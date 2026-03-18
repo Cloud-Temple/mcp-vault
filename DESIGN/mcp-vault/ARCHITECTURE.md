@@ -829,7 +829,7 @@ mcp-vault/
 │   └── cli/
 │       ├── __init__.py
 │       ├── client.py          # Client MCP Streamable HTTP
-│       ├── commands.py        # CLI Click (vault-space, secret, ssh, admin, audit)
+│       ├── commands.py        # CLI Click (vault, secret, ssh, token, audit)
 │       ├── shell.py           # Shell interactif
 │       └── display.py         # Affichage Rich
 ├── Dockerfile                 # Python 3.11 + binaire OpenBao

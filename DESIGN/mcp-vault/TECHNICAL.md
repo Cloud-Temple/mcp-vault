@@ -153,13 +153,13 @@ Utilise les `contextvars` Python pour injecter les infos du token sans dépendre
 
 **Matrice de permissions** :
 
-| Token                      | `check_access(own_space)` | `check_access(other)` | `check_write`  | `check_admin` |
-| -------------------------- | ------------------------- | --------------------- | -------------- | ------------- |
-| Aucun                      | ❌                        | ❌                    | ❌             | ❌            |
-| `read` + spaces restreints | ✅                        | ❌                    | ❌             | ❌            |
-| `read` + spaces vides      | ✅                        | ✅                    | ❌             | ❌            |
-| `read,write` + spaces      | ✅                        | ❌                    | ✅             | ❌            |
-| `admin`                    | ✅                        | ✅                    | ✅ (implicite) | ✅            |
+| Token                       | `check_access(own_vault)` | `check_access(other)` | `check_write`  | `check_admin` |
+| --------------------------- | ------------------------- | --------------------- | -------------- | ------------- |
+| Aucun                       | ❌                        | ❌                    | ❌             | ❌            |
+| `read` + vaults restreints  | ✅                        | ❌                    | ❌             | ❌            |
+| `read` + vaults vides       | ✅                        | ✅                    | ❌             | ❌            |
+| `read,write` + vaults       | ✅                        | ❌                    | ✅             | ❌            |
+| `admin`                     | ✅                        | ✅                    | ✅ (implicite) | ✅            |
 
 **Règles** :
 - `vault_ids: []` (vide) → accès à **tous** les vaults
@@ -217,9 +217,9 @@ SECRET_TYPES = {
 
 **Générateur de mots de passe** : CSPRNG (`secrets.choice`), 8-128 caractères, contrôle fin (uppercase, lowercase, digits, symbols, exclusions).
 
-### 3.8 `vault/spaces.py` — Vault Spaces
+### 3.8 `vault/spaces.py` — Vaults (coffres de secrets)
 
-Chaque space = un **mount point KV v2** dans OpenBao.
+Chaque vault = un **mount point KV v2** dans OpenBao.
 
 **Métadonnées vault** : chaque vault contient un secret réservé `_vault_meta` qui stocke
 `created_at`, `created_by`, `updated_at`, `updated_by`, `description`. Ce chemin est protégé
@@ -240,10 +240,10 @@ empêche l'écriture directe, la suppression et masque ces chemins dans les list
 
 | Opération                               | OpenBao API                                | Notes                                     |
 | --------------------------------------- | ------------------------------------------ | ----------------------------------------- |
-| `write_secret(space, path, data, type)` | `kv.v2.create_or_update_secret()`          | Validation type + enrichissement + protection RESERVED_PATHS |
-| `read_secret(space, path, version)`     | `kv.v2.read_secret_version()`              | Version 0 = dernière                      |
-| `list_secrets(space, path)`             | `kv.v2.list_secrets()`                     | Clés uniquement, filtre `_vault_meta`     |
-| `delete_secret(space, path)`            | `kv.v2.delete_metadata_and_all_versions()` | Irréversible, protection RESERVED_PATHS   |
+| `write_secret(vault_id, path, data, type)` | `kv.v2.create_or_update_secret()`          | Validation type + enrichissement + protection RESERVED_PATHS |
+| `read_secret(vault_id, path, version)`     | `kv.v2.read_secret_version()`              | Version 0 = dernière                      |
+| `list_secrets(vault_id, path)`             | `kv.v2.list_secrets()`                     | Clés uniquement, filtre `_vault_meta`     |
+| `delete_secret(vault_id, path)`            | `kv.v2.delete_metadata_and_all_versions()` | Irréversible, protection RESERVED_PATHS   |
 
 ### 3.10 `vault/ssh_ca.py` — SSH Certificate Authority
 
@@ -251,9 +251,9 @@ Chaque vault peut avoir sa propre CA SSH (mount `ssh-ca-{vault_id}`).
 
 | Opération                                    | Description                                          |
 | -------------------------------------------- | ---------------------------------------------------- |
-| `setup_ssh_ca(space, role, users, ttl)`      | Monte le SSH engine + génère la CA + crée le rôle    |
-| `sign_ssh_key(space, role, public_key, ttl)` | Signe une clé publique → certificat éphémère         |
-| `get_ca_public_key(space)`                   | Retourne la clé publique CA pour `TrustedUserCAKeys` |
+| `setup_ssh_ca(vault_id, role, users, ttl)`      | Monte le SSH engine + génère la CA + crée le rôle    |
+| `sign_ssh_key(vault_id, role, public_key, ttl)` | Signe une clé publique → certificat éphémère         |
+| `get_ca_public_key(vault_id)`                   | Retourne la clé publique CA pour `TrustedUserCAKeys` |
 
 ### 3.11 `openbao/` — OpenBao Process Manager
 
@@ -351,10 +351,10 @@ volumes:
 | Scénario                       | Tests                                      |
 | ------------------------------ | ------------------------------------------ |
 | Aucun token                    | 4 (access, write, admin, client_name)      |
-| Admin (accès total)            | 9 (5 spaces + write + admin + client_name) |
-| Read-only + spaces restreints  | 6 (2 OK + 2 refusés + write + admin)       |
-| Read+Write + spaces restreints | 4 (1 OK + 1 refusé + write + admin)        |
-| Spaces vides (= tous)          | 5 (5 spaces différents)                    |
+| Admin (accès total)            | 9 (5 vaults + write + admin + client_name) |
+| Read-only + vaults restreints  | 6 (2 OK + 2 refusés + write + admin)       |
+| Read+Write + vaults restreints | 4 (1 OK + 1 refusé + write + admin)        |
+| Vaults vides (= tous)          | 5 (5 vaults différents)                    |
 | Admin-only (sans r/w)          | 3 (access + write implicite + admin)       |
 | Permissions vides              | 3 (access OK + write + admin)              |
 | Edge cases                     | 4 (case sensitive, wildcard, empty)        |
