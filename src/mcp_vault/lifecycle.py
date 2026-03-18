@@ -139,14 +139,22 @@ async def vault_shutdown():
     except Exception as e:
         logger.warning(f"⚠️ Erreur arrêt sync : {e}")
 
-    # ── 2. Sceller OpenBao ────────────────────────────────────────
+    # ── 2. Sceller OpenBao + effacer les clés mémoire ────────────
     try:
-        from .openbao.lifecycle import seal_vault
+        from .openbao.lifecycle import seal_vault, clear_in_memory_keys
         seal_result = await seal_vault()
         if seal_result.get("status") == "sealed":
             logger.info("🔒 OpenBao scellé")
+        # Garantir l'effacement des clés même si le seal a échoué
+        clear_in_memory_keys()
     except Exception as e:
         logger.warning(f"⚠️ Erreur scellement : {e}")
+        # Tentative d'effacement des clés malgré l'erreur
+        try:
+            from .openbao.lifecycle import clear_in_memory_keys
+            clear_in_memory_keys()
+        except Exception:
+            pass
 
     # ── 3. Upload final S3 ────────────────────────────────────────
     try:

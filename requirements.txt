@@ -10,6 +10,9 @@ boto3>=1.35.0
 # --- OpenBao client (compatible Vault API) ---
 hvac>=2.3.0
 
+# --- Crypto (chiffrement clés unseal — Option C) ---
+cryptography>=42.0
+
 # --- HTTP client (health checks, CLI) ---
 httpx>=0.27.0
 
