@@ -506,10 +506,11 @@ vault-bucket/
 
 | Outil                                               | Perm  | Description                                            |
 | --------------------------------------------------- | ----- | ------------------------------------------------------ |
-| `vault_create(vault_id, description?, tags?)` | admin | Crée un vault (mount point KV v2 dans OpenBao)        |
-| `vault_list()`                                | read  | Liste les vaults accessibles (filtrés par token)      |
-| `vault_info(vault_id)`                        | read  | Détails d'un vault (nombre de secrets, date création) |
-| `vault_delete(vault_id)`                      | admin | Supprime un vault et tous ses secrets                 |
+| `vault_create(vault_id, description?, tags?)` | write | Crée un vault (mount point KV v2) + métadonnées (owner, date) |
+| `vault_list()`                                | read  | Liste les vaults accessibles (filtrés par token)               |
+| `vault_info(vault_id)`                        | read  | Détails d'un vault (métadonnées, nombre de secrets, owner)     |
+| `vault_update(vault_id, description)`         | write | Met à jour la description d'un vault                           |
+| `vault_delete(vault_id)`                      | admin | Supprime un vault et tous ses secrets                          |
 
 ### 6.2 Secrets
 

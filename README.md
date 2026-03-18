@@ -22,7 +22,7 @@ docker compose up -d
 # 3. Vérifier (depuis le conteneur)
 docker compose exec mcp-vault python scripts/mcp_cli.py health
 
-# 4. Tester (104 tests e2e)
+# 4. Tester (118 tests e2e)
 docker compose exec mcp-vault python tests/test_e2e.py
 ```
 
@@ -42,7 +42,7 @@ Au démarrage, MCP Vault :
 
 ---
 
-## 🛠️ Outils MCP (15)
+## 🛠️ Outils MCP (17)
 
 ### System (2)
 
@@ -51,13 +51,14 @@ Au démarrage, MCP Vault :
 | `system_health` | État de santé (OpenBao + S3) |
 | `system_about` | Informations service (version, outils, plateforme) |
 
-### Vaults — coffres de secrets (4)
+### Vaults — coffres de secrets (5)
 
 | Outil | Perm | Description |
 |-------|------|-------------|
-| `vault_create(vault_id, description?)` | write | Crée un vault (mount KV v2) |
-| `vault_list()` | read | Liste les vaults accessibles |
-| `vault_info(vault_id)` | read | Détails d'un vault |
+| `vault_create(vault_id, description?)` | write | Crée un vault (mount KV v2) + métadonnées (owner, date) |
+| `vault_list()` | read | Liste les vaults accessibles (filtrés par token) |
+| `vault_info(vault_id)` | read | Détails d'un vault (métadonnées, secrets_count, owner) |
+| `vault_update(vault_id, description)` | write | Met à jour la description d'un vault |
 | `vault_delete(vault_id, confirm)` | admin | Supprime un vault et tous ses secrets ⚠️ |
 
 ### Secrets (6)
@@ -183,7 +184,7 @@ Les clés unseal d'OpenBao sont protégées par **séparation physique à 3 fact
 ## 📋 Tests
 
 ```bash
-# Tests e2e MCP (104 tests, OpenBao réel)
+# Tests e2e MCP (118 tests, OpenBao réel)
 docker compose exec mcp-vault python tests/test_e2e.py
 
 # Tests bas niveau (78 tests, S3, auth, types)
@@ -197,17 +198,17 @@ docker compose exec mcp-vault python tests/test_e2e.py --test secrets
 docker compose exec mcp-vault python tests/test_e2e.py --test password
 ```
 
-### Couverture e2e (104 tests)
+### Couverture e2e (118 tests)
 
 | Catégorie | Tests | Description |
 |-----------|-------|-------------|
 | Système | 7 | health, about, services |
-| Vault CRUD | 12 | create, list, info, delete, confirm, erreurs |
+| Vault CRUD | 22 | create + métadonnées, list, info + owner, update, delete, confirm, erreurs |
 | Secrets CRUD | 24 | 10 types écrits, read/list/delete, validation |
 | Versioning | 8 | v1→v2→v3, read latest, read spécifique |
 | Passwords | 14 | longueurs, options, exclusions, CSPRNG |
 | Isolation | 7 | secrets cloisonnés entre vaults |
-| Erreurs | 7 | edge cases, vault inexistant, type invalide |
+| Erreurs | 10 | edge cases, vault inexistant, type invalide, protection `_vault_meta` |
 | S3 Sync | 3 | archive tar.gz sur S3 |
 | SSH CA | 2 | setup, public key |
 | Types | 16 | 14 types vérifiés individuellement |
@@ -237,7 +238,7 @@ mcp-vault/
 │       └── shell.py          # Shell interactif
 ├── src/mcp_vault/
 │   ├── config.py             # Configuration pydantic-settings
-│   ├── server.py             # FastMCP + 15 outils MCP + lifecycle
+│   ├── server.py             # FastMCP + 17 outils MCP + lifecycle
 │   ├── lifecycle.py          # Orchestrateur startup/shutdown
 │   ├── s3_client.py          # Client S3 hybride SigV2/SigV4
 │   ├── s3_sync.py            # Sync file backend ↔ S3
@@ -247,7 +248,7 @@ mcp-vault/
 │   ├── vault/                # Spaces, secrets, SSH CA, types
 │   └── static/               # admin.html (SPA)
 ├── tests/
-│   ├── test_e2e.py           # 104 tests MCP e2e
+│   ├── test_e2e.py           # 118 tests MCP e2e
 │   ├── test_service.py       # 78 tests bas niveau
 │   └── test_integration.py   # Tests pytest
 └── waf/                      # Caddy reverse proxy

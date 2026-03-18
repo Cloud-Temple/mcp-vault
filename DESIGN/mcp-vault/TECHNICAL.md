@@ -48,7 +48,7 @@ MCP Vault est un serveur MCP (Model Context Protocol) qui fournit une gestion s�
 │  │  HealthCheckMiddleware → /health, /healthz, /ready       │  │
 │  │  AuthMiddleware     → Bearer token → contextvars         │  │
 │  │  LoggingMiddleware  → stderr + ring buffer (200 entrées) │  │
-│  │  FastMCP            → /mcp (Streamable HTTP, 15 outils)  │  │
+│  │  FastMCP            → /mcp (Streamable HTTP, 17 outils)  │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │                                                                │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
@@ -221,21 +221,29 @@ SECRET_TYPES = {
 
 Chaque space = un **mount point KV v2** dans OpenBao.
 
-| Opération            | OpenBao API                                                          |
-| -------------------- | -------------------------------------------------------------------- |
-| `create_space(id)`   | `sys.enable_secrets_engine("kv", path=id, options={"version": "2"})` |
-| `list_spaces()`      | `sys.list_mounted_secrets_engines()` → filtre type "kv"              |
-| `get_space_info(id)` | Mounts info + `kv.v2.list_secrets()` pour le count                   |
-| `delete_space(id)`   | `sys.disable_secrets_engine(path=id)`                                |
+**Métadonnées vault** : chaque vault contient un secret réservé `_vault_meta` qui stocke
+`created_at`, `created_by`, `updated_at`, `updated_by`, `description`. Ce chemin est protégé
+contre l'écriture directe par les utilisateurs (via `RESERVED_PATHS` dans secrets.py).
+
+| Opération                    | OpenBao API                                                          | Notes                                   |
+| ---------------------------- | -------------------------------------------------------------------- | --------------------------------------- |
+| `create_space(id, desc)`     | `sys.enable_secrets_engine("kv", path=id, options={"version": "2"})` | + écriture `_vault_meta` avec owner/date |
+| `list_spaces(allowed_ids?)`  | `sys.list_mounted_secrets_engines()` → filtre type "kv"              | Filtrage par vault_ids du token          |
+| `get_space_info(id)`         | Mounts info + `kv.v2.list_secrets()` pour le count                   | + lecture `_vault_meta` pour métadonnées |
+| `update_space(id, desc)`     | `sys.tune_mount_configuration()` + `_vault_meta`                     | Mise à jour description + updated_at/by  |
+| `delete_space(id)`           | `sys.disable_secrets_engine(path=id)`                                | Supprime tout (secrets + métadonnées)    |
 
 ### 3.9 `vault/secrets.py` — Secrets CRUD
 
-| Opération                               | OpenBao API                                | Notes                            |
-| --------------------------------------- | ------------------------------------------ | -------------------------------- |
-| `write_secret(space, path, data, type)` | `kv.v2.create_or_update_secret()`          | Validation type + enrichissement |
-| `read_secret(space, path, version)`     | `kv.v2.read_secret_version()`              | Version 0 = dernière             |
-| `list_secrets(space, path)`             | `kv.v2.list_secrets()`                     | Clés uniquement                  |
-| `delete_secret(space, path)`            | `kv.v2.delete_metadata_and_all_versions()` | Irréversible                     |
+**Protection des chemins réservés** : le set `RESERVED_PATHS` (contenant `_vault_meta`)
+empêche l'écriture directe, la suppression et masque ces chemins dans les listings.
+
+| Opération                               | OpenBao API                                | Notes                                     |
+| --------------------------------------- | ------------------------------------------ | ----------------------------------------- |
+| `write_secret(space, path, data, type)` | `kv.v2.create_or_update_secret()`          | Validation type + enrichissement + protection RESERVED_PATHS |
+| `read_secret(space, path, version)`     | `kv.v2.read_secret_version()`              | Version 0 = dernière                      |
+| `list_secrets(space, path)`             | `kv.v2.list_secrets()`                     | Clés uniquement, filtre `_vault_meta`     |
+| `delete_secret(space, path)`            | `kv.v2.delete_metadata_and_all_versions()` | Irréversible, protection RESERVED_PATHS   |
 
 ### 3.10 `vault/ssh_ca.py` — SSH Certificate Authority
 
@@ -447,8 +455,8 @@ ADMIN_BOOTSTRAP_KEY          → Variable d'environnement uniquement
 | Phase 1 — S3 + Auth         | ✅     | Client S3 hybride, Token Store, middleware          |
 | Phase 2 — Types             | ✅     | 14 types de secrets, validation, password generator |
 | Phase 3 — Tests             | ✅     | 78 tests e2e (permissions, S3, admin)               |
-| Phase 4 — OpenBao lifecycle | 🔜    | Init/unseal/seal intégré au startup/shutdown        |
-| Phase 5 — Vault Spaces CRUD | 🔜    | Tests e2e avec OpenBao réel                         |
+| Phase 4 — OpenBao lifecycle | ✅     | Init/unseal/seal intégré, clés chiffrées AES-256-GCM sur S3, 104 tests |
+| Phase 5 — Vault Spaces CRUD | ✅     | Métadonnées (owner, dates), vault_update, filtrage token, protection _vault_meta, 118 tests |
 | Phase 6 — SSH CA            | 🔜    | Tests e2e signature de clés                         |
 | Phase 7 — Interface web     | 🔜    | Console admin enrichie (/vault)                     |
 | Phase 8 — WAF Coraza        | 🔜    | OWASP CRS en production                             |
