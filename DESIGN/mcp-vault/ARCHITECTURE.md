@@ -13,10 +13,10 @@
 ### Principes
 
 1. **OpenBao embedded** — Le binaire OpenBao tourne en process intégré, pas comme service séparé
-2. **Espaces libres** — L'utilisateur organise ses secrets par serveur, application, groupe... comme il veut
-3. **Même pattern que Live Memory** — Tokens Bearer, `space_ids`, `check_access()`, starter-kit
+2. **Vaults libres** — L'utilisateur organise ses secrets par serveur, application, groupe... comme il veut
+3. **Même pattern que Live Memory** — Tokens Bearer, `vault_ids`, `check_access()`, starter-kit
 4. **S3 comme source de vérité** — Le storage OpenBao est synchronisé avec S3 (download au start, upload au stop)
-5. **Missions découplées** — Les espaces vault sont indépendants des missions. On donne à la mission l'espace vault à utiliser.
+5. **Missions découplées** — Les vaults sont indépendants des missions. On donne à la mission le vault à utiliser.
 6. **SSH Certificate Authority** — Signer des clés publiques à la volée (certificats éphémères)
 
 ### Pourquoi OpenBao ?
@@ -57,7 +57,7 @@
 │  │                                                            │  │
 │  │  AdminMiddleware        → /admin, /admin/static/*, API     │  │
 │  │  HealthCheckMiddleware  → /health, /healthz, /ready        │  │
-│  │  AuthMiddleware         → Bearer Token + space_ids         │  │
+│  │  AuthMiddleware         → Bearer Token + vault_ids         │  │
 │  │  LoggingMiddleware      → Ring buffer 200 entrées          │  │
 │  │  FastMCP app            → MCP Protocol (Streamable HTTP)   │  │
 │  └────────────────────────────────────────────────────────────┘  │
@@ -72,7 +72,7 @@
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │  20 Outils MCP (façade)                                    │  │
 │  │                                                            │  │
-│  │  Spaces :  vault_space_create, _list, _info, _delete       │  │
+│  │  Vaults :  vault_create, _list, _info, _delete       │  │
 │  │  Secrets : secret_store, _get, _list, _delete, _rotate     │  │
 │  │  SSH CA :  ssh_sign_key                                    │  │
 │  │  Policies: policy_create, _list, _delete                   │  │
@@ -98,7 +98,7 @@
 │  │  Audit : File audit device                                 │  │
 │  │                                                            │  │
 │  │  Mount points :                                            │  │
-│  │    /spaces/{space_id}/kv/  ← KV v2 par espace              │  │
+│  │    /vaults/{vault_id}/kv/  ← KV v2 par vault               │  │
 │  │    /ssh/                   ← SSH CA (global)               │  │
 │  │                                                            │  │
 │  │  NON exposé sur le réseau — localhost uniquement           │  │
@@ -130,7 +130,7 @@
 | **WAF Caddy+Coraza**    | TLS, rate limiting, OWASP CRS, reverse proxy    | Caddy + plugin Coraza          |
 | **AdminMiddleware**      | Console admin web + API REST admin               | ASGI middleware (starter-kit)  |
 | **HealthCheckMiddleware**| Health check HTTP (/health, /healthz, /ready)    | ASGI middleware                |
-| **AuthMiddleware**       | Auth Bearer Token + space access + ContextVar    | ASGI middleware (starter-kit)  |
+| **AuthMiddleware**       | Auth Bearer Token + vault access + ContextVar    | ASGI middleware (starter-kit)  |
 | **LoggingMiddleware**    | Logging requêtes + ring buffer mémoire           | ASGI middleware (starter-kit)  |
 | **Outils MCP**           | Façade MCP (20 outils)                           | FastMCP (starter-kit)          |
 | **hvac client**          | Client Python vers OpenBao                       | `hvac` library                 |
@@ -205,8 +205,8 @@ AdminMiddleware (ASGI, outermost)
     └── */admin/api/*        → API REST admin (auth Bearer admin requise)
             │
             ├── GET  /admin/api/health          → état du serveur + OpenBao status
-            ├── GET  /admin/api/spaces          → lister les espaces vault
-            ├── POST /admin/api/spaces          → créer un espace
+            ├── GET  /admin/api/vaults          → lister les vaults
+            ├── POST /admin/api/vaults          → créer un vault
             ├── GET  /admin/api/tokens          → lister les tokens S3
             ├── POST /admin/api/tokens          → créer un token
             ├── GET  /admin/api/tokens/{name}   → info d'un token
@@ -218,9 +218,9 @@ AdminMiddleware (ASGI, outermost)
 
 | Vue           | Description                                                                                                      |
 | ------------- | ---------------------------------------------------------------------------------------------------------------- |
-| **Dashboard** | État du serveur (version, OpenBao sealed/unsealed, S3 sync status, last sync, spaces count), stats tokens        |
-| **Spaces**    | Grille des espaces vault avec nombre de secrets, tags, date de création. Clic = détail des clés (pas les valeurs)|
-| **Tokens**    | Table CRUD : créer (checkboxes space_ids, permissions), info, révoquer. Token brut affiché une seule fois        |
+| **Dashboard** | État du serveur (version, OpenBao sealed/unsealed, S3 sync status, last sync, vaults count), stats tokens        |
+| **Vaults**    | Grille des vaults avec nombre de secrets, tags, date de création. Clic = détail des clés (pas les valeurs)|
+| **Tokens**    | Table CRUD : créer (checkboxes vault_ids, permissions), info, révoquer. Token brut affiché une seule fois        |
 | **Activité**  | Logs temps réel (ring buffer mémoire 200 entrées, auto-refresh 5s). Méthode, path, status, durée                |
 
 #### Sécurité de la console admin
@@ -232,62 +232,62 @@ AdminMiddleware (ASGI, outermost)
 
 ---
 
-## 3. Espaces Vault
+## 3. Vaults (coffres de secrets)
 
 ### 3.1 Concept
 
-Les espaces vault sont **organisés librement par l'utilisateur**, indépendamment des missions. Un espace regroupe des secrets liés à un même contexte (serveur, application, environnement...).
+Les vaults sont **organisés librement par l'utilisateur**, indépendamment des missions. Un vault regroupe des secrets liés à un même contexte (serveur, application, environnement...).
 
 ```
-Espace "serveurs-prod"           → Clés SSH, passwords des serveurs de production
-Espace "bdd-prod"                → Credentials des bases de données de production
-Espace "monitoring"              → Tokens API des outils de monitoring
-Espace "certificats"             → Certificats TLS, CA
-Espace "ci-cd"                   → Tokens de déploiement, registries
-Espace "client-alpha-staging"    → Secrets d'un client en staging
+Vault "serveurs-prod"           → Clés SSH, passwords des serveurs de production
+Vault "bdd-prod"                → Credentials des bases de données de production
+Vault "monitoring"              → Tokens API des outils de monitoring
+Vault "certificats"             → Certificats TLS, CA
+Vault "ci-cd"                   → Tokens de déploiement, registries
+Vault "client-alpha-staging"    → Secrets d'un client en staging
 ```
 
-### 3.2 Liaison Mission ↔ Espaces Vault
+### 3.2 Liaison Mission ↔ Vaults
 
-Les missions **consomment** les espaces vault, elles ne les créent pas :
+Les missions **consomment** les vaults, elles ne les créent pas :
 
 ```
 Mission "MAJ serveur web-prod-01"
-  vault_spaces: ["serveurs-prod"]
+  vault_ids: ["serveurs-prod"]
   → L'agent SRE accède à serveurs-prod/ssh-key-web-prod-01
 
 Mission "Audit sécurité application"
-  vault_spaces: ["serveurs-prod", "monitoring"]
+  vault_ids: ["serveurs-prod", "monitoring"]
   → L'agent Security accède aux deux espaces
 
 Mission "Migration BDD"
-  vault_spaces: ["bdd-prod", "bdd-staging"]
+  vault_ids: ["bdd-prod", "bdd-staging"]
   → L'agent DBA accède aux deux espaces
 ```
 
-Le token MCP de l'agent est configuré avec les `space_ids` autorisés.
+Le token MCP de l'agent est configuré avec les `vault_ids` autorisés.
 
 ### 3.3 Implémentation OpenBao
 
-Chaque espace = un **mount point KV v2** dans OpenBao :
+Chaque vault = un **mount point KV v2** dans OpenBao :
 
 ```
-vault_space_create("serveurs-prod")
-  → hvac.sys.enable_secrets_engine("kv", path="spaces/serveurs-prod/kv", options={"version": "2"})
+vault_create("serveurs-prod")
+  → hvac.sys.enable_secrets_engine("kv", path="vaults/serveurs-prod/kv", options={"version": "2"})
 
-vault_space_delete("serveurs-prod")
-  → hvac.sys.disable_secrets_engine("spaces/serveurs-prod/kv")
+vault_delete("serveurs-prod")
+  → hvac.sys.disable_secrets_engine("vaults/serveurs-prod/kv")
 
 secret_store("serveurs-prod", "ssh-key-web-prod-01", value="...")
   → hvac.secrets.kv.v2.create_or_update_secret(
-      mount_point="spaces/serveurs-prod/kv",
+      mount_point="vaults/serveurs-prod/kv",
       path="ssh-key-web-prod-01",
       secret={"value": "...", "type": "ssh_private_key"}
     )
 
 secret_get("serveurs-prod", "ssh-key-web-prod-01")
   → hvac.secrets.kv.v2.read_secret_version(
-      mount_point="spaces/serveurs-prod/kv",
+      mount_point="vaults/serveurs-prod/kv",
       path="ssh-key-web-prod-01"
     )
 ```
@@ -368,7 +368,7 @@ OPERATIONS NORMALES
   |
   +-- Les outils MCP appellent OpenBao via hvac
   |
-  +-- Apres chaque ecriture (secret_store, rotate, delete, space_create/delete) :
+  +-- Apres chaque ecriture (secret_store, rotate, delete, vault_create/delete) :
   |   -> Mettre a jour le timestamp local dans /data/openbao/sync_marker
   |
   +-- Sync S3 periodique (boucle asyncio, toutes les S3_SYNC_INTERVAL secondes) :
@@ -487,37 +487,39 @@ vault-bucket/
 │   └── sync_meta.json           # {last_sync: "2026-03-04T09:30:00Z", size_bytes: 12345}
 │
 ├── _init/
-│   └── init_output.json.enc     # Sortie de `bao operator init` (chiffrée)
-│                                 # Contient unseal keys + root token
-│                                 # Chiffré avec ADMIN_BOOTSTRAP_KEY
+│   └── init_keys.json.enc       # Clés unseal + root token (chiffrées)
+│                                 # Chiffrement : AES-256-GCM
+│                                 # Clé dérivée de ADMIN_BOOTSTRAP_KEY via PBKDF2
+│                                 # ⚠️ JAMAIS stocké en clair — ni sur S3, ni localement
+│                                 # Le fichier local est supprimé après unseal
 │
-└── _meta.json                   # {version: "0.2.0", created_at: "...", spaces_count: 5}
+└── _meta.json                   # {version: "0.2.0", created_at: "...", vaults_count: 5}
 ```
 
-**Note** : Les secrets eux-mêmes ne sont PAS directement sur S3 en clair. Ils sont dans `openbao-data.tar.gz` qui contient le File storage OpenBao, chiffré par la barrier encryption d'OpenBao (XChaCha20-Poly1305). Sans les unseal keys, les données sont illisibles.
+**Séparation données/clés** : Les secrets sont dans `openbao-data.tar.gz` (File storage chiffré par la barrier OpenBao, XChaCha20-Poly1305). Les clés unseal sont dans `_init/init_keys.json.enc` (chiffrées avec ADMIN_BOOTSTRAP_KEY). Sans les **deux** (données + clé de déchiffrement des unseal keys), les secrets sont illisibles. Cette séparation physique garantit qu'un vol du bucket S3 seul est insuffisant sans la `ADMIN_BOOTSTRAP_KEY` (variable d'environnement, jamais sur S3).
 
 ---
 
 ## 6. Outils MCP
 
-### 6.1 Espaces
+### 6.1 Vaults
 
 | Outil                                               | Perm  | Description                                            |
 | --------------------------------------------------- | ----- | ------------------------------------------------------ |
-| `vault_space_create(space_id, description?, tags?)` | admin | Crée un espace (mount point KV v2 dans OpenBao)        |
-| `vault_space_list()`                                | read  | Liste les espaces accessibles (filtrés par token)      |
-| `vault_space_info(space_id)`                        | read  | Détails d'un espace (nombre de secrets, date création) |
-| `vault_space_delete(space_id)`                      | admin | Supprime un espace et tous ses secrets                 |
+| `vault_create(vault_id, description?, tags?)` | admin | Crée un vault (mount point KV v2 dans OpenBao)        |
+| `vault_list()`                                | read  | Liste les vaults accessibles (filtrés par token)      |
+| `vault_info(vault_id)`                        | read  | Détails d'un vault (nombre de secrets, date création) |
+| `vault_delete(vault_id)`                      | admin | Supprime un vault et tous ses secrets                 |
 
 ### 6.2 Secrets
 
 | Outil                                                            | Perm  | Description                                         |
 | ---------------------------------------------------------------- | ----- | --------------------------------------------------- |
-| `secret_store(space_id, key, value, type?, description?, tags?)` | write | Stocker un secret (nouvelle version si existe déjà) |
-| `secret_get(space_id, key, version?)`                            | read  | Récupérer un secret (dernière version par défaut)   |
-| `secret_list(space_id, prefix?)`                                 | read  | Lister les clés d'un espace (pas les valeurs !)     |
-| `secret_delete(space_id, key)`                                   | admin | Supprimer un secret (toutes les versions)           |
-| `secret_rotate(space_id, key, new_value)`                        | write | Rotation : crée une nouvelle version                |
+| `secret_store(vault_id, key, value, type?, description?, tags?)` | write | Stocker un secret (nouvelle version si existe déjà) |
+| `secret_get(vault_id, key, version?)`                            | read  | Récupérer un secret (dernière version par défaut)   |
+| `secret_list(vault_id, prefix?)`                                 | read  | Lister les clés d'un vault (pas les valeurs !)     |
+| `secret_delete(vault_id, key)`                                   | admin | Supprimer un secret (toutes les versions)           |
+| `secret_rotate(vault_id, key, new_value)`                        | write | Rotation : crée une nouvelle version                |
 
 ### 6.3 SSH Certificate Authority
 
@@ -537,18 +539,18 @@ vault-bucket/
 
 | Outil                                                                        | Perm  | Description                |
 | ---------------------------------------------------------------------------- | ----- | -------------------------- |
-| `admin_create_token(client_name, permissions, space_ids?, expires_in_days?)` | admin | Créer un token d'accès MCP |
+| `admin_create_token(client_name, permissions, vault_ids?, expires_in_days?)` | admin | Créer un token d'accès MCP |
 | `admin_list_tokens()`                                                        | admin | Lister les tokens          |
 | `admin_revoke_token(token_prefix)`                                           | admin | Révoquer un token          |
-| `admin_update_token(token_prefix, space_ids?, permissions?)`                 | admin | Modifier un token          |
+| `admin_update_token(token_prefix, vault_ids?, permissions?)`                 | admin | Modifier un token          |
 
 ### 6.6 Audit & Système
 
 | Outil                                       | Perm   | Description                                                       |
 | ------------------------------------------- | ------ | ----------------------------------------------------------------- |
-| `audit_log(last_n?, space_id?, operation?)` | admin  | Journal d'audit (depuis l'audit device OpenBao)                   |
+| `audit_log(last_n?, vault_id?, operation?)` | admin  | Journal d'audit (depuis l'audit device OpenBao)                   |
 | `system_health`                             | public | État de santé (OpenBao sealed/unsealed, S3 accessible, last sync) |
-| `system_about`                              | public | Version, nombre d'espaces, nombre de secrets, uptime              |
+| `system_about`                              | public | Version, nombre de vaults, nombre de secrets, uptime              |
 
 **Total : 20 outils MCP**
 
@@ -606,52 +608,140 @@ hvac.secrets.ssh.create_role(
 
 ## 8. Démarrage et Unseal
 
+### 8.0 Modèle de sécurité des clés unseal
+
+> **Principe fondamental** : les clés unseal ne doivent **jamais** résider en clair
+> sur le même système que les données chiffrées. Un attaquant qui compromet le
+> conteneur ne doit pas pouvoir accéder aux clés ET aux données simultanément.
+
+**Option C — Compromis pragmatique (v0.2.1)** :
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  SÉPARATION PHYSIQUE DONNÉES / CLÉS                             │
+│                                                                 │
+│  Données chiffrées (barrier OpenBao)                            │
+│  └─ Volume Docker local + S3 (_storage/openbao-data.tar.gz)    │
+│     ⟶ Chiffrement XChaCha20-Poly1305 par OpenBao               │
+│     ⟶ Illisibles sans unseal key                                │
+│                                                                 │
+│  Clés unseal                                                    │
+│  └─ S3 UNIQUEMENT (_init/init_keys.json.enc)                   │
+│     ⟶ Chiffrées AES-256-GCM (clé dérivée ADMIN_BOOTSTRAP_KEY) │
+│     ⟶ JAMAIS en clair sur le filesystem local                   │
+│     ⟶ Téléchargées → déchiffrées → utilisées → effacées         │
+│     ⟶ Ne restent qu'en MÉMOIRE pendant le runtime              │
+│                                                                 │
+│  ADMIN_BOOTSTRAP_KEY                                            │
+│  └─ Variable d'environnement UNIQUEMENT                         │
+│     ⟶ Jamais sur S3, jamais sur disque                          │
+│     ⟶ Nécessaire pour déchiffrer les clés unseal               │
+│                                                                 │
+│  Pour accéder aux secrets, un attaquant doit compromettre :     │
+│  ✗ Le bucket S3 (données + clés chiffrées)                     │
+│  ✗ ET la variable d'environnement ADMIN_BOOTSTRAP_KEY           │
+│  ✗ OU le processus en mémoire pendant le runtime               │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Chiffrement des clés unseal** :
+
+| Paramètre | Valeur |
+|-----------|--------|
+| Algorithme | AES-256-GCM (via `cryptography` Python) |
+| Dérivation de clé | PBKDF2-HMAC-SHA256, 600 000 itérations |
+| Sel | 16 bytes aléatoires (stocké avec le ciphertext) |
+| IV/Nonce | 12 bytes aléatoires (requis par GCM) |
+| Format stocké | `salt (16B) || nonce (12B) || ciphertext || tag (16B)` encodé base64 |
+| Clé source | `ADMIN_BOOTSTRAP_KEY` (variable d'environnement) |
+
+**Roadmap v0.3.0** : Transit Auto-Unseal via une instance OpenBao dédiée
+(KMS interne Cloud Temple), éliminant le besoin de stocker les clés unseal.
+
 ### 8.1 Première exécution (init)
 
 ```python
 async def first_time_init(self):
-    """Première exécution : init OpenBao et sauvegarder les clés."""
-    # 1. Init OpenBao
+    """Première exécution : init OpenBao et sauvegarder les clés sur S3."""
+    # 1. Init OpenBao (Shamir shares=1, threshold=1 pour embedded)
     init_result = self.hvac.sys.initialize(
-        secret_shares=1,      # Simplifié : 1 share = 1 unseal key
+        secret_shares=1,
         secret_threshold=1
     )
     
-    # 2. Sauvegarder les clés (chiffrées avec ADMIN_BOOTSTRAP_KEY)
+    # 2. Chiffrer les clés avec ADMIN_BOOTSTRAP_KEY (AES-256-GCM + PBKDF2)
     init_data = {
         "unseal_key": init_result["keys"][0],
         "root_token": init_result["root_token"]
     }
     encrypted = encrypt_with_bootstrap_key(json.dumps(init_data))
-    await s3.put("_init/init_output.json.enc", encrypted)
     
-    # 3. Unseal
+    # 3. Sauvegarder UNIQUEMENT sur S3 (jamais en clair localement)
+    await s3.put("_init/init_keys.json.enc", encrypted)
+    # ⚠️ Aucun fichier local — les clés ne touchent jamais le disque en clair
+    
+    # 4. Unseal avec la clé (en mémoire)
     self.hvac.sys.submit_unseal_key(init_result["keys"][0])
     
-    # 4. Configurer l'audit device
+    # 5. Stocker root_token et unseal_key en mémoire uniquement
+    self._in_memory_keys = init_data  # Garbage collected au shutdown
+    
+    # 6. Configurer l'audit device
     self.hvac.sys.enable_audit_device(
         device_type="file",
         options={"file_path": "/tmp/openbao-audit.log"}
     )
     
-    # 5. Activer SSH CA
+    # 7. Activer SSH CA
     self.hvac.sys.enable_secrets_engine("ssh", path="ssh")
     self.hvac.secrets.ssh.create_ca(generate_signing_key=True)
 ```
 
-### 8.2 Exécutions suivantes (unseal)
+### 8.2 Exécutions suivantes (unseal depuis S3)
 
 ```python
 async def unseal_from_s3(self):
-    """Charge les clés depuis S3 et unseal."""
-    encrypted = await s3.get("_init/init_output.json.enc")
+    """Télécharge les clés chiffrées depuis S3, déchiffre, unseal, puis efface."""
+    # 1. Download depuis S3
+    encrypted = await s3.get("_init/init_keys.json.enc")
+    
+    # 2. Déchiffrer avec ADMIN_BOOTSTRAP_KEY (AES-256-GCM + PBKDF2)
     init_data = json.loads(decrypt_with_bootstrap_key(encrypted))
     
+    # 3. Unseal OpenBao
     self.hvac.sys.submit_unseal_key(init_data["unseal_key"])
     self.hvac.token = init_data["root_token"]
+    
+    # 4. Stocker en mémoire uniquement (pas sur disque)
+    self._in_memory_keys = init_data
+    
+    # ⚠️ init_data n'est JAMAIS écrit sur le filesystem local
+    # Les clés ne vivent qu'en mémoire pendant le runtime
 ```
 
-**Note** : L'unseal key est chiffrée avec la `ADMIN_BOOTSTRAP_KEY` (variable d'env) avant stockage sur S3. Sans cette clé, impossible d'unseal.
+### 8.3 Résumé du flux des clés unseal
+
+```
+INIT (1ère fois) :
+  OpenBao.init() → clés en mémoire → chiffrement AES-256-GCM → upload S3
+                                    → unseal immédiat
+                                    → PAS de fichier local
+
+STARTUP (suivants) :
+  S3 download → déchiffrement AES-256-GCM → clés en mémoire → unseal
+                                           → PAS de fichier local
+
+RUNTIME :
+  Clés uniquement en mémoire (variable Python)
+  → Garbage collected au shutdown du processus
+
+SHUTDOWN :
+  seal → upload S3 (données) → stop processus → mémoire libérée
+```
+
+**Sécurité** : À aucun moment les clés unseal n'existent en clair sur le
+filesystem. Elles transitent uniquement en mémoire pendant le runtime.
+Un crash du processus efface automatiquement les clés de la mémoire.
 
 ---
 
@@ -811,7 +901,7 @@ python-dotenv>=1.0
 Couche 1 : WAF (Caddy + Coraza)       — TLS termination, rate limiting, OWASP CRS
 Couche 2 : AdminMiddleware             — Console admin isolée, CORS preflight, path traversal
 Couche 3 : HealthCheckMiddleware       — /health sans auth (pour WAF/load balancer)
-Couche 4 : AuthMiddleware + ContextVar — Bearer Token + permissions + space_ids, request-scoped
+Couche 4 : AuthMiddleware + ContextVar — Bearer Token + permissions + vault_ids, request-scoped
 Couche 5 : LoggingMiddleware           — Audit trail HTTP (ring buffer 200 entrées)
 Couche 6 : OpenBao policies            — HCL fine-grained access control
 Couche 7 : OpenBao barrier             — XChaCha20-Poly1305 encryption at rest
@@ -823,8 +913,8 @@ Couche 9 : S3                          — Données chiffrées par OpenBao avant
 
 **ContextVar (request-scoped auth)** — Le middleware `AuthMiddleware` valide le
 Bearer token et stocke les informations d'identité (client_name, permissions,
-space_ids) dans un `contextvars.ContextVar`. Chaque outil MCP appelle ensuite
-`check_access(space_id)` qui lit cette variable. Le mécanisme est :
+vault_ids) dans un `contextvars.ContextVar`. Chaque outil MCP appelle ensuite
+`check_access(vault_id)` qui lit cette variable. Le mécanisme est :
 - **Thread-safe** en asyncio (isolé par tâche)
 - **Request-scoped** (pas de fuite entre requêtes)
 - **Zéro couplage** entre le middleware et les outils (pas de passage de paramètre)
@@ -846,33 +936,84 @@ validés avant lecture sur le filesystem.
 docker-compose. Il n'est pas directement accessible depuis l'extérieur.
 Tout le trafic passe par le WAF Caddy+Coraza.
 
-### 11.3 Menaces et mitigations
+### 11.3 Gestion sécurisée des clés unseal (Option C)
 
-| Menace                           | Mitigation                                                                      |
-| -------------------------------- | ------------------------------------------------------------------------------- |
-| Vol du bucket S3                 | Les données sont chiffrées par la barrier OpenBao. Sans unseal keys → illisible |
-| Compromission du container       | OpenBao sealed au shutdown. Unseal keys chiffrées avec ADMIN_BOOTSTRAP_KEY      |
-| Accès non autorisé à un espace   | Tokens MCP avec space_ids + OpenBao policies HCL                                |
-| Fuite de la bootstrap key        | Uniquement en variable d'env, jamais sur S3 en clair                            |
-| Perte du storage                 | S3 3AZ (répliqué sur 3 zones) + sync toutes les 60s (configurable)             |
-| Agent lit un secret non autorisé | Token MCP scopé (ContextVar) + OpenBao policy par rôle                         |
-| Audit trail altéré               | File audit device OpenBao (non modifiable par les outils MCP)                   |
-| XSS/injection sur la console     | WAF OWASP CRS + console admin SPA (pas de SSR) + CORS strict                  |
-| Path traversal via /admin/static | AdminMiddleware normalise les chemins, bloque `../`                             |
-| DDoS sur le service              | WAF Caddy rate limiting + service non exposé directement                        |
+La gestion des clés unseal est le point critique de la sécurité. Le principe
+fondamental est la **séparation physique** entre les données chiffrées et les
+clés de déchiffrement :
 
-### 11.4 Recommandations production
+```
+┌──────────────────────────────────────────────────────────────┐
+│  3 FACTEURS nécessaires pour accéder aux secrets             │
+│                                                              │
+│  1. Données chiffrées  → S3 + volume Docker local           │
+│     (openbao-data.tar.gz, barrier XChaCha20-Poly1305)       │
+│                                                              │
+│  2. Clés unseal        → S3 (_init/init_keys.json.enc)      │
+│     (chiffrées AES-256-GCM, dérivation PBKDF2)              │
+│                                                              │
+│  3. Bootstrap key      → Variable d'environnement           │
+│     (jamais sur S3, jamais sur disque)                       │
+│                                                              │
+│  Compromettre 1 seul facteur = insuffisant                   │
+│  Compromettre 2 facteurs (1+2 sans 3) = insuffisant          │
+│  Les 3 sont nécessaires simultanément                        │
+└──────────────────────────────────────────────────────────────┘
+```
 
-| Recommandation                                                | Priorité     |
-| ------------------------------------------------------------- | ------------ |
-| ADMIN_BOOTSTRAP_KEY ≥ 64 caractères aléatoires                | 🔴 Critique |
-| TLS via WAF (HTTPS)                                           | 🔴 Critique |
-| WAF_PORT non accessible publiquement (réseau privé)           | 🔴 Critique |
-| Rotation périodique des secrets                               | 🟠 Élevée   |
-| Monitoring des seal/unseal events                             | 🟡 Moyenne  |
-| Backup S3 séparé du bucket vault                              | 🟡 Moyenne  |
-| Shamir secret sharing (5 shares, threshold 3) pour production | 🟡 Moyenne  |
-| Monitoring de la console admin (logs d'accès)                 | 🟡 Moyenne  |
+**Invariants de sécurité** :
+
+| Invariant | Description |
+|-----------|-------------|
+| Pas de clé en clair sur disque | Les clés unseal ne sont JAMAIS écrites en clair sur le filesystem |
+| Séparation données/clés | Les données (barrier) et les clés (enc) sont sur S3 mais ne se déchiffrent pas mutuellement |
+| Mémoire seule au runtime | Pendant l'exécution, les clés ne vivent qu'en mémoire Python |
+| Crash = effacement | Un crash du processus efface automatiquement les clés de la mémoire |
+| Bootstrap key externe | La clé de déchiffrement des unseal keys n'est jamais persistée |
+
+**Roadmap** :
+
+| Version | Approche | Sécurité |
+|---------|----------|----------|
+| **v0.2.1** (actuel) | Option C — Clés sur S3 chiffrées, mémoire seule au runtime | 🟡 Bonne |
+| **v0.3.0** (futur) | Transit Auto-Unseal via OpenBao dédié (KMS Cloud Temple) | 🟢 Excellente |
+| **v1.0** (prod) | HSM ou Cloud KMS si disponible | 🟢 Maximale |
+
+### 11.4 Menaces et mitigations
+
+| Menace | Mitigation |
+| ------ | ---------- |
+| Vol du bucket S3 | Données chiffrées (barrier OpenBao). Clés unseal chiffrées (AES-256-GCM). Sans `ADMIN_BOOTSTRAP_KEY` → tout illisible |
+| Compromission du container | Clés uniquement en mémoire, pas sur disque. Sealed au shutdown. Crash = mémoire effacée |
+| Vol de la bootstrap key seule | Insuffisant : il faut aussi le bucket S3 (clés chiffrées + données) |
+| Vol S3 + bootstrap key | Scénario le plus grave. Mitigation : WAF + réseau privé + rotation de bootstrap key |
+| Lecture mémoire du processus | Nécessite accès root au conteneur. Mitigation : user non-root, seccomp, no-new-privileges |
+| Accès non autorisé à un espace | Tokens MCP avec vault_ids + OpenBao policies HCL |
+| Fuite de la bootstrap key | Uniquement en variable d'env, jamais sur S3 en clair. Rotation recommandée |
+| Perte du storage | S3 3AZ (répliqué sur 3 zones) + sync toutes les 60s (configurable) |
+| Agent lit un secret non autorisé | Token MCP scopé (ContextVar) + OpenBao policy par rôle |
+| Audit trail altéré | File audit device OpenBao (non modifiable par les outils MCP) |
+| XSS/injection sur la console | WAF OWASP CRS + console admin SPA (pas de SSR) + CORS strict |
+| Path traversal via /admin/static | AdminMiddleware normalise les chemins, bloque `../` |
+| DDoS sur le service | WAF Caddy rate limiting + service non exposé directement |
+| Unseal/seal inattendu | Monitoring + alertes sur les événements seal/unseal anormaux |
+
+### 11.5 Recommandations production
+
+| Recommandation | Priorité |
+| -------------- | -------- |
+| ADMIN_BOOTSTRAP_KEY ≥ 64 caractères aléatoires | 🔴 Critique |
+| TLS via WAF (HTTPS) | 🔴 Critique |
+| WAF_PORT non accessible publiquement (réseau privé) | 🔴 Critique |
+| Clés unseal jamais en clair sur disque (Option C) | 🔴 Critique |
+| Rotation périodique des secrets | 🟠 Élevée |
+| Rotation de la ADMIN_BOOTSTRAP_KEY (avec re-chiffrement des clés unseal) | 🟠 Élevée |
+| Monitoring des seal/unseal events (alertes temps réel) | 🟠 Élevée |
+| Backup S3 séparé du bucket vault | 🟡 Moyenne |
+| Shamir secret sharing (5 shares, threshold 3) pour production | 🟡 Moyenne |
+| Transit Auto-Unseal via OpenBao dédié (v0.3.0) | 🟡 Moyenne |
+| Monitoring de la console admin (logs d'accès) | 🟡 Moyenne |
+| User non-root + seccomp profile dans Docker | 🟡 Moyenne |
 
 ---
 
@@ -886,7 +1027,7 @@ python scripts/mcp_cli.py --token $ADMIN_BOOTSTRAP_KEY admin create-token \
   --name "vault-admin" --permissions admin
 
 # CLI : créer un espace pour les serveurs de prod
-python scripts/mcp_cli.py vault-space create serveurs-prod \
+python scripts/mcp_cli.py vault create serveurs-prod \
   --description "Clés SSH et passwords des serveurs de production"
 
 # CLI : stocker une clé SSH
@@ -895,7 +1036,7 @@ python scripts/mcp_cli.py secret store serveurs-prod ssh-key-web-prod-01 \
 
 # CLI : créer un token pour le MCP Agent (lecture seule, espace serveurs-prod)
 python scripts/mcp_cli.py admin create-token \
-  --name "mcp-agent-sre" --permissions read --space-ids serveurs-prod
+  --name "mcp-agent-sre" --permissions read --vault-ids serveurs-prod
 ```
 
 ### 12.2 Utilisation par un agent (via MCP)
@@ -903,7 +1044,7 @@ python scripts/mcp_cli.py admin create-token \
 ```python
 # L'agent (via MCP Agent → MCP Vault) récupère un secret :
 result = await vault_client.call("secret_get", {
-    "space_id": "serveurs-prod",
+    "vault_id": "serveurs-prod",
     "key": "ssh-key-web-prod-01"
 })
 # → {"status": "ok", "key": "ssh-key-web-prod-01", 

@@ -32,12 +32,13 @@ Au démarrage, MCP Vault :
 1. Charge les tokens depuis S3
 2. Restaure les données OpenBao (volume Docker ou S3)
 3. Démarre OpenBao, l'initialise (1ère fois) et le déverrouille
-4. Active le sync S3 périodique (60s)
+4. **Clés unseal** : chiffrées (AES-256-GCM) sur S3, jamais en clair sur disque — uniquement en mémoire
+5. Active le sync S3 périodique (60s)
 
 À l'arrêt (`docker compose stop`) :
 1. Scelle OpenBao 🔒
 2. Upload final vers S3 📤
-3. Arrête le processus proprement
+3. Arrête le processus — clés effacées de la mémoire
 
 ---
 
@@ -162,6 +163,20 @@ RUNTIME:  secrets via hvac → sync S3 toutes les 60s
 SHUTDOWN: seal → S3 upload final → stop process
 CRASH:    Docker volume local → redémarrage immédiat
 ```
+
+### 🔐 Sécurité des clés unseal (Option C)
+
+Les clés unseal d'OpenBao sont protégées par **séparation physique à 3 facteurs** :
+
+| Facteur | Stockage | Compromis seul = insuffisant |
+|---------|----------|------------------------------|
+| **Données chiffrées** (barrier OpenBao) | Volume Docker + S3 | Illisibles sans unseal key |
+| **Clés unseal** (chiffrées AES-256-GCM) | S3 uniquement | Indéchiffrables sans bootstrap key |
+| **ADMIN_BOOTSTRAP_KEY** | Variable d'env uniquement | Inutile sans les clés chiffrées |
+
+**Invariants** : les clés unseal ne sont **jamais** en clair sur disque — uniquement en mémoire pendant le runtime. Un crash efface automatiquement les clés.
+
+> 📖 Voir [DESIGN/mcp-vault/ARCHITECTURE.md](DESIGN/mcp-vault/ARCHITECTURE.md) §8 et §11 pour les détails complets.
 
 ---
 

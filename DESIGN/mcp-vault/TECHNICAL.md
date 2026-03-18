@@ -14,7 +14,7 @@ MCP Vault est un serveur MCP (Model Context Protocol) qui fournit une gestion s�
 1. **OpenBao embedded** — Le binaire OpenBao tourne comme processus intégré dans le conteneur Docker, pas comme un service séparé
 2. **File backend + S3 sync** — Les données sont stockées localement (file backend) et synchronisées périodiquement avec S3 (source de vérité froide)
 3. **Types de secrets style 1Password** — 14 types prédéfinis avec validation des champs
-4. **Même pattern que Live Memory** — Bearer tokens, `space_ids`, `check_access()`, starter-kit Cloud Temple
+4. **Même pattern que Live Memory** — Bearer tokens, `vault_ids`, `check_access()`, starter-kit Cloud Temple
 5. **Zéro mocking** — Tous les tests sont réels (S3 Dell ECS, Docker, OpenBao)
 
 ---
@@ -162,8 +162,8 @@ Utilise les `contextvars` Python pour injecter les infos du token sans dépendre
 | `admin`                    | ✅                        | ✅                    | ✅ (implicite) | ✅            |
 
 **Règles** :
-- `space_ids: []` (vide) → accès à **tous** les spaces
-- `space_ids: ["a", "b"]` → accès **uniquement** à "a" et "b"
+- `vault_ids: []` (vide) → accès à **tous** les vaults
+- `vault_ids: ["a", "b"]` → accès **uniquement** à "a" et "b"
 - La comparaison est **case-sensitive** et **exacte** (pas de wildcard)
 - `admin` implique `read` et `write`
 
@@ -239,7 +239,7 @@ Chaque space = un **mount point KV v2** dans OpenBao.
 
 ### 3.10 `vault/ssh_ca.py` — SSH Certificate Authority
 
-Chaque space peut avoir sa propre CA SSH (mount `ssh-ca-{space_id}`).
+Chaque vault peut avoir sa propre CA SSH (mount `ssh-ca-{vault_id}`).
 
 | Opération                                    | Description                                          |
 | -------------------------------------------- | ---------------------------------------------------- |
@@ -253,7 +253,25 @@ Chaque space peut avoir sa propre CA SSH (mount `ssh-ca-{space_id}`).
 | -------------- | ---------------------------------------------------------------------------- |
 | `manager.py`   | Démarrage/arrêt du process `bao server`, health check, client hvac singleton |
 | `config.py`    | Génération du fichier HCL (file backend, listener localhost, disable_mlock)  |
-| `lifecycle.py` | Init (Shamir shares=1), unseal, seal, status                                 |
+| `lifecycle.py` | Init (Shamir shares=1), unseal, seal, status, chiffrement clés unseal        |
+
+**Gestion sécurisée des clés unseal (Option C)** :
+
+Les clés unseal (Shamir key + root token) sont gérées selon le principe de
+**séparation physique données/clés** :
+
+| Étape | Action | Stockage des clés |
+|-------|--------|-------------------|
+| Init (1ère fois) | `initialize()` → chiffrement AES-256-GCM → upload S3 | S3 uniquement (chiffré) |
+| Unseal (suivants) | Download S3 → déchiffrement → `submit_unseal_key()` | Mémoire uniquement |
+| Runtime | Clés en mémoire Python (variable de module) | Mémoire uniquement |
+| Shutdown/Crash | `seal()` → mémoire libérée | Nulle part (garbage collected) |
+
+**Chiffrement** : AES-256-GCM, clé dérivée de `ADMIN_BOOTSTRAP_KEY` via
+PBKDF2-HMAC-SHA256 (600 000 itérations). Format : `salt(16B) || nonce(12B) || ciphertext || tag(16B)` encodé base64.
+
+**⚠️ Invariant** : les clés unseal ne sont **jamais** écrites en clair sur le
+filesystem local. Elles transitent uniquement en mémoire pendant le runtime.
 
 **Configuration HCL générée** :
 
@@ -355,24 +373,44 @@ docker compose run --rm --entrypoint python test scripts/test_service.py --no-do
 
 ### 6.1 Chiffrement
 
-- **OpenBao** : Barrière de chiffrement sur toutes les données du file backend
+- **OpenBao barrier** : Chiffrement at-rest de toutes les données du file backend (XChaCha20-Poly1305)
 - **Shamir's Secret Sharing** : Clé racine divisée en parts (shares=1, threshold=1 pour embedded)
-- **Transit** : Chiffrement at-rest par OpenBao (XChaCha20-Poly1305 natif)
+- **Clés unseal** : Chiffrées AES-256-GCM (clé dérivée PBKDF2 de `ADMIN_BOOTSTRAP_KEY`)
 
-### 6.2 Réseau
+### 6.2 Gestion des clés unseal (Option C)
+
+Principe : **séparation physique** données / clés / bootstrap key.
+
+```
+Données chiffrées (barrier)  → Volume Docker + S3 (_storage/)
+Clés unseal (chiffrées)      → S3 uniquement (_init/init_keys.json.enc)
+ADMIN_BOOTSTRAP_KEY          → Variable d'environnement uniquement
+```
+
+**Invariants** :
+- Les clés unseal ne sont **jamais** en clair sur le filesystem local
+- Elles ne vivent qu'en **mémoire** pendant le runtime
+- Un crash efface automatiquement les clés (garbage collection)
+- 3 facteurs nécessaires pour accéder aux secrets : données + clés enc + bootstrap key
+
+**Chiffrement** : `AES-256-GCM` via `cryptography` Python, dérivation `PBKDF2-HMAC-SHA256` (600k itérations).
+
+**Roadmap** : Transit Auto-Unseal via OpenBao dédié (v0.3.0), HSM/Cloud KMS (v1.0).
+
+### 6.3 Réseau
 
 - OpenBao écoute **uniquement sur localhost:8200** (TLS désactivé car localhost)
 - Le service MCP n'est **pas exposé directement** (WAF en frontal)
 - Docker network isolé (`mcp-net`)
 
-### 6.3 Tokens
+### 6.4 Tokens
 
 - Hash SHA-256 stocké (jamais le token en clair)
 - Expiration configurable
 - Révocation immédiate
 - Cache TTL 5 minutes
 
-### 6.4 S3
+### 6.5 S3
 
 - Config hybride SigV2/SigV4 (Dell ECS)
 - Path-style addressing
@@ -388,6 +426,7 @@ docker compose run --rm --entrypoint python test scripts/test_service.py --no-do
 | `pydantic-settings` | ≥2.0    | Configuration env vars                   |
 | `boto3`             | ≥1.35.0 | Client S3 Dell ECS                       |
 | `hvac`              | ≥2.3.0  | Client Python pour OpenBao/Vault         |
+| `cryptography`      | ≥42.0   | Chiffrement clés unseal (AES-256-GCM, PBKDF2) |
 | `uvicorn[standard]` | ≥0.32.0 | Serveur ASGI                             |
 | `pytest`            | ≥8.0    | Tests                                    |
 | `pytest-asyncio`    | ≥0.24.0 | Tests async                              |

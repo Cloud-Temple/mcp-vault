@@ -17,12 +17,12 @@ logger = logging.getLogger("mcp-vault.ssh-ca")
 SSH_MOUNT_PREFIX = "ssh-ca-"
 
 
-def _ssh_mount_point(space_id: str) -> str:
-    """Mount point SSH pour un space donné."""
-    return f"{SSH_MOUNT_PREFIX}{space_id}"
+def _ssh_mount_point(vault_id: str) -> str:
+    """Mount point SSH pour un vault donné."""
+    return f"{SSH_MOUNT_PREFIX}{vault_id}"
 
 
-async def setup_ssh_ca(space_id: str, role_name: str, allowed_users: str = "*",
+async def setup_ssh_ca(vault_id: str, role_name: str, allowed_users: str = "*",
                        default_user: str = "ubuntu", ttl: str = "30m") -> dict:
     """
     Configure un rôle SSH CA dans un espace vault.
@@ -35,7 +35,7 @@ async def setup_ssh_ca(space_id: str, role_name: str, allowed_users: str = "*",
     if not client:
         return {"status": "error", "message": "OpenBao non connecté"}
 
-    mount_point = _ssh_mount_point(space_id)
+    mount_point = _ssh_mount_point(vault_id)
 
     try:
         # 1. Monter le SSH engine (ignore si déjà monté)
@@ -43,7 +43,7 @@ async def setup_ssh_ca(space_id: str, role_name: str, allowed_users: str = "*",
             client.sys.enable_secrets_engine(
                 backend_type="ssh",
                 path=mount_point,
-                description=f"SSH CA for space {space_id}",
+                description=f"SSH CA for vault {vault_id}",
             )
             logger.info(f"✅ SSH engine monté: {mount_point}")
         except Exception as e:
@@ -56,7 +56,7 @@ async def setup_ssh_ca(space_id: str, role_name: str, allowed_users: str = "*",
                 f"{mount_point}/config/ca",
                 generate_signing_key=True,
             )
-            logger.info(f"✅ CA SSH générée pour {space_id}")
+            logger.info(f"✅ CA SSH générée pour {vault_id}")
         except Exception:
             pass  # Déjà générée
 
@@ -69,11 +69,11 @@ async def setup_ssh_ca(space_id: str, role_name: str, allowed_users: str = "*",
             default_user=default_user,
             allow_user_certificates=True,
         )
-        logger.info(f"✅ Rôle SSH créé: {role_name} dans {space_id}")
+        logger.info(f"✅ Rôle SSH créé: {role_name} dans {vault_id}")
 
         return {
             "status": "ok",
-            "space_id": space_id,
+            "vault_id": vault_id,
             "role_name": role_name,
             "mount_point": mount_point,
             "allowed_users": allowed_users,
@@ -81,18 +81,18 @@ async def setup_ssh_ca(space_id: str, role_name: str, allowed_users: str = "*",
             "ttl": ttl,
         }
     except Exception as e:
-        logger.error(f"❌ Erreur setup SSH CA {space_id}: {e}")
+        logger.error(f"❌ Erreur setup SSH CA {vault_id}: {e}")
         return {"status": "error", "message": str(e)}
 
 
-async def sign_ssh_key(space_id: str, role_name: str, public_key: str,
+async def sign_ssh_key(vault_id: str, role_name: str, public_key: str,
                        ttl: str = "30m") -> dict:
     """Signe une clé publique SSH avec la CA du space."""
     client = get_hvac_client()
     if not client:
         return {"status": "error", "message": "OpenBao non connecté"}
 
-    mount_point = _ssh_mount_point(space_id)
+    mount_point = _ssh_mount_point(vault_id)
 
     try:
         response = client.write(
@@ -111,17 +111,17 @@ async def sign_ssh_key(space_id: str, role_name: str, public_key: str,
             "ttl": ttl,
         }
     except Exception as e:
-        logger.error(f"❌ Erreur signature SSH {space_id}/{role_name}: {e}")
+        logger.error(f"❌ Erreur signature SSH {vault_id}/{role_name}: {e}")
         return {"status": "error", "message": str(e)}
 
 
-async def get_ca_public_key(space_id: str) -> dict:
+async def get_ca_public_key(vault_id: str) -> dict:
     """Récupère la clé publique de la CA SSH."""
     client = get_hvac_client()
     if not client:
         return {"status": "error", "message": "OpenBao non connecté"}
 
-    mount_point = _ssh_mount_point(space_id)
+    mount_point = _ssh_mount_point(vault_id)
 
     try:
         response = client.read(f"{mount_point}/config/ca")
@@ -129,10 +129,10 @@ async def get_ca_public_key(space_id: str) -> dict:
 
         return {
             "status": "ok",
-            "space_id": space_id,
+            "vault_id": vault_id,
             "public_key": public_key,
             "usage": "Ajouter dans /etc/ssh/trusted-user-ca-keys.pem sur les serveurs cibles",
         }
     except Exception as e:
-        logger.error(f"❌ Erreur lecture CA publique {space_id}: {e}")
+        logger.error(f"❌ Erreur lecture CA publique {vault_id}: {e}")
         return {"status": "error", "message": str(e)}

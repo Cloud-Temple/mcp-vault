@@ -34,13 +34,13 @@ def check_access(resource_id: str) -> Optional[dict]:
     if "admin" in token_info.get("permissions", []):
         return None
 
-    # Vérifier que la ressource est dans les space_ids autorisés
-    allowed = token_info.get("space_ids", [])
+    # Vérifier que la ressource est dans les vault_ids autorisés
+    allowed = token_info.get("vault_ids", [])
     if allowed and resource_id not in allowed:
         return {
             "status": "error",
             "message": f"Accès refusé à '{resource_id}'",
-            "allowed_spaces": allowed,
+            "allowed_vaults": allowed,
         }
 
     return None
