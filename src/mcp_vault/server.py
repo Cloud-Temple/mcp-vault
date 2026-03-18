@@ -112,9 +112,18 @@ async def vault_create(vault_id: str, description: str = "") -> dict:
 @mcp.tool()
 async def vault_list() -> dict:
     """Liste tous les vaults (coffres de secrets) accessibles par le token courant."""
+    from .auth.context import current_token_info
     from .vault.spaces import list_spaces
 
-    return await list_spaces()
+    # ── Filtrage par token : les non-admin ne voient que leurs vaults ──
+    token_info = current_token_info.get()
+    allowed_vault_ids = None
+    if token_info and "admin" not in token_info.get("permissions", []):
+        allowed = token_info.get("vault_ids", [])
+        if allowed:
+            allowed_vault_ids = allowed
+
+    return await list_spaces(allowed_vault_ids=allowed_vault_ids)
 
 
 @mcp.tool()
@@ -133,6 +142,31 @@ async def vault_info(vault_id: str) -> dict:
         return access_err
 
     return await get_space_info(vault_id)
+
+
+@mcp.tool()
+async def vault_update(vault_id: str, description: str = "") -> dict:
+    """
+    Met à jour les métadonnées d'un vault (description).
+
+    Args:
+        vault_id: Identifiant du vault à modifier
+        description: Nouvelle description du vault
+    """
+    from .auth.context import check_access, check_write_permission
+    from .vault.spaces import update_space
+
+    access_err = check_access(vault_id)
+    if access_err:
+        return access_err
+    write_err = check_write_permission()
+    if write_err:
+        return write_err
+
+    if not description:
+        return {"status": "error", "message": "Au moins un champ à modifier est requis (description)"}
+
+    return await update_space(vault_id, description)
 
 
 @mcp.tool()

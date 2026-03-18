@@ -84,18 +84,18 @@ def vault_group(ctx):
     pass
 
 
-@space_group.command("create")
+@vault_group.command("create")
 @click.argument("vault_id")
-@click.option("--description", "-d", default="", help="Description de l'vault")
+@click.option("--description", "-d", default="", help="Description du vault")
 @click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
 @click.pass_context
 def vault_create_cmd(ctx, vault_id, description, output_json):
-    """Créer un nouvel vault vault.
+    """Créer un nouveau vault.
 
     \b
     Exemples :
-      space create serveurs-prod -d "Clés SSH production"
-      space create bdd-staging
+      vault create serveurs-prod -d "Clés SSH production"
+      vault create bdd-staging
     """
     async def _run():
         client = MCPClient(ctx.obj["url"], ctx.obj["token"])
@@ -109,11 +109,11 @@ def vault_create_cmd(ctx, vault_id, description, output_json):
     asyncio.run(_run())
 
 
-@space_group.command("list")
+@vault_group.command("list")
 @click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
 @click.pass_context
 def vault_list_cmd(ctx, output_json):
-    """Lister tous les vaults vault."""
+    """Lister tous les vaults accessibles."""
     async def _run():
         client = MCPClient(ctx.obj["url"], ctx.obj["token"])
         result = await client.call_tool("vault_list", {})
@@ -124,12 +124,12 @@ def vault_list_cmd(ctx, output_json):
     asyncio.run(_run())
 
 
-@space_group.command("info")
+@vault_group.command("info")
 @click.argument("vault_id")
 @click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
 @click.pass_context
 def vault_info_cmd(ctx, vault_id, output_json):
-    """Détails d'un vault vault."""
+    """Détails d'un vault (métadonnées, secrets_count, owner)."""
     async def _run():
         client = MCPClient(ctx.obj["url"], ctx.obj["token"])
         result = await client.call_tool("vault_info", {"vault_id": vault_id})
@@ -140,7 +140,31 @@ def vault_info_cmd(ctx, vault_id, output_json):
     asyncio.run(_run())
 
 
-@space_group.command("delete")
+@vault_group.command("update")
+@click.argument("vault_id")
+@click.option("--description", "-d", required=True, help="Nouvelle description du vault")
+@click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
+@click.pass_context
+def vault_update_cmd(ctx, vault_id, description, output_json):
+    """Mettre à jour un vault (description).
+
+    \b
+    Exemples :
+      vault update serveurs-prod -d "Clés SSH production v2"
+    """
+    async def _run():
+        client = MCPClient(ctx.obj["url"], ctx.obj["token"])
+        result = await client.call_tool("vault_update", {
+            "vault_id": vault_id, "description": description,
+        })
+        if output_json:
+            show_json(result)
+        else:
+            show_vault_result(result)
+    asyncio.run(_run())
+
+
+@vault_group.command("delete")
 @click.argument("vault_id")
 @click.option("--yes", "-y", is_flag=True, help="Confirmer la suppression sans prompt")
 @click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
@@ -148,7 +172,7 @@ def vault_info_cmd(ctx, vault_id, output_json):
 def vault_delete_cmd(ctx, vault_id, yes, output_json):
     """Supprimer un vault et TOUS ses secrets (⚠️ irréversible)."""
     if not yes:
-        click.confirm(f"⚠️  Supprimer l'vault '{vault_id}' et tous ses secrets ?", abort=True)
+        click.confirm(f"⚠️  Supprimer le vault '{vault_id}' et tous ses secrets ?", abort=True)
     async def _run():
         client = MCPClient(ctx.obj["url"], ctx.obj["token"])
         result = await client.call_tool("vault_delete", {

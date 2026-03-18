@@ -9,9 +9,13 @@ Supporte le versioning natif de KV v2.
 import logging
 
 from ..openbao.manager import get_hvac_client
+from .spaces import VAULT_META_PATH
 from .types import validate_secret, enrich_secret_data, list_types, generate_password, SECRET_TYPES
 
 logger = logging.getLogger("mcp-vault.secrets")
+
+# Chemins réservés — protégés contre l'écriture directe
+RESERVED_PATHS = {VAULT_META_PATH}
 
 
 async def write_secret(vault_id: str, path: str, data: dict,
@@ -28,6 +32,10 @@ async def write_secret(vault_id: str, path: str, data: dict,
         tags: Tags séparés par des virgules
         favorite: Marquer comme favori
     """
+    # Protection des chemins réservés
+    if path in RESERVED_PATHS or path.rstrip("/") in RESERVED_PATHS:
+        return {"status": "error", "message": f"Le chemin '{path}' est réservé au système"}
+
     # Validation du type
     error = validate_secret(secret_type, data)
     if error:
@@ -69,7 +77,7 @@ async def read_secret(vault_id: str, path: str, version: int = 0) -> dict:
         return {"status": "error", "message": "OpenBao non connecté"}
 
     try:
-        kwargs = {"path": path, "mount_point": vault_id}
+        kwargs: dict = {"path": path, "mount_point": vault_id}
         if version > 0:
             kwargs["version"] = version
 
@@ -100,7 +108,9 @@ async def list_secrets(vault_id: str, path: str = "") -> dict:
 
     try:
         response = client.secrets.kv.v2.list_secrets(path=path, mount_point=vault_id)
-        keys = response.get("data", {}).get("keys", [])
+        all_keys = response.get("data", {}).get("keys", [])
+        # Filtrer les chemins réservés (ex: _vault_meta)
+        keys = [k for k in all_keys if k not in RESERVED_PATHS]
         return {"status": "ok", "vault_id": vault_id, "path": path, "keys": keys, "count": len(keys)}
     except Exception as e:
         if "InvalidPath" in str(type(e).__name__) or "404" in str(e):
@@ -111,6 +121,10 @@ async def list_secrets(vault_id: str, path: str = "") -> dict:
 
 async def delete_secret(vault_id: str, path: str) -> dict:
     """Supprime un secret et toutes ses versions."""
+    # Protection des chemins réservés
+    if path in RESERVED_PATHS or path.rstrip("/") in RESERVED_PATHS:
+        return {"status": "error", "message": f"Le chemin '{path}' est réservé au système"}
+
     client = get_hvac_client()
     if not client:
         return {"status": "error", "message": "OpenBao non connecté"}

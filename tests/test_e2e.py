@@ -164,12 +164,16 @@ async def test_01_system():
 # =============================================================================
 
 async def test_02_spaces():
-    """Vault Spaces — CRUD complet + erreurs + idempotence."""
+    """Vault Spaces — CRUD complet + update + métadonnées + erreurs."""
     print("\n  ── TEST 2 — Vault Spaces CRUD ──")
 
     # 2a. Créer un vault
     r = await call_tool("vault_create", {"vault_id": "test-e2e-alpha", "description": "Test E2E Alpha"})
     check("Créer test-e2e-alpha", r, "created")
+
+    # 2a-meta. Vérifier les métadonnées de création
+    check_true("created_at présent", bool(r.get("created_at")), r.get("created_at", ""))
+    check_true("created_by présent", bool(r.get("created_by")), r.get("created_by", ""))
 
     # 2b. Créer un 2ème vault
     r = await call_tool("vault_create", {"vault_id": "test-e2e-beta", "description": "Test E2E Beta"})
@@ -189,25 +193,43 @@ async def test_02_spaces():
     check_true("beta dans la liste", "test-e2e-beta" in vault_ids)
     check_true("gamma dans la liste", "test-e2e-gamma" in vault_ids)
 
-    # 2e. Info d'un vault
+    # 2e. Info d'un vault — avec métadonnées
     r = await call_tool("vault_info", {"vault_id": "test-e2e-alpha"})
     check("Info test-e2e-alpha", r)
     check_value("vault_id correct", r.get("vault_id"), "test-e2e-alpha")
+    check_true("created_at dans info", bool(r.get("created_at")), r.get("created_at", ""))
+    check_true("created_by dans info", bool(r.get("created_by")), r.get("created_by", ""))
+    check_true("secrets_count = 0 (vide)", r.get("secrets_count", -1) == 0, f"count={r.get('secrets_count')}")
 
-    # 2f. Supprimer sans confirm → erreur
+    # 2f. Update description d'un vault
+    r = await call_tool("vault_update", {"vault_id": "test-e2e-alpha", "description": "Alpha Updated"})
+    check("Update test-e2e-alpha", r, "updated")
+    check_value("description updated", r.get("description"), "Alpha Updated")
+    check_true("updated_at présent", bool(r.get("updated_at")), r.get("updated_at", ""))
+    check_true("updated_by présent", bool(r.get("updated_by")), r.get("updated_by", ""))
+
+    # 2f-verify. Vérifier que l'info reflète la mise à jour
+    r = await call_tool("vault_info", {"vault_id": "test-e2e-alpha"})
+    check_value("description après update", r.get("description"), "Alpha Updated")
+
+    # 2g. Update vault inexistant → erreur
+    r = await call_tool("vault_update", {"vault_id": "vault-fantome", "description": "nope"})
+    check("Update vault inexistant → erreur", r, "error")
+
+    # 2h. Supprimer sans confirm → erreur
     r = await call_tool("vault_delete", {"vault_id": "test-e2e-gamma", "confirm": False})
     check("Delete sans confirm → erreur", r, "error")
 
-    # 2g. Supprimer avec confirm → OK
+    # 2i. Supprimer avec confirm → OK
     r = await call_tool("vault_delete", {"vault_id": "test-e2e-gamma", "confirm": True})
     check("Delete gamma avec confirm", r, "deleted")
 
-    # 2h. Vérifier gamma disparu
+    # 2j. Vérifier gamma disparu
     r = await call_tool("vault_list", {})
     vault_ids = [s.get("vault_id", "") for s in r.get("vaults", [])]
     check_true("gamma supprimé", "test-e2e-gamma" not in vault_ids)
 
-    # 2i. Info sur vault inexistant → erreur
+    # 2k. Info sur vault inexistant → erreur
     r = await call_tool("vault_info", {"vault_id": "vault-fantome"})
     check("Info vault inexistant → erreur", r, "error")
 
@@ -554,7 +576,23 @@ async def test_07_errors():
     # Cleanup
     await call_tool("vault_delete", {"vault_id": "test-e2e-empty", "confirm": True})
 
-    # 7g. Secret type invalide → devrait fonctionner en custom ou refuser
+    # 7g. Écriture sur chemin réservé _vault_meta → refusé
+    r = await call_tool("secret_write", {
+        "vault_id": "test-e2e-alpha", "path": "_vault_meta",
+        "data": {"hack": "true"}, "secret_type": "custom",
+    })
+    check("Write _vault_meta → refusé", r, "error")
+
+    # 7h. Suppression de _vault_meta → refusé
+    r = await call_tool("secret_delete", {"vault_id": "test-e2e-alpha", "path": "_vault_meta"})
+    check("Delete _vault_meta → refusé", r, "error")
+
+    # 7i. _vault_meta invisible dans secret_list
+    r = await call_tool("secret_list", {"vault_id": "test-e2e-alpha"})
+    keys = r.get("keys", [])
+    check_true("_vault_meta absent du listing", "_vault_meta" not in keys, f"keys={keys}")
+
+    # 7j. Secret type invalide → devrait fonctionner en custom ou refuser
     r = await call_tool("secret_write", {
         "vault_id": "test-e2e-alpha", "path": "err/bad-type",
         "data": {"value": "x"}, "secret_type": "type_inexistant_xyz",
