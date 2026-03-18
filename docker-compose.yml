@@ -1,0 +1,72 @@
+# docker-compose.yml — MCP Vault + WAF
+#
+# Usage :
+#   docker compose build
+#   docker compose up -d
+#   docker compose logs -f
+#
+# Architecture réseau :
+#   Internet → WAF (port 8082) → mcp-vault (port 8030, réseau interne)
+#   Le service MCP n'est PAS exposé directement.
+#   OpenBao tourne en localhost dans le conteneur mcp-vault.
+
+services:
+
+  # ─────────────────────────────────────────────────────────────
+  # WAF — Caddy + Coraza OWASP CRS + Rate Limiting
+  # ─────────────────────────────────────────────────────────────
+  waf:
+    build: ./waf
+    ports:
+      - "${WAF_PORT:-8082}:8082"
+    volumes:
+      - ./waf/Caddyfile:/etc/caddy/Caddyfile:ro
+    environment:
+      - SITE_ADDRESS=${SITE_ADDRESS:-:8082}
+    depends_on:
+      - mcp-vault
+    restart: unless-stopped
+    networks:
+      - mcp-net
+
+  # ─────────────────────────────────────────────────────────────
+  # MCP Vault — Python + OpenBao embedded (réseau interne)
+  # ─────────────────────────────────────────────────────────────
+  mcp-vault:
+    build: .
+    # PAS de "ports:" — expose uniquement sur le réseau interne
+    expose:
+      - "8030"
+    env_file: .env
+    volumes:
+      # Persistance locale du file backend OpenBao (cache crash recovery)
+      - openbao-data:/openbao/file
+      # Logs OpenBao (optionnel)
+      - openbao-logs:/openbao/logs
+    cap_add:
+      - IPC_LOCK  # Permet à OpenBao de verrouiller la mémoire (mlock)
+    restart: unless-stopped
+    networks:
+      - mcp-net
+
+  # ─────────────────────────────────────────────────────────────
+  # Tests — Lance les tests d'intégration (usage ponctuel)
+  # docker compose run --rm test
+  # ─────────────────────────────────────────────────────────────
+  test:
+    build: .
+    env_file: .env
+    entrypoint: ["python", "-m", "pytest", "tests/", "-v", "--tb=short"]
+    profiles: ["test"]
+    networks:
+      - mcp-net
+
+volumes:
+  openbao-data:
+    driver: local
+  openbao-logs:
+    driver: local
+
+networks:
+  mcp-net:
+    driver: bridge

@@ -1,0 +1,32 @@
+# --- Secrets & config locale ---
+.env
+.clinerules/
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Docker ---
+# Les volumes Docker sont gérés par docker-compose, pas par git
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Design docs d'autres projets (symlinks/copies) ---
+/DESIGN/graph-mem
+/DESIGN/live-mem
+/DESIGN/mcp-agent
+/DESIGN/mcp-tools
+/DESIGN/mcp-mission

@@ -1,0 +1,37 @@
+# Caddyfile — Reverse Proxy pour MCP Vault
+# Caddy standard (Coraza WAF sera ajouté en production via xcaddy)
+#
+# Architecture : Internet → Caddy (:8082) → mcp-vault (:8030, réseau interne)
+
+{$SITE_ADDRESS::8082} {
+
+    # --- Reverse proxy vers MCP Vault ---
+    reverse_proxy mcp-vault:8030 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+
+        # Timeouts adaptés aux appels MCP (qui peuvent être longs)
+        transport http {
+            dial_timeout 10s
+            response_header_timeout 120s
+            read_timeout 120s
+            write_timeout 120s
+        }
+    }
+
+    # --- Headers de sécurité ---
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy strict-origin-when-cross-origin
+        -Server
+    }
+
+    # --- Logs ---
+    log {
+        output stderr
+        format console
+        level INFO
+    }
+}
