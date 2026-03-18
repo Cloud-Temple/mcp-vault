@@ -96,15 +96,15 @@ def show_vault_result(result: dict):
         return
 
     # --- LIST ---
-    spaces = result.get("vaults")
-    if spaces is not None:
-        console.print(f"\n✅ [bold]{len(spaces)} vault(s)[/bold]")
-        if spaces:
+    vaults = result.get("vaults")
+    if vaults is not None:
+        console.print(f"\n✅ [bold]{len(vaults)} vault(s)[/bold]")
+        if vaults:
             table = Table(show_header=True)
             table.add_column("Space ID", style="cyan bold", min_width=20)
             table.add_column("Description", style="dim")
             table.add_column("Secrets", style="green", justify="right")
-            for s in spaces:
+            for s in vaults:
                 table.add_row(
                     s.get("vault_id", "?"),
                     s.get("description", ""),
@@ -179,8 +179,8 @@ def show_secret_result(result: dict):
     # --- LIST ---
     keys = result.get("keys")
     if keys is not None:
-        space = result.get("vault_id", "?")
-        console.print(f"\n✅ [bold]{len(keys)} clé(s)[/bold] dans [cyan]{space}[/cyan]")
+        vid = result.get("vault_id", "?")
+        console.print(f"\n✅ [bold]{len(keys)} clé(s)[/bold] dans [cyan]{vid}[/cyan]")
         if keys:
             for k in keys:
                 console.print(f"  📄 {k}")
@@ -310,7 +310,7 @@ def show_token_result(result: dict):
             table.add_column("Expire", style="dim")
             table.add_column("Hash", style="dim")
             for t in tokens:
-                spaces = ", ".join(t.get("allowed_resources", [])) or "(tous)"
+                allowed_vaults = ", ".join(t.get("allowed_resources", [])) or "(tous)"
                 exp = t.get("expires_at") or "jamais"
                 if t.get("revoked"):
                     exp = f"[red]RÉVOQUÉ[/red]"
@@ -320,7 +320,7 @@ def show_token_result(result: dict):
                     t.get("client_name", "?"),
                     t.get("email", "") or "",
                     ", ".join(t.get("permissions", [])),
-                    spaces,
+                    allowed_vaults,
                     exp,
                     t.get("hash_prefix", "?"),
                 )

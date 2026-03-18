@@ -2,7 +2,7 @@
 """
 Vault Secrets — CRUD des secrets KV v2.
 
-Chaque secret est stocké dans un space (= mount point KV v2).
+Chaque secret est stocké dans un vault (= mount point KV v2).
 Supporte le versioning natif de KV v2.
 """
 
@@ -101,7 +101,7 @@ async def read_secret(vault_id: str, path: str, version: int = 0) -> dict:
 
 
 async def list_secrets(vault_id: str, path: str = "") -> dict:
-    """Liste les secrets d'un space (clés uniquement, pas les valeurs)."""
+    """Liste les secrets d'un vault (clés uniquement, pas les valeurs)."""
     client = get_hvac_client()
     if not client:
         return {"status": "error", "message": "OpenBao non connecté"}

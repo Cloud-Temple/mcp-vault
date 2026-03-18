@@ -2,7 +2,7 @@
 """
 SSH Certificate Authority — Signature de clés publiques SSH.
 
-Chaque space peut avoir sa propre CA SSH (mount ssh engine par space).
+Chaque vault peut avoir sa propre CA SSH (mount ssh engine par vault).
 Les agents demandent la signature de leur clé publique et reçoivent
 un certificat éphémère pour se connecter aux serveurs cibles.
 """
@@ -87,7 +87,7 @@ async def setup_ssh_ca(vault_id: str, role_name: str, allowed_users: str = "*",
 
 async def sign_ssh_key(vault_id: str, role_name: str, public_key: str,
                        ttl: str = "30m") -> dict:
-    """Signe une clé publique SSH avec la CA du space."""
+    """Signe une clé publique SSH avec la CA du vault."""
     client = get_hvac_client()
     if not client:
         return {"status": "error", "message": "OpenBao non connecté"}

@@ -7,8 +7,8 @@ Usage :
     python scripts/mcp_cli.py --help
     python scripts/mcp_cli.py health
     python scripts/mcp_cli.py about
-    python scripts/mcp_cli.py space list
-    python scripts/mcp_cli.py secret write myspace test/key --data '{"user":"me"}'
+    python scripts/mcp_cli.py vault list
+    python scripts/mcp_cli.py secret write myvault test/key --data '{"user":"me"}'
     python scripts/mcp_cli.py shell
 
 Variables d'environnement :

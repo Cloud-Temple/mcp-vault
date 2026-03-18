@@ -23,11 +23,11 @@ SHELL_COMMANDS = {
     "help":       "Afficher l'aide",
     "health":     "Vérifier l'état de santé (OpenBao + S3)",
     "about":      "Informations sur le service",
-    "space":      "space <op> [args] — create, list, info, delete",
-    "secret":     "secret <op> <space> [args] — write, read, list, delete",
+    "vault":      "vault <op> [args] — create, list, info, update, delete",
+    "secret":     "secret <op> <vault> [args] — write, read, list, delete",
     "types":      "Lister les 14 types de secrets",
     "password":   "password [length] — Générer un mot de passe CSPRNG",
-    "ssh":        "ssh <op> <space> [args] — setup, sign, ca-key",
+    "ssh":        "ssh <op> <vault> [args] — setup, sign, ca-key",
     "token":      "token <op> [args] — create, list, revoke",
     "quit":       "Quitter le shell",
 }
@@ -55,13 +55,13 @@ VAULT_OPS = ("create", "list", "info", "delete")
 async def cmd_vault(client, args="", json_output=False):
     parts = args.strip().split()
     if not parts or parts[0] not in VAULT_OPS:
-        show_warning("Usage: space <op> [args]")
+        show_warning("Usage: vault <op> [args]")
         show_warning("")
-        show_warning("  space list                              — lister les vaults")
-        show_warning("  space create my-space                   — créer un vault")
-        show_warning("  space create my-space --desc 'Ma desc'  — avec description")
-        show_warning("  space info my-space                     — détails")
-        show_warning("  space delete my-space                   — supprimer")
+        show_warning("  vault list                              — lister les vaults")
+        show_warning("  vault create my-vault                   — créer un vault")
+        show_warning("  vault create my-vault --desc 'Ma desc'  — avec description")
+        show_warning("  vault info my-vault                     — détails")
+        show_warning("  vault delete my-vault                   — supprimer")
         return
 
     op = parts[0]
@@ -84,7 +84,7 @@ async def cmd_vault(client, args="", json_output=False):
             "vault_id": parts[1], "confirm": True,
         })
     else:
-        show_warning(f"Usage: space {op} <vault_id>")
+        show_warning(f"Usage: vault {op} <vault_id>")
         return
 
     if json_output:
@@ -99,12 +99,12 @@ SECRET_OPS = ("write", "read", "list", "delete")
 async def cmd_secret(client, args="", json_output=False):
     parts = args.strip().split()
     if not parts or parts[0] not in SECRET_OPS:
-        show_warning("Usage: secret <op> <space> [path] [options]")
+        show_warning("Usage: secret <op> <vault> [path] [options]")
         show_warning("")
-        show_warning("  secret list my-space                    — lister les clés")
-        show_warning("  secret read my-space web/github         — lire un secret")
-        show_warning("  secret write my-space test/key --data '{\"user\":\"me\"}' --type login")
-        show_warning("  secret delete my-space test/key         — supprimer")
+        show_warning("  secret list my-vault                    — lister les clés")
+        show_warning("  secret read my-vault web/github         — lire un secret")
+        show_warning("  secret write my-vault test/key --data '{\"user\":\"me\"}' --type login")
+        show_warning("  secret delete my-vault test/key         — supprimer")
         return
 
     op = parts[0]
@@ -150,7 +150,7 @@ async def cmd_secret(client, args="", json_output=False):
             "vault_id": parts[1], "path": parts[2],
         })
     else:
-        show_warning(f"Usage: secret {op} <space> <path>")
+        show_warning(f"Usage: secret {op} <vault> <path>")
         return
 
     if json_output:
@@ -188,11 +188,11 @@ SSH_OPS = ("setup", "sign", "ca-key")
 async def cmd_ssh(client, args="", json_output=False):
     parts = args.strip().split()
     if not parts or parts[0] not in SSH_OPS:
-        show_warning("Usage: ssh <op> <space> [args]")
+        show_warning("Usage: ssh <op> <vault> [args]")
         show_warning("")
-        show_warning("  ssh setup my-space my-role --users deploy --ttl 15m")
-        show_warning("  ssh sign my-space my-role --key-data 'ssh-ed25519 ...'")
-        show_warning("  ssh ca-key my-space")
+        show_warning("  ssh setup my-vault my-role --users deploy --ttl 15m")
+        show_warning("  ssh sign my-vault my-role --key-data 'ssh-ed25519 ...'")
+        show_warning("  ssh ca-key my-vault")
         return
 
     op = parts[0]
@@ -237,7 +237,7 @@ async def cmd_ssh(client, args="", json_output=False):
             "public_key": key_data, "ttl": ttl,
         })
     else:
-        show_warning(f"Usage: ssh {op} <space> ...")
+        show_warning(f"Usage: ssh {op} <vault> ...")
         return
 
     if json_output:
@@ -255,7 +255,7 @@ async def cmd_token(client, args="", json_output=False):
         show_warning("Usage: token <op> [args]")
         show_warning("")
         show_warning("  token list")
-        show_warning("  token create agent-prod --permissions read --spaces prod")
+        show_warning("  token create agent-prod --permissions read --vaults prod")
         show_warning("  token revoke <hash_prefix>")
         return
 
@@ -274,7 +274,7 @@ async def cmd_token(client, args="", json_output=False):
             result = {"status": "error", "message": str(e)}
     elif op == "create" and len(parts) >= 2:
         perms = ["read", "write"]
-        spaces = []
+        vaults = []
         expires = 90
         email = ""
         i = 2
@@ -282,8 +282,8 @@ async def cmd_token(client, args="", json_output=False):
             if parts[i] == "--permissions" and i + 1 < len(parts):
                 perms = [p.strip() for p in parts[i + 1].split(",")]
                 i += 2
-            elif parts[i] == "--spaces" and i + 1 < len(parts):
-                spaces = [s.strip() for s in parts[i + 1].split(",")]
+            elif parts[i] == "--vaults" and i + 1 < len(parts):
+                vaults = [s.strip() for s in parts[i + 1].split(",")]
                 i += 2
             elif parts[i] == "--expires" and i + 1 < len(parts):
                 expires = int(parts[i + 1])
@@ -301,7 +301,7 @@ async def cmd_token(client, args="", json_output=False):
                     json={
                         "client_name": parts[1],
                         "permissions": perms,
-                        "allowed_resources": spaces,
+                        "allowed_resources": vaults,
                         "expires_in_days": expires,
                         "email": email,
                     },
@@ -381,7 +381,7 @@ async def run_shell(url: str, token: str):
                 await cmd_health(client, args, json_output)
             elif command == "about":
                 await cmd_about(client, args, json_output)
-            elif command == "space":
+            elif command == "vault":
                 await cmd_vault(client, args, json_output)
             elif command == "secret":
                 await cmd_secret(client, args, json_output)

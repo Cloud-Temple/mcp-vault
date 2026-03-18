@@ -9,7 +9,7 @@ Teste TOUTES les fonctionnalités MCP avec un OpenBao réel :
     3. Secrets CRUD       — 14 types, write/read/list/delete, versioning
     4. Secret rotation    — multiple versions, lecture version spécifique
     5. Password generator — longueurs, options, exclusions, unicité
-    6. Isolation inter-spaces — cloisonnement des secrets
+    6. Isolation inter-vaults — cloisonnement des secrets
     7. Gestion d'erreurs  — edge cases, données invalides
     8. Sync S3            — vérification archive sur S3
     9. SSH CA             — setup, ca-key
@@ -482,12 +482,12 @@ async def test_05_password():
 
 
 # =============================================================================
-# TEST 6 — Isolation inter-spaces
+# TEST 6 — Isolation inter-vaults
 # =============================================================================
 
 async def test_06_isolation():
-    """Isolation — les secrets d'un space ne sont pas visibles dans un autre."""
-    print("\n  ── TEST 6 — Isolation inter-spaces ──")
+    """Isolation — les secrets d'un vault ne sont pas visibles dans un autre."""
+    print("\n  ── TEST 6 — Isolation inter-vaults ──")
 
     space_a = "test-e2e-alpha"
     space_b = "test-e2e-beta"
@@ -542,16 +542,16 @@ async def test_07_errors():
     """Edge cases et gestion d'erreurs."""
     print("\n  ── TEST 7 — Gestion d'erreurs ──")
 
-    # 7a. Lire dans un space inexistant
+    # 7a. Lire dans un vault inexistant
     r = await call_tool("secret_read", {"vault_id": "vault-fantome", "path": "test"})
-    check("Read dans space inexistant → erreur", r, "error")
+    check("Read dans vault inexistant → erreur", r, "error")
 
-    # 7b. Écrire dans un space inexistant
+    # 7b. Écrire dans un vault inexistant
     r = await call_tool("secret_write", {
         "vault_id": "vault-fantome", "path": "test",
         "data": {"value": "x"}, "secret_type": "custom",
     })
-    check("Write dans space inexistant → erreur", r, "error")
+    check("Write dans vault inexistant → erreur", r, "error")
 
     # 7c. Lire un secret inexistant
     r = await call_tool("secret_read", {"vault_id": "test-e2e-alpha", "path": "chemin/inexistant/profond"})
@@ -568,10 +568,10 @@ async def test_07_errors():
     check_true("Create vault existant (pas de crash)", r.get("status") in ("created", "error", "ok", "already_exists"),
                f"status={r.get('status')}")
 
-    # 7f. Lister les secrets d'un space vide
+    # 7f. Lister les secrets d'un vault vide
     r = await call_tool("vault_create", {"vault_id": "test-e2e-empty"})
     r = await call_tool("secret_list", {"vault_id": "test-e2e-empty"})
-    check_true("List space vide (pas de crash)", r.get("status") in ("ok", "error"),
+    check_true("List vault vide (pas de crash)", r.get("status") in ("ok", "error"),
                f"status={r.get('status')}, keys={r.get('keys', [])}")
     # Cleanup
     await call_tool("vault_delete", {"vault_id": "test-e2e-empty", "confirm": True})

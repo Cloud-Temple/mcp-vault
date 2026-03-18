@@ -2,7 +2,7 @@
 """
 Vault Spaces — CRUD des espaces vault (mount points KV v2).
 
-Chaque space = un mount point KV v2 dans OpenBao.
+Chaque vault = un mount point KV v2 dans OpenBao.
 L'utilisateur organise ses secrets librement (par serveur, app, env, etc.)
 
 Métadonnées vault :
@@ -149,7 +149,7 @@ async def list_spaces(allowed_vault_ids: Optional[list] = None) -> dict:
 
         return {"status": "ok", "vaults": vaults, "count": len(vaults)}
     except Exception as e:
-        logger.error(f"❌ Erreur listing spaces: {e}")
+        logger.error(f"❌ Erreur listing vaults: {e}")
         return {"status": "error", "message": str(e)}
 
 

@@ -5,8 +5,8 @@ CLI Click — MCP Vault : commandes scriptables.
 Usage :
     python scripts/mcp_cli.py health
     python scripts/mcp_cli.py about
-    python scripts/mcp_cli.py space list
-    python scripts/mcp_cli.py secret write myspace test/key --data '{"user":"me"}'
+    python scripts/mcp_cli.py vault list
+    python scripts/mcp_cli.py secret write myvault test/key --data '{"user":"me"}'
     python scripts/mcp_cli.py shell
 """
 
@@ -468,23 +468,23 @@ def token_group(ctx):
 @token_group.command("create")
 @click.argument("name")
 @click.option("--permissions", "-p", default="read,write", help="Permissions (séparées par virgule)")
-@click.option("--spaces", "-s", default="", help="Vaults autorisés (virgule, vide=tous)")
+@click.option("--vaults", "-s", default="", help="Vaults autorisés (virgule, vide=tous)")
 @click.option("--expires", "-e", default=90, type=int, help="Expiration en jours (0=jamais)")
 @click.option("--email", default="", help="Email du propriétaire")
 @click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
 @click.pass_context
-def token_create_cmd(ctx, name, permissions, spaces, expires, email, output_json):
+def token_create_cmd(ctx, name, permissions, vaults, expires, email, output_json):
     """Créer un nouveau token.
 
     \b
     Exemples :
-      token create agent-sre --spaces serveurs-prod --permissions read
+      token create agent-sre --vaults serveurs-prod --permissions read
       token create admin-user --permissions admin --expires 365
       token create ci-cd --email ci@company.com --permissions read,write
     """
     async def _run():
         perms = [p.strip() for p in permissions.split(",") if p.strip()]
-        space_list = [s.strip() for s in spaces.split(",") if s.strip()] if spaces else []
+        vault_list_ids = [s.strip() for s in vaults.split(",") if s.strip()] if spaces else []
         import httpx
         try:
             async with httpx.AsyncClient(timeout=10) as http:
@@ -494,7 +494,7 @@ def token_create_cmd(ctx, name, permissions, spaces, expires, email, output_json
                     json={
                         "client_name": name,
                         "permissions": perms,
-                        "allowed_resources": space_list,
+                        "allowed_resources": vault_list_ids,
                         "expires_in_days": expires,
                         "email": email,
                     },
