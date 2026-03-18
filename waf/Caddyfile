@@ -1,9 +1,9 @@
 # Caddyfile — Reverse Proxy pour MCP Vault
 # Caddy standard (Coraza WAF sera ajouté en production via xcaddy)
 #
-# Architecture : Internet → Caddy (:8082) → mcp-vault (:8030, réseau interne)
+# Architecture : Internet → Caddy (:8085) → mcp-vault (:8030, réseau interne)
 
-{$SITE_ADDRESS::8082} {
+{$SITE_ADDRESS::8085} {
 
     # --- Reverse proxy vers MCP Vault ---
     reverse_proxy mcp-vault:8030 {

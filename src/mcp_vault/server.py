@@ -412,6 +412,45 @@ async def ssh_ca_public_key(vault_id: str) -> dict:
     return await get_ca_public_key(vault_id)
 
 
+@mcp.tool()
+async def ssh_ca_list_roles(vault_id: str) -> dict:
+    """
+    Liste les rôles SSH CA configurés dans un vault.
+
+    Chaque rôle définit qui peut signer quoi (utilisateurs autorisés, TTL, extensions).
+
+    Args:
+        vault_id: Vault cible
+    """
+    from .auth.context import check_access
+    from .vault.ssh_ca import list_ssh_roles
+
+    access_err = check_access(vault_id)
+    if access_err:
+        return access_err
+
+    return await list_ssh_roles(vault_id)
+
+
+@mcp.tool()
+async def ssh_ca_role_info(vault_id: str, role_name: str) -> dict:
+    """
+    Détails d'un rôle SSH CA (TTL, allowed_users, extensions, etc.).
+
+    Args:
+        vault_id: Vault cible
+        role_name: Nom du rôle SSH à inspecter
+    """
+    from .auth.context import check_access
+    from .vault.ssh_ca import get_ssh_role_info
+
+    access_err = check_access(vault_id)
+    if access_err:
+        return access_err
+
+    return await get_ssh_role_info(vault_id, role_name)
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # ASGI MIDDLEWARE STACK + MAIN
 # ═══════════════════════════════════════════════════════════════════════

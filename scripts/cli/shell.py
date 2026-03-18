@@ -27,7 +27,7 @@ SHELL_COMMANDS = {
     "secret":     "secret <op> <vault> [args] — write, read, list, delete",
     "types":      "Lister les 14 types de secrets",
     "password":   "password [length] — Générer un mot de passe CSPRNG",
-    "ssh":        "ssh <op> <vault> [args] — setup, sign, ca-key",
+    "ssh":        "ssh <op> <vault> [args] — setup, sign, ca-key, roles, role-info",
     "token":      "token <op> [args] — create, list, revoke",
     "quit":       "Quitter le shell",
 }
@@ -182,7 +182,7 @@ async def cmd_password(client, args="", json_output=False):
         show_password_result(result)
 
 
-SSH_OPS = ("setup", "sign", "ca-key")
+SSH_OPS = ("setup", "sign", "ca-key", "roles", "role-info")
 
 
 async def cmd_ssh(client, args="", json_output=False):
@@ -193,15 +193,24 @@ async def cmd_ssh(client, args="", json_output=False):
         show_warning("  ssh setup my-vault my-role --users deploy --ttl 15m")
         show_warning("  ssh sign my-vault my-role --key-data 'ssh-ed25519 ...'")
         show_warning("  ssh ca-key my-vault")
+        show_warning("  ssh roles my-vault")
+        show_warning("  ssh role-info my-vault my-role")
         return
 
     op = parts[0]
     if op == "ca-key" and len(parts) >= 2:
         result = await client.call_tool("ssh_ca_public_key", {"vault_id": parts[1]})
+    elif op == "roles" and len(parts) >= 2:
+        result = await client.call_tool("ssh_ca_list_roles", {"vault_id": parts[1]})
+    elif op == "role-info" and len(parts) >= 3:
+        result = await client.call_tool("ssh_ca_role_info", {
+            "vault_id": parts[1], "role_name": parts[2],
+        })
     elif op == "setup" and len(parts) >= 3:
         # Parse optional args
         users = "*"
         ttl = "30m"
+        default_user = "ubuntu"
         i = 3
         while i < len(parts):
             if parts[i] == "--users" and i + 1 < len(parts):
@@ -210,11 +219,14 @@ async def cmd_ssh(client, args="", json_output=False):
             elif parts[i] == "--ttl" and i + 1 < len(parts):
                 ttl = parts[i + 1]
                 i += 2
+            elif parts[i] == "--default-user" and i + 1 < len(parts):
+                default_user = parts[i + 1]
+                i += 2
             else:
                 i += 1
         result = await client.call_tool("ssh_ca_setup", {
             "vault_id": parts[1], "role_name": parts[2],
-            "allowed_users": users, "ttl": ttl,
+            "allowed_users": users, "default_user": default_user, "ttl": ttl,
         })
     elif op == "sign" and len(parts) >= 3:
         key_data = ""

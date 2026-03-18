@@ -1,6 +1,6 @@
 # Architecture — MCP Vault
 
-> **Version** : 0.2.1-draft | **Date** : 2026-03-08 | **Auteur** : Cloud Temple  
+> **Version** : 0.2.2-draft | **Date** : 2026-03-18 | **Auteur** : Cloud Temple  
 > **Projet** : mcp-vault | **Licence** : Apache 2.0  
 > **Statut** : 📐 Design — non implémenté
 
@@ -43,7 +43,7 @@
          │  MCP Protocol (Streamable HTTP)                 │
          ▼                        ▼                        ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│       WAF Caddy + Coraza (:8082, configurable WAF_PORT)         │
+│       WAF Caddy + Coraza (:8085, configurable WAF_PORT)         │
 │       TLS termination, rate limiting, OWASP CRS                  │
 └──────────────────────────┬───────────────────────────────────────┘
                            │ reverse proxy
@@ -98,8 +98,8 @@
 │  │  Audit : File audit device                                 │  │
 │  │                                                            │  │
 │  │  Mount points :                                            │  │
-│  │    /vaults/{vault_id}/kv/  ← KV v2 par vault               │  │
-│  │    /ssh/                   ← SSH CA (global)               │  │
+│  │    /vaults/{vault_id}/kv/      ← KV v2 par vault           │  │
+│  │    /ssh-ca-{vault_id}/         ← SSH CA par vault (isolée) │  │
 │  │                                                            │  │
 │  │  NON exposé sur le réseau — localhost uniquement           │  │
 │  └────────────────────────────────────────────────────────────┘  │
@@ -436,7 +436,7 @@ services:
   waf:
     build: ./waf
     ports:
-      - "${WAF_PORT:-8082}:8082"
+      - "${WAF_PORT:-8085}:8085"
     depends_on:
       - mcp-vault
     networks:
@@ -465,7 +465,7 @@ volumes:
 
 **Important** : Le service `mcp-vault` utilise `expose` (pas `ports`) — il n'est
 **pas** accessible directement depuis l'extérieur. Tout le trafic passe par le WAF
-sur le port configurable `WAF_PORT` (défaut 8082).
+sur le port configurable `WAF_PORT` (défaut 8085).
 
 Le WAF (Caddy + Coraza) gère :
 - **TLS termination** (HTTPS)
@@ -524,9 +524,13 @@ vault-bucket/
 
 ### 6.3 SSH Certificate Authority
 
-| Outil                                              | Perm  | Description                                                  |
-| -------------------------------------------------- | ----- | ------------------------------------------------------------ |
-| `ssh_sign_key(public_key, valid_principals, ttl?)` | write | Signe une clé publique SSH → retourne un certificat éphémère |
+| Outil                                                                               | Perm  | Description                                                                  |
+| ----------------------------------------------------------------------------------- | ----- | ---------------------------------------------------------------------------- |
+| `ssh_ca_setup(vault_id, role_name, allowed_users?, default_user?, ttl?)`            | write | Configure une CA SSH + rôle dans un vault (crée le mount SSH si inexistant)  |
+| `ssh_sign_key(vault_id, role_name, public_key, valid_principals?, ttl?)`            | read  | Signe une clé publique SSH → retourne un certificat éphémère                 |
+| `ssh_ca_public_key(vault_id)`                                                       | read  | Récupère la clé publique CA (pour `TrustedUserCAKeys` sur les serveurs)      |
+| `ssh_ca_list_roles(vault_id)`                                                       | read  | Liste les rôles SSH CA configurés dans un vault                              |
+| `ssh_ca_role_info(vault_id, role_name)`                                             | read  | Détails d'un rôle (TTL, allowed_users, extensions, etc.)                     |
 
 ### 6.4 Policies OpenBao
 
@@ -559,51 +563,299 @@ vault-bucket/
 
 ## 7. SSH Certificate Authority
 
-### 7.1 Concept
+### 7.1 Concept — Pourquoi une SSH CA ?
 
-Au lieu de stocker des clés SSH privées et les distribuer aux agents (risqué), le vault **signe des clés publiques** avec un certificat SSH éphémère :
+**Le problème** : aujourd'hui, les clés SSH statiques sont déployées sur chaque
+serveur (`authorized_keys`). Une seule clé compromis = accès à tous les serveurs,
+sans limite de durée, sans audit.
+
+**La solution** : au lieu de distribuer des clés SSH, on déploie une **CA de
+confiance** une seule fois sur les serveurs. Ensuite, chaque connexion utilise
+un **certificat SSH éphémère** (30 min, 1h...) signé par cette CA.
 
 ```
-L'agent MCP veut accéder à un serveur :
+┌──────────────────────────────────────────────────────────────┐
+│  AVANT (clés statiques)                                      │
+│                                                              │
+│  Clé privée ed25519 ────→ authorized_keys sur CHAQUE serveur │
+│  • 1 clé compromise = TOUS les serveurs exposés              │
+│  • Pas de durée de vie (valide pour toujours)                │
+│  • Pas d'audit de qui se connecte avec quel cert             │
+│  • Provisioning manuel (script par serveur)                  │
+│  • Maintenance known_hosts pénible                           │
+└──────────────────────────────────────────────────────────────┘
 
-1. L'agent génère une paire de clés éphémère (en mémoire)
-2. L'agent envoie la clé publique au MCP Vault :
-   → ssh_sign_key(public_key="ssh-ed25519 AAAA...", 
-                   valid_principals="deploy", 
-                   ttl="5m")
-3. Le MCP Vault signe via OpenBao SSH CA :
-   → Retourne un certificat SSH valide 5 minutes
-4. L'agent utilise la clé privée + certificat pour SSH
-5. Après 5 minutes, le certificat est invalide → rien à nettoyer
-
-Prérequis : le serveur cible doit faire confiance à la CA du vault
-  → TrustedUserCAKeys /etc/ssh/trusted-ca.pub
+┌──────────────────────────────────────────────────────────────┐
+│  APRÈS (SSH CA par vault)                                    │
+│                                                              │
+│  Clé publique CA ────→ TrustedUserCAKeys sur CHAQUE serveur  │
+│  (déployée 1 seule fois)                                     │
+│                                                              │
+│  Agent/Humain :                                              │
+│    1. Envoie sa clé publique à MCP Vault                     │
+│    2. Reçoit un certificat signé (ex: 30 min)                │
+│    3. Se connecte avec le certificat                         │
+│    4. Le certificat expire → rien à nettoyer                 │
+│                                                              │
+│  • 1 cert compromis = valide 30 min max (pas tous les srv)   │
+│  • Audit complet (qui, quand, quel rôle, quel serial)        │
+│  • Provisioning = 1 fichier CA sur chaque serveur            │
+│  • Pas de known_hosts à maintenir                            │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-### 7.2 Setup initial
+### 7.2 Modèle de sécurité — CA isolée par vault
+
+Chaque vault possède sa **propre CA SSH** — il n'y a pas de CA globale. Cela
+garantit une **isolation cryptographique complète** entre les domaines de confiance.
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  MCP VAULT                                                       │
+│                                                                  │
+│  ┌────────────────────────────┐  ┌────────────────────────────┐  │
+│  │ Vault: llmaas-infra        │  │ Vault: project-x           │  │
+│  │                            │  │                            │  │
+│  │  📁 Secrets KV v2          │  │  📁 Secrets KV v2          │  │
+│  │  mount: vaults/llmaas-     │  │  mount: vaults/project-x/  │  │
+│  │         infra/kv           │  │         kv                 │  │
+│  │                            │  │                            │  │
+│  │  🔑 SSH CA PROPRE          │  │  🔑 SSH CA PROPRE          │  │
+│  │  mount: ssh-ca-llmaas-     │  │  mount: ssh-ca-project-x   │  │
+│  │         infra              │  │                            │  │
+│  │  • CA key pair A           │  │  • CA key pair B           │  │
+│  │  • rôle "adminct" (1h)     │  │  • rôle "deploy" (30m)    │  │
+│  │  • rôle "agentic" (30m)    │  │  • rôle "ci-cd" (15m)     │  │
+│  └────────────────────────────┘  └────────────────────────────┘  │
+│                                                                  │
+│  🎫 TOKENS                                                      │
+│  • Token "agent-cline"  → vault_ids: ["llmaas-infra"]           │
+│    ✅ Signe avec CA llmaas-infra                                 │
+│    ❌ Ne peut PAS signer avec CA project-x                       │
+│  • Token "ci-pipeline"  → vault_ids: ["project-x"]              │
+│    ❌ Ne peut PAS signer avec CA llmaas-infra                    │
+│    ✅ Signe avec CA project-x                                    │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**3 niveaux d'isolation** :
+
+| Niveau | Mécanisme | Protection |
+|--------|-----------|------------|
+| **Vault** | Chaque vault = son propre mount SSH CA OpenBao | Les CA sont **cryptographiquement différentes**. Un cert de vault A ne fonctionne pas sur les serveurs configurés pour vault B |
+| **Token** | `vault_ids` dans le token MCP | Un agent ne peut **même pas appeler** les outils SSH d'un vault non autorisé |
+| **Rôle SSH** | `allowed_users` + `ttl` par rôle | Le rôle "agentic" ne peut signer un cert que pour les utilisateurs listés, avec un TTL borné |
+
+### 7.3 Implémentation OpenBao
+
+Chaque vault utilise un **mount SSH secrets engine dédié** :
 
 ```python
-# Activer le SSH secret engine
-hvac.sys.enable_secrets_engine("ssh", path="ssh")
+# Mount point SSH par vault
+SSH_MOUNT_PREFIX = "ssh-ca-"
 
-# Configurer la CA
-hvac.secrets.ssh.create_ca(generate_signing_key=True)
-
-# Récupérer la clé publique de la CA (à déployer sur les serveurs)
-ca_public_key = hvac.secrets.ssh.read_ca()
-# → À mettre dans /etc/ssh/trusted-ca.pub sur chaque serveur
-
-# Créer un rôle pour les agents SRE
-hvac.secrets.ssh.create_role(
-    name="sre-role",
-    key_type="ca",
-    allowed_users="deploy,admin",
-    default_user="deploy",
-    ttl="5m",
-    max_ttl="30m",
-    allow_user_certificates=True
-)
+def _ssh_mount_point(vault_id: str) -> str:
+    return f"{SSH_MOUNT_PREFIX}{vault_id}"
+    # "llmaas-infra" → "ssh-ca-llmaas-infra"
 ```
+
+**Opérations OpenBao** :
+
+| Opération | API OpenBao (via hvac) |
+|-----------|----------------------|
+| Monter le SSH engine | `sys.enable_secrets_engine("ssh", path="ssh-ca-{vault_id}")` |
+| Générer la CA | `write("ssh-ca-{vault_id}/config/ca", generate_signing_key=True)` |
+| Créer un rôle | `write("ssh-ca-{vault_id}/roles/{role}", key_type="ca", ...)` |
+| Signer une clé | `write("ssh-ca-{vault_id}/sign/{role}", public_key="...")` |
+| Lire la CA publique | `read("ssh-ca-{vault_id}/config/ca")` |
+| Lister les rôles | `list("ssh-ca-{vault_id}/roles")` |
+| Info rôle | `read("ssh-ca-{vault_id}/roles/{role}")` |
+
+### 7.4 Rôles SSH
+
+Un rôle SSH définit **qui peut signer quoi** :
+
+| Paramètre | Description | Exemple |
+|-----------|-------------|---------|
+| `role_name` | Identifiant du rôle | `"adminct"`, `"agentic"` |
+| `allowed_users` | Utilisateurs système autorisés dans le cert | `"adminct"`, `"agentic,iaagentic"`, `"*"` |
+| `default_user` | Utilisateur par défaut si non spécifié | `"adminct"` |
+| `ttl` | Durée de vie par défaut du certificat | `"1h"`, `"30m"` |
+| `max_ttl` | Durée de vie maximale | `"24h"` |
+| `allow_user_certificates` | Autorise les user certs (vs host certs) | `true` |
+| `allowed_extensions` | Extensions SSH autorisées | `"permit-pty,permit-port-forwarding"` |
+
+### 7.5 Workflow concret — Exemple LLMaaS
+
+L'infrastructure LLMaaS comprend ~50 serveurs (GPU, load balancers, bases de
+données, monitoring) accessibles via un bastion (`bastion01-prod`). Deux profils
+utilisateur : `adminct` (admin sudo) et `agentic/iaagentic` (service automatisé).
+
+#### Étape 1 — Setup initial (ONE-TIME)
+
+```python
+# 1. Créer le vault dédié à l'infra SSH LLMaaS
+vault_create("llmaas-infra", description="SSH CA + secrets LLMaaS")
+
+# 2. Configurer la CA SSH + rôles
+ssh_ca_setup("llmaas-infra", "adminct",
+    allowed_users="adminct",
+    default_user="adminct",
+    ttl="1h")
+    
+ssh_ca_setup("llmaas-infra", "agentic",
+    allowed_users="agentic,iaagentic",
+    default_user="agentic",
+    ttl="30m")
+
+# 3. Récupérer la clé publique CA
+result = ssh_ca_public_key("llmaas-infra")
+ca_pub = result["public_key"]
+# → "ssh-ed25519 AAAA... (CA key)"
+```
+
+#### Étape 2 — Déployer la CA sur les serveurs (ONE-TIME)
+
+```bash
+# Sur chaque serveur (via le bastion, scriptable) :
+# 1. Déployer la clé publique CA
+echo "<CA_PUBLIC_KEY>" > /etc/ssh/trusted-user-ca-keys.pem
+
+# 2. Configurer sshd pour faire confiance à la CA
+echo "TrustedUserCAKeys /etc/ssh/trusted-user-ca-keys.pem" >> /etc/ssh/sshd_config
+
+# 3. (Optionnel) Configurer AuthorizedPrincipals pour restreindre les users
+mkdir -p /etc/ssh/auth_principals
+echo "adminct" > /etc/ssh/auth_principals/adminct
+echo "agentic" > /etc/ssh/auth_principals/agentic
+echo "iaagentic" >> /etc/ssh/auth_principals/agentic
+echo "AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u" >> /etc/ssh/sshd_config
+
+# 4. Redémarrer sshd
+systemctl restart sshd
+```
+
+> ⚠️ **Les clés statiques continuent de fonctionner** en parallèle (`authorized_keys`).
+> La SSH CA est un mécanisme ADDITIONNEL. Migration progressive possible.
+
+#### Étape 3 — Usage quotidien
+
+**Humain (admin) :**
+
+```bash
+# 1. Demander un certificat (CLI mcp-vault)
+python scripts/mcp_cli.py ssh sign llmaas-infra adminct \
+    --key ./ssh-keys/adminct/id_ed25519.pub --ttl 2h
+# → Certificat écrit dans ./ssh-keys/adminct/id_ed25519-cert.pub
+
+# 2. Se connecter comme d'habitude (OpenSSH détecte le -cert.pub automatiquement)
+ssh -F ./ssh-keys/adminct/config ia01
+```
+
+**Agent MCP (automatique) :**
+
+```python
+# 1. L'agent signe sa clé publique
+cert = await call_tool("ssh_sign_key", {
+    "vault_id": "llmaas-infra",
+    "role_name": "agentic",
+    "public_key": "ssh-ed25519 AAAA...",
+    "ttl": "30m"
+})
+# → cert["signed_key"] = certificat signé, valide 30 min
+
+# 2. L'agent utilise le cert pour SSH (via mcp-tools)
+result = await call_tool("ssh", {
+    "host": "ia01", "username": "agentic",
+    "command": "nvidia-smi",
+    "private_key": agent_private_key,
+    "certificate": cert["signed_key"]
+})
+# → 30 min plus tard : cert expiré, aucun risque résiduel
+```
+
+### 7.6 Suppression automatique de la CA avec le vault
+
+Quand un vault est supprimé (`vault_delete`), son mount SSH CA est également
+supprimé. Cela garantit qu'aucune CA orpheline ne subsiste :
+
+```python
+vault_delete("llmaas-infra")
+# → Supprime le mount KV v2 (secrets)
+# → Supprime le mount ssh-ca-llmaas-infra (CA + rôles)
+# → Les certs déjà émis continuent de fonctionner jusqu'à expiration
+# → Aucun nouveau cert ne peut être émis
+```
+
+### 7.7 Comparatif clés statiques vs SSH CA
+
+| Aspect | Clés statiques | SSH CA (MCP Vault) |
+|--------|---------------|-------------------|
+| Provisioning serveur | Copier clé publique sur chaque serveur | Copier 1 fichier CA (une seule fois) |
+| Durée de vie | Permanente | Éphémère (configurable, ex: 30min) |
+| Révocation | Supprimer manuellement de chaque serveur | Le cert expire tout seul |
+| Compromission | Accès à TOUS les serveurs, pour toujours | Accès limité au TTL du cert |
+| Audit | Aucun (qui utilise quelle clé ?) | Serial number + audit OpenBao |
+| Multi-profil | 1 clé par profil, copiée partout | 1 rôle par profil, cert à la demande |
+| Rotation | Très pénible (changer partout) | Naturelle (nouveaux certs à chaque session) |
+| Agents IA | Clé stockée quelque part (risque) | Cert éphémère en mémoire, jamais stocké |
+
+### 7.8 Checklist de sécurité opérationnelle SSH CA
+
+Cette checklist couvre les bonnes pratiques de sécurité pour le déploiement et
+l'exploitation de la SSH CA de MCP Vault en production.
+
+#### 7.8.1 Configuration des rôles SSH
+
+| Règle | Priorité | Description |
+|-------|----------|-------------|
+| **TTL courts par défaut** | 🔴 Critique | `ttl` ≤ 1h pour les humains, ≤ 30m pour les agents IA. Plus le TTL est court, plus la fenêtre d'exposition en cas de compromission est réduite |
+| **max_ttl borné** | 🔴 Critique | Toujours définir un `max_ttl` (ex: 24h) pour empêcher les demandes de certificats longue durée |
+| **allowed_users explicites** | 🔴 Critique | Ne **jamais** utiliser `"*"` en production. Lister explicitement les utilisateurs autorisés (ex: `"adminct"`, `"agentic,iaagentic"`) |
+| **Un rôle = un profil** | 🟠 Élevée | Créer un rôle SSH distinct par profil de connexion (admin, agent, CI/CD). Ne pas mélanger les périmètres |
+| **Extensions minimales** | 🟠 Élevée | Limiter les extensions SSH au strict nécessaire : `permit-pty` pour les shells interactifs, pas de `permit-port-forwarding` sauf besoin explicite |
+| **Pas de rôle wildcard** | 🟡 Moyenne | Éviter les rôles avec `allowed_users="*"` même pour les admins — préférer un rôle `admin-emergency` séparé, audité |
+
+#### 7.8.2 Déploiement sur les serveurs cibles
+
+| Règle | Priorité | Description |
+|-------|----------|-------------|
+| **TrustedUserCAKeys obligatoire** | 🔴 Critique | Configurer `TrustedUserCAKeys /etc/ssh/trusted-user-ca-keys.pem` dans `sshd_config` sur **chaque** serveur cible |
+| **AuthorizedPrincipalsFile** | 🟠 Élevée | Toujours configurer `AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u` pour restreindre quels principals sont acceptés par utilisateur système |
+| **Migration progressive** | 🟠 Élevée | Maintenir les `authorized_keys` existants pendant la transition. La SSH CA est un mécanisme **additionnel**, pas un remplacement immédiat |
+| **Fichier CA en lecture seule** | 🟡 Moyenne | `chmod 644 /etc/ssh/trusted-user-ca-keys.pem` — le fichier CA ne contient que la clé publique, mais sa modification permettrait une usurpation de CA |
+| **Déploiement automatisé** | 🟡 Moyenne | Utiliser un outil de configuration (Ansible, Salt, etc.) pour déployer la clé CA et la config sshd de manière reproductible |
+| **Test de non-régression** | 🟡 Moyenne | Après déploiement, vérifier que les connexions par clé statique ET par certificat fonctionnent |
+
+#### 7.8.3 Gestion du cycle de vie des CA
+
+| Règle | Priorité | Description |
+|-------|----------|-------------|
+| **1 CA par domaine de confiance** | 🔴 Critique | Ne jamais partager une CA entre des environnements non liés (prod/staging, clients différents). Utiliser un vault distinct par domaine |
+| **Rotation CA planifiée** | 🟠 Élevée | Planifier une rotation de la CA tous les **12-24 mois**. Workflow : créer un nouveau vault avec nouvelle CA → déployer la nouvelle clé CA sur les serveurs → migrer les signatures → supprimer l'ancien vault |
+| **Période de chevauchement** | 🟠 Élevée | Pendant la rotation, configurer **deux** clés CA dans `TrustedUserCAKeys` (ancienne + nouvelle) pendant une période de transition (2-4 semaines) |
+| **Suppression vault = suppression CA** | 🟡 Moyenne | Rappel : `vault_delete()` supprime automatiquement le mount SSH CA. Les certificats déjà émis restent valides jusqu'à expiration |
+| **Backup avant rotation** | 🟡 Moyenne | Exporter le vault (`vault_export`) avant toute rotation pour permettre une restauration en cas de problème |
+
+#### 7.8.4 Audit et monitoring
+
+| Règle | Priorité | Description |
+|-------|----------|-------------|
+| **Audit OpenBao activé** | 🔴 Critique | L'audit device OpenBao trace chaque signature (serial number, rôle, principal, TTL, timestamp). Vérifier qu'il est actif |
+| **Alertes sur signatures anormales** | 🟠 Élevée | Monitorer les signatures hors horaires normaux, les TTL inhabituellement longs, ou les rafales de signatures |
+| **Inventaire des CA actives** | 🟡 Moyenne | Maintenir un inventaire des vaults avec SSH CA active (`ssh_ca_list_roles` sur chaque vault) |
+| **Revue périodique des rôles** | 🟡 Moyenne | Tous les 3 mois, auditer les rôles SSH CA : utilisateurs autorisés toujours pertinents ? TTL toujours adaptés ? |
+| **Corrélation logs SSH** | 🟡 Moyenne | Croiser les logs `auth.log` des serveurs cibles avec l'audit OpenBao pour détecter les certificats utilisés vs émis |
+
+#### 7.8.5 Scénarios de compromission
+
+| Scénario | Impact | Réponse |
+|----------|--------|---------|
+| **Clé privée agent compromise** | Limité au TTL du dernier cert émis (ex: 30 min max) | Révoquer le token MCP de l'agent → plus de nouvelle signature possible. Attendre l'expiration du cert |
+| **Token MCP admin compromis** | Peut créer de nouveaux rôles et signer des certs | Révoquer le token immédiatement. Auditer les signatures récentes. Créer un nouveau token admin |
+| **Clé CA compromise** (worst case) | Tous les certificats émis par cette CA sont suspects | 1. Supprimer le vault (supprime la CA). 2. Retirer la clé CA des serveurs (`TrustedUserCAKeys`). 3. Créer un nouveau vault avec nouvelle CA. 4. Redéployer |
+| **Serveur cible compromis** | L'attaquant peut utiliser les certs valides sur CE serveur | Isoler le serveur. La CA n'est pas compromise — les autres serveurs restent sûrs |
+| **Bootstrap key compromise** | Peut unseal OpenBao → accès à toutes les CA | Rotation complète : nouvelle bootstrap key, re-chiffrement des unseal keys, rotation de toutes les CA |
 
 ---
 
@@ -754,7 +1006,7 @@ MCP_SERVER_NAME=mcp-vault
 MCP_SERVER_PORT=8030
 
 # --- WAF ---
-WAF_PORT=8082                    # Port d'écoute externe du WAF Caddy+Coraza
+WAF_PORT=8085                    # Port d'écoute externe du WAF Caddy+Coraza
 
 # --- Auth MCP ---
 ADMIN_BOOTSTRAP_KEY=change_me_to_a_strong_random_key_64chars
@@ -976,9 +1228,153 @@ clés de déchiffrement :
 
 | Version | Approche | Sécurité |
 |---------|----------|----------|
-| **v0.2.1** (actuel) | Option C — Clés sur S3 chiffrées, mémoire seule au runtime | 🟡 Bonne |
+| **v0.2.x** (actuel) | Option C — Clés sur S3 chiffrées, mémoire seule au runtime | 🟡 Bonne |
 | **v0.3.0** (futur) | Transit Auto-Unseal via OpenBao dédié (KMS Cloud Temple) | 🟢 Excellente |
-| **v1.0** (prod) | HSM ou Cloud KMS si disponible | 🟢 Maximale |
+| **v2.0** (prod) | 🔐 Connexion HSM (Hardware Security Module) Cloud Temple | 🟢 Maximale |
+
+#### v0.3.0 — Transit Auto-Unseal (KMS Cloud Temple)
+
+Le Transit Auto-Unseal utilise une **deuxième instance OpenBao dédiée** comme
+service de chiffrement (KMS). L'instance MCP Vault n'a plus besoin de connaître
+les clés unseal — elle délègue le déchiffrement au KMS.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  v0.3.0 — TRANSIT AUTO-UNSEAL                                  │
+│                                                                 │
+│  MCP Vault (instance applicative)                               │
+│  └─ OpenBao embedded (sealed au démarrage)                      │
+│     ⟶ Demande unseal au KMS via Transit                         │
+│     ⟶ N'a JAMAIS accès aux clés unseal en clair                 │
+│     ⟶ Pas de bootstrap key nécessaire                           │
+│                                                                 │
+│  KMS OpenBao (instance dédiée, réseau interne)                  │
+│  └─ Transit secrets engine activé                               │
+│     ⟶ Clé de transit "mcp-vault-unseal"                         │
+│     ⟶ Déchiffre les clés unseal à la demande                    │
+│     ⟶ Clés de transit protégées par son propre seal             │
+│     ⟶ Unsealed via Shamir (3/5 shares détenues par 5 admins)    │
+│                                                                 │
+│  Avantages :                                                    │
+│  ✅ Pas de bootstrap key en variable d'environnement            │
+│  ✅ Séparation physique MCP Vault ↔ KMS                         │
+│  ✅ Rotation de la clé de transit sans downtime                  │
+│  ✅ Audit complet des opérations de déchiffrement                │
+│                                                                 │
+│  Prérequis :                                                    │
+│  • Instance OpenBao dédiée (bare metal ou VM, pas containerisée)│
+│  • Shamir 5 shares / threshold 3 (5 administrateurs Cloud Temple)│
+│  • Réseau privé entre MCP Vault et KMS (pas d'accès Internet)  │
+│  • Monitoring + alertes sur le seal status du KMS               │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Étapes de migration v0.2.x → v0.3.0** :
+
+| # | Étape | Description |
+|---|-------|-------------|
+| 1 | Déployer le KMS | Installer OpenBao dédié, init avec Shamir 5/3, activer Transit engine |
+| 2 | Créer la clé de transit | `bao write transit/keys/mcp-vault-unseal type=aes256-gcm256` |
+| 3 | Re-chiffrer les clés unseal | Déchiffrer avec ADMIN_BOOTSTRAP_KEY → re-chiffrer avec Transit |
+| 4 | Configurer MCP Vault | `seal "transit"` dans la config HCL, pointer vers le KMS |
+| 5 | Tester le cycle complet | Startup → auto-unseal via KMS → runtime → shutdown |
+| 6 | Retirer ADMIN_BOOTSTRAP_KEY | La variable d'environnement n'est plus nécessaire |
+
+#### v2.0 — HSM Cloud Temple (PKCS#11 / KMIP)
+
+Le HSM (Hardware Security Module) est le niveau de sécurité **maximal**. Les clés
+de chiffrement ne quittent **jamais** le module matériel certifié. Le HSM assure
+le unsealing via une API cryptographique standardisée.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  v2.0 — HSM CLOUD TEMPLE                                       │
+│                                                                 │
+│  MCP Vault (instance applicative)                               │
+│  └─ OpenBao embedded                                            │
+│     ⟶ seal "pkcs11" dans la config HCL                          │
+│     ⟶ Auto-unseal via appel PKCS#11 au HSM                      │
+│     ⟶ Aucune clé en mémoire applicative                         │
+│                                                                 │
+│          ┌─────────────────────┐                                │
+│          │  PKCS#11 / KMIP     │                                │
+│          └──────────┬──────────┘                                │
+│                     │ API crypto                                │
+│                     ▼                                           │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  HSM Cloud Temple (matériel certifié)                    │   │
+│  │                                                          │   │
+│  │  • Certification FIPS 140-2 Level 3 (ou CC EAL4+)       │   │
+│  │  • Clés générées et stockées dans le HSM                 │   │
+│  │  • Opérations crypto IN-HSM (encrypt/decrypt)            │   │
+│  │  • Anti-tampering physique (détection d'ouverture)       │   │
+│  │  • Partition dédiée MCP Vault                            │   │
+│  │                                                          │   │
+│  │  Clé "mcp-vault-master" (AES-256)                        │   │
+│  │  └─ Utilisée pour unseal OpenBao                         │   │
+│  │  └─ Ne quitte JAMAIS le HSM                              │   │
+│  │  └─ Rotation possible sans downtime                      │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  Avantages :                                                    │
+│  ✅ Aucune clé en mémoire logicielle (ni app, ni KMS)          │
+│  ✅ Protection matérielle contre l'extraction                    │
+│  ✅ Certification de sécurité (FIPS / CC)                        │
+│  ✅ Conformité réglementaire (SecNumCloud, HDS, ISO 27001)      │
+│  ✅ Rotation et backup HSM-to-HSM                                │
+│                                                                 │
+│  Prérequis Cloud Temple :                                       │
+│  • HSM dédié ou partition HSM (Thales Luna / Entrust nShield)   │
+│  • Driver PKCS#11 installé sur l'hôte MCP Vault                │
+│  • OU : endpoint KMIP accessible sur réseau privé              │
+│  • Contrat HSM Cloud Temple (option infrastructure)             │
+│  • OpenBao compilé avec support PKCS#11 (plugin seal)           │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Deux interfaces possibles** :
+
+| Interface | Standard | Avantage | Inconvénient |
+|-----------|----------|----------|--------------|
+| **PKCS#11** | OASIS PKCS#11 v2.40+ | Direct, faible latence, mature | Nécessite driver local + accès réseau au HSM |
+| **KMIP** | OASIS KMIP v1.4+ | Réseau, multi-cloud, standard enterprise | Latence réseau, serveur KMIP intermédiaire |
+
+**Étapes de migration v0.3.0 → v2.0** :
+
+| # | Étape | Description |
+|---|-------|-------------|
+| 1 | Provisionner le HSM | Commander une partition HSM dédiée chez Cloud Temple |
+| 2 | Installer le driver | PKCS#11 library (ex: `libCryptoki2.so`) sur l'hôte Docker |
+| 3 | Créer la master key | Générer `mcp-vault-master` (AES-256) dans le HSM |
+| 4 | Configurer OpenBao | `seal "pkcs11"` avec `lib`, `slot`, `pin`, `key_label` dans HCL |
+| 5 | Migrer depuis Transit | `bao operator migrate` du seal Transit vers seal PKCS#11 |
+| 6 | Valider le cycle | Auto-unseal via HSM → runtime → seal → re-unseal |
+| 7 | Retirer le KMS Transit | L'instance OpenBao dédiée n'est plus nécessaire |
+
+**Configuration HCL cible (v2.0)** :
+
+```hcl
+seal "pkcs11" {
+  lib            = "/usr/lib/libCryptoki2.so"
+  slot           = "0"
+  pin            = "env://HSM_PIN"           # PIN du HSM via env var
+  key_label      = "mcp-vault-master"
+  mechanism      = "0x1085"                  # CKM_AES_GCM
+  hmac_key_label = "mcp-vault-hmac"
+}
+```
+
+> **Résumé de la trajectoire sécurité** : chaque version élimine un facteur
+> d'exposition des clés, jusqu'à atteindre le niveau où **aucune clé n'existe
+> jamais en dehors du matériel certifié**.
+>
+> ```
+> v0.2.x : Clés en mémoire Python (bootstrap key + AES-256-GCM)
+>     ↓
+> v0.3.0 : Clés dans un KMS dédié (Transit auto-unseal)
+>     ↓
+> v2.0   : Clés dans un HSM matériel (PKCS#11, jamais extractibles)
+> ```
 
 ### 11.4 Menaces et mitigations
 

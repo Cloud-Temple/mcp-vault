@@ -196,3 +196,6 @@ if __name__ == "__main__":
     if failed == 0:
         print(f"  ✅ {passed}/{passed} tests passent")
     else:
+        print(f"  ❌ {failed}/{passed + failed} tests échouent")
+    print(f"{'=' * 50}")
+    sys.exit(0 if failed == 0 else 1)

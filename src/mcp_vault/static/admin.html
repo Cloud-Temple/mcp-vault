@@ -3,95 +3,161 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin — MCP Vault</title>
-    <style>
-        :root { --bg: #0f0f23; --surface: #1a1a2e; --accent: #41a890; --text: #e0e0e0; --muted: #888; --danger: #e74c3c; }
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); }
-        .header { background: var(--surface); padding: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid var(--accent); }
-        .header h1 { color: var(--accent); font-size: 1.2rem; }
-        .header h1::before { content: "🔐 "; }
-        .content { max-width: 1000px; margin: 2rem auto; padding: 0 1rem; }
-        .card { background: var(--surface); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; }
-        .card h2 { color: var(--accent); margin-bottom: 1rem; font-size: 1rem; }
-        .status { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; }
-        .status.ok { background: #1a4a3a; color: #41a890; }
-        .status.error { background: #4a1a1a; color: #e74c3c; }
-        pre { background: #0a0a1a; padding: 1rem; border-radius: 4px; overflow-x: auto; font-size: 0.85rem; }
-        .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
-        .info-item { padding: 0.5rem; }
-        .info-item .label { color: var(--muted); font-size: 0.8rem; }
-        .info-item .value { font-size: 1.1rem; margin-top: 0.2rem; }
-        .loading { color: var(--muted); font-style: italic; }
-    </style>
+    <title>Cloud Temple — MCP Vault</title>
+    <link rel="stylesheet" href="/admin/static/css/admin.css">
 </head>
 <body>
+
+<!-- ═══════════════ LOGIN ═══════════════ -->
+<div class="login-overlay" id="loginOverlay">
+    <div class="login-card">
+        <img src="/admin/static/img/logo-cloudtemple.svg" alt="Cloud Temple" class="login-logo">
+        <h2>MCP Vault</h2>
+        <p class="login-subtitle">Gestion sécurisée des secrets pour agents IA</p>
+        <form class="login-form" id="loginForm">
+            <label for="loginToken">🔑 Token d'accès</label>
+            <input type="password" id="loginToken" placeholder="Collez votre token ici…" autocomplete="off" autofocus>
+            <div class="login-error" id="loginError"></div>
+            <button type="submit">Se connecter</button>
+        </form>
+        <p class="login-hint">Contactez votre administrateur pour obtenir un token.</p>
+    </div>
+</div>
+
+<!-- ═══════════════ APP MAIN ═══════════════ -->
+<div id="appMain" class="hidden">
+
+    <!-- Header -->
     <div class="header">
-        <h1>MCP Vault — Admin Console</h1>
-        <span id="version" class="loading">loading...</span>
-    </div>
-    <div class="content">
-        <div class="card">
-            <h2>🏥 Service Health</h2>
-            <div id="health" class="loading">Chargement...</div>
+        <div class="header-brand">
+            <img src="/admin/static/img/logo-cloudtemple.svg" alt="Cloud Temple" class="header-logo">
+            <span class="header-sep">|</span>
+            <h1>MCP Vault</h1>
         </div>
-        <div class="card">
-            <h2>🔑 Tokens</h2>
-            <div id="tokens" class="loading">Chargement...</div>
-        </div>
-        <div class="card">
-            <h2>📊 Activité récente</h2>
-            <div id="logs" class="loading">Chargement...</div>
+        <div class="header-right">
+            <span id="headerUser"></span>
+            <span id="headerVersion"></span>
+            <button class="btn-logout" onclick="logout()" title="Déconnexion">🔓</button>
         </div>
     </div>
-    <script>
-        const TOKEN = prompt("Bearer token admin :");
-        const headers = { "Authorization": `Bearer ${TOKEN}` };
 
-        async function loadHealth() {
-            try {
-                const r = await fetch("/admin/api/health", { headers });
-                const d = await r.json();
-                document.getElementById("version").textContent = `v${d.version}`;
-                document.getElementById("health").innerHTML = `
-                    <div class="info-grid">
-                        <div class="info-item"><div class="label">Service</div><div class="value">${d.service_name}</div></div>
-                        <div class="info-item"><div class="label">Status</div><div class="value"><span class="status ok">${d.status}</span></div></div>
-                        <div class="info-item"><div class="label">Tools</div><div class="value">${d.tools_count} outils</div></div>
-                        <div class="info-item"><div class="label">Python</div><div class="value">${d.python_version}</div></div>
-                    </div>
-                    <pre>${JSON.stringify(d.tools, null, 2)}</pre>`;
-            } catch(e) { document.getElementById("health").innerHTML = `<span class="status error">Erreur: ${e.message}</span>`; }
-        }
+    <!-- Sidebar + Content -->
+    <div class="app-layout">
+        <div class="sidebar">
+            <div class="sidebar-title">Navigation</div>
+            <div class="sidebar-nav" id="sidebarNav"></div>
+        </div>
+        <div class="main-content">
+            <div id="page-dashboard" class="hidden"></div>
+            <div id="page-vaults" class="hidden"></div>
+            <div id="page-tokens" class="hidden"></div>
+            <div id="page-activity" class="hidden"></div>
+        </div>
+    </div>
+</div>
 
-        async function loadTokens() {
-            try {
-                const r = await fetch("/admin/api/tokens", { headers });
-                const d = await r.json();
-                const rows = d.tokens.map(t => `<tr>
-                    <td>${t.client_name}</td>
-                    <td>${t.permissions.join(", ")}</td>
-                    <td>${t.hash_prefix}...</td>
-                    <td>${t.revoked ? '<span class="status error">révoqué</span>' : '<span class="status ok">actif</span>'}</td>
-                </tr>`).join("");
-                document.getElementById("tokens").innerHTML = d.tokens.length ?
-                    `<table style="width:100%;border-collapse:collapse"><tr style="color:var(--muted);text-align:left"><th>Client</th><th>Permissions</th><th>Hash</th><th>Status</th></tr>${rows}</table>` :
-                    `<span class="loading">Aucun token (S3 non configuré ou vide)</span>`;
-            } catch(e) { document.getElementById("tokens").innerHTML = `<span class="status error">Erreur</span>`; }
-        }
+<!-- ═══════════════ MODAL — Créer vault ═══════════════ -->
+<div id="modalCreateVault" class="modal-overlay">
+    <div class="modal">
+        <h2>🗄️ Nouveau vault</h2>
+        <div class="form-group">
+            <label for="cvVaultId">Identifiant du vault *</label>
+            <input type="text" id="cvVaultId" placeholder="ex: serveurs-prod">
+        </div>
+        <div class="form-group">
+            <label for="cvDescription">Description</label>
+            <input type="text" id="cvDescription" placeholder="Description optionnelle">
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeModal('modalCreateVault')">Annuler</button>
+            <button class="btn btn-primary" onclick="doCreateVault()">Créer</button>
+        </div>
+    </div>
+</div>
 
-        async function loadLogs() {
-            try {
-                const r = await fetch("/admin/api/logs", { headers });
-                const d = await r.json();
-                const items = d.logs.slice(-10).reverse().map(l =>
-                    `<div style="padding:0.3rem 0;border-bottom:1px solid #222">📡 ${l.method} ${l.path} → ${l.status} (${l.duration_ms}ms)</div>`
-                ).join("");
-                document.getElementById("logs").innerHTML = items || "<span class='loading'>Aucune activité</span>";
-            } catch(e) { document.getElementById("logs").innerHTML = `<span class="status error">Erreur</span>`; }
-        }
+<!-- ═══════════════ MODAL — Écrire secret (formulaire dynamique) ═══════════════ -->
+<div id="modalWriteSecret" class="modal-overlay">
+    <div class="modal modal-lg">
+        <h2>🔐 Nouveau secret</h2>
+        <input type="hidden" id="wsVaultId">
+        <div class="form-row">
+            <div class="form-group">
+                <label for="wsPath">Chemin <span class="field-required">*</span></label>
+                <input type="text" id="wsPath" placeholder="ex: db/postgres-prod">
+            </div>
+            <div class="form-group">
+                <label for="wsType">Type de secret</label>
+                <select id="wsType" onchange="renderSecretFields(this.value)">
+                    <option value="login">🔑 Identifiants</option>
+                    <option value="password">🔒 Mot de passe</option>
+                    <option value="api_key">🔌 Clé API</option>
+                    <option value="database">🗄️ Base de données</option>
+                    <option value="server">🖥️ Serveur</option>
+                    <option value="ssh_key">🗝️ Clé SSH</option>
+                    <option value="certificate">📜 Certificat TLS</option>
+                    <option value="env_file">📄 Fichier .env</option>
+                    <option value="secure_note">📝 Note sécurisée</option>
+                    <option value="credit_card">💳 Carte bancaire</option>
+                    <option value="identity">👤 Identité</option>
+                    <option value="wifi">📶 Wi-Fi</option>
+                    <option value="crypto_wallet">₿ Wallet crypto</option>
+                    <option value="custom">⚙️ Personnalisé (JSON)</option>
+                </select>
+            </div>
+        </div>
+        <!-- Conteneur dynamique : les champs changent selon le type sélectionné -->
+        <div id="wsFields"></div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeModal('modalWriteSecret')">Annuler</button>
+            <button class="btn btn-primary" onclick="doWriteSecret()">💾 Enregistrer</button>
+        </div>
+    </div>
+</div>
 
-        loadHealth(); loadTokens(); loadLogs();
-    </script>
+<!-- ═══════════════ MODAL — Créer token ═══════════════ -->
+<div id="modalCreateToken" class="modal-overlay">
+    <div class="modal">
+        <h2>🔑 Nouveau token</h2>
+        <div class="form-group">
+            <label for="ctName">Nom du client *</label>
+            <input type="text" id="ctName" placeholder="ex: mcp-agent-sre">
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label for="ctEmail">Email</label>
+                <input type="email" id="ctEmail" placeholder="admin@company.com">
+            </div>
+            <div class="form-group">
+                <label for="ctExpires">Expiration (jours)</label>
+                <input type="number" id="ctExpires" value="90" min="0">
+            </div>
+        </div>
+        <div class="form-group">
+            <label>Permissions</label>
+            <div class="checkbox-group">
+                <label><input type="checkbox" checked disabled> read</label>
+                <label><input type="checkbox" id="ctPermWrite"> write</label>
+                <label><input type="checkbox" id="ctPermAdmin"> admin</label>
+            </div>
+        </div>
+        <div class="form-group">
+            <label for="ctVaults">Vaults autorisés (vide = tous)</label>
+            <input type="text" id="ctVaults" placeholder="vault1, vault2">
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeModal('modalCreateToken')">Annuler</button>
+            <button class="btn btn-primary" onclick="doCreateToken()">Créer</button>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════ SCRIPTS ═══════════════ -->
+<script src="/admin/static/js/config.js"></script>
+<script src="/admin/static/js/api.js"></script>
+<script src="/admin/static/js/dashboard.js"></script>
+<script src="/admin/static/js/vaults.js"></script>
+<script src="/admin/static/js/tokens.js"></script>
+<script src="/admin/static/js/activity.js"></script>
+<script src="/admin/static/js/app.js"></script>
 </body>
 </html>

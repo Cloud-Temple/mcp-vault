@@ -16,11 +16,11 @@ python scripts/mcp_cli.py --help
 
 ### Variables d'environnement
 
-| Variable | Défaut | Description |
-|----------|--------|-------------|
-| `MCP_URL` | `http://localhost:8082` | URL du serveur MCP (via WAF) |
-| `MCP_TOKEN` | *(depuis ADMIN_BOOTSTRAP_KEY)* | Token d'authentification |
-| `ADMIN_BOOTSTRAP_KEY` | *(dans .env)* | Fallback si MCP_TOKEN absent |
+| Variable              | Défaut                         | Description                  |
+| --------------------- | ------------------------------ | ---------------------------- |
+| `MCP_URL`             | `http://localhost:8085`        | URL du serveur MCP (via WAF) |
+| `MCP_TOKEN`           | *(depuis ADMIN_BOOTSTRAP_KEY)* | Token d'authentification     |
+| `ADMIN_BOOTSTRAP_KEY` | *(dans .env)*                  | Fallback si MCP_TOKEN absent |
 
 Le CLI charge automatiquement le fichier `.env` à la racine du projet.
 
@@ -105,13 +105,19 @@ python scripts/mcp_cli.py ssh sign mon-vault sre-role --key-data "ssh-ed25519 AA
 
 # Récupérer la clé publique CA
 python scripts/mcp_cli.py ssh ca-key mon-vault
+
+# Lister les rôles SSH CA d'un vault
+python scripts/mcp_cli.py ssh roles mon-vault
+
+# Détails d'un rôle SSH CA
+python scripts/mcp_cli.py ssh role-info mon-vault sre-role
 ```
 
 ### Tokens (admin)
 
 ```bash
 # Créer un token
-python scripts/mcp_cli.py token create agent-sre --permissions read --spaces serveurs-prod
+python scripts/mcp_cli.py token create agent-sre --permissions read --vaults serveurs-prod
 python scripts/mcp_cli.py token create admin-user --permissions admin --expires 365
 python scripts/mcp_cli.py token create ci-cd --email ci@company.com
 
@@ -131,7 +137,7 @@ python scripts/mcp_cli.py shell
 ```
 
 ```
-🐚 MCP Vault Shell — connecté à http://localhost:8082
+🐚 MCP Vault Shell — connecté à http://localhost:8085
 Tapez 'help' pour l'aide, 'quit' pour quitter.
 
 mcp-vault> health
@@ -168,11 +174,11 @@ scripts/
 
 ## 🔧 Dépendances
 
-| Package | Rôle |
-|---------|------|
-| `click` | CLI framework |
-| `rich` | Affichage terminal (tables, panels, syntax) |
-| `prompt-toolkit` | Shell interactif (history, completion) |
-| `python-dotenv` | Chargement .env |
-| `mcp[cli]` | SDK MCP (Streamable HTTP client) |
-| `httpx` | Appels REST (health, tokens admin) |
+| Package          | Rôle                                        |
+| ---------------- | ------------------------------------------- |
+| `click`          | CLI framework                               |
+| `rich`           | Affichage terminal (tables, panels, syntax) |
+| `prompt-toolkit` | Shell interactif (history, completion)      |
+| `python-dotenv`  | Chargement .env                             |
+| `mcp[cli]`       | SDK MCP (Streamable HTTP client)            |
+| `httpx`          | Appels REST (health, tokens admin)          |

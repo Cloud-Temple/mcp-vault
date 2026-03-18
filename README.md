@@ -22,7 +22,7 @@ docker compose up -d
 # 3. Vérifier (depuis le conteneur)
 docker compose exec mcp-vault python scripts/mcp_cli.py health
 
-# 4. Tester (118 tests e2e)
+# 4. Tester (148 tests e2e)
 docker compose exec mcp-vault python tests/test_e2e.py
 ```
 
@@ -42,64 +42,89 @@ Au démarrage, MCP Vault :
 
 ---
 
-## 🛠️ Outils MCP (17)
+## 🛠️ Outils MCP (18)
 
 ### System (2)
 
-| Outil | Description |
-|-------|-------------|
-| `system_health` | État de santé (OpenBao + S3) |
-| `system_about` | Informations service (version, outils, plateforme) |
+| Outil           | Description                                        |
+| --------------- | -------------------------------------------------- |
+| `system_health` | État de santé (OpenBao + S3)                       |
+| `system_about`  | Informations service (version, outils, plateforme) |
 
 ### Vaults — coffres de secrets (5)
 
-| Outil | Perm | Description |
-|-------|------|-------------|
+| Outil                                  | Perm  | Description                                             |
+| -------------------------------------- | ----- | ------------------------------------------------------- |
 | `vault_create(vault_id, description?)` | write | Crée un vault (mount KV v2) + métadonnées (owner, date) |
-| `vault_list()` | read | Liste les vaults accessibles (filtrés par token) |
-| `vault_info(vault_id)` | read | Détails d'un vault (métadonnées, secrets_count, owner) |
-| `vault_update(vault_id, description)` | write | Met à jour la description d'un vault |
-| `vault_delete(vault_id, confirm)` | admin | Supprime un vault et tous ses secrets ⚠️ |
+| `vault_list()`                         | read  | Liste les vaults accessibles (filtrés par token)        |
+| `vault_info(vault_id)`                 | read  | Détails d'un vault (métadonnées, secrets_count, owner)  |
+| `vault_update(vault_id, description)`  | write | Met à jour la description d'un vault                    |
+| `vault_delete(vault_id, confirm)`      | admin | Supprime un vault et tous ses secrets ⚠️              |
 
 ### Secrets (6)
 
-| Outil | Perm | Description |
-|-------|------|-------------|
-| `secret_write(vault_id, path, data, type?)` | write | Écrit un secret typé |
-| `secret_read(vault_id, path, version?)` | read | Lit un secret (dernière version ou spécifique) |
-| `secret_list(vault_id, path?)` | read | Liste les clés d'un vault |
-| `secret_delete(vault_id, path)` | write | Supprime un secret et toutes ses versions |
-| `secret_types()` | read | Liste les 14 types de secrets |
-| `secret_generate_password(length?, ...)` | read | Génère un mot de passe CSPRNG |
+| Outil                                       | Perm  | Description                                    |
+| ------------------------------------------- | ----- | ---------------------------------------------- |
+| `secret_write(vault_id, path, data, type?)` | write | Écrit un secret typé                           |
+| `secret_read(vault_id, path, version?)`     | read  | Lit un secret (dernière version ou spécifique) |
+| `secret_list(vault_id, path?)`              | read  | Liste les clés d'un vault                      |
+| `secret_delete(vault_id, path)`             | write | Supprime un secret et toutes ses versions      |
+| `secret_types()`                            | read  | Liste les 14 types de secrets                  |
+| `secret_generate_password(length?, ...)`    | read  | Génère un mot de passe CSPRNG                  |
 
-### SSH Certificate Authority (3)
+### SSH Certificate Authority (5)
 
-| Outil | Perm | Description |
-|-------|------|-------------|
-| `ssh_ca_setup(vault_id, role, ...)` | write | Configure un rôle SSH CA |
-| `ssh_sign_key(vault_id, role, public_key)` | read | Signe une clé publique → certificat éphémère |
-| `ssh_ca_public_key(vault_id)` | read | Clé publique CA (pour `TrustedUserCAKeys`) |
+Chaque vault possède sa **propre CA SSH isolée** — les CA sont cryptographiquement différentes entre vaults. Un certificat signé par la CA d'un vault ne fonctionne PAS sur les serveurs configurés pour un autre vault.
+
+| Outil                                                | Perm  | Description                                                 |
+| ---------------------------------------------------- | ----- | ----------------------------------------------------------- |
+| `ssh_ca_setup(vault_id, role, allowed_users?, ttl?)` | write | Configure une CA SSH + rôle dans un vault                   |
+| `ssh_sign_key(vault_id, role, public_key, ttl?)`     | read  | Signe une clé publique → certificat éphémère                |
+| `ssh_ca_public_key(vault_id)`                        | read  | Clé publique CA (pour `TrustedUserCAKeys` sur les serveurs) |
+| `ssh_ca_list_roles(vault_id)`                        | read  | Liste les rôles SSH CA configurés dans un vault             |
+| `ssh_ca_role_info(vault_id, role)`                   | read  | Détails d'un rôle (TTL, allowed_users, extensions)          |
+
+<details>
+<summary>💡 Workflow SSH CA typique (ex: infrastructure LLMaaS)</summary>
+
+```python
+# 1. Setup initial (ONE-TIME) — créer vault + rôles SSH
+vault_create("llmaas-infra", description="SSH CA LLMaaS")
+ssh_ca_setup("llmaas-infra", "adminct", allowed_users="adminct", ttl="1h")
+ssh_ca_setup("llmaas-infra", "agentic", allowed_users="agentic,iaagentic", ttl="30m")
+
+# 2. Déployer la CA sur les serveurs (ONE-TIME)
+result = ssh_ca_public_key("llmaas-infra")
+# → Mettre result["public_key"] dans /etc/ssh/trusted-user-ca-keys.pem
+
+# 3. Usage quotidien — signer une clé publique
+cert = ssh_sign_key("llmaas-infra", "adminct", public_key="ssh-ed25519 AAAA...", ttl="1h")
+# → cert["signed_key"] = certificat signé, valide 1h
+# → OpenSSH l'utilise automatiquement si placé à côté de la clé privée
+```
+
+</details>
 
 ---
 
 ## 🔑 Types de secrets (style 1Password)
 
-| Type | Icône | Champs requis | Usage |
-|------|-------|---------------|-------|
-| `login` | 🔑 | username, password | Identifiants web/app |
-| `password` | 🔒 | password | Mot de passe simple |
-| `secure_note` | 📝 | content | Notes sécurisées |
-| `api_key` | 🔌 | key | Clés API |
-| `ssh_key` | 🗝️ | private_key | Paires de clés SSH |
-| `database` | 🗄️ | host, username, password | Connexions BDD |
-| `server` | 🖥️ | host, username | Accès serveur |
-| `certificate` | 📜 | certificate, private_key | Certificats TLS/SSL |
-| `env_file` | 📄 | content | Fichiers .env |
-| `credit_card` | 💳 | number, expiry, cvv | Cartes bancaires |
-| `identity` | 👤 | name | Identités |
-| `wifi` | 📶 | ssid, password | Réseaux Wi-Fi |
-| `crypto_wallet` | ₿ | *(tout optionnel)* | Wallets crypto |
-| `custom` | ⚙️ | *(champs libres)* | Tout le reste |
+| Type            | Icône | Champs requis            | Usage                |
+| --------------- | ----- | ------------------------ | -------------------- |
+| `login`         | 🔑   | username, password       | Identifiants web/app |
+| `password`      | 🔒   | password                 | Mot de passe simple  |
+| `secure_note`   | 📝   | content                  | Notes sécurisées     |
+| `api_key`       | 🔌   | key                      | Clés API             |
+| `ssh_key`       | 🗝️ | private_key              | Paires de clés SSH   |
+| `database`      | 🗄️ | host, username, password | Connexions BDD       |
+| `server`        | 🖥️ | host, username           | Accès serveur        |
+| `certificate`   | 📜   | certificate, private_key | Certificats TLS/SSL  |
+| `env_file`      | 📄   | content                  | Fichiers .env        |
+| `credit_card`   | 💳   | number, expiry, cvv      | Cartes bancaires     |
+| `identity`      | 👤   | name                     | Identités            |
+| `wifi`          | 📶   | ssid, password           | Réseaux Wi-Fi        |
+| `crypto_wallet` | ₿     | *(tout optionnel)*       | Wallets crypto       |
+| `custom`        | ⚙️  | *(champs libres)*        | Tout le reste        |
 
 Chaque secret supporte : `tags`, `favorite`, versioning KV v2 automatique.
 
@@ -112,10 +137,10 @@ Authorization: Bearer <token>
 ```
 
 | Permission | Lecture | Écriture | Admin |
-|------------|--------|----------|-------|
-| `read` | ✅ | ❌ | ❌ |
-| `write` | ✅ | ✅ | ❌ |
-| `admin` | ✅ | ✅ | ✅ |
+| ---------- | ------- | -------- | ----- |
+| `read`     | ✅      | ❌       | ❌    |
+| `write`    | ✅      | ✅       | ❌    |
+| `admin`    | ✅      | ✅       | ✅    |
 
 **Isolation par vault** : chaque token est scopé à des `vault_ids` (vide = tous).
 
@@ -147,7 +172,7 @@ Voir [scripts/README.md](scripts/README.md) pour la documentation complète du C
 ## 🏗️ Architecture
 
 ```
-Internet → WAF (Caddy :8082) → MCP Vault (Python :8030) → OpenBao (:8200 localhost)
+Internet → WAF (Caddy :8085) → MCP Vault (Python :8030) → OpenBao (:8200 localhost)
                                      ↕
                               S3 Dell ECS (persistance)
 ```
@@ -169,13 +194,21 @@ CRASH:    Docker volume local → redémarrage immédiat
 
 Les clés unseal d'OpenBao sont protégées par **séparation physique à 3 facteurs** :
 
-| Facteur | Stockage | Compromis seul = insuffisant |
-|---------|----------|------------------------------|
-| **Données chiffrées** (barrier OpenBao) | Volume Docker + S3 | Illisibles sans unseal key |
-| **Clés unseal** (chiffrées AES-256-GCM) | S3 uniquement | Indéchiffrables sans bootstrap key |
-| **ADMIN_BOOTSTRAP_KEY** | Variable d'env uniquement | Inutile sans les clés chiffrées |
+| Facteur                                 | Stockage                  | Compromis seul = insuffisant       |
+| --------------------------------------- | ------------------------- | ---------------------------------- |
+| **Données chiffrées** (barrier OpenBao) | Volume Docker + S3        | Illisibles sans unseal key         |
+| **Clés unseal** (chiffrées AES-256-GCM) | S3 uniquement             | Indéchiffrables sans bootstrap key |
+| **ADMIN_BOOTSTRAP_KEY**                 | Variable d'env uniquement | Inutile sans les clés chiffrées    |
 
 **Invariants** : les clés unseal ne sont **jamais** en clair sur disque — uniquement en mémoire pendant le runtime. Un crash efface automatiquement les clés.
+
+**Roadmap sécurité** :
+
+| Version | Approche |
+|---------|----------|
+| **v0.2.x** (actuel) | Clés sur S3 chiffrées AES-256-GCM, mémoire seule au runtime |
+| **v0.3.0** | Transit Auto-Unseal via OpenBao dédié (KMS Cloud Temple) |
+| **v2.0** | 🔐 **Connexion HSM** (Hardware Security Module) Cloud Temple — les clés ne quittent jamais le module matériel certifié |
 
 > 📖 Voir [DESIGN/mcp-vault/ARCHITECTURE.md](DESIGN/mcp-vault/ARCHITECTURE.md) §8 et §11 pour les détails complets.
 
@@ -184,7 +217,7 @@ Les clés unseal d'OpenBao sont protégées par **séparation physique à 3 fact
 ## 📋 Tests
 
 ```bash
-# Tests e2e MCP (118 tests, OpenBao réel)
+# Tests e2e MCP (148 tests, OpenBao réel)
 docker compose exec mcp-vault python tests/test_e2e.py
 
 # Tests bas niveau (78 tests, S3, auth, types)
@@ -198,20 +231,20 @@ docker compose exec mcp-vault python tests/test_e2e.py --test secrets
 docker compose exec mcp-vault python tests/test_e2e.py --test password
 ```
 
-### Couverture e2e (118 tests)
+### Couverture e2e (148 tests)
 
-| Catégorie | Tests | Description |
-|-----------|-------|-------------|
-| Système | 7 | health, about, services |
-| Vault CRUD | 22 | create + métadonnées, list, info + owner, update, delete, confirm, erreurs |
-| Secrets CRUD | 24 | 10 types écrits, read/list/delete, validation |
-| Versioning | 8 | v1→v2→v3, read latest, read spécifique |
-| Passwords | 14 | longueurs, options, exclusions, CSPRNG |
-| Isolation | 7 | secrets cloisonnés entre vaults |
-| Erreurs | 10 | edge cases, vault inexistant, type invalide, protection `_vault_meta` |
-| S3 Sync | 3 | archive tar.gz sur S3 |
-| SSH CA | 2 | setup, public key |
-| Types | 16 | 14 types vérifiés individuellement |
+| Catégorie    | Tests | Description                                                                           |
+| ------------ | ----- | ------------------------------------------------------------------------------------- |
+| Système      | 7     | health, about, services                                                               |
+| Vault CRUD   | 28    | create + métadonnées, list, info + owner, update, delete, confirm, erreurs            |
+| Secrets CRUD | 24    | 10 types écrits, read/list/delete, validation                                         |
+| Versioning   | 8     | v1→v2→v3, read latest, read spécifique                                                |
+| Passwords    | 14    | longueurs, options, exclusions, CSPRNG                                                |
+| Isolation    | 7     | secrets cloisonnés entre vaults                                                       |
+| Erreurs      | 10    | edge cases, vault inexistant, type invalide, protection `_vault_meta`                 |
+| S3 Sync      | 3     | archive tar.gz sur S3                                                                 |
+| SSH CA       | 33    | setup, rôles multiples, signature ed25519, list/info roles, isolation CA, cleanup, erreurs |
+| Types        | 14    | 14 types vérifiés individuellement                                                    |
 
 ---
 
@@ -225,8 +258,8 @@ mcp-vault/
 ├── requirements.txt          # Dépendances Python
 ├── VERSION                   # 0.1.0
 ├── DESIGN/mcp-vault/
-│   ├── ARCHITECTURE.md       # Spécification détaillée (v0.2.1-draft)
-│   └── TECHNICAL.md          # Documentation technique
+│   ├── ARCHITECTURE.md       # Spécification détaillée (v0.2.2-draft)
+│   └── TECHNICAL.md          # Documentation technique (v0.2.0)
 ├── scripts/
 │   ├── mcp_cli.py            # CLI entry point
 │   ├── README.md             # Documentation CLI
@@ -238,7 +271,7 @@ mcp-vault/
 │       └── shell.py          # Shell interactif
 ├── src/mcp_vault/
 │   ├── config.py             # Configuration pydantic-settings
-│   ├── server.py             # FastMCP + 17 outils MCP + lifecycle
+│   ├── server.py             # FastMCP + 18 outils MCP + lifecycle
 │   ├── lifecycle.py          # Orchestrateur startup/shutdown
 │   ├── s3_client.py          # Client S3 hybride SigV2/SigV4
 │   ├── s3_sync.py            # Sync file backend ↔ S3
@@ -246,9 +279,13 @@ mcp-vault/
 │   ├── admin/                # Console web /admin + API REST
 │   ├── openbao/              # Process manager, HCL config, lifecycle
 │   ├── vault/                # Spaces, secrets, SSH CA, types
-│   └── static/               # admin.html (SPA)
+│   └── static/               # Console admin (SPA modulaire)
+│       ├── admin.html        # HTML structure (162 lignes)
+│       ├── css/admin.css     # Design Cloud Temple
+│       ├── js/               # Modules JS (config, api, app, dashboard, vaults, tokens, activity)
+│       └── img/              # logo-cloudtemple.svg
 ├── tests/
-│   ├── test_e2e.py           # 118 tests MCP e2e
+│   ├── test_e2e.py           # 148 tests MCP e2e
 │   ├── test_service.py       # 78 tests bas niveau
 │   └── test_integration.py   # Tests pytest
 └── waf/                      # Caddy reverse proxy
@@ -258,14 +295,14 @@ mcp-vault/
 
 ## 🌐 Écosystème MCP Cloud Temple
 
-| Serveur | Rôle | Port |
-|---------|------|------|
-| **MCP Tools** | Boîte à outils (SSH, HTTP, shell) | :8010 |
-| **Live Memory** | Mémoire de travail partagée | :8002 |
-| **Graph Memory** | Mémoire long terme (graphe) | :8080 |
-| **MCP Vault** | 🔐 Coffre-fort à secrets | :8030 |
-| **MCP Agent** | Runtime d'agents autonomes | :8040 |
-| **MCP Mission** | Orchestrateur de missions | :8020 |
+| Serveur          | Rôle                              | Port  |
+| ---------------- | --------------------------------- | ----- |
+| **MCP Tools**    | Boîte à outils (SSH, HTTP, shell) | :8010 |
+| **Live Memory**  | Mémoire de travail partagée       | :8002 |
+| **Graph Memory** | Mémoire long terme (graphe)       | :8080 |
+| **MCP Vault**    | 🔐 Coffre-fort à secrets         | :8030 |
+| **MCP Agent**    | Runtime d'agents autonomes        | :8040 |
+| **MCP Mission**  | Orchestrateur de missions         | :8020 |
 
 ---
 

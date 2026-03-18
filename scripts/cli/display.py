@@ -233,20 +233,22 @@ def show_ssh_result(result: dict):
         show_error(result.get("message", "Erreur"))
         return
 
-    # CA Setup
-    if "ca_public_key" in result and "role" in result:
-        show_success(f"SSH CA configurée (rôle: {result.get('role', '?')})")
-        console.print(Panel(
-            result.get("ca_public_key", "?"),
-            title="Clé publique CA (à mettre dans TrustedUserCAKeys)",
-            border_style="cyan",
-        ))
+    # CA Setup (setup retourne vault_id + role_name + mount_point)
+    if "role_name" in result and "mount_point" in result:
+        show_success(
+            f"SSH CA configurée — vault [cyan]{result.get('vault_id', '?')}[/cyan] "
+            f"rôle [green]{result.get('role_name', '?')}[/green]"
+        )
+        console.print(f"  Mount     : {result.get('mount_point', '?')}")
+        console.print(f"  Users     : {result.get('allowed_users', '?')}")
+        console.print(f"  Default   : {result.get('default_user', '?')}")
+        console.print(f"  TTL       : {result.get('ttl', '?')}")
         return
 
     # Sign key
     signed = result.get("signed_key")
     if signed:
-        show_success(f"Clé signée (TTL: {result.get('ttl', '?')})")
+        show_success(f"Clé signée (TTL: {result.get('ttl', '?')}, serial: {result.get('serial_number', '?')})")
         console.print(Panel(
             signed[:200] + "..." if len(signed) > 200 else signed,
             title="Certificat SSH",
@@ -254,10 +256,42 @@ def show_ssh_result(result: dict):
         ))
         return
 
+    # List roles
+    roles = result.get("roles")
+    if roles is not None and "vault_id" in result and "count" in result:
+        vid = result.get("vault_id", "?")
+        console.print(f"\n✅ [bold]{result.get('count', 0)} rôle(s) SSH CA[/bold] dans [cyan]{vid}[/cyan]")
+        if roles:
+            for role in roles:
+                console.print(f"  🔏 {role}")
+        else:
+            console.print("  [dim](aucun rôle configuré)[/dim]")
+        return
+
+    # Role info
+    if "role_name" in result and "key_type" in result:
+        console.print(f"\n✅ [bold]Rôle SSH : {result.get('role_name', '?')}[/bold] "
+                       f"(vault: [cyan]{result.get('vault_id', '?')}[/cyan])")
+        table = Table(show_header=True)
+        table.add_column("Paramètre", style="cyan bold", min_width=25)
+        table.add_column("Valeur", style="white")
+        table.add_row("key_type", str(result.get("key_type", "")))
+        table.add_row("ttl", str(result.get("ttl", "")))
+        table.add_row("max_ttl", str(result.get("max_ttl", "")))
+        table.add_row("default_user", str(result.get("default_user", "")))
+        table.add_row("allowed_users", str(result.get("allowed_users", "")))
+        table.add_row("allowed_extensions", str(result.get("allowed_extensions", "")))
+        table.add_row("allow_user_certificates", str(result.get("allow_user_certificates", "")))
+        table.add_row("allow_host_certificates", str(result.get("allow_host_certificates", "")))
+        console.print(table)
+        return
+
     # CA public key
     pub_key = result.get("ca_public_key") or result.get("public_key")
     if pub_key:
         console.print(Panel(pub_key, title="Clé publique CA", border_style="cyan"))
+        if result.get("usage"):
+            console.print(f"  [dim]💡 {result['usage']}[/dim]")
         return
 
     show_json(result)

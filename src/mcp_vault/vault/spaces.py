@@ -276,15 +276,24 @@ async def update_space(vault_id: str, description: str = "") -> dict:
 
 async def delete_space(vault_id: str) -> dict:
     """
-    Supprime un espace vault (unmount KV v2).
+    Supprime un espace vault (unmount KV v2) et sa CA SSH associée.
 
-    Supprime automatiquement tous les secrets ET les métadonnées.
+    Supprime automatiquement :
+    - Tous les secrets et métadonnées (KV v2 mount)
+    - Le mount SSH CA si configuré (ssh-ca-{vault_id})
     """
     client = get_hvac_client()
     if not client:
         return {"status": "error", "message": "OpenBao non connecté"}
 
     try:
+        # 1. Supprimer le mount SSH CA associé (si existant)
+        from .ssh_ca import cleanup_ssh_ca
+        ssh_cleaned = await cleanup_ssh_ca(vault_id)
+        if not ssh_cleaned:
+            logger.warning(f"⚠️ Impossible de nettoyer la SSH CA de {vault_id} (non bloquant)")
+
+        # 2. Supprimer le mount KV v2 (secrets + métadonnées)
         client.sys.disable_secrets_engine(path=vault_id)
         logger.info(f"🗑️ Vault supprimé: {vault_id}")
         return {"status": "deleted", "vault_id": vault_id}

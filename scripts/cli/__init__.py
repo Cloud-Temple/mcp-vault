@@ -3,7 +3,7 @@
 Configuration globale du CLI — MCP Vault.
 
 Variables d'environnement :
-    MCP_URL   — URL du serveur MCP (défaut: http://localhost:8082)
+    MCP_URL   — URL du serveur MCP (défaut: http://localhost:8085)
     MCP_TOKEN — Token d'authentification
     ADMIN_BOOTSTRAP_KEY — Clé admin (fallback si MCP_TOKEN non défini)
 
@@ -20,5 +20,5 @@ _env_file = _project_root / ".env"
 if _env_file.exists():
     load_dotenv(_env_file)
 
-BASE_URL = os.environ.get("MCP_URL", "http://localhost:8082")
+BASE_URL = os.environ.get("MCP_URL", "http://localhost:8085")
 TOKEN = os.environ.get("MCP_TOKEN", os.environ.get("ADMIN_BOOTSTRAP_KEY", ""))

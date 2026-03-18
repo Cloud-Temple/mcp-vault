@@ -671,31 +671,151 @@ async def test_08_s3_sync():
 
 
 # =============================================================================
-# TEST 9 — SSH CA
+# TEST 9 — SSH CA (Phase 6 — tests exhaustifs)
 # =============================================================================
 
 async def test_09_ssh_ca():
-    """SSH CA — setup et récupération de clé publique."""
+    """SSH CA — setup, rôles multiples, signature, isolation, erreurs."""
     print("\n  ── TEST 9 — SSH CA ──")
 
     space = "test-e2e-beta"
 
-    # 9a. Setup SSH CA
+    # ── 9a. Setup CA + rôle adminct ────────────────────────────────
     r = await call_tool("ssh_ca_setup", {
-        "vault_id": space, "role_name": "test-role",
-        "allowed_users": "deploy,admin", "ttl": "15m",
+        "vault_id": space, "role_name": "adminct",
+        "allowed_users": "adminct", "default_user": "adminct", "ttl": "1h",
     })
-    # Peut réussir ou échouer selon l'implémentation
-    status = r.get("status", "?")
-    check_true("SSH CA setup (pas de crash)", status in ("ok", "error", "created"),
-               f"status={status}")
+    check("SSH CA setup rôle adminct", r)
+    check_value("vault_id retourné", r.get("vault_id"), space)
+    check_value("role_name retourné", r.get("role_name"), "adminct")
 
-    if status in ("ok", "created"):
-        # 9b. Récupérer la clé publique CA
-        r = await call_tool("ssh_ca_public_key", {"vault_id": space})
-        status = r.get("status", "?")
-        check_true("SSH CA public key", status in ("ok", "error"),
-                   f"status={status}")
+    # ── 9b. Setup 2ème rôle agentic (rôles multiples) ─────────────
+    r = await call_tool("ssh_ca_setup", {
+        "vault_id": space, "role_name": "agentic",
+        "allowed_users": "agentic,iaagentic", "default_user": "agentic", "ttl": "30m",
+    })
+    check("SSH CA setup rôle agentic", r)
+
+    # ── 9c. Récupérer la clé publique CA ───────────────────────────
+    r = await call_tool("ssh_ca_public_key", {"vault_id": space})
+    check("SSH CA public key", r)
+    pub_key = r.get("public_key", "")
+    check_true("Clé publique non vide", len(pub_key) > 20, f"len={len(pub_key)}")
+    check_true("Format clé SSH valide", pub_key.startswith("ssh-"), f"prefix={pub_key[:20]}")
+    check_true("Usage hint présent", bool(r.get("usage")))
+
+    # ── 9d. Lister les rôles SSH CA ────────────────────────────────
+    r = await call_tool("ssh_ca_list_roles", {"vault_id": space})
+    check("SSH CA list roles", r)
+    roles = r.get("roles", [])
+    check_true("au moins 2 rôles configurés", r.get("count", 0) >= 2, f"count={r.get('count')}, roles={roles}")
+    check_true("adminct dans les rôles", "adminct" in roles, f"roles={roles}")
+    check_true("agentic dans les rôles", "agentic" in roles, f"roles={roles}")
+
+    # ── 9e. Info rôle adminct ──────────────────────────────────────
+    r = await call_tool("ssh_ca_role_info", {"vault_id": space, "role_name": "adminct"})
+    check("SSH CA role info adminct", r)
+    check_value("key_type = ca", r.get("key_type"), "ca")
+    check_value("default_user = adminct", r.get("default_user"), "adminct")
+    check_value("allowed_users = adminct", r.get("allowed_users"), "adminct")
+    check_true("allow_user_certificates = true", r.get("allow_user_certificates") is True)
+
+    # ── 9f. Info rôle agentic ──────────────────────────────────────
+    r = await call_tool("ssh_ca_role_info", {"vault_id": space, "role_name": "agentic"})
+    check("SSH CA role info agentic", r)
+    check_value("allowed_users agentic", r.get("allowed_users"), "agentic,iaagentic")
+
+    # ── 9g. Signature de clé publique SSH ──────────────────────────
+    # Générer une clé ed25519 via la lib cryptography (pas de dépendance ssh-keygen)
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives import serialization
+    import base64
+
+    private_key = Ed25519PrivateKey.generate()
+    pub_key_bytes = private_key.public_key().public_bytes(
+        serialization.Encoding.OpenSSH,
+        serialization.PublicFormat.OpenSSH,
+    )
+    test_pub_key = pub_key_bytes.decode("utf-8")
+
+    r = await call_tool("ssh_sign_key", {
+        "vault_id": space, "role_name": "adminct",
+        "public_key": test_pub_key, "ttl": "15m",
+    })
+    check("SSH sign key (adminct)", r)
+    signed_key = r.get("signed_key", "")
+    check_true("signed_key non vide", len(signed_key) > 50, f"len={len(signed_key)}")
+    check_true("serial_number présent", bool(r.get("serial_number")))
+
+    # ── 9h. Signature avec rôle agentic ────────────────────────────
+    r = await call_tool("ssh_sign_key", {
+        "vault_id": space, "role_name": "agentic",
+        "public_key": test_pub_key, "ttl": "5m",
+    })
+    check("SSH sign key (agentic)", r)
+
+    # ── 9i. Erreur — rôle inexistant ──────────────────────────────
+    r = await call_tool("ssh_sign_key", {
+        "vault_id": space, "role_name": "role-fantome",
+        "public_key": test_pub_key, "ttl": "5m",
+    })
+    check("Sign avec rôle inexistant → erreur", r, "error")
+
+    # ── 9j. Erreur — clé publique invalide ─────────────────────────
+    r = await call_tool("ssh_sign_key", {
+        "vault_id": space, "role_name": "adminct",
+        "public_key": "ceci-nest-pas-une-cle-ssh", "ttl": "5m",
+    })
+    check("Sign avec clé invalide → erreur", r, "error")
+
+    # ── 9k. Erreur — info rôle inexistant ──────────────────────────
+    r = await call_tool("ssh_ca_role_info", {
+        "vault_id": space, "role_name": "role-fantome",
+    })
+    check("Info rôle inexistant → erreur", r, "error")
+
+    # ── 9l. Isolation CA — vault alpha vs beta ─────────────────────
+    # Setup une CA sur alpha
+    r_alpha = await call_tool("ssh_ca_setup", {
+        "vault_id": "test-e2e-alpha", "role_name": "test-iso",
+        "allowed_users": "*", "ttl": "15m",
+    })
+    check("SSH CA setup sur alpha (isolation)", r_alpha)
+
+    # Récupérer les 2 clés publiques CA
+    r_ca_alpha = await call_tool("ssh_ca_public_key", {"vault_id": "test-e2e-alpha"})
+    r_ca_beta = await call_tool("ssh_ca_public_key", {"vault_id": space})
+    ca_alpha = r_ca_alpha.get("public_key", "")
+    ca_beta = r_ca_beta.get("public_key", "")
+    check_true("CA alpha ≠ CA beta (isolation crypto)",
+               ca_alpha != ca_beta and len(ca_alpha) > 20 and len(ca_beta) > 20,
+               f"alpha={ca_alpha[:30]}... beta={ca_beta[:30]}...")
+
+    # ── 9m. List roles sur vault sans CA → liste vide ──────────────
+    # Créer un vault temporaire sans CA
+    await call_tool("vault_create", {"vault_id": "test-e2e-noca"})
+    r = await call_tool("ssh_ca_list_roles", {"vault_id": "test-e2e-noca"})
+    check_true("List roles vault sans CA", r.get("status") in ("ok", "error"),
+               f"status={r.get('status')}, roles={r.get('roles', [])}")
+    # Cleanup
+    await call_tool("vault_delete", {"vault_id": "test-e2e-noca", "confirm": True})
+
+    # ── 9n. Suppression vault → SSH CA nettoyée ───────────────────
+    # Créer un vault avec CA, puis le supprimer, vérifier que la CA disparaît
+    await call_tool("vault_create", {"vault_id": "test-e2e-ssh-cleanup"})
+    await call_tool("ssh_ca_setup", {
+        "vault_id": "test-e2e-ssh-cleanup", "role_name": "temp",
+        "allowed_users": "*", "ttl": "5m",
+    })
+    # Vérifier que la CA existe
+    r = await call_tool("ssh_ca_public_key", {"vault_id": "test-e2e-ssh-cleanup"})
+    check_true("CA existe avant suppression", r.get("status") == "ok")
+    # Supprimer le vault
+    r = await call_tool("vault_delete", {"vault_id": "test-e2e-ssh-cleanup", "confirm": True})
+    check("Delete vault avec CA", r, "deleted")
+    # Vérifier que la CA est inaccessible
+    r = await call_tool("ssh_ca_public_key", {"vault_id": "test-e2e-ssh-cleanup"})
+    check("CA inaccessible après suppression vault", r, "error")
 
 
 # =============================================================================
@@ -717,6 +837,60 @@ async def test_10_types():
     type_names = [t.get("type", "") for t in types]
     for exp in expected:
         check_true(f"Type '{exp}' présent", exp in type_names)
+
+
+# =============================================================================
+# TEST 11 — Admin API
+# =============================================================================
+
+async def test_11_admin_api():
+    """Tests des endpoints Admin API (REST HTTP)."""
+    print("\n  ── TEST 11 — Admin API ──")
+
+    import urllib.request
+
+    admin_url = BASE_URL + "/admin/api"
+    req_headers = {"Authorization": f"Bearer {TOKEN}"}
+
+    def admin_get(path):
+        req = urllib.request.Request(f"{admin_url}{path}", headers=req_headers)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+
+    # 11a. Health
+    r = admin_get("/health")
+    check_value("Admin API health status", r.get("status"), "ok")
+    check_true("Admin API tools_count > 0", r.get("tools_count", 0) > 0, f"count={r.get('tools_count')}")
+
+    # 11b. Whoami
+    r = admin_get("/whoami")
+    check_value("Admin API whoami status", r.get("status"), "ok")
+    check_true("Admin API whoami client_name", bool(r.get("client_name")), r.get("client_name", ""))
+
+    # 11c. Generate password — basic
+    r = admin_get("/generate-password")
+    check_value("Admin API generate-password status", r.get("status"), "ok")
+    pw = r.get("password", "")
+    check_true("Password non vide", len(pw) > 0, f"len={len(pw)}")
+    check_value("Password longueur 24", r.get("length"), 24)
+    check_value("Password 24 chars effectifs", len(pw), 24)
+
+    # 11d. Generate password — unicité (CSPRNG)
+    r2 = admin_get("/generate-password")
+    pw2 = r2.get("password", "")
+    check_true("2 passwords admin différents (CSPRNG)", pw != pw2, f"p1={pw[:10]}... p2={pw2[:10]}...")
+
+    # 11e. Generate password — complexité (majuscules + minuscules + chiffres + symboles)
+    combined = pw + pw2
+    check_true("Password contient majuscules", any(c.isupper() for c in combined))
+    check_true("Password contient minuscules", any(c.islower() for c in combined))
+    check_true("Password contient chiffres", any(c.isdigit() for c in combined))
+    check_true("Password contient symboles", any(not c.isalnum() for c in combined))
+
+    # 11f. Logs endpoint
+    r = admin_get("/logs")
+    check_value("Admin API logs status", r.get("status"), "ok")
+    check_true("Admin API logs count >= 0", r.get("count", -1) >= 0, f"count={r.get('count')}")
 
 
 # =============================================================================
@@ -748,6 +922,7 @@ TEST_REGISTRY = {
     "s3_sync":    test_08_s3_sync,
     "ssh_ca":     test_09_ssh_ca,
     "types":      test_10_types,
+    "admin_api":  test_11_admin_api,
 }
 
 

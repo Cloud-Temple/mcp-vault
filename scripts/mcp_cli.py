@@ -12,7 +12,7 @@ Usage :
     python scripts/mcp_cli.py shell
 
 Variables d'environnement :
-    MCP_URL   — URL du serveur (défaut: http://localhost:8082)
+    MCP_URL   — URL du serveur (défaut: http://localhost:8085)
     MCP_TOKEN — Token d'authentification
 """
 

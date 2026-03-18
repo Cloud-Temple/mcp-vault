@@ -20,28 +20,92 @@ async def handle_admin_api(scope, receive, send, mcp):
     path = scope.get("path", "")
     method = scope.get("method", "GET")
 
-    # --- Auth admin requise ---
+    # --- Auth : token valide requis ---
     token = _extract_admin_token(scope)
-    if not _is_admin(token):
-        return await _json_response(send, 401, {"status": "error", "message": "Admin token required"})
+    token_info = _get_token_info(token)
+    if not token_info:
+        return await _json_response(send, 401, {"status": "error", "message": "Valid token required"})
 
-    # --- Routes ---
+    perms = token_info.get("permissions", [])
+    is_admin = "admin" in perms
+    can_write = is_admin or "write" in perms
+    allowed_vaults = token_info.get("allowed_resources", [])
+
+    # --- Routes système (tout token) ---
     if path == "/admin/api/health" and method == "GET":
         return await _api_health(send, mcp)
 
+    if path == "/admin/api/whoami" and method == "GET":
+        return await _json_response(send, 200, {"status": "ok", **token_info})
+
+    if path == "/admin/api/logs" and method == "GET":
+        return await _api_logs(send)
+
+    if path == "/admin/api/generate-password" and method == "GET":
+        return await _api_generate_password(send)
+
+    # --- Routes vaults (read = list/detail, write = create/update, admin = delete) ---
+    if path == "/admin/api/vaults" and method == "GET":
+        return await _api_list_vaults(send, allowed_vaults if not is_admin else None)
+
+    if path == "/admin/api/vaults" and method == "POST":
+        if not can_write:
+            return await _json_response(send, 403, {"status": "error", "message": "Permission write requise"})
+        body = await _read_body(receive)
+        return await _api_create_vault(send, body)
+
+    if path.startswith("/admin/api/vaults/") and not "/secrets" in path:
+        vault_id = path[len("/admin/api/vaults/"):]
+        if "/" not in vault_id and vault_id:
+            if method == "GET":
+                return await _api_vault_detail(send, vault_id)
+            if method == "PUT":
+                if not can_write:
+                    return await _json_response(send, 403, {"status": "error", "message": "Permission write requise"})
+                body = await _read_body(receive)
+                return await _api_update_vault(send, vault_id, body)
+            if method == "DELETE":
+                if not is_admin:
+                    return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
+                return await _api_delete_vault(send, vault_id)
+
+    # --- Routes secrets (read = list/get, write = create, admin = delete) ---
+    if path.startswith("/admin/api/vaults/") and "/secrets" in path:
+        parts = path[len("/admin/api/vaults/"):].split("/secrets", 1)
+        vault_id = parts[0]
+        secret_path = parts[1].lstrip("/") if len(parts) > 1 else ""
+
+        if method == "GET" and not secret_path:
+            return await _api_list_secrets(send, vault_id)
+        if method == "GET" and secret_path:
+            return await _api_read_secret(send, vault_id, secret_path)
+        if method == "POST":
+            if not can_write:
+                return await _json_response(send, 403, {"status": "error", "message": "Permission write requise"})
+            body = await _read_body(receive)
+            return await _api_write_secret(send, vault_id, body)
+        if method == "DELETE" and secret_path:
+            if not is_admin:
+                return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
+            return await _api_delete_secret(send, vault_id, secret_path)
+
+    # --- Routes tokens (admin only) ---
     if path == "/admin/api/tokens" and method == "GET":
+        if not is_admin:
+            return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
         return await _api_list_tokens(send)
 
     if path == "/admin/api/tokens" and method == "POST":
+        if not is_admin:
+            return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
         body = await _read_body(receive)
         return await _api_create_token(send, body)
 
     if path.startswith("/admin/api/tokens/") and method == "DELETE":
+        if not is_admin:
+            return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
         name = path.split("/")[-1]
         return await _api_revoke_token(send, name)
-
-    if path == "/admin/api/logs" and method == "GET":
-        return await _api_logs(send)
 
     return await _json_response(send, 404, {"status": "error", "message": f"Unknown admin route: {path}"})
 
@@ -112,6 +176,158 @@ async def _api_revoke_token(send, hash_prefix):
         await _json_response(send, 404, {"status": "error", "message": f"Token {hash_prefix}... non trouvé"})
 
 
+async def _api_create_vault(send, body):
+    """POST /admin/api/vaults — Créer un vault."""
+    from ..vault.spaces import create_space
+    data = json.loads(body) if body else {}
+    vault_id = data.get("vault_id", "").strip()
+    description = data.get("description", "")
+    if not vault_id:
+        return await _json_response(send, 400, {"status": "error", "message": "vault_id requis"})
+    result = await create_space(vault_id, description)
+    status = 201 if result.get("status") == "created" else 400
+    await _json_response(send, status, result)
+
+
+async def _api_update_vault(send, vault_id, body):
+    """PUT /admin/api/vaults/{vault_id} — Modifier un vault."""
+    from ..vault.spaces import update_space
+    data = json.loads(body) if body else {}
+    description = data.get("description", "")
+    result = await update_space(vault_id, description)
+    status = 200 if result.get("status") != "error" else 400
+    await _json_response(send, status, result)
+
+
+async def _api_delete_vault(send, vault_id):
+    """DELETE /admin/api/vaults/{vault_id} — Supprimer un vault."""
+    from ..vault.spaces import delete_space
+    result = await delete_space(vault_id)
+    status = 200 if result.get("status") == "deleted" else 400
+    await _json_response(send, status, result)
+
+
+async def _api_list_secrets(send, vault_id):
+    """GET /admin/api/vaults/{vault_id}/secrets — Lister les secrets."""
+    from ..vault.secrets import list_secrets
+    result = await list_secrets(vault_id)
+    await _json_response(send, 200, result)
+
+
+async def _api_read_secret(send, vault_id, secret_path):
+    """GET /admin/api/vaults/{vault_id}/secrets/{path} — Lire un secret."""
+    from ..vault.secrets import read_secret
+    result = await read_secret(vault_id, secret_path)
+    status = 200 if result.get("status") == "ok" else 404
+    await _json_response(send, status, result)
+
+
+async def _api_write_secret(send, vault_id, body):
+    """POST /admin/api/vaults/{vault_id}/secrets — Écrire un secret."""
+    from ..vault.secrets import write_secret
+    data = json.loads(body) if body else {}
+    path = data.get("path", "").strip()
+    secret_data = data.get("data", {})
+    secret_type = data.get("type", "custom")
+    tags = data.get("tags", "")
+    if not path:
+        return await _json_response(send, 400, {"status": "error", "message": "path requis"})
+    if not secret_data:
+        return await _json_response(send, 400, {"status": "error", "message": "data requis"})
+    result = await write_secret(vault_id, path, secret_data, secret_type, tags)
+    status = 200 if result.get("status") == "ok" else 400
+    await _json_response(send, status, result)
+
+
+async def _api_delete_secret(send, vault_id, secret_path):
+    """DELETE /admin/api/vaults/{vault_id}/secrets/{path} — Supprimer un secret."""
+    from ..vault.secrets import delete_secret
+    result = await delete_secret(vault_id, secret_path)
+    status = 200 if result.get("status") == "deleted" else 400
+    await _json_response(send, status, result)
+
+
+async def _api_list_vaults(send, allowed_vault_ids=None):
+    """GET /admin/api/vaults — Liste des vaults avec métadonnées."""
+    from ..vault.spaces import list_spaces, get_space_info
+
+    result = await list_spaces(allowed_vault_ids)
+    if result.get("status") != "ok":
+        return await _json_response(send, 500, result)
+
+    # Enrichir chaque vault avec ses métadonnées (secrets_count, dates)
+    enriched = []
+    for vault in result.get("vaults", []):
+        try:
+            info = await get_space_info(vault["vault_id"])
+            enriched.append({
+                "vault_id": vault["vault_id"],
+                "description": info.get("description", vault.get("description", "")),
+                "secrets_count": info.get("secrets_count", 0),
+                "created_at": info.get("created_at", ""),
+                "created_by": info.get("created_by", ""),
+                "updated_at": info.get("updated_at", ""),
+            })
+        except Exception:
+            enriched.append({
+                "vault_id": vault["vault_id"],
+                "description": vault.get("description", ""),
+                "secrets_count": 0,
+            })
+
+    await _json_response(send, 200, {
+        "status": "ok",
+        "vaults": enriched,
+        "count": len(enriched),
+    })
+
+
+async def _api_vault_detail(send, vault_id):
+    """GET /admin/api/vaults/{vault_id} — Détail d'un vault."""
+    from ..vault.spaces import get_space_info
+    from ..vault.secrets import list_secrets
+    from ..vault.ssh_ca import list_ssh_roles
+
+    # Infos de base
+    info = await get_space_info(vault_id)
+    if info.get("status") == "error":
+        return await _json_response(send, 404, info)
+
+    # Liste des clés de secrets (pas les valeurs !)
+    secrets = await list_secrets(vault_id)
+    keys = secrets.get("keys", [])
+
+    # SSH CA : lister les rôles (si CA configurée)
+    ssh_roles = []
+    try:
+        ssh_result = await list_ssh_roles(vault_id)
+        if ssh_result.get("status") == "ok":
+            ssh_roles = ssh_result.get("roles", [])
+    except Exception:
+        pass
+
+    await _json_response(send, 200, {
+        "status": "ok",
+        "vault_id": vault_id,
+        "description": info.get("description", ""),
+        "secrets_count": info.get("secrets_count", 0),
+        "secret_keys": keys,
+        "created_at": info.get("created_at", ""),
+        "created_by": info.get("created_by", ""),
+        "updated_at": info.get("updated_at", ""),
+        "updated_by": info.get("updated_by", ""),
+        "ssh_ca_roles": ssh_roles,
+        "has_ssh_ca": len(ssh_roles) > 0,
+    })
+
+
+async def _api_generate_password(send):
+    """GET /admin/api/generate-password — Génère un mot de passe CSPRNG."""
+    from ..vault.types import generate_password
+    password = generate_password(length=24, uppercase=True, lowercase=True, digits=True, symbols=True)
+    await _json_response(send, 200, {"status": "ok", "password": password, "length": len(password)})
+
+
 async def _api_logs(send):
     """GET /admin/api/logs — Activité récente (ring buffer)."""
     logs = get_activity_log()
@@ -146,6 +362,35 @@ def _is_admin(token: str) -> bool:
         if info and "admin" in info.get("permissions", []) and not info.get("revoked"):
             return True
     return False
+
+
+def _get_token_info(token: str) -> dict | None:
+    """Retourne les infos du token (permissions, allowed_resources) ou None si invalide."""
+    if not token:
+        return None
+    settings = get_settings()
+    # Bootstrap key = admin total
+    if token == settings.admin_bootstrap_key:
+        return {
+            "client_name": "admin",
+            "permissions": ["read", "write", "admin"],
+            "allowed_resources": [],
+            "auth_type": "bootstrap",
+        }
+    # Token S3
+    store = get_token_store()
+    if store:
+        import hashlib
+        h = hashlib.sha256(token.encode()).hexdigest()
+        info = store.get_by_hash(h)
+        if info and not info.get("revoked"):
+            return {
+                "client_name": info.get("client_name", "unknown"),
+                "permissions": info.get("permissions", ["read"]),
+                "allowed_resources": info.get("allowed_resources", []),
+                "auth_type": "token",
+            }
+    return None
 
 
 async def _read_body(receive) -> bytes:

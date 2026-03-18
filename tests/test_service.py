@@ -59,7 +59,7 @@ from botocore.config import Config
 # Configuration
 # =============================================================================
 
-BASE_URL = os.getenv("MCP_URL", "http://localhost:8082")
+BASE_URL = os.getenv("MCP_URL", "http://localhost:8085")
 TOKEN = os.getenv("MCP_TOKEN", os.getenv("ADMIN_BOOTSTRAP_KEY", "change_me_in_production"))
 
 # S3 Dell ECS

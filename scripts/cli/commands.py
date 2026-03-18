@@ -450,6 +450,52 @@ def ssh_ca_key_cmd(ctx, vault_id, output_json):
     asyncio.run(_run())
 
 
+@ssh_group.command("roles")
+@click.argument("vault_id")
+@click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
+@click.pass_context
+def ssh_roles_cmd(ctx, vault_id, output_json):
+    """Lister les rôles SSH CA d'un vault.
+
+    \b
+    Exemples :
+      ssh roles llmaas-infra
+    """
+    async def _run():
+        client = MCPClient(ctx.obj["url"], ctx.obj["token"])
+        result = await client.call_tool("ssh_ca_list_roles", {"vault_id": vault_id})
+        if output_json:
+            show_json(result)
+        else:
+            show_ssh_result(result)
+    asyncio.run(_run())
+
+
+@ssh_group.command("role-info")
+@click.argument("vault_id")
+@click.argument("role_name")
+@click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
+@click.pass_context
+def ssh_role_info_cmd(ctx, vault_id, role_name, output_json):
+    """Détails d'un rôle SSH CA (TTL, allowed_users, etc.).
+
+    \b
+    Exemples :
+      ssh role-info llmaas-infra adminct
+      ssh role-info prod-servers agentic
+    """
+    async def _run():
+        client = MCPClient(ctx.obj["url"], ctx.obj["token"])
+        result = await client.call_tool("ssh_ca_role_info", {
+            "vault_id": vault_id, "role_name": role_name,
+        })
+        if output_json:
+            show_json(result)
+        else:
+            show_ssh_result(result)
+    asyncio.run(_run())
+
+
 # =============================================================================
 # Token management (groupe admin)
 # =============================================================================
@@ -484,7 +530,7 @@ def token_create_cmd(ctx, name, permissions, vaults, expires, email, output_json
     """
     async def _run():
         perms = [p.strip() for p in permissions.split(",") if p.strip()]
-        vault_list_ids = [s.strip() for s in vaults.split(",") if s.strip()] if spaces else []
+        vault_list_ids = [s.strip() for s in vaults.split(",") if s.strip()] if vaults else []
         import httpx
         try:
             async with httpx.AsyncClient(timeout=10) as http:

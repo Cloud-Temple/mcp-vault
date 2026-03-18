@@ -6,7 +6,7 @@
 #   docker compose logs -f
 #
 # Architecture réseau :
-#   Internet → WAF (port 8082) → mcp-vault (port 8030, réseau interne)
+#   Internet → WAF (port 8085) → mcp-vault (port 8030, réseau interne)
 #   Le service MCP n'est PAS exposé directement.
 #   OpenBao tourne en localhost dans le conteneur mcp-vault.
 
@@ -18,11 +18,11 @@ services:
   waf:
     build: ./waf
     ports:
-      - "${WAF_PORT:-8082}:8082"
+      - "${WAF_PORT:-8085}:8085"
     volumes:
       - ./waf/Caddyfile:/etc/caddy/Caddyfile:ro
     environment:
-      - SITE_ADDRESS=${SITE_ADDRESS:-:8082}
+      - SITE_ADDRESS=${SITE_ADDRESS:-:8085}
     depends_on:
       - mcp-vault
     restart: unless-stopped
