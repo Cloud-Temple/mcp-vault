@@ -128,7 +128,7 @@ class TokenStore:
         return token
 
     def create(self, client_name: str, permissions: list, allowed_resources: list = None,
-               expires_in_days: int = 90, email: str = "") -> dict:
+               expires_in_days: int = 90, email: str = "", policy_id: str = "") -> dict:
         """Crée un nouveau token et le sauvegarde sur S3."""
         import secrets
         from datetime import datetime, timezone, timedelta
@@ -146,6 +146,7 @@ class TokenStore:
             "client_name": client_name,
             "permissions": permissions,
             "allowed_resources": allowed_resources or [],
+            "policy_id": policy_id,
             "email": email,
             "created_at": now.isoformat(),
             "expires_at": expires_at,
@@ -164,13 +165,71 @@ class TokenStore:
             {
                 "client_name": t["client_name"],
                 "permissions": t["permissions"],
+                "policy_id": t.get("policy_id", ""),
                 "email": t.get("email", ""),
                 "hash_prefix": t["hash"][:12],
+                "allowed_resources": t.get("allowed_resources", []),
                 "expires_at": t.get("expires_at"),
                 "revoked": t.get("revoked", False),
             }
             for t in self._tokens.values()
         ]
+
+    def update(self, hash_prefix: str, policy_id: str = None,
+               permissions: list = None, allowed_resources: list = None) -> dict:
+        """
+        Met à jour un token existant (policy_id, permissions, allowed_resources).
+
+        Seuls les champs fournis (non-None) sont modifiés.
+        Retourne le token mis à jour ou une erreur.
+        """
+        self._maybe_refresh()
+
+        # Trouver le token par préfixe de hash
+        target_hash = None
+        for h in self._tokens:
+            if h.startswith(hash_prefix):
+                target_hash = h
+                break
+
+        if not target_hash:
+            return {"status": "error", "message": f"Token {hash_prefix}... non trouvé"}
+
+        token = self._tokens[target_hash]
+        if token.get("revoked"):
+            return {"status": "error", "message": f"Token {hash_prefix}... est révoqué"}
+
+        updated_fields = []
+
+        if policy_id is not None:
+            token["policy_id"] = policy_id
+            updated_fields.append("policy_id")
+
+        if permissions is not None:
+            valid_perms = {"read", "write", "admin"}
+            if not all(p in valid_perms for p in permissions):
+                return {"status": "error", "message": f"Permissions invalides: {permissions}"}
+            token["permissions"] = permissions
+            updated_fields.append("permissions")
+
+        if allowed_resources is not None:
+            token["allowed_resources"] = allowed_resources
+            updated_fields.append("allowed_resources")
+
+        if not updated_fields:
+            return {"status": "error", "message": "Aucun champ à modifier"}
+
+        self._save()
+
+        return {
+            "status": "updated",
+            "hash_prefix": hash_prefix,
+            "client_name": token["client_name"],
+            "updated_fields": updated_fields,
+            "policy_id": token.get("policy_id", ""),
+            "permissions": token["permissions"],
+            "allowed_resources": token.get("allowed_resources", []),
+        }
 
     def revoke(self, hash_prefix: str) -> bool:
         """Révoque un token par préfixe de hash."""

@@ -6,6 +6,22 @@ MCP Vault est un serveur [MCP](https://modelcontextprotocol.io/) qui fournit un 
 
 **Pensez 1Password, mais pour vos agents IA.**
 
+### 📸 Console d'administration
+
+|               Dashboard                |          Vaults & Secrets           |
+| :------------------------------------: | :---------------------------------: |
+| ![Dashboard](screenshoots/screen1.png) | ![Vaults](screenshoots/screen2.png) |
+
+---
+
+## 📖 Documentation
+
+| Document                                                | Description                                                                                                                                                                  |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [**ARCHITECTURE.md**](DESIGN/mcp-vault/ARCHITECTURE.md) | Spécification complète — vision, architecture ASGI 5 couches, vaults, SSH CA, policies MCP (6 exemples prêts à l'emploi), sécurité des clés unseal (3 facteurs), roadmap HSM |
+| [**TECHNICAL.md**](DESIGN/mcp-vault/TECHNICAL.md)       | Documentation technique — 14 modules source, modèle de données, Docker, 243 tests e2e, dépendances, roadmap Phase 8→9                                                        |
+| [**scripts/README.md**](scripts/README.md)              | Guide CLI complet — 7 groupes de commandes, shell interactif, exemples                                                                                                       |
+
 ---
 
 ## ⚡ Démarrage rapide
@@ -22,7 +38,7 @@ docker compose up -d
 # 3. Vérifier (depuis le conteneur)
 docker compose exec mcp-vault python scripts/mcp_cli.py health
 
-# 4. Tester (148 tests e2e)
+# 4. Tester (243 tests e2e)
 docker compose exec mcp-vault python tests/test_e2e.py
 ```
 
@@ -42,14 +58,16 @@ Au démarrage, MCP Vault :
 
 ---
 
-## 🛠️ Outils MCP (18)
+## 🛠️ Outils MCP (24)
 
 ### System (2)
 
-| Outil           | Description                                        |
-| --------------- | -------------------------------------------------- |
-| `system_health` | État de santé (OpenBao + S3)                       |
-| `system_about`  | Informations service (version, outils, plateforme) |
+| Outil           | Description                                            |
+| --------------- | ------------------------------------------------------ |
+| `system_health` | État de santé (OpenBao + S3)                           |
+| `system_about`  | Informations service (version, outils, plateforme)     |
+
+> 💡 **Introspection** : l'endpoint `/admin/api/whoami` et la commande CLI `whoami` permettent de vérifier l'identité et les permissions du token courant.
 
 ### Vaults — coffres de secrets (5)
 
@@ -83,6 +101,31 @@ Chaque vault possède sa **propre CA SSH isolée** — les CA sont cryptographiq
 | `ssh_ca_public_key(vault_id)`                        | read  | Clé publique CA (pour `TrustedUserCAKeys` sur les serveurs) |
 | `ssh_ca_list_roles(vault_id)`                        | read  | Liste les rôles SSH CA configurés dans un vault             |
 | `ssh_ca_role_info(vault_id, role)`                   | read  | Détails d'un rôle (TTL, allowed_users, extensions)          |
+
+### Policies MCP — contrôle d'accès granulaire (4)
+
+Les policies permettent de restreindre finement les outils accessibles par token, avec support des **wildcards** (`system_*`, `ssh_*`...) et des **règles par vault** (`prod-*` → lecture seule).
+
+| Outil                                                                                | Perm  | Description                                         |
+| ------------------------------------------------------------------------------------ | ----- | --------------------------------------------------- |
+| `policy_create(policy_id, description?, allowed_tools?, denied_tools?, path_rules?)` | admin | Crée une policy avec règles d'accès                 |
+| `policy_list()`                                                                      | admin | Liste les policies avec compteurs                   |
+| `policy_get(policy_id)`                                                              | admin | Détails complets (allowed/denied tools, path_rules) |
+| `policy_delete(policy_id, confirm)`                                                  | admin | Supprime une policy ⚠️                            |
+
+> 📋 6 policies prêtes à l'emploi documentées dans [ARCHITECTURE.md §6.4.1](DESIGN/mcp-vault/ARCHITECTURE.md) : `readonly`, `ssh-operator`, `developer`, `prod-reader-dev-writer`, `ci-cd-agent`, `security-auditor`
+
+### Token Management (1)
+
+| Outil                                                          | Perm  | Description                                                      |
+| -------------------------------------------------------------- | ----- | ---------------------------------------------------------------- |
+| `token_update(hash_prefix, policy_id?, permissions?, vaults?)` | admin | Modifier un token existant (policy, permissions, vaults)         |
+
+### Audit (1)
+
+| Outil                                                                      | Perm  | Description                                                                    |
+| -------------------------------------------------------------------------- | ----- | ------------------------------------------------------------------------------ |
+| `audit_log(limit?, client?, vault_id?, tool?, category?, status?, since?)` | admin | Journal d'audit filtrable (ring buffer 5000 entrées + JSONL persistant)        |
 
 <details>
 <summary>💡 Workflow SSH CA typique (ex: infrastructure LLMaaS)</summary>
@@ -154,6 +197,7 @@ MCP Vault inclut un CLI complet avec Click + Rich + shell interactif :
 # Commandes scriptables
 python scripts/mcp_cli.py health
 python scripts/mcp_cli.py about
+python scripts/mcp_cli.py whoami                       # Identité du token courant
 python scripts/mcp_cli.py vault list
 python scripts/mcp_cli.py vault create serveurs-prod -d "Clés SSH prod"
 python scripts/mcp_cli.py secret write serveurs-prod web/github -d '{"username":"me","password":"s3cr3t"}' -t login
@@ -204,11 +248,11 @@ Les clés unseal d'OpenBao sont protégées par **séparation physique à 3 fact
 
 **Roadmap sécurité** :
 
-| Version | Approche |
-|---------|----------|
-| **v0.2.x** (actuel) | Clés sur S3 chiffrées AES-256-GCM, mémoire seule au runtime |
-| **v0.3.0** | Transit Auto-Unseal via OpenBao dédié (KMS Cloud Temple) |
-| **v2.0** | 🔐 **Connexion HSM** (Hardware Security Module) Cloud Temple — les clés ne quittent jamais le module matériel certifié |
+| Version             | Approche                                                                                                                |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| **v0.2.x** (actuel) | Clés sur S3 chiffrées AES-256-GCM, mémoire seule au runtime                                                             |
+| **v0.3.0**          | Transit Auto-Unseal via OpenBao dédié (KMS Cloud Temple)                                                                |
+| **v2.0**            | 🔐 **Connexion HSM** (Hardware Security Module) Cloud Temple — les clés ne quittent jamais le module matériel certifié |
 
 > 📖 Voir [DESIGN/mcp-vault/ARCHITECTURE.md](DESIGN/mcp-vault/ARCHITECTURE.md) §8 et §11 pour les détails complets.
 
@@ -217,7 +261,7 @@ Les clés unseal d'OpenBao sont protégées par **séparation physique à 3 fact
 ## 📋 Tests
 
 ```bash
-# Tests e2e MCP (148 tests, OpenBao réel)
+# Tests e2e MCP (243 tests, OpenBao réel)
 docker compose exec mcp-vault python tests/test_e2e.py
 
 # Tests bas niveau (78 tests, S3, auth, types)
@@ -231,20 +275,23 @@ docker compose exec mcp-vault python tests/test_e2e.py --test secrets
 docker compose exec mcp-vault python tests/test_e2e.py --test password
 ```
 
-### Couverture e2e (148 tests)
+### Couverture e2e (243 tests, 13 catégories)
 
-| Catégorie    | Tests | Description                                                                           |
-| ------------ | ----- | ------------------------------------------------------------------------------------- |
-| Système      | 7     | health, about, services                                                               |
-| Vault CRUD   | 28    | create + métadonnées, list, info + owner, update, delete, confirm, erreurs            |
-| Secrets CRUD | 24    | 10 types écrits, read/list/delete, validation                                         |
-| Versioning   | 8     | v1→v2→v3, read latest, read spécifique                                                |
-| Passwords    | 14    | longueurs, options, exclusions, CSPRNG                                                |
-| Isolation    | 7     | secrets cloisonnés entre vaults                                                       |
-| Erreurs      | 10    | edge cases, vault inexistant, type invalide, protection `_vault_meta`                 |
-| S3 Sync      | 3     | archive tar.gz sur S3                                                                 |
-| SSH CA       | 33    | setup, rôles multiples, signature ed25519, list/info roles, isolation CA, cleanup, erreurs |
-| Types        | 14    | 14 types vérifiés individuellement                                                    |
+| Catégorie              | Tests  | Description                                                                       |
+| ---------------------- | ------ | --------------------------------------------------------------------------------- |
+| Système                | 7      | health, about, services, tools_count (24)                                         |
+| Vault CRUD             | 28     | create + métadonnées, list, info + owner, update, delete, confirm, erreurs        |
+| Secrets CRUD           | 24     | 10 types écrits, read/list/delete, validation                                     |
+| Versioning             | 8      | v1→v2→v3, read latest, read spécifique                                            |
+| Passwords              | 14     | longueurs, options, exclusions, CSPRNG                                            |
+| Isolation              | 7      | secrets cloisonnés entre vaults                                                   |
+| Erreurs                | 10     | edge cases, vault inexistant, type invalide, protection `_vault_meta`             |
+| S3 Sync                | 3      | archive tar.gz sur S3                                                             |
+| SSH CA                 | 33     | setup, rôles multiples, signature ed25519, list/info roles, isolation CA, cleanup |
+| Types                  | 14     | 14 types vérifiés individuellement                                                |
+| Admin API              | 15     | health, whoami, generate-password, logs, unicité CSPRNG                           |
+| Policies MCP           | 43     | CRUD, validation, wildcards, path_rules, doublons, erreurs, Admin API REST        |
+| **Policy Enforcement** | **37** | check_policy, token_update, denied/allowed, changement policy, Admin API          |
 
 ---
 
@@ -271,7 +318,7 @@ mcp-vault/
 │       └── shell.py          # Shell interactif
 ├── src/mcp_vault/
 │   ├── config.py             # Configuration pydantic-settings
-│   ├── server.py             # FastMCP + 18 outils MCP + lifecycle
+│   ├── server.py             # FastMCP + 24 outils MCP + lifecycle + audit
 │   ├── lifecycle.py          # Orchestrateur startup/shutdown
 │   ├── s3_client.py          # Client S3 hybride SigV2/SigV4
 │   ├── s3_sync.py            # Sync file backend ↔ S3
@@ -285,7 +332,7 @@ mcp-vault/
 │       ├── js/               # Modules JS (config, api, app, dashboard, vaults, tokens, activity)
 │       └── img/              # logo-cloudtemple.svg
 ├── tests/
-│   ├── test_e2e.py           # 148 tests MCP e2e
+│   ├── test_e2e.py           # 243 tests MCP e2e (13 catégories)
 │   ├── test_service.py       # 78 tests bas niveau
 │   └── test_integration.py   # Tests pytest
 └── waf/                      # Caddy reverse proxy

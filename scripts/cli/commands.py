@@ -16,10 +16,11 @@ from . import BASE_URL, TOKEN
 from .client import MCPClient
 from .display import (
     console, show_error, show_json,
-    show_health_result, show_about_result,
+    show_health_result, show_about_result, show_whoami_result,
     show_vault_result, show_secret_result,
     show_types_result, show_password_result,
     show_ssh_result, show_token_result,
+    show_policy_result, show_audit_result,
 )
 
 
@@ -65,6 +66,29 @@ def about_cmd(ctx, output_json):
             show_json(result)
         else:
             show_about_result(result)
+    asyncio.run(_run())
+
+
+@cli.command("whoami")
+@click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
+@click.pass_context
+def whoami_cmd(ctx, output_json):
+    """👤 Identité du token courant (nom, permissions, vaults autorisés)."""
+    async def _run():
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=10) as http:
+                resp = await http.get(
+                    f"{ctx.obj['url']}/admin/api/whoami",
+                    headers={"Authorization": f"Bearer {ctx.obj['token']}"},
+                )
+                result = resp.json()
+        except Exception as e:
+            result = {"status": "error", "message": str(e)}
+        if output_json:
+            show_json(result)
+        else:
+            show_whoami_result(result)
     asyncio.run(_run())
 
 
@@ -497,6 +521,105 @@ def ssh_role_info_cmd(ctx, vault_id, role_name, output_json):
 
 
 # =============================================================================
+# Policies (groupe admin)
+# =============================================================================
+
+@cli.group("policy")
+@click.pass_context
+def policy_group(ctx):
+    """📋 Gestion des policies MCP (contrôle d'accès granulaire, admin).
+
+    \b
+    Sous-commandes : create, list, get, delete.
+    Les policies définissent quels outils MCP sont accessibles par token.
+    """
+    pass
+
+
+@policy_group.command("create")
+@click.argument("policy_id")
+@click.option("--description", "-d", default="", help="Description de la policy")
+@click.option("--allowed", "-a", default="", help="Outils autorisés (virgule, wildcards, ex: 'secret_*,vault_list')")
+@click.option("--denied", "-D", default="", help="Outils refusés (virgule, prioritaire, ex: 'vault_delete')")
+@click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
+@click.pass_context
+def policy_create_cmd(ctx, policy_id, description, allowed, denied, output_json):
+    """Créer une policy MCP.
+
+    \b
+    Exemples :
+      policy create readonly -d "Lecture seule" --allowed "system_*,vault_list,secret_read,secret_list"
+      policy create no-ssh -d "Pas de SSH" --denied "ssh_*"
+      policy create full-except-delete --denied "vault_delete,secret_delete"
+    """
+    async def _run():
+        client = MCPClient(ctx.obj["url"], ctx.obj["token"])
+        at = [t.strip() for t in allowed.split(",") if t.strip()] if allowed else []
+        dt = [t.strip() for t in denied.split(",") if t.strip()] if denied else []
+        result = await client.call_tool("policy_create", {
+            "policy_id": policy_id, "description": description,
+            "allowed_tools": at, "denied_tools": dt,
+        })
+        if output_json:
+            show_json(result)
+        else:
+            show_policy_result(result)
+    asyncio.run(_run())
+
+
+@policy_group.command("list")
+@click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
+@click.pass_context
+def policy_list_cmd(ctx, output_json):
+    """Lister toutes les policies."""
+    async def _run():
+        client = MCPClient(ctx.obj["url"], ctx.obj["token"])
+        result = await client.call_tool("policy_list", {})
+        if output_json:
+            show_json(result)
+        else:
+            show_policy_result(result)
+    asyncio.run(_run())
+
+
+@policy_group.command("get")
+@click.argument("policy_id")
+@click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
+@click.pass_context
+def policy_get_cmd(ctx, policy_id, output_json):
+    """Détails complets d'une policy (allowed/denied tools, path rules)."""
+    async def _run():
+        client = MCPClient(ctx.obj["url"], ctx.obj["token"])
+        result = await client.call_tool("policy_get", {"policy_id": policy_id})
+        if output_json:
+            show_json(result)
+        else:
+            show_policy_result(result)
+    asyncio.run(_run())
+
+
+@policy_group.command("delete")
+@click.argument("policy_id")
+@click.option("--yes", "-y", is_flag=True, help="Confirmer sans prompt")
+@click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
+@click.pass_context
+def policy_delete_cmd(ctx, policy_id, yes, output_json):
+    """Supprimer une policy (⚠️ irréversible)."""
+    if not yes:
+        click.confirm(f"⚠️  Supprimer la policy '{policy_id}' ?", abort=True)
+    async def _run():
+        client = MCPClient(ctx.obj["url"], ctx.obj["token"])
+        result = await client.call_tool("policy_delete", {
+            "policy_id": policy_id, "confirm": True,
+        })
+        if output_json:
+            show_json(result)
+        else:
+            show_policy_result(result)
+    asyncio.run(_run())
+
+
+# =============================================================================
 # Token management (groupe admin)
 # =============================================================================
 
@@ -506,7 +629,7 @@ def token_group(ctx):
     """🎫 Gestion des tokens d'accès MCP (admin).
 
     \b
-    Sous-commandes : create, list, revoke.
+    Sous-commandes : create, list, update, revoke.
     """
     pass
 
@@ -578,6 +701,51 @@ def token_list_cmd(ctx, output_json):
     asyncio.run(_run())
 
 
+@token_group.command("update")
+@click.argument("hash_prefix")
+@click.option("--policy", default="", help="Policy ID à assigner (vide = retirer)")
+@click.option("--permissions", "-p", default="", help="Nouvelles permissions (virgule)")
+@click.option("--vaults", default="", help="Vaults autorisés (virgule, '_all' = tous)")
+@click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
+@click.pass_context
+def token_update_cmd(ctx, hash_prefix, policy, permissions, vaults, output_json):
+    """Modifier un token (policy, permissions, vaults).
+
+    \b
+    Exemples :
+      token update abc123 --policy readonly
+      token update abc123 --policy _remove
+      token update abc123 --permissions read --vaults prod-servers
+    """
+    async def _run():
+        import httpx
+        data = {}
+        if policy:
+            data["policy_id"] = "" if policy == "_remove" else policy
+        if permissions:
+            data["permissions"] = [p.strip() for p in permissions.split(",") if p.strip()]
+        if vaults:
+            if vaults == "_all":
+                data["allowed_resources"] = []
+            else:
+                data["allowed_resources"] = [v.strip() for v in vaults.split(",") if v.strip()]
+        try:
+            async with httpx.AsyncClient(timeout=10) as http:
+                resp = await http.put(
+                    f"{ctx.obj['url']}/admin/api/tokens/{hash_prefix}",
+                    headers={"Authorization": f"Bearer {ctx.obj['token']}"},
+                    json=data,
+                )
+                result = resp.json()
+        except Exception as e:
+            result = {"status": "error", "message": str(e)}
+        if output_json:
+            show_json(result)
+        else:
+            show_policy_result(result)
+    asyncio.run(_run())
+
+
 @token_group.command("revoke")
 @click.argument("hash_prefix")
 @click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
@@ -599,6 +767,42 @@ def token_revoke_cmd(ctx, hash_prefix, output_json):
             show_json(result)
         else:
             show_token_result(result)
+    asyncio.run(_run())
+
+
+# =============================================================================
+# Audit Log
+# =============================================================================
+
+@cli.command("audit")
+@click.option("--limit", "-n", default=50, type=int, help="Nombre d'entrées (défaut: 50)")
+@click.option("--client", "-c", default="", help="Filtrer par client")
+@click.option("--vault", "-v", default="", help="Filtrer par vault")
+@click.option("--tool", default="", help="Filtrer par outil (wildcards: secret_*)")
+@click.option("--category", default="", help="Filtrer: system|vault|secret|ssh|policy|token")
+@click.option("--status", "-s", default="", help="Filtrer: ok|error|created|deleted|denied")
+@click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
+@click.pass_context
+def audit_cmd(ctx, limit, client, vault, tool, category, status, output_json):
+    """📊 Journal d'audit — toutes les opérations MCP.
+
+    \b
+    Exemples :
+      audit                              — 50 derniers événements
+      audit -n 100 --category secret     — 100 derniers secrets
+      audit --status denied              — refus de policy
+      audit --client agent-sre --vault prod-servers
+    """
+    async def _run():
+        mcpc = MCPClient(ctx.obj["url"], ctx.obj["token"])
+        result = await mcpc.call_tool("audit_log", {
+            "limit": limit, "client": client, "vault_id": vault,
+            "tool": tool, "category": category, "status": status,
+        })
+        if output_json:
+            show_json(result)
+        else:
+            show_audit_result(result)
     asyncio.run(_run())
 
 

@@ -73,6 +73,36 @@ def show_about_result(result: dict):
 
 
 # =============================================================================
+# system_whoami
+# =============================================================================
+
+def show_whoami_result(result: dict):
+    status = result.get("status", "?")
+    if status == "error":
+        show_error(result.get("message", "Erreur"))
+        return
+
+    client = result.get("client_name", "?")
+    auth_type = result.get("auth_type", "?")
+    perms = result.get("permissions", [])
+    resources = result.get("allowed_resources", [])
+
+    perms_str = ", ".join(perms) if perms else "(aucune)"
+    resources_str = ", ".join(resources) if resources else "(tous)"
+
+    auth_icon = "🔑" if auth_type == "bootstrap" else "🎫"
+
+    console.print(Panel.fit(
+        f"[bold]Client      :[/bold] [cyan]{client}[/cyan]\n"
+        f"[bold]Auth        :[/bold] {auth_icon} {auth_type}\n"
+        f"[bold]Permissions :[/bold] [green]{perms_str}[/green]\n"
+        f"[bold]Vaults      :[/bold] {resources_str}",
+        title="👤 Identité du token",
+        border_style="blue",
+    ))
+
+
+# =============================================================================
 # Vault Spaces
 # =============================================================================
 
@@ -292,6 +322,173 @@ def show_ssh_result(result: dict):
         console.print(Panel(pub_key, title="Clé publique CA", border_style="cyan"))
         if result.get("usage"):
             console.print(f"  [dim]💡 {result['usage']}[/dim]")
+        return
+
+    show_json(result)
+
+
+# =============================================================================
+# Audit Log
+# =============================================================================
+
+def show_audit_result(result: dict):
+    status = result.get("status", "?")
+
+    if status == "error":
+        show_error(result.get("message", "Erreur"))
+        return
+
+    entries = result.get("entries", [])
+    stats = result.get("stats", {})
+    total = result.get("total_in_buffer", 0)
+
+    # Stats header
+    by_cat = stats.get("by_category", {})
+    if by_cat:
+        cat_parts = []
+        cat_icons = {"system": "⚙️", "vault": "🏛️", "secret": "🔑", "ssh": "🔏",
+                     "policy": "📋", "token": "🎫", "audit": "📊"}
+        for cat, count in by_cat.items():
+            icon = cat_icons.get(cat, "📌")
+            cat_parts.append(f"{icon} {cat}:{count}")
+        console.print(f"\n[bold]📊 Audit[/bold] — {total} événements total — {' '.join(cat_parts)}")
+    else:
+        console.print(f"\n[bold]📊 Audit[/bold] — {total} événements total")
+
+    if not entries:
+        console.print("  [dim](aucun événement)[/dim]")
+        return
+
+    console.print(f"  Affichage : {len(entries)} entrée(s)\n")
+
+    table = Table(show_header=True, show_lines=False, pad_edge=False)
+    table.add_column("Heure", style="dim", min_width=8)
+    table.add_column("Cat", style="cyan", min_width=6)
+    table.add_column("Outil", style="bold white", min_width=18)
+    table.add_column("Client", style="blue", min_width=10)
+    table.add_column("Vault", style="green", min_width=12)
+    table.add_column("Status", min_width=8)
+    table.add_column("Détail", style="dim", max_width=30)
+
+    status_styles = {
+        "ok": "[green]✅ ok[/green]",
+        "created": "[green]🆕 created[/green]",
+        "deleted": "[yellow]🗑️ deleted[/yellow]",
+        "updated": "[cyan]✏️ updated[/cyan]",
+        "error": "[red]❌ error[/red]",
+        "denied": "[red bold]🚫 denied[/red bold]",
+    }
+
+    cat_icons = {"system": "⚙️", "vault": "🏛️", "secret": "🔑", "ssh": "🔏",
+                 "policy": "📋", "token": "🎫", "audit": "📊"}
+
+    for e in entries:
+        ts = (e.get("ts", "") or "")[11:19]
+        cat = cat_icons.get(e.get("category", ""), "📌")
+        tool = e.get("tool", "?")
+        client = e.get("client", "")
+        vault = e.get("vault_id", "")
+        st = status_styles.get(e.get("status", ""), e.get("status", "?"))
+        detail = e.get("detail", "")
+        if len(detail) > 30:
+            detail = detail[:27] + "..."
+
+        table.add_row(ts, cat, tool, client, vault, st, detail)
+
+    console.print(table)
+
+
+# =============================================================================
+# Policies
+# =============================================================================
+
+def show_policy_result(result: dict):
+    status = result.get("status", "?")
+
+    if status == "error":
+        show_error(result.get("message", "Erreur"))
+        return
+
+    # --- CREATE ---
+    if status == "created" and "policy_id" in result:
+        show_success(f"Policy [cyan]{result.get('policy_id', '?')}[/cyan] créée")
+        if result.get("description"):
+            console.print(f"  Description   : {result['description']}")
+        at = result.get("allowed_tools", [])
+        dt = result.get("denied_tools", [])
+        pr = result.get("path_rules", [])
+        if at:
+            console.print(f"  Allowed tools : [green]{', '.join(at)}[/green]")
+        if dt:
+            console.print(f"  Denied tools  : [red]{', '.join(dt)}[/red]")
+        if pr:
+            console.print(f"  Path rules    : {len(pr)} règle(s)")
+        return
+
+    # --- DELETE ---
+    if status == "deleted" and "policy_id" in result:
+        show_success(f"Policy [cyan]{result.get('policy_id', '?')}[/cyan] supprimée")
+        return
+
+    # --- LIST ---
+    policies = result.get("policies")
+    if policies is not None:
+        console.print(f"\n✅ [bold]{len(policies)} policy(ies)[/bold]")
+        if policies:
+            table = Table(show_header=True)
+            table.add_column("Policy ID", style="cyan bold", min_width=20)
+            table.add_column("Description", style="dim")
+            table.add_column("Allowed", style="green", justify="right")
+            table.add_column("Denied", style="red", justify="right")
+            table.add_column("Rules", style="white", justify="right")
+            table.add_column("Créé par", style="dim")
+            for p in policies:
+                table.add_row(
+                    p.get("policy_id", "?"),
+                    p.get("description", ""),
+                    str(p.get("allowed_tools_count", 0)),
+                    str(p.get("denied_tools_count", 0)),
+                    str(p.get("path_rules_count", 0)),
+                    p.get("created_by", ""),
+                )
+            console.print(table)
+        return
+
+    # --- GET (détail complet) ---
+    if "policy_id" in result and "allowed_tools" in result:
+        pid = result.get("policy_id", "?")
+        console.print(f"\n✅ [bold]Policy : {pid}[/bold]")
+        console.print(f"  Description : {result.get('description', '(aucune)')}")
+        console.print(f"  Créé par    : {result.get('created_by', '?')}")
+        console.print(f"  Créé le     : {result.get('created_at', '?')}")
+
+        at = result.get("allowed_tools", [])
+        dt = result.get("denied_tools", [])
+        pr = result.get("path_rules", [])
+
+        if at:
+            console.print(f"\n  [green]✅ Allowed tools ({len(at)}):[/green]")
+            for t in at:
+                console.print(f"    • {t}")
+        else:
+            console.print(f"\n  [dim]Allowed tools : (tous autorisés)[/dim]")
+
+        if dt:
+            console.print(f"\n  [red]🚫 Denied tools ({len(dt)}):[/red]")
+            for t in dt:
+                console.print(f"    • {t}")
+
+        if pr:
+            console.print(f"\n  📋 Path rules ({len(pr)}):")
+            for rule in pr:
+                console.print(f"    • {rule.get('vault_pattern', '?')} → {rule.get('permissions', [])}")
+        return
+
+    # --- UPDATE token with policy ---
+    if status == "updated":
+        show_success(f"Token [cyan]{result.get('client_name', result.get('hash_prefix', '?'))}[/cyan] mis à jour")
+        for f in result.get("updated_fields", []):
+            console.print(f"  ✏️  {f} → {result.get(f, '?')}")
         return
 
     show_json(result)

@@ -185,6 +185,42 @@ label { display: block; color: var(--text2); font-size: 0.8rem; margin-bottom: 0
 .btn-field-action.btn-generate:hover { background: rgba(39,174,96,0.15); border-color: var(--success); }
 .mono-textarea { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.8rem; }
 
+/* ═══ AUDIT TIMELINE ═══ */
+.audit-timeline { padding: 0; }
+.audit-date-sep {
+    padding: 0.5rem 1rem; font-size: 0.75rem; font-weight: 600;
+    color: var(--accent); background: rgba(65,168,144,0.06);
+    border-bottom: 1px solid rgba(65,168,144,0.15);
+    letter-spacing: 0.03em;
+}
+.audit-entry {
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.5rem 1rem; border-bottom: 1px solid rgba(42,42,72,0.3);
+    font-size: 0.82rem; transition: background 0.15s;
+}
+.audit-entry:hover { background: rgba(65,168,144,0.04); }
+.audit-time { color: var(--muted); font-family: 'SF Mono', monospace; font-size: 0.72rem; min-width: 55px; }
+.audit-icon { font-size: 1rem; min-width: 22px; text-align: center; }
+.audit-content { flex: 1; min-width: 0; }
+.audit-tool { font-weight: 600; color: var(--text); font-family: 'SF Mono', monospace; font-size: 0.8rem; }
+.audit-meta { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; margin-top: 2px; }
+.audit-tag {
+    display: inline-block; padding: 1px 6px; border-radius: 4px;
+    font-size: 0.68rem; font-weight: 500;
+}
+.audit-tag-client { background: rgba(52,152,219,0.15); color: #3498db; }
+.audit-tag-vault { background: rgba(65,168,144,0.15); color: var(--accent); cursor: pointer; }
+.audit-tag-vault:hover { background: rgba(65,168,144,0.3); }
+.audit-detail-text { color: var(--text2); font-size: 0.72rem; }
+.audit-status { min-width: 24px; text-align: center; font-size: 0.9rem; }
+.audit-duration { color: var(--muted); font-size: 0.68rem; font-family: monospace; min-width: 42px; text-align: right; }
+
+/* Status row highlights */
+.audit-entry.audit-error { border-left: 3px solid var(--danger); }
+.audit-entry.audit-denied { border-left: 3px solid #e74c3c; background: rgba(231,76,60,0.03); }
+.audit-entry.audit-created { border-left: 3px solid var(--success); }
+.audit-entry.audit-deleted { border-left: 3px solid var(--warning); }
+
 /* ═══ EMPTY STATE ═══ */
 .empty-state { text-align: center; padding: 2rem; color: var(--muted); font-size: 0.85rem; }
 

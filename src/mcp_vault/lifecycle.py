@@ -46,6 +46,22 @@ async def vault_startup() -> bool:
     except Exception as e:
         logger.error(f"❌ Token Store : {e}")
 
+    # ── 1b. Policy Store S3 ────────────────────────────────────────
+    logger.info("📋 Initialisation du Policy Store...")
+    try:
+        from .auth.policies import init_policy_store
+        init_policy_store()
+    except Exception as e:
+        logger.error(f"❌ Policy Store : {e}")
+
+    # ── 1c. Audit Store ────────────────────────────────────────────
+    logger.info("📋 Initialisation de l'Audit Store...")
+    try:
+        from .audit import init_audit_store
+        init_audit_store()
+    except Exception as e:
+        logger.error(f"❌ Audit Store : {e}")
+
     # ── 2. Vérifier les données locales (Docker volume) ───────────
     data_dir = Path(settings.openbao_data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)

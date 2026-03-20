@@ -70,14 +70,15 @@
 │  └────────────────────────────────────────────────────────────┘  │
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐  │
-│  │  20 Outils MCP (façade)                                    │  │
+│  │  24 Outils MCP (façade)                                    │  │
 │  │                                                            │  │
-│  │  Vaults :  vault_create, _list, _info, _delete       │  │
-│  │  Secrets : secret_store, _get, _list, _delete, _rotate     │  │
-│  │  SSH CA :  ssh_sign_key                                    │  │
-│  │  Policies: policy_create, _list, _delete                   │  │
-│  │  Tokens :  admin_create_token, _list_tokens,               │  │
-│  │            _revoke_token, _update_token                    │  │
+│  │  Vaults :  vault_create, _list, _info, _update, _delete    │  │
+│  │  Secrets : secret_write, _read, _list, _delete             │  │
+│  │  Types :   secret_types, secret_generate_password          │  │
+│  │  SSH CA :  ssh_ca_setup, _sign_key, _public_key,           │  │
+│  │            _list_roles, _role_info                         │  │
+│  │  Policies: policy_create, _list, _get, _delete             │  │
+│  │  Token :   token_update                                    │  │
 │  │  Audit :   audit_log                                       │  │
 │  │  System :  system_health, system_about                     │  │
 │  └─────────────────────────┬──────────────────────────────────┘  │
@@ -125,18 +126,18 @@
 
 ### 2.2 Composants
 
-| Composant                | Rôle                                             | Technologie                    |
-| ------------------------ | ------------------------------------------------ | ------------------------------ |
-| **WAF Caddy+Coraza**    | TLS, rate limiting, OWASP CRS, reverse proxy    | Caddy + plugin Coraza          |
-| **AdminMiddleware**      | Console admin web + API REST admin               | ASGI middleware (starter-kit)  |
-| **HealthCheckMiddleware**| Health check HTTP (/health, /healthz, /ready)    | ASGI middleware                |
-| **AuthMiddleware**       | Auth Bearer Token + vault access + ContextVar    | ASGI middleware (starter-kit)  |
-| **LoggingMiddleware**    | Logging requêtes + ring buffer mémoire           | ASGI middleware (starter-kit)  |
-| **Outils MCP**           | Façade MCP (20 outils)                           | FastMCP (starter-kit)          |
-| **hvac client**          | Client Python vers OpenBao                       | `hvac` library                 |
-| **OpenBao process**      | Moteur de secrets (chiffrement, policies, audit) | Binaire `bao` (Go, embedded)   |
-| **S3 Sync Manager**      | Synchronisation storage local ↔ S3               | boto3 + tar/gzip               |
-| **Token Manager**        | Gestion des tokens MCP, cache mémoire TTL 5min  | JSON sur S3 (starter-kit)      |
+| Composant                 | Rôle                                             | Technologie                   |
+| ------------------------- | ------------------------------------------------ | ----------------------------- |
+| **WAF Caddy+Coraza**      | TLS, rate limiting, OWASP CRS, reverse proxy     | Caddy + plugin Coraza         |
+| **AdminMiddleware**       | Console admin web + API REST admin               | ASGI middleware (starter-kit) |
+| **HealthCheckMiddleware** | Health check HTTP (/health, /healthz, /ready)    | ASGI middleware               |
+| **AuthMiddleware**        | Auth Bearer Token + vault access + ContextVar    | ASGI middleware (starter-kit) |
+| **LoggingMiddleware**     | Logging requêtes + ring buffer mémoire           | ASGI middleware (starter-kit) |
+| **Outils MCP**            | Façade MCP (24 outils)                           | FastMCP (starter-kit)         |
+| **hvac client**           | Client Python vers OpenBao                       | `hvac` library                |
+| **OpenBao process**       | Moteur de secrets (chiffrement, policies, audit) | Binaire `bao` (Go, embedded)  |
+| **S3 Sync Manager**       | Synchronisation storage local ↔ S3               | boto3 + tar/gzip              |
+| **Token Manager**         | Gestion des tokens MCP, cache mémoire TTL 5min   | JSON sur S3 (starter-kit)     |
 
 ### 2.3 Pile middleware ASGI
 
@@ -147,13 +148,13 @@ vers l'intérieur. Chaque couche intercepte les requêtes avant de les passer à
 AdminMiddleware → HealthCheckMiddleware → AuthMiddleware → LoggingMiddleware → FastMCP
 ```
 
-| Couche (ext → int)         | Intercepte                          | Passe au suivant si        |
-| -------------------------- | ----------------------------------- | -------------------------- |
-| **AdminMiddleware**        | `/admin`, `/admin/static/*`, `/admin/api/*` | Pas un chemin admin  |
-| **HealthCheckMiddleware**  | `/health`, `/healthz`, `/ready`     | Pas un chemin health       |
-| **AuthMiddleware**         | Toutes les requêtes MCP             | Token valide → ContextVar  |
-| **LoggingMiddleware**      | Toutes les requêtes                 | Log + ring buffer 200 ent. |
-| **FastMCP app**            | MCP Protocol (Streamable HTTP)      | —                          |
+| Couche (ext → int)        | Intercepte                                  | Passe au suivant si        |
+| ------------------------- | ------------------------------------------- | -------------------------- |
+| **AdminMiddleware**       | `/admin`, `/admin/static/*`, `/admin/api/*` | Pas un chemin admin        |
+| **HealthCheckMiddleware** | `/health`, `/healthz`, `/ready`             | Pas un chemin health       |
+| **AuthMiddleware**        | Toutes les requêtes MCP                     | Token valide → ContextVar  |
+| **LoggingMiddleware**     | Toutes les requêtes                         | Log + ring buffer 200 ent. |
+| **FastMCP app**           | MCP Protocol (Streamable HTTP)              | —                          |
 
 **Assemblage dans `create_app()`** (identique au pattern MCP Tools) :
 
@@ -216,12 +217,12 @@ AdminMiddleware (ASGI, outermost)
 
 #### 4 vues
 
-| Vue           | Description                                                                                                      |
-| ------------- | ---------------------------------------------------------------------------------------------------------------- |
-| **Dashboard** | État du serveur (version, OpenBao sealed/unsealed, S3 sync status, last sync, vaults count), stats tokens        |
-| **Vaults**    | Grille des vaults avec nombre de secrets, tags, date de création. Clic = détail des clés (pas les valeurs)|
-| **Tokens**    | Table CRUD : créer (checkboxes vault_ids, permissions), info, révoquer. Token brut affiché une seule fois        |
-| **Activité**  | Logs temps réel (ring buffer mémoire 200 entrées, auto-refresh 5s). Méthode, path, status, durée                |
+| Vue           | Description                                                                                                |
+| ------------- | ---------------------------------------------------------------------------------------------------------- |
+| **Dashboard** | État du serveur (version, OpenBao sealed/unsealed, S3 sync status, last sync, vaults count), stats tokens  |
+| **Vaults**    | Grille des vaults avec nombre de secrets, tags, date de création. Clic = détail des clés (pas les valeurs) |
+| **Tokens**    | Table CRUD : créer (checkboxes vault_ids, permissions), info, révoquer. Token brut affiché une seule fois  |
+| **Activité**  | Logs temps réel (ring buffer mémoire 200 entrées, auto-refresh 5s). Méthode, path, status, durée           |
 
 #### Sécurité de la console admin
 
@@ -327,11 +328,11 @@ Le S3 sert de **backup distant** synchronise regulierement.
 
 Trois niveaux de protection, configurables :
 
-| Strategie | Quand | Perte max en cas de crash | Cout |
-|-----------|-------|---------------------------|------|
-| **write-through** | Apres chaque secret_store/rotate/delete | 0 | Eleve (1 upload S3 par ecriture) |
-| **periodic** (defaut) | Toutes les N secondes (defaut 60s) | N secondes | Modere |
-| **lazy** | Toutes les N minutes (defaut 5min) | N minutes | Faible |
+| Strategie             | Quand                                   | Perte max en cas de crash | Cout                             |
+| --------------------- | --------------------------------------- | ------------------------- | -------------------------------- |
+| **write-through**     | Apres chaque secret_store/rotate/delete | 0                         | Eleve (1 upload S3 par ecriture) |
+| **periodic** (defaut) | Toutes les N secondes (defaut 60s)      | N secondes                | Modere                           |
+| **lazy**              | Toutes les N minutes (defaut 5min)      | N minutes                 | Faible                           |
 
 Recommandation : **periodic** a 60 secondes pour un bon compromis.
 
@@ -504,13 +505,13 @@ vault-bucket/
 
 ### 6.1 Vaults
 
-| Outil                                               | Perm  | Description                                            |
-| --------------------------------------------------- | ----- | ------------------------------------------------------ |
+| Outil                                         | Perm  | Description                                                   |
+| --------------------------------------------- | ----- | ------------------------------------------------------------- |
 | `vault_create(vault_id, description?, tags?)` | write | Crée un vault (mount point KV v2) + métadonnées (owner, date) |
-| `vault_list()`                                | read  | Liste les vaults accessibles (filtrés par token)               |
-| `vault_info(vault_id)`                        | read  | Détails d'un vault (métadonnées, nombre de secrets, owner)     |
-| `vault_update(vault_id, description)`         | write | Met à jour la description d'un vault                           |
-| `vault_delete(vault_id)`                      | admin | Supprime un vault et tous ses secrets                          |
+| `vault_list()`                                | read  | Liste les vaults accessibles (filtrés par token)              |
+| `vault_info(vault_id)`                        | read  | Détails d'un vault (métadonnées, nombre de secrets, owner)    |
+| `vault_update(vault_id, description)`         | write | Met à jour la description d'un vault                          |
+| `vault_delete(vault_id)`                      | admin | Supprime un vault et tous ses secrets                         |
 
 ### 6.2 Secrets
 
@@ -518,27 +519,260 @@ vault-bucket/
 | ---------------------------------------------------------------- | ----- | --------------------------------------------------- |
 | `secret_store(vault_id, key, value, type?, description?, tags?)` | write | Stocker un secret (nouvelle version si existe déjà) |
 | `secret_get(vault_id, key, version?)`                            | read  | Récupérer un secret (dernière version par défaut)   |
-| `secret_list(vault_id, prefix?)`                                 | read  | Lister les clés d'un vault (pas les valeurs !)     |
+| `secret_list(vault_id, prefix?)`                                 | read  | Lister les clés d'un vault (pas les valeurs !)      |
 | `secret_delete(vault_id, key)`                                   | admin | Supprimer un secret (toutes les versions)           |
 | `secret_rotate(vault_id, key, new_value)`                        | write | Rotation : crée une nouvelle version                |
 
 ### 6.3 SSH Certificate Authority
 
-| Outil                                                                               | Perm  | Description                                                                  |
-| ----------------------------------------------------------------------------------- | ----- | ---------------------------------------------------------------------------- |
-| `ssh_ca_setup(vault_id, role_name, allowed_users?, default_user?, ttl?)`            | write | Configure une CA SSH + rôle dans un vault (crée le mount SSH si inexistant)  |
-| `ssh_sign_key(vault_id, role_name, public_key, valid_principals?, ttl?)`            | read  | Signe une clé publique SSH → retourne un certificat éphémère                 |
-| `ssh_ca_public_key(vault_id)`                                                       | read  | Récupère la clé publique CA (pour `TrustedUserCAKeys` sur les serveurs)      |
-| `ssh_ca_list_roles(vault_id)`                                                       | read  | Liste les rôles SSH CA configurés dans un vault                              |
-| `ssh_ca_role_info(vault_id, role_name)`                                             | read  | Détails d'un rôle (TTL, allowed_users, extensions, etc.)                     |
+| Outil                                                                    | Perm  | Description                                                                 |
+| ------------------------------------------------------------------------ | ----- | --------------------------------------------------------------------------- |
+| `ssh_ca_setup(vault_id, role_name, allowed_users?, default_user?, ttl?)` | write | Configure une CA SSH + rôle dans un vault (crée le mount SSH si inexistant) |
+| `ssh_sign_key(vault_id, role_name, public_key, valid_principals?, ttl?)` | read  | Signe une clé publique SSH → retourne un certificat éphémère                |
+| `ssh_ca_public_key(vault_id)`                                            | read  | Récupère la clé publique CA (pour `TrustedUserCAKeys` sur les serveurs)     |
+| `ssh_ca_list_roles(vault_id)`                                            | read  | Liste les rôles SSH CA configurés dans un vault                             |
+| `ssh_ca_role_info(vault_id, role_name)`                                  | read  | Détails d'un rôle (TTL, allowed_users, extensions, etc.)                    |
 
-### 6.4 Policies OpenBao
+### 6.4 Policies MCP (contrôle d'accès granulaire)
 
-| Outil                                   | Perm  | Description                                     |
-| --------------------------------------- | ----- | ----------------------------------------------- |
-| `policy_create(policy_id, hcl_content)` | admin | Créer/mettre à jour une policy HCL dans OpenBao |
-| `policy_list()`                         | admin | Lister les policies                             |
-| `policy_delete(policy_id)`              | admin | Supprimer une policy                            |
+Les policies MCP permettent de restreindre les outils accessibles et les
+permissions par vault, au-delà du système de permissions basique (read/write/admin).
+Elles sont stockées sur S3 (`_system/policies.json`) et assignables aux tokens
+via un champ `policy_id` (Phase 8b).
+
+| Outil                                                                                | Perm  | Description                                                  |
+| ------------------------------------------------------------------------------------ | ----- | ------------------------------------------------------------ |
+| `policy_create(policy_id, description?, allowed_tools?, denied_tools?, path_rules?)` | admin | Crée une policy avec règles d'accès aux outils et aux vaults |
+| `policy_list()`                                                                      | admin | Liste les policies avec compteurs résumés                    |
+| `policy_get(policy_id)`                                                              | admin | Détails complets d'une policy (rules, allowed/denied tools)  |
+| `policy_delete(policy_id, confirm)`                                                  | admin | Supprime une policy (irréversible, confirm=True requis)      |
+
+**Modèle de données policy** :
+
+```json
+{
+  "policy_id": "readonly-ssh",
+  "description": "Lecture seule + SSH CA uniquement",
+  "allowed_tools": ["system_*", "vault_list", "vault_info", "secret_read", "secret_list", "ssh_*"],
+  "denied_tools": ["vault_delete", "secret_write", "secret_delete"],
+  "path_rules": [
+    {"vault_pattern": "prod-*", "permissions": ["read"]},
+    {"vault_pattern": "dev-*", "permissions": ["read", "write"]}
+  ],
+  "created_at": "2026-03-18T22:00:00+00:00",
+  "created_by": "admin"
+}
+```
+
+**Logique d'évaluation** :
+
+```
+1. denied_tools match    → REFUSÉ (toujours prioritaire)
+2. allowed_tools vide    → tout autorisé (sauf denied)
+3. allowed_tools match   → autorisé
+4. Sinon                 → refusé
+```
+
+**Wildcards** : les patterns supportent `*` via `fnmatch` Python :
+- `"system_*"` → matche `system_health`, `system_about`
+- `"ssh_*"` → matche `ssh_ca_setup`, `ssh_sign_key`, `ssh_ca_public_key`, etc.
+- `"secret_*"` → matche `secret_write`, `secret_read`, `secret_list`, `secret_delete`
+
+**path_rules** : permissions granulaires par vault pattern :
+- `{"vault_pattern": "prod-*", "permissions": ["read"]}` → lecture seule sur les vaults prod
+- `{"vault_pattern": "*", "permissions": ["read", "write"]}` → lecture/écriture sur tous les vaults
+
+#### 6.4.1 Catalogue de policies prêtes à l'emploi
+
+Voici des exemples de policies directement utilisables, couvrant les cas d'usage
+les plus courants. Chacune peut être créée via `policy_create`.
+
+##### 🔒 `readonly` — Lecture seule complète
+
+Pour les agents ou utilisateurs qui doivent consulter les secrets sans pouvoir
+les modifier. Idéal pour les agents d'audit, de monitoring ou de documentation.
+
+```json
+{
+  "policy_id": "readonly",
+  "description": "Lecture seule — aucune modification possible",
+  "allowed_tools": [
+    "system_*",
+    "vault_list", "vault_info",
+    "secret_read", "secret_list", "secret_types"
+  ],
+  "denied_tools": [
+    "vault_create", "vault_update", "vault_delete",
+    "secret_write", "secret_delete",
+    "ssh_ca_setup",
+    "policy_*"
+  ],
+  "path_rules": []
+}
+```
+
+##### 🔑 `ssh-operator` — Opérateur SSH CA uniquement
+
+Pour les agents SRE/DevOps qui doivent signer des clés SSH mais n'ont pas besoin
+d'accéder aux secrets KV. Combine l'accès SSH avec la lecture des secrets de base.
+
+```json
+{
+  "policy_id": "ssh-operator",
+  "description": "Signature SSH CA + lecture secrets — pas de modification",
+  "allowed_tools": [
+    "system_*",
+    "vault_list", "vault_info",
+    "secret_read", "secret_list",
+    "ssh_ca_setup", "ssh_sign_key", "ssh_ca_public_key",
+    "ssh_ca_list_roles", "ssh_ca_role_info"
+  ],
+  "denied_tools": [
+    "vault_delete",
+    "secret_delete",
+    "policy_*"
+  ],
+  "path_rules": []
+}
+```
+
+##### 🏗️ `developer` — Développeur avec écriture
+
+Pour les développeurs qui gèrent leurs propres secrets (API keys, credentials)
+mais ne doivent pas pouvoir supprimer des vaults ou modifier les policies.
+
+```json
+{
+  "policy_id": "developer",
+  "description": "Lecture/écriture des secrets — pas de suppression vault ni policy",
+  "allowed_tools": [
+    "system_*",
+    "vault_list", "vault_info", "vault_create",
+    "secret_write", "secret_read", "secret_list", "secret_delete",
+    "secret_types", "secret_generate_password"
+  ],
+  "denied_tools": [
+    "vault_delete",
+    "ssh_ca_setup",
+    "policy_*"
+  ],
+  "path_rules": []
+}
+```
+
+##### 🏭 `prod-reader-dev-writer` — Lecture prod, écriture dev
+
+Pattern classique séparation prod/dev : les agents peuvent lire les secrets
+de production mais ne peuvent écrire que dans les vaults de développement.
+
+```json
+{
+  "policy_id": "prod-reader-dev-writer",
+  "description": "Lecture seule sur prod-*, lecture/écriture sur dev-*",
+  "allowed_tools": [
+    "system_*",
+    "vault_list", "vault_info",
+    "secret_write", "secret_read", "secret_list",
+    "secret_types", "secret_generate_password"
+  ],
+  "denied_tools": [
+    "vault_delete", "vault_create",
+    "policy_*"
+  ],
+  "path_rules": [
+    {"vault_pattern": "prod-*", "permissions": ["read"]},
+    {"vault_pattern": "dev-*", "permissions": ["read", "write"]},
+    {"vault_pattern": "staging-*", "permissions": ["read", "write"]}
+  ]
+}
+```
+
+##### 🤖 `ci-cd-agent` — Pipeline CI/CD
+
+Pour les pipelines de déploiement automatisé qui doivent lire des secrets
+(credentials, certificates) et signer des clés SSH pour le déploiement.
+
+```json
+{
+  "policy_id": "ci-cd-agent",
+  "description": "CI/CD — lecture secrets + signature SSH, pas de modification vault",
+  "allowed_tools": [
+    "system_health",
+    "vault_list", "vault_info",
+    "secret_read", "secret_list",
+    "ssh_sign_key", "ssh_ca_public_key", "ssh_ca_list_roles"
+  ],
+  "denied_tools": [
+    "vault_create", "vault_update", "vault_delete",
+    "secret_write", "secret_delete",
+    "ssh_ca_setup",
+    "policy_*"
+  ],
+  "path_rules": [
+    {"vault_pattern": "deploy-*", "permissions": ["read"]},
+    {"vault_pattern": "ci-*", "permissions": ["read"]}
+  ]
+}
+```
+
+##### 🛡️ `security-auditor` — Auditeur sécurité
+
+Pour les auditeurs qui doivent pouvoir tout lire (y compris les policies et
+les rôles SSH) sans pouvoir modifier quoi que ce soit.
+
+```json
+{
+  "policy_id": "security-auditor",
+  "description": "Audit — lecture totale incluant policies et SSH, aucune écriture",
+  "allowed_tools": [
+    "system_*",
+    "vault_list", "vault_info",
+    "secret_read", "secret_list", "secret_types",
+    "ssh_ca_public_key", "ssh_ca_list_roles", "ssh_ca_role_info",
+    "policy_list", "policy_get"
+  ],
+  "denied_tools": [
+    "vault_create", "vault_update", "vault_delete",
+    "secret_write", "secret_delete",
+    "ssh_ca_setup", "ssh_sign_key",
+    "policy_create", "policy_delete"
+  ],
+  "path_rules": []
+}
+```
+
+#### 6.4.2 Architecture du PolicyStore
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Policy Store (même pattern que Token Store)                 │
+│                                                              │
+│  Stockage  : S3 (_system/policies.json)                      │
+│  Cache     : mémoire TTL 5 minutes                           │
+│  Singleton : init_policy_store() au startup                  │
+│  Getter    : get_policy_store()                              │
+│                                                              │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │ Matching (wildcards via fnmatch)                       │  │
+│  │                                                        │  │
+│  │ is_tool_allowed(policy_id, tool_name) → bool           │  │
+│  │  • denied_tools match → False (prioritaire)            │  │
+│  │  • allowed_tools vide → True (tout permis)             │  │
+│  │  • allowed_tools match → True                          │  │
+│  │  • Sinon → False                                       │  │
+│  │                                                        │  │
+│  │ get_vault_permissions(policy_id, vault_id) → list      │  │
+│  │  • Cherche la première path_rule qui matche             │  │
+│  │  • Retourne les permissions (ex: ["read", "write"])    │  │
+│  │  • Aucune règle → [] (permissions par défaut du token) │  │
+│  └────────────────────────────────────────────────────────┘  │
+│                                                              │
+│  Enforcement actif (Phase 8b ✅) :                           │
+│  • check_policy() dans 15 outils MCP                         │
+│  • Champ policy_id dans les tokens MCP                       │
+│  • Outil token_update pour assigner/modifier les policies    │
+└──────────────────────────────────────────────────────────────┘
+```
 
 ### 6.5 Tokens MCP
 
@@ -549,15 +783,80 @@ vault-bucket/
 | `admin_revoke_token(token_prefix)`                                           | admin | Révoquer un token          |
 | `admin_update_token(token_prefix, vault_ids?, permissions?)`                 | admin | Modifier un token          |
 
-### 6.6 Audit & Système
+### 6.6 Token Management
 
-| Outil                                       | Perm   | Description                                                       |
-| ------------------------------------------- | ------ | ----------------------------------------------------------------- |
-| `audit_log(last_n?, vault_id?, operation?)` | admin  | Journal d'audit (depuis l'audit device OpenBao)                   |
-| `system_health`                             | public | État de santé (OpenBao sealed/unsealed, S3 accessible, last sync) |
-| `system_about`                              | public | Version, nombre de vaults, nombre de secrets, uptime              |
+| Outil                                                                  | Perm  | Description                                            |
+| ---------------------------------------------------------------------- | ----- | ------------------------------------------------------ |
+| `token_update(hash_prefix, policy_id?, permissions?, vaults?)`         | admin | Modifier un token existant (policy, permissions, vaults) |
 
-**Total : 20 outils MCP**
+### 6.7 Audit & Système
+
+| Outil                                                                       | Perm   | Description                                                                    |
+| --------------------------------------------------------------------------- | ------ | ------------------------------------------------------------------------------ |
+| `audit_log(limit?, client?, vault_id?, tool?, category?, status?, since?)`  | admin  | Journal d'audit MCP avec filtres combinables (ring buffer 5000 + JSONL persistant) |
+| `system_health`                                                             | public | État de santé (OpenBao sealed/unsealed, S3 accessible, last sync)              |
+| `system_about`                                                              | public | Version, nombre de vaults, nombre de secrets, uptime                           |
+
+> 💡 **Introspection** : l'endpoint `/admin/api/whoami` et la commande CLI `whoami` permettent de vérifier l'identité et les permissions du token courant (client_name, auth_type, permissions, vaults autorisés).
+
+**Total : 24 outils MCP** (5 vaults + 6 secrets + 5 SSH CA + 4 policies + 1 token + 1 audit + 2 system)
+
+#### 6.7.1 Architecture du journal d'audit
+
+Le système d'audit trace **toutes** les opérations MCP, avec double persistance :
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  AUDIT FLOW                                                     │
+│                                                                 │
+│  Outil MCP                                                      │
+│    │                                                            │
+│    ├── check_policy() ──× DENIED ──→ log_audit(status="denied") │
+│    │                                                            │
+│    ├── [logique métier] ──→ résultat                            │
+│    │                                                            │
+│    └── _r(tool, result) ──→ log_audit(status=result["status"])  │
+│              │                                                  │
+│              ▼                                                  │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │  AuditStore (singleton)                                 │    │
+│  │                                                         │    │
+│  │  ┌──────────────────┐  ┌──────────────────────────┐     │    │
+│  │  │ Ring buffer       │  │ Fichier JSONL            │     │    │
+│  │  │ 5000 entrées max  │  │ /openbao/logs/           │     │    │
+│  │  │ (deque, mémoire)  │  │ audit-mcp.jsonl          │     │    │
+│  │  │                   │  │ (append-only, persistant) │     │    │
+│  │  │ → Filtrage rapide │  │ → Rechargé au startup    │     │    │
+│  │  │ → Stats dashboard │  │ → Survit aux restarts    │     │    │
+│  │  └──────────────────┘  └──────────────────────────┘     │    │
+│  └─────────────────────────────────────────────────────────┘    │
+│                                                                 │
+│  Chaque entrée :                                                │
+│  {ts, client, tool, category, vault_id, status, detail, ms}     │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Catégorisation automatique** : basée sur le préfixe du nom d'outil.
+
+| Préfixe    | Catégorie | Icône |
+| ---------- | --------- | ----- |
+| `system_`  | system    | ⚙️  |
+| `vault_`   | vault     | 🏛️  |
+| `secret_`  | secret    | 🔑   |
+| `ssh_`     | ssh       | 🔏   |
+| `policy_`  | policy    | 📋   |
+| `token_`   | token     | 🎫   |
+| `audit_`   | audit     | 📊   |
+
+**Statuts possibles** : `ok`, `created`, `deleted`, `updated`, `error`, `denied`.
+
+**Filtres combinables** dans `audit_log` : limit, client, vault_id, tool (wildcards), category, status, since (ISO 8601).
+
+**Intégration** :
+- Le helper `_r(tool, result)` dans `server.py` appelle `log_audit()` après chaque opération MCP et retourne le résultat inchangé — audit systématique sans modifier la logique métier.
+- Les refus de policy (`check_policy()`) génèrent un événement `status="denied"` avant même l'exécution de l'outil.
+- La SPA admin affiche les événements en timeline avec stats par catégorie, filtres, séparateurs de date et auto-refresh.
+- Le CLI `audit` offre un affichage Rich coloré (table avec icônes par catégorie et statut).
 
 ---
 
@@ -640,11 +939,11 @@ garantit une **isolation cryptographique complète** entre les domaines de confi
 
 **3 niveaux d'isolation** :
 
-| Niveau | Mécanisme | Protection |
-|--------|-----------|------------|
-| **Vault** | Chaque vault = son propre mount SSH CA OpenBao | Les CA sont **cryptographiquement différentes**. Un cert de vault A ne fonctionne pas sur les serveurs configurés pour vault B |
-| **Token** | `vault_ids` dans le token MCP | Un agent ne peut **même pas appeler** les outils SSH d'un vault non autorisé |
-| **Rôle SSH** | `allowed_users` + `ttl` par rôle | Le rôle "agentic" ne peut signer un cert que pour les utilisateurs listés, avec un TTL borné |
+| Niveau       | Mécanisme                                      | Protection                                                                                                                     |
+| ------------ | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| **Vault**    | Chaque vault = son propre mount SSH CA OpenBao | Les CA sont **cryptographiquement différentes**. Un cert de vault A ne fonctionne pas sur les serveurs configurés pour vault B |
+| **Token**    | `vault_ids` dans le token MCP                  | Un agent ne peut **même pas appeler** les outils SSH d'un vault non autorisé                                                   |
+| **Rôle SSH** | `allowed_users` + `ttl` par rôle               | Le rôle "agentic" ne peut signer un cert que pour les utilisateurs listés, avec un TTL borné                                   |
 
 ### 7.3 Implémentation OpenBao
 
@@ -661,29 +960,29 @@ def _ssh_mount_point(vault_id: str) -> str:
 
 **Opérations OpenBao** :
 
-| Opération | API OpenBao (via hvac) |
-|-----------|----------------------|
-| Monter le SSH engine | `sys.enable_secrets_engine("ssh", path="ssh-ca-{vault_id}")` |
-| Générer la CA | `write("ssh-ca-{vault_id}/config/ca", generate_signing_key=True)` |
-| Créer un rôle | `write("ssh-ca-{vault_id}/roles/{role}", key_type="ca", ...)` |
-| Signer une clé | `write("ssh-ca-{vault_id}/sign/{role}", public_key="...")` |
-| Lire la CA publique | `read("ssh-ca-{vault_id}/config/ca")` |
-| Lister les rôles | `list("ssh-ca-{vault_id}/roles")` |
-| Info rôle | `read("ssh-ca-{vault_id}/roles/{role}")` |
+| Opération            | API OpenBao (via hvac)                                            |
+| -------------------- | ----------------------------------------------------------------- |
+| Monter le SSH engine | `sys.enable_secrets_engine("ssh", path="ssh-ca-{vault_id}")`      |
+| Générer la CA        | `write("ssh-ca-{vault_id}/config/ca", generate_signing_key=True)` |
+| Créer un rôle        | `write("ssh-ca-{vault_id}/roles/{role}", key_type="ca", ...)`     |
+| Signer une clé       | `write("ssh-ca-{vault_id}/sign/{role}", public_key="...")`        |
+| Lire la CA publique  | `read("ssh-ca-{vault_id}/config/ca")`                             |
+| Lister les rôles     | `list("ssh-ca-{vault_id}/roles")`                                 |
+| Info rôle            | `read("ssh-ca-{vault_id}/roles/{role}")`                          |
 
 ### 7.4 Rôles SSH
 
 Un rôle SSH définit **qui peut signer quoi** :
 
-| Paramètre | Description | Exemple |
-|-----------|-------------|---------|
-| `role_name` | Identifiant du rôle | `"adminct"`, `"agentic"` |
-| `allowed_users` | Utilisateurs système autorisés dans le cert | `"adminct"`, `"agentic,iaagentic"`, `"*"` |
-| `default_user` | Utilisateur par défaut si non spécifié | `"adminct"` |
-| `ttl` | Durée de vie par défaut du certificat | `"1h"`, `"30m"` |
-| `max_ttl` | Durée de vie maximale | `"24h"` |
-| `allow_user_certificates` | Autorise les user certs (vs host certs) | `true` |
-| `allowed_extensions` | Extensions SSH autorisées | `"permit-pty,permit-port-forwarding"` |
+| Paramètre                 | Description                                 | Exemple                                   |
+| ------------------------- | ------------------------------------------- | ----------------------------------------- |
+| `role_name`               | Identifiant du rôle                         | `"adminct"`, `"agentic"`                  |
+| `allowed_users`           | Utilisateurs système autorisés dans le cert | `"adminct"`, `"agentic,iaagentic"`, `"*"` |
+| `default_user`            | Utilisateur par défaut si non spécifié      | `"adminct"`                               |
+| `ttl`                     | Durée de vie par défaut du certificat       | `"1h"`, `"30m"`                           |
+| `max_ttl`                 | Durée de vie maximale                       | `"24h"`                                   |
+| `allow_user_certificates` | Autorise les user certs (vs host certs)     | `true`                                    |
+| `allowed_extensions`      | Extensions SSH autorisées                   | `"permit-pty,permit-port-forwarding"`     |
 
 ### 7.5 Workflow concret — Exemple LLMaaS
 
@@ -789,16 +1088,16 @@ vault_delete("llmaas-infra")
 
 ### 7.7 Comparatif clés statiques vs SSH CA
 
-| Aspect | Clés statiques | SSH CA (MCP Vault) |
-|--------|---------------|-------------------|
-| Provisioning serveur | Copier clé publique sur chaque serveur | Copier 1 fichier CA (une seule fois) |
-| Durée de vie | Permanente | Éphémère (configurable, ex: 30min) |
-| Révocation | Supprimer manuellement de chaque serveur | Le cert expire tout seul |
-| Compromission | Accès à TOUS les serveurs, pour toujours | Accès limité au TTL du cert |
-| Audit | Aucun (qui utilise quelle clé ?) | Serial number + audit OpenBao |
-| Multi-profil | 1 clé par profil, copiée partout | 1 rôle par profil, cert à la demande |
-| Rotation | Très pénible (changer partout) | Naturelle (nouveaux certs à chaque session) |
-| Agents IA | Clé stockée quelque part (risque) | Cert éphémère en mémoire, jamais stocké |
+| Aspect               | Clés statiques                           | SSH CA (MCP Vault)                          |
+| -------------------- | ---------------------------------------- | ------------------------------------------- |
+| Provisioning serveur | Copier clé publique sur chaque serveur   | Copier 1 fichier CA (une seule fois)        |
+| Durée de vie         | Permanente                               | Éphémère (configurable, ex: 30min)          |
+| Révocation           | Supprimer manuellement de chaque serveur | Le cert expire tout seul                    |
+| Compromission        | Accès à TOUS les serveurs, pour toujours | Accès limité au TTL du cert                 |
+| Audit                | Aucun (qui utilise quelle clé ?)         | Serial number + audit OpenBao               |
+| Multi-profil         | 1 clé par profil, copiée partout         | 1 rôle par profil, cert à la demande        |
+| Rotation             | Très pénible (changer partout)           | Naturelle (nouveaux certs à chaque session) |
+| Agents IA            | Clé stockée quelque part (risque)        | Cert éphémère en mémoire, jamais stocké     |
 
 ### 7.8 Checklist de sécurité opérationnelle SSH CA
 
@@ -807,55 +1106,55 @@ l'exploitation de la SSH CA de MCP Vault en production.
 
 #### 7.8.1 Configuration des rôles SSH
 
-| Règle | Priorité | Description |
-|-------|----------|-------------|
-| **TTL courts par défaut** | 🔴 Critique | `ttl` ≤ 1h pour les humains, ≤ 30m pour les agents IA. Plus le TTL est court, plus la fenêtre d'exposition en cas de compromission est réduite |
-| **max_ttl borné** | 🔴 Critique | Toujours définir un `max_ttl` (ex: 24h) pour empêcher les demandes de certificats longue durée |
-| **allowed_users explicites** | 🔴 Critique | Ne **jamais** utiliser `"*"` en production. Lister explicitement les utilisateurs autorisés (ex: `"adminct"`, `"agentic,iaagentic"`) |
-| **Un rôle = un profil** | 🟠 Élevée | Créer un rôle SSH distinct par profil de connexion (admin, agent, CI/CD). Ne pas mélanger les périmètres |
-| **Extensions minimales** | 🟠 Élevée | Limiter les extensions SSH au strict nécessaire : `permit-pty` pour les shells interactifs, pas de `permit-port-forwarding` sauf besoin explicite |
-| **Pas de rôle wildcard** | 🟡 Moyenne | Éviter les rôles avec `allowed_users="*"` même pour les admins — préférer un rôle `admin-emergency` séparé, audité |
+| Règle                        | Priorité     | Description                                                                                                                                       |
+| ---------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **TTL courts par défaut**    | 🔴 Critique | `ttl` ≤ 1h pour les humains, ≤ 30m pour les agents IA. Plus le TTL est court, plus la fenêtre d'exposition en cas de compromission est réduite    |
+| **max_ttl borné**            | 🔴 Critique | Toujours définir un `max_ttl` (ex: 24h) pour empêcher les demandes de certificats longue durée                                                    |
+| **allowed_users explicites** | 🔴 Critique | Ne **jamais** utiliser `"*"` en production. Lister explicitement les utilisateurs autorisés (ex: `"adminct"`, `"agentic,iaagentic"`)              |
+| **Un rôle = un profil**      | 🟠 Élevée   | Créer un rôle SSH distinct par profil de connexion (admin, agent, CI/CD). Ne pas mélanger les périmètres                                          |
+| **Extensions minimales**     | 🟠 Élevée   | Limiter les extensions SSH au strict nécessaire : `permit-pty` pour les shells interactifs, pas de `permit-port-forwarding` sauf besoin explicite |
+| **Pas de rôle wildcard**     | 🟡 Moyenne  | Éviter les rôles avec `allowed_users="*"` même pour les admins — préférer un rôle `admin-emergency` séparé, audité                                |
 
 #### 7.8.2 Déploiement sur les serveurs cibles
 
-| Règle | Priorité | Description |
-|-------|----------|-------------|
-| **TrustedUserCAKeys obligatoire** | 🔴 Critique | Configurer `TrustedUserCAKeys /etc/ssh/trusted-user-ca-keys.pem` dans `sshd_config` sur **chaque** serveur cible |
-| **AuthorizedPrincipalsFile** | 🟠 Élevée | Toujours configurer `AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u` pour restreindre quels principals sont acceptés par utilisateur système |
-| **Migration progressive** | 🟠 Élevée | Maintenir les `authorized_keys` existants pendant la transition. La SSH CA est un mécanisme **additionnel**, pas un remplacement immédiat |
-| **Fichier CA en lecture seule** | 🟡 Moyenne | `chmod 644 /etc/ssh/trusted-user-ca-keys.pem` — le fichier CA ne contient que la clé publique, mais sa modification permettrait une usurpation de CA |
-| **Déploiement automatisé** | 🟡 Moyenne | Utiliser un outil de configuration (Ansible, Salt, etc.) pour déployer la clé CA et la config sshd de manière reproductible |
-| **Test de non-régression** | 🟡 Moyenne | Après déploiement, vérifier que les connexions par clé statique ET par certificat fonctionnent |
+| Règle                             | Priorité     | Description                                                                                                                                          |
+| --------------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **TrustedUserCAKeys obligatoire** | 🔴 Critique | Configurer `TrustedUserCAKeys /etc/ssh/trusted-user-ca-keys.pem` dans `sshd_config` sur **chaque** serveur cible                                     |
+| **AuthorizedPrincipalsFile**      | 🟠 Élevée   | Toujours configurer `AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u` pour restreindre quels principals sont acceptés par utilisateur système   |
+| **Migration progressive**         | 🟠 Élevée   | Maintenir les `authorized_keys` existants pendant la transition. La SSH CA est un mécanisme **additionnel**, pas un remplacement immédiat            |
+| **Fichier CA en lecture seule**   | 🟡 Moyenne  | `chmod 644 /etc/ssh/trusted-user-ca-keys.pem` — le fichier CA ne contient que la clé publique, mais sa modification permettrait une usurpation de CA |
+| **Déploiement automatisé**        | 🟡 Moyenne  | Utiliser un outil de configuration (Ansible, Salt, etc.) pour déployer la clé CA et la config sshd de manière reproductible                          |
+| **Test de non-régression**        | 🟡 Moyenne  | Après déploiement, vérifier que les connexions par clé statique ET par certificat fonctionnent                                                       |
 
 #### 7.8.3 Gestion du cycle de vie des CA
 
-| Règle | Priorité | Description |
-|-------|----------|-------------|
-| **1 CA par domaine de confiance** | 🔴 Critique | Ne jamais partager une CA entre des environnements non liés (prod/staging, clients différents). Utiliser un vault distinct par domaine |
-| **Rotation CA planifiée** | 🟠 Élevée | Planifier une rotation de la CA tous les **12-24 mois**. Workflow : créer un nouveau vault avec nouvelle CA → déployer la nouvelle clé CA sur les serveurs → migrer les signatures → supprimer l'ancien vault |
-| **Période de chevauchement** | 🟠 Élevée | Pendant la rotation, configurer **deux** clés CA dans `TrustedUserCAKeys` (ancienne + nouvelle) pendant une période de transition (2-4 semaines) |
-| **Suppression vault = suppression CA** | 🟡 Moyenne | Rappel : `vault_delete()` supprime automatiquement le mount SSH CA. Les certificats déjà émis restent valides jusqu'à expiration |
-| **Backup avant rotation** | 🟡 Moyenne | Exporter le vault (`vault_export`) avant toute rotation pour permettre une restauration en cas de problème |
+| Règle                                  | Priorité     | Description                                                                                                                                                                                                   |
+| -------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **1 CA par domaine de confiance**      | 🔴 Critique | Ne jamais partager une CA entre des environnements non liés (prod/staging, clients différents). Utiliser un vault distinct par domaine                                                                        |
+| **Rotation CA planifiée**              | 🟠 Élevée   | Planifier une rotation de la CA tous les **12-24 mois**. Workflow : créer un nouveau vault avec nouvelle CA → déployer la nouvelle clé CA sur les serveurs → migrer les signatures → supprimer l'ancien vault |
+| **Période de chevauchement**           | 🟠 Élevée   | Pendant la rotation, configurer **deux** clés CA dans `TrustedUserCAKeys` (ancienne + nouvelle) pendant une période de transition (2-4 semaines)                                                              |
+| **Suppression vault = suppression CA** | 🟡 Moyenne  | Rappel : `vault_delete()` supprime automatiquement le mount SSH CA. Les certificats déjà émis restent valides jusqu'à expiration                                                                              |
+| **Backup avant rotation**              | 🟡 Moyenne  | Exporter le vault (`vault_export`) avant toute rotation pour permettre une restauration en cas de problème                                                                                                    |
 
 #### 7.8.4 Audit et monitoring
 
-| Règle | Priorité | Description |
-|-------|----------|-------------|
-| **Audit OpenBao activé** | 🔴 Critique | L'audit device OpenBao trace chaque signature (serial number, rôle, principal, TTL, timestamp). Vérifier qu'il est actif |
-| **Alertes sur signatures anormales** | 🟠 Élevée | Monitorer les signatures hors horaires normaux, les TTL inhabituellement longs, ou les rafales de signatures |
-| **Inventaire des CA actives** | 🟡 Moyenne | Maintenir un inventaire des vaults avec SSH CA active (`ssh_ca_list_roles` sur chaque vault) |
-| **Revue périodique des rôles** | 🟡 Moyenne | Tous les 3 mois, auditer les rôles SSH CA : utilisateurs autorisés toujours pertinents ? TTL toujours adaptés ? |
-| **Corrélation logs SSH** | 🟡 Moyenne | Croiser les logs `auth.log` des serveurs cibles avec l'audit OpenBao pour détecter les certificats utilisés vs émis |
+| Règle                                | Priorité     | Description                                                                                                              |
+| ------------------------------------ | ------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| **Audit OpenBao activé**             | 🔴 Critique | L'audit device OpenBao trace chaque signature (serial number, rôle, principal, TTL, timestamp). Vérifier qu'il est actif |
+| **Alertes sur signatures anormales** | 🟠 Élevée   | Monitorer les signatures hors horaires normaux, les TTL inhabituellement longs, ou les rafales de signatures             |
+| **Inventaire des CA actives**        | 🟡 Moyenne  | Maintenir un inventaire des vaults avec SSH CA active (`ssh_ca_list_roles` sur chaque vault)                             |
+| **Revue périodique des rôles**       | 🟡 Moyenne  | Tous les 3 mois, auditer les rôles SSH CA : utilisateurs autorisés toujours pertinents ? TTL toujours adaptés ?          |
+| **Corrélation logs SSH**             | 🟡 Moyenne  | Croiser les logs `auth.log` des serveurs cibles avec l'audit OpenBao pour détecter les certificats utilisés vs émis      |
 
 #### 7.8.5 Scénarios de compromission
 
-| Scénario | Impact | Réponse |
-|----------|--------|---------|
-| **Clé privée agent compromise** | Limité au TTL du dernier cert émis (ex: 30 min max) | Révoquer le token MCP de l'agent → plus de nouvelle signature possible. Attendre l'expiration du cert |
-| **Token MCP admin compromis** | Peut créer de nouveaux rôles et signer des certs | Révoquer le token immédiatement. Auditer les signatures récentes. Créer un nouveau token admin |
-| **Clé CA compromise** (worst case) | Tous les certificats émis par cette CA sont suspects | 1. Supprimer le vault (supprime la CA). 2. Retirer la clé CA des serveurs (`TrustedUserCAKeys`). 3. Créer un nouveau vault avec nouvelle CA. 4. Redéployer |
-| **Serveur cible compromis** | L'attaquant peut utiliser les certs valides sur CE serveur | Isoler le serveur. La CA n'est pas compromise — les autres serveurs restent sûrs |
-| **Bootstrap key compromise** | Peut unseal OpenBao → accès à toutes les CA | Rotation complète : nouvelle bootstrap key, re-chiffrement des unseal keys, rotation de toutes les CA |
+| Scénario                           | Impact                                                     | Réponse                                                                                                                                                    |
+| ---------------------------------- | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Clé privée agent compromise**    | Limité au TTL du dernier cert émis (ex: 30 min max)        | Révoquer le token MCP de l'agent → plus de nouvelle signature possible. Attendre l'expiration du cert                                                      |
+| **Token MCP admin compromis**      | Peut créer de nouveaux rôles et signer des certs           | Révoquer le token immédiatement. Auditer les signatures récentes. Créer un nouveau token admin                                                             |
+| **Clé CA compromise** (worst case) | Tous les certificats émis par cette CA sont suspects       | 1. Supprimer le vault (supprime la CA). 2. Retirer la clé CA des serveurs (`TrustedUserCAKeys`). 3. Créer un nouveau vault avec nouvelle CA. 4. Redéployer |
+| **Serveur cible compromis**        | L'attaquant peut utiliser les certs valides sur CE serveur | Isoler le serveur. La CA n'est pas compromise — les autres serveurs restent sûrs                                                                           |
+| **Bootstrap key compromise**       | Peut unseal OpenBao → accès à toutes les CA                | Rotation complète : nouvelle bootstrap key, re-chiffrement des unseal keys, rotation de toutes les CA                                                      |
 
 ---
 
@@ -899,14 +1198,14 @@ l'exploitation de la SSH CA de MCP Vault en production.
 
 **Chiffrement des clés unseal** :
 
-| Paramètre | Valeur |
-|-----------|--------|
-| Algorithme | AES-256-GCM (via `cryptography` Python) |
-| Dérivation de clé | PBKDF2-HMAC-SHA256, 600 000 itérations |
-| Sel | 16 bytes aléatoires (stocké avec le ciphertext) |
-| IV/Nonce | 12 bytes aléatoires (requis par GCM) |
-| Format stocké | `salt (16B) || nonce (12B) || ciphertext || tag (16B)` encodé base64 |
-| Clé source | `ADMIN_BOOTSTRAP_KEY` (variable d'environnement) |
+| Paramètre         | Valeur                                                               |
+| ----------------- | -------------------------------------------------------------------- |
+| Algorithme        | AES-256-GCM (via `cryptography` Python)                              |
+| Dérivation de clé | PBKDF2-HMAC-SHA256, 600 000 itérations                               |
+| Sel               | 16 bytes aléatoires (stocké avec le ciphertext)                      |
+| IV/Nonce          | 12 bytes aléatoires (requis par GCM)                                 |
+| Format stocké     | `salt (16B) || nonce (12B) || ciphertext || tag (16B)` encodé base64 |
+| Clé source        | `ADMIN_BOOTSTRAP_KEY` (variable d'environnement)                     |
 
 **Roadmap v0.3.0** : Transit Auto-Unseal via une instance OpenBao dédiée
 (KMS interne Cloud Temple), éliminant le besoin de stocker les clés unseal.
@@ -1216,21 +1515,21 @@ clés de déchiffrement :
 
 **Invariants de sécurité** :
 
-| Invariant | Description |
-|-----------|-------------|
-| Pas de clé en clair sur disque | Les clés unseal ne sont JAMAIS écrites en clair sur le filesystem |
-| Séparation données/clés | Les données (barrier) et les clés (enc) sont sur S3 mais ne se déchiffrent pas mutuellement |
-| Mémoire seule au runtime | Pendant l'exécution, les clés ne vivent qu'en mémoire Python |
-| Crash = effacement | Un crash du processus efface automatiquement les clés de la mémoire |
-| Bootstrap key externe | La clé de déchiffrement des unseal keys n'est jamais persistée |
+| Invariant                      | Description                                                                                 |
+| ------------------------------ | ------------------------------------------------------------------------------------------- |
+| Pas de clé en clair sur disque | Les clés unseal ne sont JAMAIS écrites en clair sur le filesystem                           |
+| Séparation données/clés        | Les données (barrier) et les clés (enc) sont sur S3 mais ne se déchiffrent pas mutuellement |
+| Mémoire seule au runtime       | Pendant l'exécution, les clés ne vivent qu'en mémoire Python                                |
+| Crash = effacement             | Un crash du processus efface automatiquement les clés de la mémoire                         |
+| Bootstrap key externe          | La clé de déchiffrement des unseal keys n'est jamais persistée                              |
 
 **Roadmap** :
 
-| Version | Approche | Sécurité |
-|---------|----------|----------|
-| **v0.2.x** (actuel) | Option C — Clés sur S3 chiffrées, mémoire seule au runtime | 🟡 Bonne |
-| **v0.3.0** (futur) | Transit Auto-Unseal via OpenBao dédié (KMS Cloud Temple) | 🟢 Excellente |
-| **v2.0** (prod) | 🔐 Connexion HSM (Hardware Security Module) Cloud Temple | 🟢 Maximale |
+| Version             | Approche                                                   | Sécurité       |
+| ------------------- | ---------------------------------------------------------- | -------------- |
+| **v0.2.x** (actuel) | Option C — Clés sur S3 chiffrées, mémoire seule au runtime | 🟡 Bonne      |
+| **v0.3.0** (futur)  | Transit Auto-Unseal via OpenBao dédié (KMS Cloud Temple)   | 🟢 Excellente |
+| **v2.0** (prod)     | 🔐 Connexion HSM (Hardware Security Module) Cloud Temple  | 🟢 Maximale   |
 
 #### v0.3.0 — Transit Auto-Unseal (KMS Cloud Temple)
 
@@ -1271,98 +1570,171 @@ les clés unseal — elle délègue le déchiffrement au KMS.
 
 **Étapes de migration v0.2.x → v0.3.0** :
 
-| # | Étape | Description |
-|---|-------|-------------|
-| 1 | Déployer le KMS | Installer OpenBao dédié, init avec Shamir 5/3, activer Transit engine |
-| 2 | Créer la clé de transit | `bao write transit/keys/mcp-vault-unseal type=aes256-gcm256` |
-| 3 | Re-chiffrer les clés unseal | Déchiffrer avec ADMIN_BOOTSTRAP_KEY → re-chiffrer avec Transit |
-| 4 | Configurer MCP Vault | `seal "transit"` dans la config HCL, pointer vers le KMS |
-| 5 | Tester le cycle complet | Startup → auto-unseal via KMS → runtime → shutdown |
-| 6 | Retirer ADMIN_BOOTSTRAP_KEY | La variable d'environnement n'est plus nécessaire |
+| #   | Étape                       | Description                                                           |
+| --- | --------------------------- | --------------------------------------------------------------------- |
+| 1   | Déployer le KMS             | Installer OpenBao dédié, init avec Shamir 5/3, activer Transit engine |
+| 2   | Créer la clé de transit     | `bao write transit/keys/mcp-vault-unseal type=aes256-gcm256`          |
+| 3   | Re-chiffrer les clés unseal | Déchiffrer avec ADMIN_BOOTSTRAP_KEY → re-chiffrer avec Transit        |
+| 4   | Configurer MCP Vault        | `seal "transit"` dans la config HCL, pointer vers le KMS              |
+| 5   | Tester le cycle complet     | Startup → auto-unseal via KMS → runtime → shutdown                    |
+| 6   | Retirer ADMIN_BOOTSTRAP_KEY | La variable d'environnement n'est plus nécessaire                     |
 
-#### v2.0 — HSM Cloud Temple (PKCS#11 / KMIP)
+#### v2.0 — HSM Cloud Temple : Thales Luna (PKCS#11)
+
+> ⚠️ **Design-only** — Le HSM Thales Luna n'est pas encore disponible chez
+> Cloud Temple. Cette section documente le chemin technique pour être prêts
+> le jour où le matériel sera opérationnel.
 
 Le HSM (Hardware Security Module) est le niveau de sécurité **maximal**. Les clés
 de chiffrement ne quittent **jamais** le module matériel certifié. Le HSM assure
-le unsealing via une API cryptographique standardisée.
+le unsealing automatique via l'interface cryptographique PKCS#11.
+
+**Matériel cible** : **Thales Luna Network HSM** (anciennement SafeNet Luna SA)
+- Certification **FIPS 140-2 Level 3** (ou **FIPS 140-3** selon le modèle)
+- Interface **PKCS#11** native (pas de serveur KMIP nécessaire)
+- Support HA avec failover automatique entre HSM primaire et secondaire
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  v2.0 — HSM CLOUD TEMPLE                                       │
+│  v2.0 — THALES LUNA HSM (PKCS#11)                               │
 │                                                                 │
-│  MCP Vault (instance applicative)                               │
+│  MCP Vault (conteneur Docker)                                   │
 │  └─ OpenBao embedded                                            │
 │     ⟶ seal "pkcs11" dans la config HCL                          │
-│     ⟶ Auto-unseal via appel PKCS#11 au HSM                      │
-│     ⟶ Aucune clé en mémoire applicative                         │
+│     ⟶ Auto-unseal via appel PKCS#11 au Luna                     │
+│     ⟶ La clé master ne quitte JAMAIS le HSM                     │
 │                                                                 │
-│          ┌─────────────────────┐                                │
-│          │  PKCS#11 / KMIP     │                                │
-│          └──────────┬──────────┘                                │
-│                     │ API crypto                                │
-│                     ▼                                           │
+│          ┌──────────────────────────┐                           │
+│          │  Luna Client v10.x       │                           │
+│          │  libpkcs11.so            │                           │
+│          └───────────┬──────────────┘                           │
+│                      │ NTLS (Network TLS)                       │
+│                      ▼                                          │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │  HSM Cloud Temple (matériel certifié)                    │   │
+│  │  Thales Luna Network HSM (matériel Cloud Temple)         │   │
 │  │                                                          │   │
-│  │  • Certification FIPS 140-2 Level 3 (ou CC EAL4+)       │   │
-│  │  • Clés générées et stockées dans le HSM                 │   │
-│  │  • Opérations crypto IN-HSM (encrypt/decrypt)            │   │
+│  │  • FIPS 140-2 Level 3 / FIPS 140-3                       │   │
 │  │  • Anti-tampering physique (détection d'ouverture)       │   │
-│  │  • Partition dédiée MCP Vault                            │   │
+│  │  • Partition dédiée "mcp-vault"                          │   │
+│  │  • Rôles : Crypto Officer + Crypto User                  │   │
 │  │                                                          │   │
-│  │  Clé "mcp-vault-master" (AES-256)                        │   │
-│  │  └─ Utilisée pour unseal OpenBao                         │   │
-│  │  └─ Ne quitte JAMAIS le HSM                              │   │
-│  │  └─ Rotation possible sans downtime                      │   │
+│  │  Clés sur le HSM (non-exportables) :                     │   │
+│  │  ├─ "mcp-vault-aes" (AES-256, CKM_AES_GCM)             │   │
+│  │  │  └─ Utilisée pour seal/unseal OpenBao                 │   │
+│  │  └─ "mcp-vault-hmac" (HMAC-256)                         │   │
+│  │     └─ Utilisée pour l'intégrité des données             │   │
+│  │                                                          │   │
+│  │  ⚠️ Les clés ne quittent JAMAIS le HSM                   │   │
+│  │  ⚠️ Les opérations crypto se font IN-HSM                 │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                 │
 │  Avantages :                                                    │
-│  ✅ Aucune clé en mémoire logicielle (ni app, ni KMS)          │
+│  ✅ Aucune clé en mémoire logicielle                            │
 │  ✅ Protection matérielle contre l'extraction                    │
-│  ✅ Certification de sécurité (FIPS / CC)                        │
-│  ✅ Conformité réglementaire (SecNumCloud, HDS, ISO 27001)      │
-│  ✅ Rotation et backup HSM-to-HSM                                │
-│                                                                 │
-│  Prérequis Cloud Temple :                                       │
-│  • HSM dédié ou partition HSM (Thales Luna / Entrust nShield)   │
-│  • Driver PKCS#11 installé sur l'hôte MCP Vault                │
-│  • OU : endpoint KMIP accessible sur réseau privé              │
-│  • Contrat HSM Cloud Temple (option infrastructure)             │
-│  • OpenBao compilé avec support PKCS#11 (plugin seal)           │
+│  ✅ Certification FIPS 140-2/3 Level 3                           │
+│  ✅ Conformité SecNumCloud, HDS, ISO 27001                      │
+│  ✅ Auto-unseal instantané au démarrage                          │
+│  ✅ Rotation des clés possible sans downtime                     │
+│  ✅ Plus besoin de ADMIN_BOOTSTRAP_KEY                           │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Deux interfaces possibles** :
+##### Prérequis Cloud Temple
 
-| Interface | Standard | Avantage | Inconvénient |
-|-----------|----------|----------|--------------|
-| **PKCS#11** | OASIS PKCS#11 v2.40+ | Direct, faible latence, mature | Nécessite driver local + accès réseau au HSM |
-| **KMIP** | OASIS KMIP v1.4+ | Réseau, multi-cloud, standard enterprise | Latence réseau, serveur KMIP intermédiaire |
+| Prérequis | Description | Statut |
+|-----------|-------------|--------|
+| **HSM Thales Luna** | Partition dédiée sur Luna Network HSM Cloud Temple | ⏳ En attente |
+| **Luna Client v10.x** | Installé dans l'image Docker MCP Vault (`/opt/luna/`) | 📋 À faire |
+| **Bibliothèque PKCS#11** | `/opt/luna/lib/libpkcs11.so` montée dans le conteneur | 📋 À faire |
+| **Connectivité NTLS** | Réseau privé entre conteneur Docker et Luna HSM | 📋 À faire |
+| **Partition initialisée** | Rôles Crypto Officer + Crypto User créés | 📋 À faire |
+| **Clés générées** | AES-256 + HMAC-256 générées sur le HSM via `lunacm` | 📋 À faire |
+| **OpenBao PKCS#11** | OpenBao compilé avec support PKCS#11 (natif depuis v2.x) | ✅ Supporté |
 
-**Étapes de migration v0.3.0 → v2.0** :
-
-| # | Étape | Description |
-|---|-------|-------------|
-| 1 | Provisionner le HSM | Commander une partition HSM dédiée chez Cloud Temple |
-| 2 | Installer le driver | PKCS#11 library (ex: `libCryptoki2.so`) sur l'hôte Docker |
-| 3 | Créer la master key | Générer `mcp-vault-master` (AES-256) dans le HSM |
-| 4 | Configurer OpenBao | `seal "pkcs11"` avec `lib`, `slot`, `pin`, `key_label` dans HCL |
-| 5 | Migrer depuis Transit | `bao operator migrate` du seal Transit vers seal PKCS#11 |
-| 6 | Valider le cycle | Auto-unseal via HSM → runtime → seal → re-unseal |
-| 7 | Retirer le KMS Transit | L'instance OpenBao dédiée n'est plus nécessaire |
-
-**Configuration HCL cible (v2.0)** :
+##### Configuration HCL cible
 
 ```hcl
+# Configuration seal PKCS#11 pour Thales Luna
 seal "pkcs11" {
-  lib            = "/usr/lib/libCryptoki2.so"
+  # Bibliothèque PKCS#11 Thales Luna
+  lib            = "/opt/luna/lib/libpkcs11.so"
+
+  # Slot de la partition dédiée MCP Vault
   slot           = "0"
-  pin            = "env://HSM_PIN"           # PIN du HSM via env var
-  key_label      = "mcp-vault-master"
-  mechanism      = "0x1085"                  # CKM_AES_GCM
+
+  # PIN Crypto User — TOUJOURS via variable d'environnement
+  pin            = "env://LUNA_HSM_PIN"
+
+  # Clés sur le HSM (non-exportables, générées via lunacm)
+  key_label      = "mcp-vault-aes"
   hmac_key_label = "mcp-vault-hmac"
+
+  # Algorithme : AES-256-GCM (mechanism PKCS#11)
+  mechanism      = "0x1085"    # CKM_AES_GCM
+
+  # Ne PAS générer les clés automatiquement — elles doivent
+  # être créées manuellement sur le HSM par le Crypto Officer
+  generate_key   = "false"
 }
 ```
+
+##### Étapes de migration v0.2.x → v2.0 (quand le Luna sera disponible)
+
+> **Note** : la migration directe v0.2.x → v2.0 est possible grâce à
+> `bao operator migrate`. L'étape Transit (v0.3.0) est **optionnelle** —
+> elle n'est utile que si on veut une étape intermédiaire de validation.
+
+| #   | Étape | Responsable | Description |
+|-----|-------|-------------|-------------|
+| 1   | **Provisionner la partition** | Admin Cloud Temple | Créer une partition dédiée "mcp-vault" sur le Luna Network HSM |
+| 2   | **Initialiser les rôles** | Admin HSM | Initialiser Crypto Officer + Crypto User avec des PINs forts |
+| 3   | **Générer les clés** | Crypto Officer | Via `lunacm` : clé AES-256 `mcp-vault-aes` + HMAC `mcp-vault-hmac` (non-exportables) |
+| 4   | **Installer Luna Client** | DevOps | Ajouter Luna Client v10.x dans le Dockerfile MCP Vault, monter `/opt/luna/` |
+| 5   | **Configurer NTLS** | Réseau | Assurer la connectivité TLS entre le conteneur et le Luna HSM (réseau privé) |
+| 6   | **Tester la connexion** | DevOps | Vérifier via `lunacm` depuis le conteneur : `partition list`, `slot list` |
+| 7   | **Modifier la config HCL** | DevOps | Ajouter le stanza `seal "pkcs11"` avec les paramètres Luna |
+| 8   | **Migrer le seal** | Admin | `bao operator migrate -config=new_config.hcl` (re-wrap du master key par le HSM) |
+| 9   | **Valider le cycle complet** | Test | Startup → auto-unseal via HSM → runtime → seal → re-unseal |
+| 10  | **Retirer ADMIN_BOOTSTRAP_KEY** | Sécurité | La variable d'environnement n'est plus nécessaire (le HSM est la root of trust) |
+| 11  | **Documenter et auditer** | Sécurité | Mettre à jour la documentation, auditer la chaîne de confiance |
+
+##### Commandes Luna de préparation (référence)
+
+```bash
+# ── Depuis lunacm (Luna Client Management) ──
+
+# 1. Vérifier la partition
+lunacm
+> partition list
+# → Doit afficher "mcp-vault" avec son slot number
+
+# 2. Générer la clé AES-256 (non-exportable)
+> key generate -mechanism AES -label mcp-vault-aes \
+    -size 256 -encrypt true -decrypt true
+
+# 3. Générer la clé HMAC (non-exportable)
+> key generate -mechanism GENERIC -label mcp-vault-hmac \
+    -size 256 -sign true -verify true
+
+# 4. Vérifier les clés
+> key list
+# → Doit afficher les 2 clés avec leurs handles
+
+# ── Test de connectivité depuis le conteneur Docker ──
+docker exec mcp-vault /opt/luna/bin/lunacm -c "slot list"
+```
+
+##### Considérations de sécurité spécifiques Luna
+
+| Aspect | Recommandation |
+|--------|----------------|
+| **PIN management** | PIN Crypto User stocké dans `LUNA_HSM_PIN` (env var), jamais dans la config HCL ni sur S3 |
+| **Clés non-exportables** | Les clés AES/HMAC doivent être générées directement sur le HSM — jamais importées |
+| **Labels avec timestamp** | Utiliser des labels versionnés (ex: `mcp-vault-aes-2026-06`) pour faciliter la rotation |
+| **Connectivité HSM** | Si le Luna est inaccessible → OpenBao ne peut PAS s'unsealer. Prévoir un monitoring + alertes |
+| **HA HSM** | Configurer le failover Luna (primaire + secondaire) pour éviter un SPOF matériel |
+| **Backup des clés** | Le backup des clés HSM se fait via les mécanismes natifs Luna (HSM-to-HSM backup) |
+| **Audit Luna** | Activer le logging sur le Luna pour tracer toutes les opérations crypto (seal/unseal) |
 
 > **Résumé de la trajectoire sécurité** : chaque version élimine un facteur
 > d'exposition des clés, jusqu'à atteindre le niveau où **aucune clé n'existe
@@ -1378,39 +1750,39 @@ seal "pkcs11" {
 
 ### 11.4 Menaces et mitigations
 
-| Menace | Mitigation |
-| ------ | ---------- |
-| Vol du bucket S3 | Données chiffrées (barrier OpenBao). Clés unseal chiffrées (AES-256-GCM). Sans `ADMIN_BOOTSTRAP_KEY` → tout illisible |
-| Compromission du container | Clés uniquement en mémoire, pas sur disque. Sealed au shutdown. Crash = mémoire effacée |
-| Vol de la bootstrap key seule | Insuffisant : il faut aussi le bucket S3 (clés chiffrées + données) |
-| Vol S3 + bootstrap key | Scénario le plus grave. Mitigation : WAF + réseau privé + rotation de bootstrap key |
-| Lecture mémoire du processus | Nécessite accès root au conteneur. Mitigation : user non-root, seccomp, no-new-privileges |
-| Accès non autorisé à un espace | Tokens MCP avec vault_ids + OpenBao policies HCL |
-| Fuite de la bootstrap key | Uniquement en variable d'env, jamais sur S3 en clair. Rotation recommandée |
-| Perte du storage | S3 3AZ (répliqué sur 3 zones) + sync toutes les 60s (configurable) |
-| Agent lit un secret non autorisé | Token MCP scopé (ContextVar) + OpenBao policy par rôle |
-| Audit trail altéré | File audit device OpenBao (non modifiable par les outils MCP) |
-| XSS/injection sur la console | WAF OWASP CRS + console admin SPA (pas de SSR) + CORS strict |
-| Path traversal via /admin/static | AdminMiddleware normalise les chemins, bloque `../` |
-| DDoS sur le service | WAF Caddy rate limiting + service non exposé directement |
-| Unseal/seal inattendu | Monitoring + alertes sur les événements seal/unseal anormaux |
+| Menace                           | Mitigation                                                                                                            |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Vol du bucket S3                 | Données chiffrées (barrier OpenBao). Clés unseal chiffrées (AES-256-GCM). Sans `ADMIN_BOOTSTRAP_KEY` → tout illisible |
+| Compromission du container       | Clés uniquement en mémoire, pas sur disque. Sealed au shutdown. Crash = mémoire effacée                               |
+| Vol de la bootstrap key seule    | Insuffisant : il faut aussi le bucket S3 (clés chiffrées + données)                                                   |
+| Vol S3 + bootstrap key           | Scénario le plus grave. Mitigation : WAF + réseau privé + rotation de bootstrap key                                   |
+| Lecture mémoire du processus     | Nécessite accès root au conteneur. Mitigation : user non-root, seccomp, no-new-privileges                             |
+| Accès non autorisé à un espace   | Tokens MCP avec vault_ids + OpenBao policies HCL                                                                      |
+| Fuite de la bootstrap key        | Uniquement en variable d'env, jamais sur S3 en clair. Rotation recommandée                                            |
+| Perte du storage                 | S3 3AZ (répliqué sur 3 zones) + sync toutes les 60s (configurable)                                                    |
+| Agent lit un secret non autorisé | Token MCP scopé (ContextVar) + OpenBao policy par rôle                                                                |
+| Audit trail altéré               | File audit device OpenBao (non modifiable par les outils MCP)                                                         |
+| XSS/injection sur la console     | WAF OWASP CRS + console admin SPA (pas de SSR) + CORS strict                                                          |
+| Path traversal via /admin/static | AdminMiddleware normalise les chemins, bloque `../`                                                                   |
+| DDoS sur le service              | WAF Caddy rate limiting + service non exposé directement                                                              |
+| Unseal/seal inattendu            | Monitoring + alertes sur les événements seal/unseal anormaux                                                          |
 
 ### 11.5 Recommandations production
 
-| Recommandation | Priorité |
-| -------------- | -------- |
-| ADMIN_BOOTSTRAP_KEY ≥ 64 caractères aléatoires | 🔴 Critique |
-| TLS via WAF (HTTPS) | 🔴 Critique |
-| WAF_PORT non accessible publiquement (réseau privé) | 🔴 Critique |
-| Clés unseal jamais en clair sur disque (Option C) | 🔴 Critique |
-| Rotation périodique des secrets | 🟠 Élevée |
-| Rotation de la ADMIN_BOOTSTRAP_KEY (avec re-chiffrement des clés unseal) | 🟠 Élevée |
-| Monitoring des seal/unseal events (alertes temps réel) | 🟠 Élevée |
-| Backup S3 séparé du bucket vault | 🟡 Moyenne |
-| Shamir secret sharing (5 shares, threshold 3) pour production | 🟡 Moyenne |
-| Transit Auto-Unseal via OpenBao dédié (v0.3.0) | 🟡 Moyenne |
-| Monitoring de la console admin (logs d'accès) | 🟡 Moyenne |
-| User non-root + seccomp profile dans Docker | 🟡 Moyenne |
+| Recommandation                                                           | Priorité     |
+| ------------------------------------------------------------------------ | ------------ |
+| ADMIN_BOOTSTRAP_KEY ≥ 64 caractères aléatoires                           | 🔴 Critique |
+| TLS via WAF (HTTPS)                                                      | 🔴 Critique |
+| WAF_PORT non accessible publiquement (réseau privé)                      | 🔴 Critique |
+| Clés unseal jamais en clair sur disque (Option C)                        | 🔴 Critique |
+| Rotation périodique des secrets                                          | 🟠 Élevée   |
+| Rotation de la ADMIN_BOOTSTRAP_KEY (avec re-chiffrement des clés unseal) | 🟠 Élevée   |
+| Monitoring des seal/unseal events (alertes temps réel)                   | 🟠 Élevée   |
+| Backup S3 séparé du bucket vault                                         | 🟡 Moyenne  |
+| Shamir secret sharing (5 shares, threshold 3) pour production            | 🟡 Moyenne  |
+| Transit Auto-Unseal via OpenBao dédié (v0.3.0)                           | 🟡 Moyenne  |
+| Monitoring de la console admin (logs d'accès)                            | 🟡 Moyenne  |
+| User non-root + seccomp profile dans Docker                              | 🟡 Moyenne  |
 
 ---
 

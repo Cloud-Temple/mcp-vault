@@ -41,6 +41,9 @@ async def handle_admin_api(scope, receive, send, mcp):
     if path == "/admin/api/logs" and method == "GET":
         return await _api_logs(send)
 
+    if path == "/admin/api/audit" and method == "GET":
+        return await _api_audit(send, scope)
+
     if path == "/admin/api/generate-password" and method == "GET":
         return await _api_generate_password(send)
 
@@ -89,6 +92,32 @@ async def handle_admin_api(scope, receive, send, mcp):
                 return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
             return await _api_delete_secret(send, vault_id, secret_path)
 
+    # --- Routes policies (admin only) ---
+    if path == "/admin/api/policies" and method == "GET":
+        if not is_admin:
+            return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
+        return await _api_list_policies(send)
+
+    if path == "/admin/api/policies" and method == "POST":
+        if not is_admin:
+            return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
+        body = await _read_body(receive)
+        return await _api_create_policy(send, body)
+
+    if path.startswith("/admin/api/policies/") and method == "GET":
+        policy_id = path[len("/admin/api/policies/"):]
+        if policy_id and "/" not in policy_id:
+            if not is_admin:
+                return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
+            return await _api_get_policy(send, policy_id)
+
+    if path.startswith("/admin/api/policies/") and method == "DELETE":
+        policy_id = path[len("/admin/api/policies/"):]
+        if policy_id and "/" not in policy_id:
+            if not is_admin:
+                return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
+            return await _api_delete_policy(send, policy_id)
+
     # --- Routes tokens (admin only) ---
     if path == "/admin/api/tokens" and method == "GET":
         if not is_admin:
@@ -100,6 +129,13 @@ async def handle_admin_api(scope, receive, send, mcp):
             return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
         body = await _read_body(receive)
         return await _api_create_token(send, body)
+
+    if path.startswith("/admin/api/tokens/") and method == "PUT":
+        if not is_admin:
+            return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
+        hash_prefix = path.split("/")[-1]
+        body = await _read_body(receive)
+        return await _api_update_token(send, hash_prefix, body)
 
     if path.startswith("/admin/api/tokens/") and method == "DELETE":
         if not is_admin:
@@ -155,13 +191,38 @@ async def _api_create_token(send, body):
     allowed_resources = data.get("allowed_resources", [])
     email = data.get("email", "")
     expires_in_days = data.get("expires_in_days", 90)
+    policy_id = data.get("policy_id", "")
 
     if not client_name:
         return await _json_response(send, 400, {"status": "error", "message": "client_name requis"})
 
     result = store.create(client_name, permissions, allowed_resources,
-                          expires_in_days=expires_in_days, email=email)
+                          expires_in_days=expires_in_days, email=email,
+                          policy_id=policy_id)
     await _json_response(send, 201, {"status": "created", **result})
+
+
+async def _api_update_token(send, hash_prefix, body):
+    """PUT /admin/api/tokens/{hash_prefix} — Modifier un token."""
+    store = get_token_store()
+    if not store:
+        return await _json_response(send, 400, {"status": "error", "message": "S3 non configuré"})
+
+    data = json.loads(body) if body else {}
+
+    # Préparer les champs (None = pas de changement)
+    policy_id = data.get("policy_id")  # None si absent
+    permissions = data.get("permissions")  # None si absent
+    allowed_resources = data.get("allowed_resources")  # None si absent
+
+    result = store.update(
+        hash_prefix=hash_prefix,
+        policy_id=policy_id,
+        permissions=permissions,
+        allowed_resources=allowed_resources,
+    )
+    status_code = 200 if result.get("status") == "updated" else 400
+    await _json_response(send, status_code, result)
 
 
 async def _api_revoke_token(send, hash_prefix):
@@ -332,6 +393,107 @@ async def _api_logs(send):
     """GET /admin/api/logs — Activité récente (ring buffer)."""
     logs = get_activity_log()
     await _json_response(send, 200, {"status": "ok", "count": len(logs), "logs": logs[-50:]})
+
+
+async def _api_audit(send, scope):
+    """GET /admin/api/audit — Journal d'audit MCP avec filtres."""
+    from ..audit import get_audit_store
+
+    store = get_audit_store()
+    if not store:
+        return await _json_response(send, 200, {"status": "ok", "entries": [], "count": 0})
+
+    # Parser les query params
+    qs = scope.get("query_string", b"").decode()
+    params = {}
+    for param in qs.split("&"):
+        if "=" in param:
+            k, v = param.split("=", 1)
+            params[k] = v
+
+    entries = store.get_entries(
+        limit=int(params.get("limit", "100")),
+        client=params.get("client", ""),
+        vault_id=params.get("vault_id", ""),
+        tool=params.get("tool", ""),
+        category=params.get("category", ""),
+        status=params.get("status", ""),
+        since=params.get("since", ""),
+    )
+    stats = store.get_stats()
+
+    await _json_response(send, 200, {
+        "status": "ok",
+        "entries": entries,
+        "count": len(entries),
+        "total_in_buffer": stats["total"],
+        "stats": stats,
+    })
+
+
+# =============================================================================
+# Endpoints — Policies
+# =============================================================================
+
+async def _api_list_policies(send):
+    """GET /admin/api/policies — Liste des policies."""
+    from ..auth.policies import get_policy_store
+    store = get_policy_store()
+    if not store:
+        return await _json_response(send, 200, {"status": "ok", "policies": [], "message": "S3 non configuré"})
+    policies = store.list_all()
+    await _json_response(send, 200, {"status": "ok", "policies": policies, "count": len(policies)})
+
+
+async def _api_create_policy(send, body):
+    """POST /admin/api/policies — Créer une policy."""
+    from ..auth.policies import get_policy_store
+    store = get_policy_store()
+    if not store:
+        return await _json_response(send, 400, {"status": "error", "message": "S3 non configuré"})
+
+    data = json.loads(body) if body else {}
+    policy_id = data.get("policy_id", "").strip()
+    if not policy_id:
+        return await _json_response(send, 400, {"status": "error", "message": "policy_id requis"})
+
+    result = store.create(
+        policy_id=policy_id,
+        description=data.get("description", ""),
+        allowed_tools=data.get("allowed_tools", []),
+        denied_tools=data.get("denied_tools", []),
+        path_rules=data.get("path_rules", []),
+        created_by="admin",
+    )
+    status_code = 201 if result.get("status") == "created" else 400
+    await _json_response(send, status_code, result)
+
+
+async def _api_get_policy(send, policy_id):
+    """GET /admin/api/policies/{policy_id} — Détail d'une policy."""
+    from ..auth.policies import get_policy_store
+    store = get_policy_store()
+    if not store:
+        return await _json_response(send, 400, {"status": "error", "message": "S3 non configuré"})
+
+    policy = store.get(policy_id)
+    if not policy:
+        return await _json_response(send, 404, {"status": "error", "message": f"Policy '{policy_id}' non trouvée"})
+
+    await _json_response(send, 200, {"status": "ok", **policy})
+
+
+async def _api_delete_policy(send, policy_id):
+    """DELETE /admin/api/policies/{policy_id} — Supprimer une policy."""
+    from ..auth.policies import get_policy_store
+    store = get_policy_store()
+    if not store:
+        return await _json_response(send, 400, {"status": "error", "message": "S3 non configuré"})
+
+    if store.delete(policy_id):
+        await _json_response(send, 200, {"status": "deleted", "policy_id": policy_id})
+    else:
+        await _json_response(send, 404, {"status": "error", "message": f"Policy '{policy_id}' non trouvée"})
 
 
 # =============================================================================

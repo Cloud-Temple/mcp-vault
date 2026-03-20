@@ -55,12 +55,13 @@ RESULTS = []
 # MCP Client helper
 # =============================================================================
 
-async def call_tool(tool_name: str, arguments: dict) -> dict:
+async def call_tool(tool_name: str, arguments: dict, token_override: str = None) -> dict:
     """Appelle un outil MCP via Streamable HTTP."""
     from mcp import ClientSession
     from mcp.client.streamable_http import streamablehttp_client
 
-    headers = {"Authorization": f"Bearer {TOKEN}"}
+    use_token = token_override or TOKEN
+    headers = {"Authorization": f"Bearer {use_token}"}
     try:
         async with streamablehttp_client(
             f"{BASE_URL}/mcp", headers=headers, timeout=30, sse_read_timeout=60,
@@ -894,6 +895,406 @@ async def test_11_admin_api():
 
 
 # =============================================================================
+# TEST 12 — Policies MCP (Phase 8a)
+# =============================================================================
+
+async def test_12_policies():
+    """Policies MCP — CRUD, validation, wildcards, persistance S3, erreurs."""
+    print("\n  ── TEST 12 — Policies MCP ──")
+
+    # ── 12a. Lister policies (vide au départ) ──────────────────────
+    r = await call_tool("policy_list", {})
+    check("Policy list (initiale)", r)
+    initial_count = r.get("count", 0)
+
+    # ── 12b. Créer policy "readonly" ───────────────────────────────
+    r = await call_tool("policy_create", {
+        "policy_id": "test-readonly",
+        "description": "Lecture seule — pas de write ni delete",
+        "allowed_tools": ["system_*", "vault_list", "vault_info", "secret_read", "secret_list", "secret_types"],
+        "denied_tools": ["vault_delete", "secret_write", "secret_delete"],
+    })
+    check("Créer policy test-readonly", r, "created")
+    check_value("policy_id retourné", r.get("policy_id"), "test-readonly")
+    check_true("created_at présent", bool(r.get("created_at")))
+    check_true("created_by présent", bool(r.get("created_by")))
+    check_true("allowed_tools non vide", len(r.get("allowed_tools", [])) > 0)
+    check_true("denied_tools non vide", len(r.get("denied_tools", [])) > 0)
+
+    # ── 12c. Créer policy "ssh-only" avec wildcards ────────────────
+    r = await call_tool("policy_create", {
+        "policy_id": "test-ssh-only",
+        "description": "Accès SSH CA uniquement",
+        "allowed_tools": ["system_*", "ssh_*"],
+        "denied_tools": [],
+    })
+    check("Créer policy test-ssh-only", r, "created")
+
+    # ── 12d. Créer policy avec path_rules ──────────────────────────
+    r = await call_tool("policy_create", {
+        "policy_id": "test-prod-reader",
+        "description": "Lecture sur prod-*, écriture sur dev-*",
+        "allowed_tools": [],
+        "denied_tools": ["vault_delete"],
+        "path_rules": [
+            {"vault_pattern": "prod-*", "permissions": ["read"]},
+            {"vault_pattern": "dev-*", "permissions": ["read", "write"]},
+        ],
+    })
+    check("Créer policy test-prod-reader", r, "created")
+    check_value("path_rules count", len(r.get("path_rules", [])), 2)
+    check_value("rule 1 vault_pattern", r["path_rules"][0]["vault_pattern"], "prod-*")
+    check_value("rule 1 permissions", r["path_rules"][0]["permissions"], ["read"])
+    check_value("rule 2 vault_pattern", r["path_rules"][1]["vault_pattern"], "dev-*")
+
+    # ── 12e. Lister policies (3 créées) ────────────────────────────
+    r = await call_tool("policy_list", {})
+    check("Policy list après création", r)
+    check_value("count = initial + 3", r.get("count"), initial_count + 3)
+    policy_ids = [p["policy_id"] for p in r.get("policies", [])]
+    check_true("test-readonly dans la liste", "test-readonly" in policy_ids)
+    check_true("test-ssh-only dans la liste", "test-ssh-only" in policy_ids)
+    check_true("test-prod-reader dans la liste", "test-prod-reader" in policy_ids)
+
+    # Vérifier les compteurs dans le résumé
+    for p in r.get("policies", []):
+        if p["policy_id"] == "test-readonly":
+            check_true("readonly allowed_tools_count > 0", p.get("allowed_tools_count", 0) > 0)
+            check_true("readonly denied_tools_count > 0", p.get("denied_tools_count", 0) > 0)
+        if p["policy_id"] == "test-prod-reader":
+            check_true("prod-reader path_rules_count = 2", p.get("path_rules_count", 0) == 2)
+
+    # ── 12f. Lire détails d'une policy ─────────────────────────────
+    r = await call_tool("policy_get", {"policy_id": "test-readonly"})
+    check("Policy get test-readonly", r)
+    check_value("policy_id", r.get("policy_id"), "test-readonly")
+    check_value("description", r.get("description"), "Lecture seule — pas de write ni delete")
+    check_true("allowed_tools complet", "system_*" in r.get("allowed_tools", []))
+    check_true("denied_tools complet", "vault_delete" in r.get("denied_tools", []))
+
+    # ── 12g. Erreur — policy inexistante ───────────────────────────
+    r = await call_tool("policy_get", {"policy_id": "policy-fantome"})
+    check("Get policy inexistante → erreur", r, "error")
+
+    # ── 12h. Erreur — créer un doublon ─────────────────────────────
+    r = await call_tool("policy_create", {
+        "policy_id": "test-readonly",
+        "description": "Doublon",
+        "allowed_tools": [],
+    })
+    check("Créer policy doublon → erreur", r, "error")
+
+    # ── 12i. Erreur — policy_id invalide ───────────────────────────
+    r = await call_tool("policy_create", {
+        "policy_id": "invalid id with spaces!",
+        "description": "Invalide",
+    })
+    check("Créer policy_id invalide → erreur", r, "error")
+
+    # ── 12j. Erreur — policy_id trop long ──────────────────────────
+    r = await call_tool("policy_create", {
+        "policy_id": "a" * 65,
+        "description": "Trop long",
+    })
+    check("Créer policy_id trop long → erreur", r, "error")
+
+    # ── 12k. Erreur — path_rule sans vault_pattern ─────────────────
+    r = await call_tool("policy_create", {
+        "policy_id": "test-bad-rule",
+        "path_rules": [{"permissions": ["read"]}],
+    })
+    check("Créer policy avec path_rule sans vault_pattern → erreur", r, "error")
+
+    # ── 12l. Erreur — path_rule avec permission invalide ───────────
+    r = await call_tool("policy_create", {
+        "policy_id": "test-bad-perm",
+        "path_rules": [{"vault_pattern": "*", "permissions": ["destroy"]}],
+    })
+    check("Créer policy avec permission invalide → erreur", r, "error")
+
+    # ── 12m. Supprimer sans confirm → erreur ───────────────────────
+    r = await call_tool("policy_delete", {"policy_id": "test-readonly", "confirm": False})
+    check("Delete policy sans confirm → erreur", r, "error")
+
+    # ── 12n. Supprimer policy inexistante → erreur ─────────────────
+    r = await call_tool("policy_delete", {"policy_id": "policy-fantome", "confirm": True})
+    check("Delete policy inexistante → erreur", r, "error")
+
+    # ── 12o. Supprimer test-ssh-only → OK ──────────────────────────
+    r = await call_tool("policy_delete", {"policy_id": "test-ssh-only", "confirm": True})
+    check("Delete test-ssh-only", r, "deleted")
+
+    # ── 12p. Vérifier suppression ──────────────────────────────────
+    r = await call_tool("policy_list", {})
+    policy_ids = [p["policy_id"] for p in r.get("policies", [])]
+    check_true("test-ssh-only supprimée", "test-ssh-only" not in policy_ids)
+    check_value("count = initial + 2", r.get("count"), initial_count + 2)
+
+    # ── 12q. Admin API policies — list ─────────────────────────────
+    import urllib.request
+    admin_url = BASE_URL + "/admin/api"
+    req_headers = {"Authorization": f"Bearer {TOKEN}"}
+
+    def admin_get(path):
+        req = urllib.request.Request(f"{admin_url}{path}", headers=req_headers)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+
+    r = admin_get("/policies")
+    check_value("Admin API policies status", r.get("status"), "ok")
+    check_true("Admin API policies count >= 2", r.get("count", 0) >= 2)
+
+    # ── 12r. Admin API policies — get detail ───────────────────────
+    r = admin_get("/policies/test-readonly")
+    check_value("Admin API policy detail status", r.get("status"), "ok")
+    check_value("Admin API policy_id", r.get("policy_id"), "test-readonly")
+
+    # ── 12s. Admin API policies — get inexistante → 404 ────────────
+    try:
+        admin_get("/policies/policy-fantome")
+        check_true("Admin API policy 404", False, "Devrait retourner une erreur")
+    except urllib.request.HTTPError as e:
+        check_value("Admin API policy 404 code", e.code, 404)
+
+    # ── CLEANUP policies ───────────────────────────────────────────
+    await call_tool("policy_delete", {"policy_id": "test-readonly", "confirm": True})
+    await call_tool("policy_delete", {"policy_id": "test-prod-reader", "confirm": True})
+
+    # Vérifier nettoyage complet
+    r = await call_tool("policy_list", {})
+    check_value("Policies nettoyées", r.get("count"), initial_count)
+
+
+# =============================================================================
+# TEST 13 — Policy Enforcement & Token Update (Phase 8b)
+# =============================================================================
+
+async def test_13_enforcement():
+    """Policy Enforcement — token avec policy → outils autorisés/refusés + token_update."""
+    print("\n  ── TEST 13 — Policy Enforcement & Token Update ──")
+
+    import urllib.request
+
+    admin_url = BASE_URL + "/admin/api"
+    req_headers = {"Authorization": f"Bearer {TOKEN}"}
+
+    def admin_post(path, data):
+        body = json.dumps(data).encode()
+        req = urllib.request.Request(
+            f"{admin_url}{path}", data=body, headers={**req_headers, "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+
+    def admin_put(path, data):
+        body = json.dumps(data).encode()
+        req = urllib.request.Request(
+            f"{admin_url}{path}", data=body, headers={**req_headers, "Content-Type": "application/json"},
+            method="PUT",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+
+    def admin_delete(path):
+        req = urllib.request.Request(f"{admin_url}{path}", headers=req_headers, method="DELETE")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+
+    def admin_get(path):
+        req = urllib.request.Request(f"{admin_url}{path}", headers=req_headers)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+
+    # ── 13a. Créer une policy "deny-write" ─────────────────────────
+    r = await call_tool("policy_create", {
+        "policy_id": "test-deny-write",
+        "description": "Interdit écriture et suppression de secrets",
+        "allowed_tools": [],
+        "denied_tools": ["secret_write", "secret_delete", "vault_create", "vault_delete"],
+    })
+    check("Créer policy test-deny-write", r, "created")
+
+    # ── 13b. Créer une policy "readonly-only" ──────────────────────
+    r = await call_tool("policy_create", {
+        "policy_id": "test-readonly-only",
+        "description": "Uniquement lecture",
+        "allowed_tools": ["system_*", "vault_list", "vault_info", "secret_read", "secret_list"],
+        "denied_tools": [],
+    })
+    check("Créer policy test-readonly-only", r, "created")
+
+    # ── 13c. Créer un token non-admin (read,write) ─────────────────
+    r = admin_post("/tokens", {
+        "client_name": "test-enforcement-agent",
+        "permissions": ["read", "write"],
+        "allowed_resources": [],
+        "expires_in_days": 1,
+    })
+    check("Créer token test-enforcement-agent", r, "created")
+    agent_token = r.get("raw_token", "")
+    agent_hash = r.get("hash", "")[:12]
+    check_true("raw_token obtenu", len(agent_token) > 10, f"len={len(agent_token)}")
+    check_true("hash obtenu", len(agent_hash) >= 8, f"hash={agent_hash}")
+
+    # ── 13d. Token sans policy → tout autorisé ─────────────────────
+    r = await call_tool("vault_list", {}, token_override=agent_token)
+    check("Token sans policy → vault_list OK", r)
+
+    r = await call_tool("secret_read", {
+        "vault_id": "test-e2e-alpha", "path": "web/github",
+    }, token_override=agent_token)
+    check("Token sans policy → secret_read OK", r)
+
+    # ── 13e. Assigner policy via token_update (MCP tool) ───────────
+    r = await call_tool("token_update", {
+        "hash_prefix": agent_hash,
+        "policy_id": "test-deny-write",
+    })
+    check("token_update assigner policy", r, "updated")
+    check_true("policy_id dans updated_fields", "policy_id" in r.get("updated_fields", []))
+    check_value("policy_id assignée", r.get("policy_id"), "test-deny-write")
+
+    # ── 13f. Token avec policy deny-write → secret_write REFUSÉ ───
+    r = await call_tool("secret_write", {
+        "vault_id": "test-e2e-alpha", "path": "enforcement/test",
+        "data": {"value": "should-fail"}, "secret_type": "custom",
+    }, token_override=agent_token)
+    check("Token + deny-write → secret_write REFUSÉ", r, "error")
+    check_true("Message contient 'refusé' ou 'policy'",
+               "refus" in r.get("message", "").lower() or "policy" in r.get("message", "").lower(),
+               r.get("message", ""))
+
+    # ── 13g. Token avec policy deny-write → secret_delete REFUSÉ ──
+    r = await call_tool("secret_delete", {
+        "vault_id": "test-e2e-alpha", "path": "web/github",
+    }, token_override=agent_token)
+    check("Token + deny-write → secret_delete REFUSÉ", r, "error")
+
+    # ── 13h. Token avec policy deny-write → vault_create REFUSÉ ───
+    r = await call_tool("vault_create", {
+        "vault_id": "enforcement-blocked",
+    }, token_override=agent_token)
+    check("Token + deny-write → vault_create REFUSÉ", r, "error")
+
+    # ── 13i. Token avec policy deny-write → vault_list AUTORISÉ ───
+    r = await call_tool("vault_list", {}, token_override=agent_token)
+    check("Token + deny-write → vault_list AUTORISÉ", r)
+
+    # ── 13j. Token avec policy deny-write → secret_read AUTORISÉ ──
+    r = await call_tool("secret_read", {
+        "vault_id": "test-e2e-alpha", "path": "web/github",
+    }, token_override=agent_token)
+    check("Token + deny-write → secret_read AUTORISÉ", r)
+
+    # ── 13k. Token avec policy deny-write → system_health AUTORISÉ ──
+    # (system_* est exempté de policy check)
+    r = await call_tool("system_health", {}, token_override=agent_token)
+    check("Token + deny-write → system_health AUTORISÉ", r)
+
+    # ── 13l. Changer la policy vers readonly-only ──────────────────
+    r = await call_tool("token_update", {
+        "hash_prefix": agent_hash,
+        "policy_id": "test-readonly-only",
+    })
+    check("token_update changer policy", r, "updated")
+
+    # ── 13m. Token + readonly-only → vault_list AUTORISÉ ───────────
+    r = await call_tool("vault_list", {}, token_override=agent_token)
+    check("Token + readonly-only → vault_list AUTORISÉ", r)
+
+    # ── 13n. Token + readonly-only → secret_read AUTORISÉ ──────────
+    r = await call_tool("secret_read", {
+        "vault_id": "test-e2e-alpha", "path": "web/github",
+    }, token_override=agent_token)
+    check("Token + readonly-only → secret_read AUTORISÉ", r)
+
+    # ── 13o. Token + readonly-only → secret_write REFUSÉ ───────────
+    # (secret_write n'est PAS dans allowed_tools)
+    r = await call_tool("secret_write", {
+        "vault_id": "test-e2e-alpha", "path": "enforcement/test",
+        "data": {"value": "should-fail"}, "secret_type": "custom",
+    }, token_override=agent_token)
+    check("Token + readonly-only → secret_write REFUSÉ", r, "error")
+
+    # ── 13p. Token + readonly-only → vault_create REFUSÉ ───────────
+    r = await call_tool("vault_create", {
+        "vault_id": "enforcement-blocked-2",
+    }, token_override=agent_token)
+    check("Token + readonly-only → vault_create REFUSÉ", r, "error")
+
+    # ── 13q. Token + readonly-only → ssh_ca_list_roles REFUSÉ ──────
+    r = await call_tool("ssh_ca_list_roles", {
+        "vault_id": "test-e2e-alpha",
+    }, token_override=agent_token)
+    check("Token + readonly-only → ssh_ca_list_roles REFUSÉ", r, "error")
+
+    # ── 13r. Retirer la policy → tout redevient autorisé ───────────
+    r = await call_tool("token_update", {
+        "hash_prefix": agent_hash,
+        "policy_id": "_remove",
+    })
+    check("token_update retirer policy", r, "updated")
+    check_value("policy_id vide après retrait", r.get("policy_id"), "")
+
+    # ── 13s. Token sans policy → secret_write AUTORISÉ ─────────────
+    r = await call_tool("secret_write", {
+        "vault_id": "test-e2e-alpha", "path": "enforcement/after-remove",
+        "data": {"value": "should-work"}, "secret_type": "custom",
+    }, token_override=agent_token)
+    check("Token sans policy → secret_write AUTORISÉ", r)
+    # Cleanup secret
+    await call_tool("secret_delete", {"vault_id": "test-e2e-alpha", "path": "enforcement/after-remove"})
+
+    # ── 13t. Token update — modifier permissions ───────────────────
+    r = await call_tool("token_update", {
+        "hash_prefix": agent_hash,
+        "permissions": "read",
+    })
+    check("token_update changer permissions", r, "updated")
+    check_true("permissions dans updated_fields", "permissions" in r.get("updated_fields", []))
+
+    # ── 13u. Token update — modifier vaults autorisés ──────────────
+    r = await call_tool("token_update", {
+        "hash_prefix": agent_hash,
+        "vaults": "test-e2e-alpha",
+    })
+    check("token_update changer vaults", r, "updated")
+    check_true("allowed_resources dans updated_fields", "allowed_resources" in r.get("updated_fields", []))
+
+    # ── 13v. Token update — erreur hash inexistant ─────────────────
+    r = await call_tool("token_update", {
+        "hash_prefix": "aaaa00000000",
+        "policy_id": "test-deny-write",
+    })
+    check("token_update hash inexistant → erreur", r, "error")
+
+    # ── 13w. Token update — erreur policy inexistante ──────────────
+    r = await call_tool("token_update", {
+        "hash_prefix": agent_hash,
+        "policy_id": "policy-fantome-xyz",
+    })
+    check("token_update policy inexistante → erreur", r, "error")
+
+    # ── 13x. Admin API — token update (PUT) ────────────────────────
+    r = admin_put(f"/tokens/{agent_hash}", {"policy_id": "test-deny-write"})
+    check("Admin API PUT token update", r, "updated")
+    check_value("Admin API policy_id assignée", r.get("policy_id"), "test-deny-write")
+
+    # ── 13y. Admin API — token list inclut policy_id ───────────────
+    r = admin_get("/tokens")
+    check("Admin API token list", r)
+    agent_entry = [t for t in r.get("tokens", []) if t.get("client_name") == "test-enforcement-agent"]
+    check_true("Token agent dans la liste", len(agent_entry) > 0)
+    if agent_entry:
+        check_value("policy_id visible dans listing", agent_entry[0].get("policy_id"), "test-deny-write")
+
+    # ── CLEANUP ────────────────────────────────────────────────────
+    admin_delete(f"/tokens/{agent_hash}")
+    await call_tool("policy_delete", {"policy_id": "test-deny-write", "confirm": True})
+    await call_tool("policy_delete", {"policy_id": "test-readonly-only", "confirm": True})
+
+
+# =============================================================================
 # CLEANUP
 # =============================================================================
 
@@ -912,17 +1313,19 @@ async def cleanup():
 # =============================================================================
 
 TEST_REGISTRY = {
-    "system":     test_01_system,
-    "vaults":     test_02_spaces,
-    "secrets":    test_03_secrets,
-    "versioning": test_04_versioning,
-    "password":   test_05_password,
-    "isolation":  test_06_isolation,
-    "errors":     test_07_errors,
-    "s3_sync":    test_08_s3_sync,
-    "ssh_ca":     test_09_ssh_ca,
-    "types":      test_10_types,
-    "admin_api":  test_11_admin_api,
+    "system":      test_01_system,
+    "vaults":      test_02_spaces,
+    "secrets":     test_03_secrets,
+    "versioning":  test_04_versioning,
+    "password":    test_05_password,
+    "isolation":   test_06_isolation,
+    "errors":      test_07_errors,
+    "s3_sync":     test_08_s3_sync,
+    "ssh_ca":      test_09_ssh_ca,
+    "types":       test_10_types,
+    "admin_api":   test_11_admin_api,
+    "policies":    test_12_policies,
+    "enforcement": test_13_enforcement,
 }
 
 

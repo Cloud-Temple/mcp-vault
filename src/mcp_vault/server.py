@@ -29,6 +29,16 @@ logger = logging.getLogger("mcp-vault")
 # --- Settings ---
 settings = get_settings()
 
+
+import time as _time
+
+def _r(tool: str, result: dict, vault_id: str = "", detail: str = "") -> dict:
+    """Log audit event and return result."""
+    from .audit import log_audit
+    status = result.get("status", "?") if isinstance(result, dict) else "?"
+    log_audit(tool, status, vault_id, detail)
+    return result
+
 # --- FastMCP instance ---
 mcp = FastMCP(
     settings.mcp_server_name,
@@ -96,9 +106,12 @@ async def vault_create(vault_id: str, description: str = "") -> dict:
         vault_id: Identifiant unique du vault (alphanum + tirets)
         description: Description optionnelle du vault
     """
-    from .auth.context import check_access, check_write_permission
+    from .auth.context import check_access, check_write_permission, check_policy
     from .vault.spaces import create_space
 
+    policy_err = check_policy("vault_create")
+    if policy_err:
+        return policy_err
     access_err = check_access(vault_id)
     if access_err:
         return access_err
@@ -106,14 +119,18 @@ async def vault_create(vault_id: str, description: str = "") -> dict:
     if write_err:
         return write_err
 
-    return await create_space(vault_id, description)
+    return _r("vault_create", await create_space(vault_id, description), vault_id)
 
 
 @mcp.tool()
 async def vault_list() -> dict:
     """Liste tous les vaults (coffres de secrets) accessibles par le token courant."""
-    from .auth.context import current_token_info
+    from .auth.context import current_token_info, check_policy
     from .vault.spaces import list_spaces
+
+    policy_err = check_policy("vault_list")
+    if policy_err:
+        return policy_err
 
     # ── Filtrage par token : les non-admin ne voient que leurs vaults ──
     token_info = current_token_info.get()
@@ -123,7 +140,7 @@ async def vault_list() -> dict:
         if allowed:
             allowed_vault_ids = allowed
 
-    return await list_spaces(allowed_vault_ids=allowed_vault_ids)
+    return _r("vault_list", await list_spaces(allowed_vault_ids=allowed_vault_ids))
 
 
 @mcp.tool()
@@ -134,14 +151,17 @@ async def vault_info(vault_id: str) -> dict:
     Args:
         vault_id: Identifiant du vault
     """
-    from .auth.context import check_access
+    from .auth.context import check_access, check_policy
     from .vault.spaces import get_space_info
 
+    policy_err = check_policy("vault_info")
+    if policy_err:
+        return policy_err
     access_err = check_access(vault_id)
     if access_err:
         return access_err
 
-    return await get_space_info(vault_id)
+    return _r("vault_info", await get_space_info(vault_id), vault_id)
 
 
 @mcp.tool()
@@ -153,9 +173,12 @@ async def vault_update(vault_id: str, description: str = "") -> dict:
         vault_id: Identifiant du vault à modifier
         description: Nouvelle description du vault
     """
-    from .auth.context import check_access, check_write_permission
+    from .auth.context import check_access, check_write_permission, check_policy
     from .vault.spaces import update_space
 
+    policy_err = check_policy("vault_update")
+    if policy_err:
+        return policy_err
     access_err = check_access(vault_id)
     if access_err:
         return access_err
@@ -166,7 +189,7 @@ async def vault_update(vault_id: str, description: str = "") -> dict:
     if not description:
         return {"status": "error", "message": "Au moins un champ à modifier est requis (description)"}
 
-    return await update_space(vault_id, description)
+    return _r("vault_update", await update_space(vault_id, description), vault_id)
 
 
 @mcp.tool()
@@ -178,9 +201,12 @@ async def vault_delete(vault_id: str, confirm: bool = False) -> dict:
         vault_id: Identifiant du vault à supprimer
         confirm: Doit être True pour confirmer la suppression
     """
-    from .auth.context import check_access, check_admin_permission
+    from .auth.context import check_access, check_admin_permission, check_policy
     from .vault.spaces import delete_space
 
+    policy_err = check_policy("vault_delete")
+    if policy_err:
+        return policy_err
     access_err = check_access(vault_id)
     if access_err:
         return access_err
@@ -191,7 +217,7 @@ async def vault_delete(vault_id: str, confirm: bool = False) -> dict:
     if not confirm:
         return {"status": "error", "message": "confirm=True requis pour supprimer un vault"}
 
-    return await delete_space(vault_id)
+    return _r("vault_delete", await delete_space(vault_id), vault_id)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -217,9 +243,12 @@ async def secret_write(vault_id: str, path: str, data: dict,
         tags: Tags séparés par des virgules (ex: "prod,critical")
         favorite: Marquer comme favori
     """
-    from .auth.context import check_access, check_write_permission
+    from .auth.context import check_access, check_write_permission, check_policy
     from .vault.secrets import write_secret
 
+    policy_err = check_policy("secret_write")
+    if policy_err:
+        return policy_err
     access_err = check_access(vault_id)
     if access_err:
         return access_err
@@ -227,7 +256,7 @@ async def secret_write(vault_id: str, path: str, data: dict,
     if write_err:
         return write_err
 
-    return await write_secret(vault_id, path, data, secret_type, tags, favorite)
+    return _r("secret_write", await write_secret(vault_id, path, data, secret_type, tags, favorite), vault_id, path)
 
 
 @mcp.tool()
@@ -240,14 +269,17 @@ async def secret_read(vault_id: str, path: str, version: int = 0) -> dict:
         path: Chemin du secret
         version: Version spécifique (0 = dernière)
     """
-    from .auth.context import check_access
+    from .auth.context import check_access, check_policy
     from .vault.secrets import read_secret
 
+    policy_err = check_policy("secret_read")
+    if policy_err:
+        return policy_err
     access_err = check_access(vault_id)
     if access_err:
         return access_err
 
-    return await read_secret(vault_id, path, version)
+    return _r("secret_read", await read_secret(vault_id, path, version), vault_id, path)
 
 
 @mcp.tool()
@@ -259,14 +291,17 @@ async def secret_list(vault_id: str, path: str = "") -> dict:
         vault_id: Vault cible
         path: Préfixe pour filtrer (optionnel)
     """
-    from .auth.context import check_access
+    from .auth.context import check_access, check_policy
     from .vault.secrets import list_secrets
 
+    policy_err = check_policy("secret_list")
+    if policy_err:
+        return policy_err
     access_err = check_access(vault_id)
     if access_err:
         return access_err
 
-    return await list_secrets(vault_id, path)
+    return _r("secret_list", await list_secrets(vault_id, path), vault_id)
 
 
 @mcp.tool()
@@ -278,9 +313,12 @@ async def secret_delete(vault_id: str, path: str) -> dict:
         vault_id: Vault cible
         path: Chemin du secret à supprimer
     """
-    from .auth.context import check_access, check_write_permission
+    from .auth.context import check_access, check_write_permission, check_policy
     from .vault.secrets import delete_secret
 
+    policy_err = check_policy("secret_delete")
+    if policy_err:
+        return policy_err
     access_err = check_access(vault_id)
     if access_err:
         return access_err
@@ -288,7 +326,7 @@ async def secret_delete(vault_id: str, path: str) -> dict:
     if write_err:
         return write_err
 
-    return await delete_secret(vault_id, path)
+    return _r("secret_delete", await delete_secret(vault_id, path), vault_id, path)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -343,7 +381,138 @@ async def secret_generate_password(length: int = 24, uppercase: bool = True,
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# OUTILS MCP — SSH CA (Phase 3 — stubs)
+# OUTILS MCP — Policies (Phase 8a — CRUD)
+# ═══════════════════════════════════════════════════════════════════════
+
+@mcp.tool()
+async def policy_create(policy_id: str, description: str = "",
+                        allowed_tools: list = None, denied_tools: list = None,
+                        path_rules: list = None) -> dict:
+    """
+    Crée une nouvelle policy MCP (contrôle d'accès granulaire).
+
+    Une policy définit quels outils MCP sont accessibles et quelles
+    permissions s'appliquent par vault. Assignable à un token via policy_id.
+
+    Logique d'évaluation :
+    - denied_tools a PRIORITÉ sur allowed_tools
+    - allowed_tools vide = tous les outils autorisés (sauf denied)
+    - Les patterns supportent les wildcards (ex: "ssh_*", "secret_*")
+
+    Args:
+        policy_id: Identifiant unique (alphanum + tirets, max 64 chars)
+        description: Description lisible de la policy
+        allowed_tools: Patterns d'outils autorisés (ex: ["system_*", "vault_list", "secret_read"])
+        denied_tools: Patterns d'outils refusés (ex: ["vault_delete", "ssh_*"])
+        path_rules: Règles par vault (ex: [{"vault_pattern": "prod-*", "permissions": ["read"]}])
+    """
+    from .auth.context import check_admin_permission, get_current_client_name
+    from .auth.policies import get_policy_store
+
+    admin_err = check_admin_permission()
+    if admin_err:
+        return admin_err
+
+    store = get_policy_store()
+    if not store:
+        return {"status": "error", "message": "Policy Store non configuré (S3 requis)"}
+
+    return store.create(
+        policy_id=policy_id,
+        description=description,
+        allowed_tools=allowed_tools or [],
+        denied_tools=denied_tools or [],
+        path_rules=path_rules or [],
+        created_by=get_current_client_name(),
+    )
+
+
+@mcp.tool()
+async def policy_list() -> dict:
+    """
+    Liste toutes les policies MCP.
+
+    Retourne un résumé de chaque policy (ID, description, compteurs).
+    Requiert la permission admin.
+    """
+    from .auth.context import check_admin_permission
+    from .auth.policies import get_policy_store
+
+    admin_err = check_admin_permission()
+    if admin_err:
+        return admin_err
+
+    store = get_policy_store()
+    if not store:
+        return {"status": "error", "message": "Policy Store non configuré (S3 requis)"}
+
+    policies = store.list_all()
+    return {"status": "ok", "policies": policies, "count": len(policies)}
+
+
+@mcp.tool()
+async def policy_get(policy_id: str) -> dict:
+    """
+    Détails complets d'une policy MCP.
+
+    Retourne toutes les règles (allowed_tools, denied_tools, path_rules).
+    Requiert la permission admin.
+
+    Args:
+        policy_id: Identifiant de la policy
+    """
+    from .auth.context import check_admin_permission
+    from .auth.policies import get_policy_store
+
+    admin_err = check_admin_permission()
+    if admin_err:
+        return admin_err
+
+    store = get_policy_store()
+    if not store:
+        return {"status": "error", "message": "Policy Store non configuré (S3 requis)"}
+
+    policy = store.get(policy_id)
+    if not policy:
+        return {"status": "error", "message": f"Policy '{policy_id}' non trouvée"}
+
+    return {"status": "ok", **policy}
+
+
+@mcp.tool()
+async def policy_delete(policy_id: str, confirm: bool = False) -> dict:
+    """
+    Supprime une policy MCP (irréversible).
+
+    ⚠️ Les tokens qui référencent cette policy perdront leur restriction.
+    Le paramètre confirm doit être True pour confirmer.
+
+    Args:
+        policy_id: Identifiant de la policy à supprimer
+        confirm: Doit être True pour confirmer la suppression
+    """
+    from .auth.context import check_admin_permission
+    from .auth.policies import get_policy_store
+
+    admin_err = check_admin_permission()
+    if admin_err:
+        return admin_err
+
+    if not confirm:
+        return {"status": "error", "message": "confirm=True requis pour supprimer une policy"}
+
+    store = get_policy_store()
+    if not store:
+        return {"status": "error", "message": "Policy Store non configuré (S3 requis)"}
+
+    if store.delete(policy_id):
+        return {"status": "deleted", "policy_id": policy_id}
+    else:
+        return {"status": "error", "message": f"Policy '{policy_id}' non trouvée"}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# OUTILS MCP — SSH CA
 # ═══════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
@@ -359,9 +528,12 @@ async def ssh_ca_setup(vault_id: str, role_name: str, allowed_users: str = "*",
         default_user: Utilisateur par défaut
         ttl: Durée de validité des certificats (ex: "30m", "1h")
     """
-    from .auth.context import check_access, check_write_permission
+    from .auth.context import check_access, check_write_permission, check_policy
     from .vault.ssh_ca import setup_ssh_ca
 
+    policy_err = check_policy("ssh_ca_setup")
+    if policy_err:
+        return policy_err
     access_err = check_access(vault_id)
     if access_err:
         return access_err
@@ -369,7 +541,7 @@ async def ssh_ca_setup(vault_id: str, role_name: str, allowed_users: str = "*",
     if write_err:
         return write_err
 
-    return await setup_ssh_ca(vault_id, role_name, allowed_users, default_user, ttl)
+    return _r("ssh_ca_setup", await setup_ssh_ca(vault_id, role_name, allowed_users, default_user, ttl), vault_id, role_name)
 
 
 @mcp.tool()
@@ -384,14 +556,17 @@ async def ssh_sign_key(vault_id: str, role_name: str, public_key: str,
         public_key: Contenu de la clé publique SSH
         ttl: Durée de validité du certificat
     """
-    from .auth.context import check_access
+    from .auth.context import check_access, check_policy
     from .vault.ssh_ca import sign_ssh_key
 
+    policy_err = check_policy("ssh_sign_key")
+    if policy_err:
+        return policy_err
     access_err = check_access(vault_id)
     if access_err:
         return access_err
 
-    return await sign_ssh_key(vault_id, role_name, public_key, ttl)
+    return _r("ssh_sign_key", await sign_ssh_key(vault_id, role_name, public_key, ttl), vault_id, role_name)
 
 
 @mcp.tool()
@@ -402,14 +577,17 @@ async def ssh_ca_public_key(vault_id: str) -> dict:
     Args:
         vault_id: Vault cible
     """
-    from .auth.context import check_access
+    from .auth.context import check_access, check_policy
     from .vault.ssh_ca import get_ca_public_key
 
+    policy_err = check_policy("ssh_ca_public_key")
+    if policy_err:
+        return policy_err
     access_err = check_access(vault_id)
     if access_err:
         return access_err
 
-    return await get_ca_public_key(vault_id)
+    return _r("ssh_ca_public_key", await get_ca_public_key(vault_id), vault_id)
 
 
 @mcp.tool()
@@ -422,14 +600,17 @@ async def ssh_ca_list_roles(vault_id: str) -> dict:
     Args:
         vault_id: Vault cible
     """
-    from .auth.context import check_access
+    from .auth.context import check_access, check_policy
     from .vault.ssh_ca import list_ssh_roles
 
+    policy_err = check_policy("ssh_ca_list_roles")
+    if policy_err:
+        return policy_err
     access_err = check_access(vault_id)
     if access_err:
         return access_err
 
-    return await list_ssh_roles(vault_id)
+    return _r("ssh_ca_list_roles", await list_ssh_roles(vault_id), vault_id)
 
 
 @mcp.tool()
@@ -441,14 +622,132 @@ async def ssh_ca_role_info(vault_id: str, role_name: str) -> dict:
         vault_id: Vault cible
         role_name: Nom du rôle SSH à inspecter
     """
-    from .auth.context import check_access
+    from .auth.context import check_access, check_policy
     from .vault.ssh_ca import get_ssh_role_info
 
+    policy_err = check_policy("ssh_ca_role_info")
+    if policy_err:
+        return policy_err
     access_err = check_access(vault_id)
     if access_err:
         return access_err
 
-    return await get_ssh_role_info(vault_id, role_name)
+    return _r("ssh_ca_role_info", await get_ssh_role_info(vault_id, role_name), vault_id, role_name)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# OUTILS MCP — Token Management (Phase 8b)
+# ═══════════════════════════════════════════════════════════════════════
+
+@mcp.tool()
+async def token_update(hash_prefix: str, policy_id: str = "",
+                       permissions: str = "", vaults: str = "") -> dict:
+    """
+    Met à jour un token existant (policy, permissions, vaults autorisés).
+
+    Seuls les champs fournis (non vides) sont modifiés.
+    Requiert la permission admin.
+
+    Args:
+        hash_prefix: Préfixe du hash du token à modifier (depuis token list)
+        policy_id: Policy à assigner (vide = retirer la policy, "_remove" = retirer)
+        permissions: Nouvelles permissions séparées par virgule (ex: "read,write")
+        vaults: Vaults autorisés séparés par virgule (vide = pas de changement, "_all" = tous)
+    """
+    from .auth.context import check_admin_permission
+    from .auth.token_store import get_token_store
+
+    admin_err = check_admin_permission()
+    if admin_err:
+        return admin_err
+
+    store = get_token_store()
+    if not store:
+        return {"status": "error", "message": "Token Store non configuré (S3 requis)"}
+
+    # Préparer les champs à modifier (None = pas de changement)
+    new_policy = None
+    new_perms = None
+    new_resources = None
+
+    if policy_id:
+        if policy_id == "_remove":
+            new_policy = ""  # Retirer la policy
+        else:
+            # Vérifier que la policy existe
+            from .auth.policies import get_policy_store
+            pstore = get_policy_store()
+            if pstore and not pstore.get(policy_id):
+                return {"status": "error", "message": f"Policy '{policy_id}' non trouvée"}
+            new_policy = policy_id
+
+    if permissions:
+        new_perms = [p.strip() for p in permissions.split(",") if p.strip()]
+
+    if vaults:
+        if vaults == "_all":
+            new_resources = []  # Vide = accès à tous
+        else:
+            new_resources = [v.strip() for v in vaults.split(",") if v.strip()]
+
+    return store.update(
+        hash_prefix=hash_prefix,
+        policy_id=new_policy,
+        permissions=new_perms,
+        allowed_resources=new_resources,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# OUTILS MCP — Audit Log (Phase 8c)
+# ═══════════════════════════════════════════════════════════════════════
+
+@mcp.tool()
+async def audit_log(limit: int = 50, client: str = "", vault_id: str = "",
+                    tool: str = "", category: str = "", status: str = "",
+                    since: str = "") -> dict:
+    """
+    Journal d'audit — toutes les opérations MCP avec filtres.
+
+    Retourne les événements les plus récents en premier. Chaque entrée
+    contient : timestamp, client, outil, vault, statut, détail, durée.
+
+    Filtres disponibles (combinables) :
+    - client : nom du client (ex: "agent-sre")
+    - vault_id : vault concerné (ex: "prod-servers")
+    - tool : nom de l'outil (supporte préfixes, ex: "secret_*")
+    - category : system, vault, secret, ssh, policy, token
+    - status : ok, error, created, deleted, updated, denied
+    - since : date ISO 8601 (ex: "2026-03-18T10:00:00")
+
+    Args:
+        limit: Nombre max d'entrées (défaut 50, max 1000)
+        client: Filtrer par client
+        vault_id: Filtrer par vault
+        tool: Filtrer par outil (wildcards)
+        category: Filtrer par catégorie
+        status: Filtrer par statut
+        since: Entrées après cette date
+    """
+    from .audit import get_audit_store
+
+    store = get_audit_store()
+    if not store:
+        return {"status": "error", "message": "Audit Store non initialisé"}
+
+    entries = store.get_entries(
+        limit=limit, client=client, vault_id=vault_id,
+        tool=tool, category=category, status=status, since=since,
+    )
+    stats = store.get_stats()
+
+    return {
+        "status": "ok",
+        "entries": entries,
+        "count": len(entries),
+        "total_in_buffer": stats["total"],
+        "stats": stats,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════

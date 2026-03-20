@@ -12,10 +12,11 @@ from pathlib import Path
 from .client import MCPClient
 from .display import (
     console, show_error, show_warning, show_json,
-    show_health_result, show_about_result,
+    show_health_result, show_about_result, show_whoami_result,
     show_vault_result, show_secret_result,
     show_types_result, show_password_result,
     show_ssh_result, show_token_result,
+    show_policy_result, show_audit_result,
 )
 
 
@@ -23,12 +24,15 @@ SHELL_COMMANDS = {
     "help":       "Afficher l'aide",
     "health":     "Vérifier l'état de santé (OpenBao + S3)",
     "about":      "Informations sur le service",
+    "whoami":     "Identité du token courant (nom, permissions, vaults)",
     "vault":      "vault <op> [args] — create, list, info, update, delete",
     "secret":     "secret <op> <vault> [args] — write, read, list, delete",
     "types":      "Lister les 14 types de secrets",
     "password":   "password [length] — Générer un mot de passe CSPRNG",
     "ssh":        "ssh <op> <vault> [args] — setup, sign, ca-key, roles, role-info",
-    "token":      "token <op> [args] — create, list, revoke",
+    "policy":     "policy <op> [args] — create, list, get, delete",
+    "token":      "token <op> [args] — create, list, update, revoke",
+    "audit":      "audit [options] — journal d'audit complet",
     "quit":       "Quitter le shell",
 }
 
@@ -47,6 +51,23 @@ async def cmd_about(client, args="", json_output=False):
         show_json(result)
     else:
         show_about_result(result)
+
+
+async def cmd_whoami(client, args="", json_output=False):
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10) as http:
+            resp = await http.get(
+                f"{client.base_url}/admin/api/whoami",
+                headers={"Authorization": f"Bearer {client.token}"},
+            )
+            result = resp.json()
+    except Exception as e:
+        result = {"status": "error", "message": str(e)}
+    if json_output:
+        show_json(result)
+    else:
+        show_whoami_result(result)
 
 
 VAULT_OPS = ("create", "list", "info", "delete")
@@ -258,7 +279,62 @@ async def cmd_ssh(client, args="", json_output=False):
         show_ssh_result(result)
 
 
-TOKEN_OPS = ("create", "list", "revoke")
+POLICY_OPS = ("create", "list", "get", "delete")
+
+
+async def cmd_policy(client, args="", json_output=False):
+    parts = args.strip().split()
+    if not parts or parts[0] not in POLICY_OPS:
+        show_warning("Usage: policy <op> [args]")
+        show_warning("")
+        show_warning("  policy list")
+        show_warning("  policy create readonly --desc 'Lecture seule' --allowed 'secret_read,vault_list'")
+        show_warning("  policy create no-ssh --denied 'ssh_*'")
+        show_warning("  policy get readonly")
+        show_warning("  policy delete readonly")
+        return
+
+    op = parts[0]
+    if op == "list":
+        result = await client.call_tool("policy_list", {})
+    elif op == "get" and len(parts) >= 2:
+        result = await client.call_tool("policy_get", {"policy_id": parts[1]})
+    elif op == "create" and len(parts) >= 2:
+        desc = ""
+        allowed = []
+        denied = []
+        i = 2
+        while i < len(parts):
+            if parts[i] == "--desc" and i + 1 < len(parts):
+                desc = parts[i + 1]
+                i += 2
+            elif parts[i] == "--allowed" and i + 1 < len(parts):
+                allowed = [t.strip() for t in parts[i + 1].split(",") if t.strip()]
+                i += 2
+            elif parts[i] == "--denied" and i + 1 < len(parts):
+                denied = [t.strip() for t in parts[i + 1].split(",") if t.strip()]
+                i += 2
+            else:
+                i += 1
+        result = await client.call_tool("policy_create", {
+            "policy_id": parts[1], "description": desc,
+            "allowed_tools": allowed, "denied_tools": denied,
+        })
+    elif op == "delete" and len(parts) >= 2:
+        result = await client.call_tool("policy_delete", {
+            "policy_id": parts[1], "confirm": True,
+        })
+    else:
+        show_warning(f"Usage: policy {op} <policy_id>")
+        return
+
+    if json_output:
+        show_json(result)
+    else:
+        show_policy_result(result)
+
+
+TOKEN_OPS = ("create", "list", "update", "revoke")
 
 
 async def cmd_token(client, args="", json_output=False):
@@ -268,6 +344,7 @@ async def cmd_token(client, args="", json_output=False):
         show_warning("")
         show_warning("  token list")
         show_warning("  token create agent-prod --permissions read --vaults prod")
+        show_warning("  token update <hash_prefix> --policy readonly")
         show_warning("  token revoke <hash_prefix>")
         return
 
@@ -321,6 +398,39 @@ async def cmd_token(client, args="", json_output=False):
                 result = resp.json()
         except Exception as e:
             result = {"status": "error", "message": str(e)}
+    elif op == "update" and len(parts) >= 2:
+        data = {}
+        i = 2
+        while i < len(parts):
+            if parts[i] == "--policy" and i + 1 < len(parts):
+                data["policy_id"] = "" if parts[i + 1] == "_remove" else parts[i + 1]
+                i += 2
+            elif parts[i] == "--permissions" and i + 1 < len(parts):
+                data["permissions"] = [p.strip() for p in parts[i + 1].split(",")]
+                i += 2
+            elif parts[i] == "--vaults" and i + 1 < len(parts):
+                if parts[i + 1] == "_all":
+                    data["allowed_resources"] = []
+                else:
+                    data["allowed_resources"] = [v.strip() for v in parts[i + 1].split(",")]
+                i += 2
+            else:
+                i += 1
+        try:
+            async with httpx.AsyncClient(timeout=10) as http:
+                resp = await http.put(
+                    f"{client.base_url}/admin/api/tokens/{parts[1]}",
+                    headers={"Authorization": f"Bearer {client.token}"},
+                    json=data,
+                )
+                result = resp.json()
+        except Exception as e:
+            result = {"status": "error", "message": str(e)}
+        if json_output:
+            show_json(result)
+        else:
+            show_policy_result(result)
+        return
     elif op == "revoke" and len(parts) >= 2:
         try:
             async with httpx.AsyncClient(timeout=10) as http:
@@ -339,6 +449,32 @@ async def cmd_token(client, args="", json_output=False):
         show_json(result)
     else:
         show_token_result(result)
+
+
+async def cmd_audit(client, args="", json_output=False):
+    params = {"limit": 50}
+    parts = args.strip().split()
+    i = 0
+    while i < len(parts):
+        if parts[i] == "--limit" and i + 1 < len(parts):
+            params["limit"] = int(parts[i + 1]); i += 2
+        elif parts[i] == "--client" and i + 1 < len(parts):
+            params["client"] = parts[i + 1]; i += 2
+        elif parts[i] == "--vault" and i + 1 < len(parts):
+            params["vault_id"] = parts[i + 1]; i += 2
+        elif parts[i] == "--tool" and i + 1 < len(parts):
+            params["tool"] = parts[i + 1]; i += 2
+        elif parts[i] == "--category" and i + 1 < len(parts):
+            params["category"] = parts[i + 1]; i += 2
+        elif parts[i] == "--status" and i + 1 < len(parts):
+            params["status"] = parts[i + 1]; i += 2
+        else:
+            i += 1
+    result = await client.call_tool("audit_log", params)
+    if json_output:
+        show_json(result)
+    else:
+        show_audit_result(result)
 
 
 def cmd_help():
@@ -393,6 +529,8 @@ async def run_shell(url: str, token: str):
                 await cmd_health(client, args, json_output)
             elif command == "about":
                 await cmd_about(client, args, json_output)
+            elif command == "whoami":
+                await cmd_whoami(client, args, json_output)
             elif command == "vault":
                 await cmd_vault(client, args, json_output)
             elif command == "secret":
@@ -403,8 +541,12 @@ async def run_shell(url: str, token: str):
                 await cmd_password(client, args, json_output)
             elif command == "ssh":
                 await cmd_ssh(client, args, json_output)
+            elif command == "policy":
+                await cmd_policy(client, args, json_output)
             elif command == "token":
                 await cmd_token(client, args, json_output)
+            elif command == "audit":
+                await cmd_audit(client, args, json_output)
             else:
                 show_warning(f"Commande inconnue: '{command}'. Tapez 'help'.")
 
