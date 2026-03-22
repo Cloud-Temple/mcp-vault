@@ -494,7 +494,7 @@ volumes:
 
 ### 5.2 Tests e2e (`tests/test_e2e.py`)
 
-**243 tests** e2e via protocole MCP Streamable HTTP, 13 catégories :
+**276 tests** e2e via protocole MCP Streamable HTTP, 14 catégories :
 
 | #   | Catégorie                     | Tests  | Description                                                     |
 | --- | ----------------------------- | ------ | --------------------------------------------------------------- |
@@ -680,6 +680,6 @@ Voir `ARCHITECTURE.md §11.3` pour les diagrammes d'architecture et les étapes 
 | Phase 6 — SSH CA            | ✅     | CA isolée par vault, 5 outils MCP (setup, sign, public_key, list_roles, role_info), 148 tests e2e, CLI ssh complet, cleanup CA auto      |
 | Phase 7 — Interface web     | ✅     | Console admin SPA modulaire (sidebar, CRUD vaults/secrets, permissions granulaires, 15 endpoints API, 10 fichiers frontend < 200 lignes) |
 | Phase 8a — Policies CRUD      | ✅     | PolicyStore S3-backed, 4 outils MCP (create, list, get, delete), wildcards fnmatch, path_rules, Admin API, 206 tests e2e |
-| Phase 8b — Policy Enforcement | ✅     | `check_policy()` dans 15 outils MCP, champ `policy_id` dans tokens, outil `token_update`, 243 tests e2e / 13 catégories |
+| Phase 8b — Policy Enforcement | ✅     | `check_policy()` dans 15 outils MCP, champ `policy_id` dans tokens, outil `token_update`, 276 tests e2e / 14 catégories |
 | Phase 8c — Audit Log          | ✅     | AuditStore (ring buffer 5000 + JSONL), outil `audit_log` filtrable, timeline SPA, CLI audit, catégorisation auto, stats dashboard |
 | Phase 9 — HSM Integration     | ⏳     | **En attente HSM** — Design et prérequis documentés (ARCHITECTURE.md §11.3). Bloqué par la disponibilité du Thales Luna chez Cloud Temple. Config HCL cible, migration 11 étapes, commandes Luna préparées. Reprise dès que le matériel HSM sera opérationnel. |

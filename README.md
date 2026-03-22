@@ -8,9 +8,9 @@ MCP Vault est un serveur [MCP](https://modelcontextprotocol.io/) qui fournit un 
 
 ### 📸 Console d'administration
 
-|               Dashboard                |          Vaults & Secrets           |
-| :------------------------------------: | :---------------------------------: |
-| ![Dashboard](screenshoots/screen1.png) | ![Vaults](screenshoots/screen2.png) |
+|               Dashboard                |          Vaults & Secrets           |             Audit & Alertes             |
+| :------------------------------------: | :---------------------------------: | :-------------------------------------: |
+| ![Dashboard](screenshoots/screen1.png) | ![Vaults](screenshoots/screen2.png) | ![Audit](screenshoots/screen3.png)      |
 
 ---
 
@@ -19,7 +19,7 @@ MCP Vault est un serveur [MCP](https://modelcontextprotocol.io/) qui fournit un 
 | Document                                                | Description                                                                                                                                                                  |
 | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [**ARCHITECTURE.md**](DESIGN/mcp-vault/ARCHITECTURE.md) | Spécification complète — vision, architecture ASGI 5 couches, vaults, SSH CA, policies MCP (6 exemples prêts à l'emploi), sécurité des clés unseal (3 facteurs), roadmap HSM |
-| [**TECHNICAL.md**](DESIGN/mcp-vault/TECHNICAL.md)       | Documentation technique — 14 modules source, modèle de données, Docker, 243 tests e2e, dépendances, roadmap Phase 8→9                                                        |
+| [**TECHNICAL.md**](DESIGN/mcp-vault/TECHNICAL.md)       | Documentation technique — 14 modules source, modèle de données, Docker, 276 tests e2e, dépendances, roadmap Phase 8→9                                                        |
 | [**scripts/README.md**](scripts/README.md)              | Guide CLI complet — 7 groupes de commandes, shell interactif, exemples                                                                                                       |
 
 ---
@@ -38,7 +38,7 @@ docker compose up -d
 # 3. Vérifier (depuis le conteneur)
 docker compose exec mcp-vault python scripts/mcp_cli.py health
 
-# 4. Tester (243 tests e2e)
+# 4. Tester (276 tests e2e)
 docker compose exec mcp-vault python tests/test_e2e.py
 ```
 
@@ -215,6 +215,8 @@ Voir [scripts/README.md](scripts/README.md) pour la documentation complète du C
 
 ## 🏗️ Architecture
 
+> 📐 **Documentation complète** : le dossier [`DESIGN/mcp-vault/`](DESIGN/mcp-vault/) contient la spécification détaillée ([ARCHITECTURE.md](DESIGN/mcp-vault/ARCHITECTURE.md) — vision, sécurité, SSH CA, policies, roadmap HSM) et la documentation technique ([TECHNICAL.md](DESIGN/mcp-vault/TECHNICAL.md) — modules, Docker, tests, dépendances).
+
 ```
 Internet → WAF (Caddy :8085) → MCP Vault (Python :8030) → OpenBao (:8200 localhost)
                                      ↕
@@ -261,7 +263,7 @@ Les clés unseal d'OpenBao sont protégées par **séparation physique à 3 fact
 ## 📋 Tests
 
 ```bash
-# Tests e2e MCP (243 tests, OpenBao réel)
+# Tests e2e MCP (276 tests, OpenBao réel)
 docker compose exec mcp-vault python tests/test_e2e.py
 
 # Tests bas niveau (78 tests, S3, auth, types)
@@ -275,7 +277,7 @@ docker compose exec mcp-vault python tests/test_e2e.py --test secrets
 docker compose exec mcp-vault python tests/test_e2e.py --test password
 ```
 
-### Couverture e2e (243 tests, 13 catégories)
+### Couverture e2e (276 tests, 14 catégories)
 
 | Catégorie              | Tests  | Description                                                                       |
 | ---------------------- | ------ | --------------------------------------------------------------------------------- |
@@ -292,6 +294,7 @@ docker compose exec mcp-vault python tests/test_e2e.py --test password
 | Admin API              | 15     | health, whoami, generate-password, logs, unicité CSPRNG                           |
 | Policies MCP           | 43     | CRUD, validation, wildcards, path_rules, doublons, erreurs, Admin API REST        |
 | **Policy Enforcement** | **37** | check_policy, token_update, denied/allowed, changement policy, Admin API          |
+| **Audit Log**          | **31** | audit_log MCP, filtres (category/tool/status/since/limit), stats, Admin API /audit |
 
 ---
 
@@ -332,7 +335,7 @@ mcp-vault/
 │       ├── js/               # Modules JS (config, api, app, dashboard, vaults, tokens, activity)
 │       └── img/              # logo-cloudtemple.svg
 ├── tests/
-│   ├── test_e2e.py           # 243 tests MCP e2e (13 catégories)
+│   ├── test_e2e.py           # 276 tests MCP e2e (14 catégories)
 │   ├── test_service.py       # 78 tests bas niveau
 │   └── test_integration.py   # Tests pytest
 └── waf/                      # Caddy reverse proxy

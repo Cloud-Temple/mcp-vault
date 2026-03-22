@@ -37,6 +37,9 @@ python scripts/mcp_cli.py health
 # Informations service
 python scripts/mcp_cli.py about
 
+# Identité du token courant
+python scripts/mcp_cli.py whoami
+
 # Sortie JSON brute (toutes les commandes)
 python scripts/mcp_cli.py health --json
 ```
@@ -53,6 +56,9 @@ python scripts/mcp_cli.py vault list
 
 # Détails d'un vault
 python scripts/mcp_cli.py vault info serveurs-prod
+
+# Modifier la description d'un vault
+python scripts/mcp_cli.py vault update serveurs-prod -d "Clés SSH production v2"
 
 # Supprimer un vault (⚠️ irréversible)
 python scripts/mcp_cli.py vault delete serveurs-prod -y
@@ -124,8 +130,51 @@ python scripts/mcp_cli.py token create ci-cd --email ci@company.com
 # Lister les tokens
 python scripts/mcp_cli.py token list
 
+# Modifier un token (policy, permissions, vaults)
+python scripts/mcp_cli.py token update <hash_prefix> --policy readonly
+python scripts/mcp_cli.py token update <hash_prefix> --permissions read --vaults prod-servers
+python scripts/mcp_cli.py token update <hash_prefix> --policy _remove
+
 # Révoquer un token
 python scripts/mcp_cli.py token revoke <hash_prefix>
+```
+
+### Policies (admin — contrôle d'accès granulaire)
+
+```bash
+# Créer une policy
+python scripts/mcp_cli.py policy create readonly -d "Lecture seule" \
+  --allowed "system_*,vault_list,secret_read,secret_list"
+
+python scripts/mcp_cli.py policy create no-ssh -d "Pas de SSH" --denied "ssh_*"
+
+# Lister les policies
+python scripts/mcp_cli.py policy list
+
+# Détails d'une policy
+python scripts/mcp_cli.py policy get readonly
+
+# Supprimer une policy
+python scripts/mcp_cli.py policy delete readonly -y
+```
+
+### Audit (journal d'activité)
+
+```bash
+# 50 derniers événements
+python scripts/mcp_cli.py audit
+
+# Filtrer par statut (denied = refus de policy)
+python scripts/mcp_cli.py audit --status denied
+
+# Filtrer par catégorie et client
+python scripts/mcp_cli.py audit --category secret --client agent-sre -n 20
+
+# Filtrer par plage de temps
+python scripts/mcp_cli.py audit --since 2026-03-22T15:00:00
+
+# Combiner les filtres + sortie JSON
+python scripts/mcp_cli.py audit --vault prod --status denied --json
 ```
 
 ---
