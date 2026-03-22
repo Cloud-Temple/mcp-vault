@@ -46,6 +46,9 @@ class HealthCheckMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope.get("path", "") == "/":
+            return await self._root_response(send)
+
         if scope["type"] == "http" and scope.get("path", "") in self.HEALTH_PATHS:
             body = json.dumps({"status": "ok"}).encode()
             await send({
@@ -60,6 +63,39 @@ class HealthCheckMiddleware:
             return
 
         await self.app(scope, receive, send)
+
+    async def _root_response(self, send):
+        """GET / → status du service MCP Vault (public, sans auth)."""
+        from pathlib import Path
+        import platform
+
+        settings = get_settings()
+        version = "dev"
+        vf = Path("VERSION")
+        if vf.exists():
+            version = vf.read_text().strip()
+
+        body = json.dumps({
+            "status": "ok",
+            "service": settings.mcp_server_name,
+            "version": version,
+            "description": "MCP Vault — Gestion sécurisée des secrets pour agents IA (OpenBao embedded)",
+            "endpoints": {
+                "mcp": "/mcp",
+                "admin": "/admin",
+                "health": "/health",
+            },
+        }, ensure_ascii=False).encode()
+
+        await send({
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [
+                [b"content-type", b"application/json"],
+                [b"access-control-allow-origin", b"*"],
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
 
 
 # =============================================================================

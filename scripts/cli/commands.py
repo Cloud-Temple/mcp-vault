@@ -781,9 +781,10 @@ def token_revoke_cmd(ctx, hash_prefix, output_json):
 @click.option("--tool", default="", help="Filtrer par outil (wildcards: secret_*)")
 @click.option("--category", default="", help="Filtrer: system|vault|secret|ssh|policy|token")
 @click.option("--status", "-s", default="", help="Filtrer: ok|error|created|deleted|denied")
+@click.option("--since", default="", help="Après cette date ISO 8601 (ex: 2026-03-18T10:00:00)")
 @click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
 @click.pass_context
-def audit_cmd(ctx, limit, client, vault, tool, category, status, output_json):
+def audit_cmd(ctx, limit, client, vault, tool, category, status, since, output_json):
     """📊 Journal d'audit — toutes les opérations MCP.
 
     \b
@@ -792,12 +793,14 @@ def audit_cmd(ctx, limit, client, vault, tool, category, status, output_json):
       audit -n 100 --category secret     — 100 derniers secrets
       audit --status denied              — refus de policy
       audit --client agent-sre --vault prod-servers
+      audit --since 2026-03-18T10:00:00  — après une date
     """
     async def _run():
         mcpc = MCPClient(ctx.obj["url"], ctx.obj["token"])
         result = await mcpc.call_tool("audit_log", {
             "limit": limit, "client": client, "vault_id": vault,
             "tool": tool, "category": category, "status": status,
+            "since": since,
         })
         if output_json:
             show_json(result)

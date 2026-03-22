@@ -88,8 +88,8 @@ async def handle_admin_api(scope, receive, send, mcp):
             body = await _read_body(receive)
             return await _api_write_secret(send, vault_id, body)
         if method == "DELETE" and secret_path:
-            if not is_admin:
-                return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
+            if not can_write:
+                return await _json_response(send, 403, {"status": "error", "message": "Permission write requise"})
             return await _api_delete_secret(send, vault_id, secret_path)
 
     # --- Routes policies (admin only) ---

@@ -126,9 +126,14 @@ def check_policy(tool_name: str) -> Optional[dict]:
         return None
 
     # Audit : enregistrer le refus de policy (événement de sécurité)
+    client = token_info.get("client_name", "?")
     try:
         from ..audit import log_audit
-        log_audit(tool_name, "denied", detail=f"policy={policy_id}", client_name=token_info.get("client_name", ""))
+        log_audit(
+            tool_name, "denied",
+            detail=f"Bloque par policy '{policy_id}'",
+            client_name=client,
+        )
     except Exception:
         pass
 

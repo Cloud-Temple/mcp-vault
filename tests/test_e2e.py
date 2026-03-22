@@ -1295,6 +1295,294 @@ async def test_13_enforcement():
 
 
 # =============================================================================
+# TEST 14 — Audit Log (Phase 8c)
+# =============================================================================
+
+async def test_14_audit():
+    """Audit log — outil MCP audit_log + Admin API /audit, filtres, stats."""
+    print("\n  ── TEST 14 — Audit Log ──")
+
+    # ── 14a. audit_log basique — doit avoir des entrées (les tests précédents en ont généré) ──
+    r = await call_tool("audit_log", {"limit": 10})
+    check("audit_log basique", r)
+    entries = r.get("entries", [])
+    check_true("audit_log a des entrées", len(entries) > 0, f"count={len(entries)}")
+    check_true("total_in_buffer > 0", r.get("total_in_buffer", 0) > 0)
+
+    # ── 14b. Vérifier la structure d'une entrée ──
+    if entries:
+        e = entries[0]
+        check_true("entrée a 'ts'", "ts" in e, f"keys={list(e.keys())}")
+        check_true("entrée a 'client'", "client" in e)
+        check_true("entrée a 'tool'", "tool" in e)
+        check_true("entrée a 'category'", "category" in e)
+        check_true("entrée a 'status'", "status" in e)
+        check_true("entrée a 'vault_id'", "vault_id" in e)
+        check_true("category valide", e.get("category") in ("system", "vault", "secret", "ssh", "policy", "token", "audit", "other"))
+
+    # ── 14c. Filtre par catégorie ──
+    r = await call_tool("audit_log", {"limit": 50, "category": "vault"})
+    check("audit_log filtre category=vault", r)
+    for e in r.get("entries", []):
+        check_true("toutes catégorie=vault", e.get("category") == "vault",
+                    f"got {e.get('category')} for {e.get('tool')}")
+        break  # Un seul suffit comme validation
+
+    # ── 14d. Filtre par tool (wildcard) ──
+    r = await call_tool("audit_log", {"limit": 50, "tool": "secret_*"})
+    check("audit_log filtre tool=secret_*", r)
+    for e in r.get("entries", []):
+        check_true("tool commence par secret_", e.get("tool", "").startswith("secret_"),
+                    f"got {e.get('tool')}")
+        break
+
+    # ── 14e. Filtre par status ──
+    r = await call_tool("audit_log", {"limit": 50, "status": "ok"})
+    check("audit_log filtre status=ok", r)
+    for e in r.get("entries", []):
+        check_true("status = ok", e.get("status") == "ok")
+        break
+
+    # ── 14f. Filtre combiné (category + status) ──
+    r = await call_tool("audit_log", {"limit": 50, "category": "secret", "status": "ok"})
+    check("audit_log filtre combiné category+status", r)
+    for e in r.get("entries", []):
+        check_true("secret + ok", e.get("category") == "secret" and e.get("status") == "ok")
+        break
+
+    # ── 14g. Stats présentes ──
+    stats = r.get("stats", {})
+    check_true("stats.total > 0", stats.get("total", 0) > 0, f"total={stats.get('total')}")
+    check_true("stats.by_category présent", isinstance(stats.get("by_category"), dict))
+    check_true("stats.by_status présent", isinstance(stats.get("by_status"), dict))
+    check_true("stats.by_client présent", isinstance(stats.get("by_client"), dict))
+
+    # ── 14h. Filtre since (date dans le futur → aucun résultat) ──
+    r = await call_tool("audit_log", {"limit": 10, "since": "2099-01-01T00:00:00"})
+    check("audit_log filtre since futur → 0 entrées", r)
+    check_value("0 entrées avec since futur", len(r.get("entries", [])), 0)
+
+    # ── 14i. Limite respectée ──
+    r = await call_tool("audit_log", {"limit": 3})
+    check("audit_log limit=3", r)
+    check_true("max 3 entrées", len(r.get("entries", [])) <= 3,
+               f"count={len(r.get('entries', []))}")
+
+    # ── 14j. Admin API /admin/api/audit ──
+    import urllib.request
+    admin_url = BASE_URL + "/admin/api"
+    req_headers = {"Authorization": f"Bearer {TOKEN}"}
+
+    def admin_get(path):
+        req = urllib.request.Request(f"{admin_url}{path}", headers=req_headers)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+
+    r = admin_get("/audit")
+    check_value("Admin API audit status", r.get("status"), "ok")
+    check_true("Admin API audit entries > 0", len(r.get("entries", [])) > 0)
+    check_true("Admin API audit stats présentes", "stats" in r)
+
+    # ── 14k. Admin API audit avec filtre ──
+    r = admin_get("/audit?category=vault&limit=5")
+    check_value("Admin API audit filtre status", r.get("status"), "ok")
+    check_true("Admin API audit filtre max 5", len(r.get("entries", [])) <= 5)
+
+    # ── 14l. Vérifier que les événements denied sont loggés (via enforcement tests précédents) ──
+    r = await call_tool("audit_log", {"limit": 100, "status": "denied"})
+    check("audit_log filtre status=denied", r)
+    check_true("Des refus de policy existent", len(r.get("entries", [])) > 0,
+               f"count={len(r.get('entries', []))}")
+
+
+# =============================================================================
+# DEMO MODE — Simulation visuelle pour /admin
+# =============================================================================
+
+async def run_demo():
+    """Mode démo : scénario réaliste avec tokens, policies, tentatives refusées."""
+    import time as _time
+    import urllib.request
+
+    DELAY = 1.5
+    demo_vault = "demo-prod"
+    admin_url = BASE_URL + "/admin/api"
+    req_headers = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}
+
+    def pause(msg=""):
+        if msg:
+            print(f"    ⏳ {msg}")
+        _time.sleep(DELAY)
+
+    def admin_post(path, data):
+        body = json.dumps(data).encode()
+        req = urllib.request.Request(f"{admin_url}{path}", data=body, headers=req_headers)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+
+    def admin_delete(path):
+        req = urllib.request.Request(f"{admin_url}{path}", headers=req_headers, method="DELETE")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+
+    print("\n" + "=" * 60)
+    print("  🎬 MODE DÉMO — MCP Vault (scénario réaliste)")
+    print(f"  📡 Ouvrez {BASE_URL.replace(':8030', ':8085')}/admin dans votre navigateur")
+    print(f"  ⏱️  Pause entre les opérations : {DELAY}s")
+    print(f"  👀 Surveillez l'onglet Activité pour voir les 🚫 denied")
+    print("=" * 60)
+    pause("Démarrage dans 3s...")
+    _time.sleep(1)
+
+    # ═══ ACTE 1 — Mise en place de l'infrastructure ═══════════════
+    print("\n  ═══ ACTE 1 — Mise en place de l'infrastructure ═══")
+
+    print("\n  📦 Création des vaults...")
+    r = await call_tool("vault_create", {"vault_id": demo_vault, "description": "🔐 Secrets de production"})
+    print(f"    ✅ {demo_vault} → {r.get('status')}")
+    pause()
+
+    r = await call_tool("vault_create", {"vault_id": "demo-staging", "description": "🧪 Secrets staging"})
+    print(f"    ✅ demo-staging → {r.get('status')}")
+    pause()
+
+    print("\n  🔑 Écriture des secrets (5 types)...")
+    secrets = [
+        ("login", "web/github", {"username": "clesur", "password": "TopSecret123!", "url": "https://github.com"}),
+        ("database", "db/postgres", {"host": "db.ct.com", "username": "admin", "password": "pg_s3cr3t", "port": "5432"}),
+        ("api_key", "api/openai", {"key": "sk-proj-demo-xyz789", "endpoint": "https://api.openai.com"}),
+        ("server", "infra/bastion01", {"host": "bastion01.ct.com", "username": "adminct", "port": "22"}),
+        ("certificate", "certs/wildcard", {"certificate": "-----BEGIN CERT-----\n...", "private_key": "-----BEGIN KEY-----\n...", "expiry": "2027-06"}),
+    ]
+    for secret_type, path, data in secrets:
+        r = await call_tool("secret_write", {"vault_id": demo_vault, "path": path, "data": data, "secret_type": secret_type})
+        print(f"    ✅ [{secret_type}] {path}")
+        _time.sleep(0.5)
+    pause("Regardez les vaults et secrets dans /admin...")
+
+    # ═══ ACTE 2 — Tokens et policies ══════════════════════════════
+    print("\n  ═══ ACTE 2 — Création de tokens et policies ═══")
+
+    print("\n  🎫 Création d'un token 'agent-sre' (read,write sur demo-prod)...")
+    r = admin_post("/tokens", {
+        "client_name": "agent-sre",
+        "permissions": ["read", "write"],
+        "allowed_resources": [demo_vault],
+        "expires_in_days": 30,
+    })
+    sre_token = r.get("raw_token", "")
+    sre_hash = r.get("hash", "")[:12]
+    print(f"    ✅ Token créé (hash: {sre_hash})")
+    pause()
+
+    print("\n  📋 Création d'une policy 'readonly-no-ssh' (interdit écriture + SSH)...")
+    r = await call_tool("policy_create", {
+        "policy_id": "demo-readonly",
+        "description": "Lecture seule — pas d'écriture ni SSH",
+        "allowed_tools": ["system_*", "vault_list", "vault_info", "secret_read", "secret_list", "secret_types"],
+        "denied_tools": ["secret_write", "secret_delete", "vault_create", "vault_delete", "ssh_*"],
+    })
+    print(f"    ✅ Policy demo-readonly → {r.get('status')}")
+    pause()
+
+    print("\n  🔗 Assignation de la policy à l'agent-sre...")
+    r = await call_tool("token_update", {"hash_prefix": sre_hash, "policy_id": "demo-readonly"})
+    print(f"    ✅ Policy assignée → {r.get('status')}")
+    pause("L'agent-sre est maintenant en lecture seule...")
+
+    # ═══ ACTE 3 — L'agent tente des opérations (denied !) ════════
+    print("\n  ═══ ACTE 3 — L'agent tente des opérations interdites 🚫 ═══")
+    print("  👀 Surveillez l'onglet Activité — les 🚫 denied vont apparaître !")
+    pause()
+
+    print("\n  🔑 Agent-sre lit un secret (autorisé)...")
+    r = await call_tool("secret_read", {"vault_id": demo_vault, "path": "web/github"}, token_override=sre_token)
+    print(f"    ✅ secret_read → {r.get('status')} (autorisé)")
+    pause()
+
+    print("\n  🚫 Agent-sre tente d'écrire un secret (REFUSÉ par policy)...")
+    r = await call_tool("secret_write", {
+        "vault_id": demo_vault, "path": "hack/attempt",
+        "data": {"value": "should-fail"}, "secret_type": "custom",
+    }, token_override=sre_token)
+    print(f"    🚫 secret_write → {r.get('status')} — {r.get('message', '')[:60]}")
+    pause()
+
+    print("\n  🚫 Agent-sre tente de supprimer un secret (REFUSÉ)...")
+    r = await call_tool("secret_delete", {"vault_id": demo_vault, "path": "web/github"}, token_override=sre_token)
+    print(f"    🚫 secret_delete → {r.get('status')} — {r.get('message', '')[:60]}")
+    pause()
+
+    print("\n  🚫 Agent-sre tente de créer un vault (REFUSÉ)...")
+    r = await call_tool("vault_create", {"vault_id": "demo-hack"}, token_override=sre_token)
+    print(f"    🚫 vault_create → {r.get('status')} — {r.get('message', '')[:60]}")
+    pause()
+
+    print("\n  🚫 Agent-sre tente d'accéder au SSH CA (REFUSÉ)...")
+    r = await call_tool("ssh_ca_list_roles", {"vault_id": demo_vault}, token_override=sre_token)
+    print(f"    🚫 ssh_ca_list_roles → {r.get('status')} — {r.get('message', '')[:60]}")
+    pause()
+
+    print("\n  🚫 Agent-sre tente d'accéder à demo-staging (pas dans ses vaults autorisés)...")
+    r = await call_tool("secret_list", {"vault_id": "demo-staging"}, token_override=sre_token)
+    print(f"    🚫 secret_list demo-staging → {r.get('status')} — {r.get('message', '')[:60]}")
+    pause()
+
+    # ═══ ACTE 4 — SSH CA + signature ══════════════════════════════
+    print("\n  ═══ ACTE 4 — SSH CA et signature de certificat ═══")
+
+    r = await call_tool("ssh_ca_setup", {
+        "vault_id": demo_vault, "role_name": "demo-admin",
+        "allowed_users": "adminct,deploy", "default_user": "adminct", "ttl": "1h",
+    })
+    print(f"    🔑 CA SSH créée → {r.get('status')}")
+    pause()
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives import serialization
+    priv = Ed25519PrivateKey.generate()
+    pub = priv.public_key().public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH).decode()
+    r = await call_tool("ssh_sign_key", {"vault_id": demo_vault, "role_name": "demo-admin", "public_key": pub, "ttl": "30m"})
+    print(f"    ✍️  Certificat signé → serial={r.get('serial_number', '?')}")
+    pause()
+
+    # ═══ ACTE 5 — Vérification audit ══════════════════════════════
+    print("\n  ═══ ACTE 5 — Vérification de l'audit ═══")
+
+    r = await call_tool("audit_log", {"limit": 10, "status": "denied"})
+    denied_count = len(r.get("entries", []))
+    print(f"    📊 {denied_count} événements 🚫 denied trouvés dans l'audit")
+    for e in r.get("entries", [])[:5]:
+        print(f"       🚫 {e.get('tool', '?')} par {e.get('client', '?')} → {e.get('detail', '')[:40]}")
+    pause("Regardez l'onglet Activité → filtrez par status 'denied'...")
+
+    # ═══ ACTE 6 — Nettoyage ═══════════════════════════════════════
+    print("\n  ═══ ACTE 6 — Nettoyage complet ═══")
+
+    for _, path, _ in secrets:
+        await call_tool("secret_delete", {"vault_id": demo_vault, "path": path})
+    print("    🗑️  Secrets supprimés")
+    _time.sleep(0.5)
+
+    await call_tool("vault_delete", {"vault_id": demo_vault, "confirm": True})
+    await call_tool("vault_delete", {"vault_id": "demo-staging", "confirm": True})
+    print("    🗑️  Vaults supprimés")
+
+    admin_delete(f"/tokens/{sre_hash}")
+    print("    🗑️  Token agent-sre révoqué")
+
+    await call_tool("policy_delete", {"policy_id": "demo-readonly", "confirm": True})
+    print("    🗑️  Policy demo-readonly supprimée")
+    pause()
+
+    print("\n" + "=" * 60)
+    print("  🎬 DÉMO TERMINÉE")
+    print(f"  📊 Allez sur l'onglet Activité → filtrez 'denied' pour voir les alertes")
+    print(f"  💡 Utilisez le filtre 'since' pour cibler la plage de temps de la démo")
+    print("=" * 60 + "\n")
+
+
+# =============================================================================
 # CLEANUP
 # =============================================================================
 
@@ -1326,6 +1614,7 @@ TEST_REGISTRY = {
     "admin_api":   test_11_admin_api,
     "policies":    test_12_policies,
     "enforcement": test_13_enforcement,
+    "audit":       test_14_audit,
 }
 
 
@@ -1390,8 +1679,14 @@ def main():
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument("--test", "-t", default=None,
                         help=f"Test spécifique ({', '.join(TEST_REGISTRY.keys())})")
+    parser.add_argument("--demo", action="store_true",
+                        help="Mode démo : CRUD lent pour visualiser /admin en temps réel")
     args = parser.parse_args()
     VERBOSE = args.verbose
+
+    if args.demo:
+        asyncio.run(run_demo())
+        sys.exit(0)
 
     success = asyncio.run(run_all(only=args.test))
     sys.exit(0 if success else 1)

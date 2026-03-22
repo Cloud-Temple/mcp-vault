@@ -70,7 +70,7 @@ async def cmd_whoami(client, args="", json_output=False):
         show_whoami_result(result)
 
 
-VAULT_OPS = ("create", "list", "info", "delete")
+VAULT_OPS = ("create", "list", "info", "update", "delete")
 
 
 async def cmd_vault(client, args="", json_output=False):
@@ -82,6 +82,7 @@ async def cmd_vault(client, args="", json_output=False):
         show_warning("  vault create my-vault                   — créer un vault")
         show_warning("  vault create my-vault --desc 'Ma desc'  — avec description")
         show_warning("  vault info my-vault                     — détails")
+        show_warning("  vault update my-vault --desc 'Nouvelle desc' — modifier")
         show_warning("  vault delete my-vault                   — supprimer")
         return
 
@@ -100,6 +101,18 @@ async def cmd_vault(client, args="", json_output=False):
         })
     elif op == "info" and len(parts) >= 2:
         result = await client.call_tool("vault_info", {"vault_id": parts[1]})
+    elif op == "update" and len(parts) >= 2:
+        desc = ""
+        if "--desc" in parts:
+            idx = parts.index("--desc")
+            if idx + 1 < len(parts):
+                desc = " ".join(parts[idx + 1:])
+        if not desc:
+            show_warning("Usage: vault update <vault_id> --desc 'Nouvelle description'")
+            return
+        result = await client.call_tool("vault_update", {
+            "vault_id": parts[1], "description": desc,
+        })
     elif op == "delete" and len(parts) >= 2:
         result = await client.call_tool("vault_delete", {
             "vault_id": parts[1], "confirm": True,
@@ -468,6 +481,8 @@ async def cmd_audit(client, args="", json_output=False):
             params["category"] = parts[i + 1]; i += 2
         elif parts[i] == "--status" and i + 1 < len(parts):
             params["status"] = parts[i + 1]; i += 2
+        elif parts[i] == "--since" and i + 1 < len(parts):
+            params["since"] = parts[i + 1]; i += 2
         else:
             i += 1
     result = await client.call_tool("audit_log", params)

@@ -32,11 +32,37 @@ settings = get_settings()
 
 import time as _time
 
+_TOOL_LABELS = {
+    "vault_create": "Création vault", "vault_list": "Liste vaults",
+    "vault_info": "Détails vault", "vault_update": "Modification vault",
+    "vault_delete": "Suppression vault",
+    "secret_write": "Écriture secret", "secret_read": "Lecture secret",
+    "secret_list": "Liste secrets", "secret_delete": "Suppression secret",
+    "ssh_ca_setup": "Setup SSH CA", "ssh_sign_key": "Signature clé SSH",
+    "ssh_ca_public_key": "Clé publique CA", "ssh_ca_list_roles": "Liste rôles SSH",
+    "ssh_ca_role_info": "Détails rôle SSH",
+    "policy_create": "Création policy", "policy_list": "Liste policies",
+    "policy_get": "Détails policy", "policy_delete": "Suppression policy",
+    "token_update": "Modification token", "audit_log": "Consultation audit",
+}
+
 def _r(tool: str, result: dict, vault_id: str = "", detail: str = "") -> dict:
-    """Log audit event and return result."""
+    """Log audit event with human-readable detail, and return result."""
     from .audit import log_audit
     status = result.get("status", "?") if isinstance(result, dict) else "?"
-    log_audit(tool, status, vault_id, detail)
+    # Build a readable detail message (no emojis — breaks CLI table alignment)
+    label = _TOOL_LABELS.get(tool, tool)
+    parts = [label]
+    if vault_id:
+        parts.append(f"[{vault_id}]")
+    if detail:
+        parts.append(detail)
+    if status in ("error",):
+        msg = result.get("message", "") if isinstance(result, dict) else ""
+        if msg:
+            parts.append(f"- {msg[:60]}")
+    readable = " ".join(parts)
+    log_audit(tool, status, vault_id, readable)
     return result
 
 # --- FastMCP instance ---

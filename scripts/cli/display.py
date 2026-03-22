@@ -371,27 +371,24 @@ def show_audit_result(result: dict):
     table.add_column("Détail", style="dim", max_width=30)
 
     status_styles = {
-        "ok": "[green]✅ ok[/green]",
-        "created": "[green]🆕 created[/green]",
-        "deleted": "[yellow]🗑️ deleted[/yellow]",
-        "updated": "[cyan]✏️ updated[/cyan]",
-        "error": "[red]❌ error[/red]",
-        "denied": "[red bold]🚫 denied[/red bold]",
+        "ok": "[green]OK[/green]",
+        "created": "[green]CREATED[/green]",
+        "deleted": "[yellow]DELETED[/yellow]",
+        "updated": "[cyan]UPDATED[/cyan]",
+        "error": "[red]ERROR[/red]",
+        "denied": "[red bold]DENIED[/red bold]",
     }
-
-    cat_icons = {"system": "⚙️", "vault": "🏛️", "secret": "🔑", "ssh": "🔏",
-                 "policy": "📋", "token": "🎫", "audit": "📊"}
 
     for e in entries:
         ts = (e.get("ts", "") or "")[11:19]
-        cat = cat_icons.get(e.get("category", ""), "📌")
+        cat = e.get("category", "?")
         tool = e.get("tool", "?")
         client = e.get("client", "")
         vault = e.get("vault_id", "")
         st = status_styles.get(e.get("status", ""), e.get("status", "?"))
         detail = e.get("detail", "")
-        if len(detail) > 30:
-            detail = detail[:27] + "..."
+        if len(detail) > 40:
+            detail = detail[:37] + "..."
 
         table.add_row(ts, cat, tool, client, vault, st, detail)
 

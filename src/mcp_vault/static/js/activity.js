@@ -23,7 +23,22 @@ const STATUS_STYLES = {
     denied: { icon: '🚫', cls: 'audit-denied' },
 };
 
-let auditFilter = { category: '', status: '', client: '', vault_id: '' };
+const TOOL_LABELS = {
+    system_health: 'Vérification santé', system_about: 'Infos service',
+    vault_create: 'Création vault', vault_list: 'Liste vaults', vault_info: 'Détails vault',
+    vault_update: 'Modification vault', vault_delete: 'Suppression vault',
+    secret_write: 'Écriture secret', secret_read: 'Lecture secret',
+    secret_list: 'Liste secrets', secret_delete: 'Suppression secret',
+    secret_types: 'Types de secrets', secret_generate_password: 'Génération mot de passe',
+    ssh_ca_setup: 'Setup SSH CA', ssh_sign_key: 'Signature clé SSH',
+    ssh_ca_public_key: 'Clé publique CA', ssh_ca_list_roles: 'Liste rôles SSH',
+    ssh_ca_role_info: 'Détails rôle SSH',
+    policy_create: 'Création policy', policy_list: 'Liste policies',
+    policy_get: 'Détails policy', policy_delete: 'Suppression policy',
+    token_update: 'Modification token', audit_log: 'Consultation audit',
+};
+
+let auditFilter = { category: '', status: '', client: '', vault_id: '', since: '' };
 let auditAutoRefresh = null;
 
 async function loadActivity() {
@@ -36,6 +51,7 @@ async function loadActivity() {
     if (auditFilter.status) params.set('status', auditFilter.status);
     if (auditFilter.client) params.set('client', auditFilter.client);
     if (auditFilter.vault_id) params.set('vault_id', auditFilter.vault_id);
+    if (auditFilter.since) params.set('since', auditFilter.since);
 
     const data = await api(`/audit?${params.toString()}`);
     const entries = data.entries || [];
@@ -87,11 +103,40 @@ async function loadActivity() {
     }
     html += '</select>';
 
-    if (auditFilter.category || auditFilter.status || auditFilter.client || auditFilter.vault_id) {
-        html += `<button class="btn btn-sm btn-ghost" onclick="clearAuditFilters()">✕ Reset</button>`;
+    // Quick shortcut: Alerts only
+    const alertActive = auditFilter.status === 'denied' || auditFilter.status === 'error';
+    html += `<button class="btn btn-sm ${alertActive ? 'btn-danger' : 'btn-ghost'}" onclick="filterAuditAlerts()" title="Afficher uniquement denied + error" style="font-size:0.75rem;${alertActive ? 'background:#c0392b;color:white;' : ''}">🚨 Alertes</button>`;
+
+    // Time range quick-select
+    html += '<span style="color:var(--border);margin:0 0.2rem">│</span>';
+    html += '<span style="color:var(--text2);font-size:0.75rem">Période :</span>';
+    const ranges = [
+        { label: '5m', minutes: 5 },
+        { label: '15m', minutes: 15 },
+        { label: '1h', minutes: 60 },
+        { label: '24h', minutes: 1440 },
+    ];
+    for (const r of ranges) {
+        const sinceVal = new Date(Date.now() - r.minutes * 60000).toISOString();
+        const isActive = auditFilter.since && Math.abs(new Date(auditFilter.since).getTime() - new Date(sinceVal).getTime()) < 60000;
+        html += `<button class="btn btn-sm btn-ghost" onclick="filterAuditSince(${r.minutes})" style="font-size:0.7rem;padding:0.15rem 0.4rem;${isActive ? 'color:var(--accent);border-color:var(--accent);' : ''}">${r.label}</button>`;
+    }
+    if (auditFilter.since) {
+        html += `<button class="btn btn-sm btn-ghost" onclick="filterAuditSince(0)" style="font-size:0.7rem;padding:0.15rem 0.3rem">✕</button>`;
     }
 
-    html += `<span style="margin-left:auto;color:var(--muted);font-size:0.75rem">${entries.length} résultat(s)</span>`;
+    if (auditFilter.category || auditFilter.status || auditFilter.client || auditFilter.vault_id || auditFilter.since) {
+        html += `<button class="btn btn-sm btn-ghost" onclick="clearAuditFilters()" style="margin-left:0.3rem">✕ Reset tout</button>`;
+    }
+
+    // Count with alert highlight
+    const deniedCount = entries.filter(e => e.status === 'denied' || e.status === 'error').length;
+    html += '<span style="margin-left:auto;font-size:0.75rem">';
+    html += `<span style="color:var(--muted)">${entries.length} résultat(s)</span>`;
+    if (deniedCount > 0) {
+        html += ` <span style="color:#e74c3c;font-weight:bold">⚠️ ${deniedCount} alerte(s)</span>`;
+    }
+    html += '</span>';
     html += '</div>';
 
     // ── Timeline ──
@@ -120,7 +165,9 @@ async function loadActivity() {
             html += `<div class="audit-time">${time}</div>`;
             html += `<div class="audit-icon" style="color:${catColor}">${catIcon}</div>`;
             html += '<div class="audit-content">';
-            html += `<div class="audit-tool">${esc(e.tool || '?')}</div>`;
+            const toolLabel = TOOL_LABELS[e.tool] || e.tool || '?';
+            const toolTechnical = (TOOL_LABELS[e.tool] && e.tool !== toolLabel) ? ` <span style="color:var(--muted);font-size:0.7rem;font-weight:normal">${esc(e.tool)}</span>` : '';
+            html += `<div class="audit-tool">${esc(toolLabel)}${toolTechnical}</div>`;
 
             // Detail line
             const parts = [];
@@ -171,8 +218,28 @@ function filterAuditVault(vid) {
     loadActivity();
 }
 
+function filterAuditSince(minutes) {
+    if (minutes <= 0) {
+        auditFilter.since = '';
+    } else {
+        auditFilter.since = new Date(Date.now() - minutes * 60000).toISOString();
+    }
+    loadActivity();
+}
+
+function filterAuditAlerts() {
+    if (auditFilter.status === 'denied') {
+        auditFilter.status = 'error';
+    } else if (auditFilter.status === 'error') {
+        auditFilter.status = '';
+    } else {
+        auditFilter.status = 'denied';
+    }
+    loadActivity();
+}
+
 function clearAuditFilters() {
-    auditFilter = { category: '', status: '', client: '', vault_id: '' };
+    auditFilter = { category: '', status: '', client: '', vault_id: '', since: '' };
     loadActivity();
 }
 
