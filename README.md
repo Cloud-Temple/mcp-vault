@@ -241,8 +241,8 @@ Internet → WAF (Caddy + Coraza :8085) → MCP Vault (Python :8030) → OpenBao
 Le WAF protège l'API contre les attaques L7 (injections SQL, XSS, LFI, RCE, SSRF) :
 - **Caddy v2.11.2** compilé avec **coraza-caddy v2.2.0** via `xcaddy`
 - **24 règles OWASP CoreRuleSet v4.7.0** chargées
-- Mode **Blocking** pour les chemins non-authentifiés (statiques, health)
-- Mode **DetectionOnly** pour les APIs authentifiées (`/mcp`, `/admin/api`) — déjà protégées par Bearer token + policies
+- Mode **Blocking sur TOUS les endpoints** (health, `/mcp`, `/admin/api`)
+- **2 exclusions ciblées** pour faux positifs JSON-RPC : Unicode français (920540), noms PowerShell (932120)
 - **Headers de sécurité** : CSP, X-Frame-Options DENY, X-XSS-Protection, nosniff
 - Méthodes autorisées adaptées au protocole MCP : GET, POST, DELETE, PUT, PATCH
 
@@ -336,7 +336,7 @@ mcp-vault/
 ├── docker-compose.yml        # WAF + MCP Vault + volumes
 ├── Dockerfile                # Multi-stage (OpenBao 2.5.1 + Python 3.12)
 ├── requirements.txt          # Dépendances Python
-├── VERSION                   # 0.3.1
+├── VERSION                   # 0.3.2
 ├── DESIGN/mcp-vault/
 │   ├── ARCHITECTURE.md       # Spécification détaillée (v0.2.2-draft)
 │   └── TECHNICAL.md          # Documentation technique (v0.2.0)
@@ -395,4 +395,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.3.1
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.3.2

@@ -50,17 +50,8 @@ class HealthCheckMiddleware:
             return await self._root_response(send)
 
         if scope["type"] == "http" and scope.get("path", "") in self.HEALTH_PATHS:
-            body = json.dumps({"status": "ok"}).encode()
-            await send({
-                "type": "http.response.start",
-                "status": 200,
-                "headers": [[b"content-type", b"application/json"]],
-            })
-            await send({
-                "type": "http.response.body",
-                "body": body,
-            })
-            return
+            return await self._health_response(send)
+
 
         await self.app(scope, receive, send)
 
@@ -94,6 +85,30 @@ class HealthCheckMiddleware:
                 [b"content-type", b"application/json"],
                 [b"access-control-allow-origin", b"*"],
             ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    async def _health_response(self, send):
+        """GET /health → format aligné sur les autres services MCP Cloud Temple."""
+        from pathlib import Path
+
+        settings = get_settings()
+        version = "dev"
+        vf = Path("VERSION")
+        if vf.exists():
+            version = vf.read_text().strip()
+
+        body = json.dumps({
+            "status": "healthy",
+            "service": settings.mcp_server_name,
+            "version": version,
+            "transport": "streamable-http",
+        }).encode()
+
+        await send({
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [[b"content-type", b"application/json"]],
         })
         await send({"type": "http.response.body", "body": body})
 

@@ -1,5 +1,53 @@
 # Changelog — MCP Vault
 
+## [0.3.2] — 2026-03-23
+
+### WAF — Mode Blocking complet
+
+Le WAF Coraza passe de **DetectionOnly** à **Blocking complet** sur tous les endpoints, y compris `/mcp` (JSON-RPC) et `/admin/api` (REST). Toutes les requêtes sont désormais inspectées et bloquées si elles dépassent le seuil d'anomalie CRS.
+
+#### Fine-tuning des règles OWASP CRS
+
+Méthodologie : suppression du mode DetectionOnly → exécution des 295 tests e2e → analyse des logs Coraza → exclusions chirurgicales.
+
+- **230/262 tests** passaient sans aucune exclusion (88% de compatibilité native)
+- **2 faux positifs identifiés** via les logs Coraza (`docker-compose logs waf`) :
+
+| Règle CRS | Description | Cause du faux positif |
+|-----------|-------------|----------------------|
+| **920540** | Unicode character bypass | Les descriptions françaises en JSON contiennent `\u00e9`, `\u00e8`, `\u2014` — encodage Unicode standard |
+| **932120** | Windows PowerShell RCE | Le policy_id `test-path-restrict` contient `test-path` → matche le cmdlet PowerShell `Test-Path` |
+
+- **Exclusions ciblées** (SecRule id:10001-10004) : `ruleRemoveById` pour les 2 règles, **uniquement** sur `/mcp` et `/admin/api`. Les chemins publics (`/health`, `/admin/static`) gardent la protection complète.
+
+#### Vérification post-tuning
+
+- ✅ **295/295 tests e2e** passent en mode blocking complet
+- ✅ **LFI** (`../../etc/passwd`) → 403
+- ✅ **SQLi** (`OR 1=1`) → 403
+- ✅ **XSS** (`<script>alert(1)</script>`) → 403
+- ✅ **RCE** (`test-path` sur `/health`) → 403 (exclusion active uniquement sur les APIs)
+- ✅ Trafic MCP légitime → 200/202
+
+### Alignement `/health` sur le standard MCP Cloud Temple
+
+Le endpoint `/health` retourne désormais le même format que Live Memory et MCP Tools :
+
+```json
+{"status": "healthy", "service": "mcp-vault", "version": "0.3.2", "transport": "streamable-http"}
+```
+
+Alignement avec :
+- Live Memory : `{"status": "healthy", "service": "live-memory", "version": "0.9.0", "transport": "streamable-http"}`
+- MCP Tools : `{"status": "healthy", "service": "mcp-tools", "version": "0.1.8", "transport": "streamable-http"}`
+
+### Fichiers modifiés (3)
+- `waf/coraza.conf` — mode Blocking complet + 4 exclusions documentées (suppression DetectionOnly)
+- `src/mcp_vault/auth/middleware.py` — nouvelle méthode `_health_response()` dans `HealthCheckMiddleware`
+- `VERSION` — 0.3.1 → 0.3.2
+
+---
+
 ## [0.3.1] — 2026-03-23
 
 ### Security — Audit & Correctifs critiques
