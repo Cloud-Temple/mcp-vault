@@ -8,9 +8,9 @@ MCP Vault est un serveur [MCP](https://modelcontextprotocol.io/) qui fournit un 
 
 ### 📸 Console d'administration
 
-|               Dashboard                |          Vaults & Secrets           |             Audit & Alertes             |
-| :------------------------------------: | :---------------------------------: | :-------------------------------------: |
-| ![Dashboard](screenshoots/screen1.png) | ![Vaults](screenshoots/screen2.png) | ![Audit](screenshoots/screen3.png)      |
+|               Dashboard                |          Vaults & Secrets           |          Audit & Alertes           |
+| :------------------------------------: | :---------------------------------: | :--------------------------------: |
+| ![Dashboard](screenshoots/screen1.png) | ![Vaults](screenshoots/screen2.png) | ![Audit](screenshoots/screen3.png) |
 
 ---
 
@@ -19,8 +19,9 @@ MCP Vault est un serveur [MCP](https://modelcontextprotocol.io/) qui fournit un 
 | Document                                                | Description                                                                                                                                                                  |
 | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [**ARCHITECTURE.md**](DESIGN/mcp-vault/ARCHITECTURE.md) | Spécification complète — vision, architecture ASGI 5 couches, vaults, SSH CA, policies MCP (6 exemples prêts à l'emploi), sécurité des clés unseal (3 facteurs), roadmap HSM |
-| [**TECHNICAL.md**](DESIGN/mcp-vault/TECHNICAL.md)       | Documentation technique — 14 modules source, modèle de données, Docker, 276 tests e2e, dépendances, roadmap Phase 8→9                                                        |
+| [**TECHNICAL.md**](DESIGN/mcp-vault/TECHNICAL.md)       | Documentation technique — 14 modules source, modèle de données, Docker, ~290 tests e2e, dépendances, roadmap                                                                 |
 | [**scripts/README.md**](scripts/README.md)              | Guide CLI complet — 7 groupes de commandes, shell interactif, exemples                                                                                                       |
+| [**TEST_CATALOG.md**](tests/TEST_CATALOG.md)            | Catalogue des tests e2e — 14 catégories, ~290 assertions, objectif de chaque section (pour auditeurs)                                                                        |
 
 ---
 
@@ -38,7 +39,7 @@ docker compose up -d
 # 3. Vérifier (depuis le conteneur)
 docker compose exec mcp-vault python scripts/mcp_cli.py health
 
-# 4. Tester (276 tests e2e)
+# 4. Tester (~290 tests e2e)
 docker compose exec mcp-vault python tests/test_e2e.py
 ```
 
@@ -62,10 +63,10 @@ Au démarrage, MCP Vault :
 
 ### System (2)
 
-| Outil           | Description                                            |
-| --------------- | ------------------------------------------------------ |
-| `system_health` | État de santé (OpenBao + S3)                           |
-| `system_about`  | Informations service (version, outils, plateforme)     |
+| Outil           | Description                                        |
+| --------------- | -------------------------------------------------- |
+| `system_health` | État de santé (OpenBao + S3)                       |
+| `system_about`  | Informations service (version, outils, plateforme) |
 
 > 💡 **Introspection** : l'endpoint `/admin/api/whoami` et la commande CLI `whoami` permettent de vérifier l'identité et les permissions du token courant.
 
@@ -117,15 +118,15 @@ Les policies permettent de restreindre finement les outils accessibles par token
 
 ### Token Management (1)
 
-| Outil                                                          | Perm  | Description                                                      |
-| -------------------------------------------------------------- | ----- | ---------------------------------------------------------------- |
-| `token_update(hash_prefix, policy_id?, permissions?, vaults?)` | admin | Modifier un token existant (policy, permissions, vaults)         |
+| Outil                                                          | Perm  | Description                                              |
+| -------------------------------------------------------------- | ----- | -------------------------------------------------------- |
+| `token_update(hash_prefix, policy_id?, permissions?, vaults?)` | admin | Modifier un token existant (policy, permissions, vaults) |
 
 ### Audit (1)
 
-| Outil                                                                      | Perm  | Description                                                                    |
-| -------------------------------------------------------------------------- | ----- | ------------------------------------------------------------------------------ |
-| `audit_log(limit?, client?, vault_id?, tool?, category?, status?, since?)` | admin | Journal d'audit filtrable (ring buffer 5000 entrées + JSONL persistant)        |
+| Outil                                                                      | Perm  | Description                                                             |
+| -------------------------------------------------------------------------- | ----- | ----------------------------------------------------------------------- |
+| `audit_log(limit?, client?, vault_id?, tool?, category?, status?, since?)` | admin | Journal d'audit filtrable (ring buffer 5000 entrées + JSONL persistant) |
 
 <details>
 <summary>💡 Workflow SSH CA typique (ex: infrastructure LLMaaS)</summary>
@@ -185,7 +186,10 @@ Authorization: Bearer <token>
 | `write`    | ✅      | ✅       | ❌    |
 | `admin`    | ✅      | ✅       | ✅    |
 
-**Isolation par vault** : chaque token est scopé à des `vault_ids` (vide = tous).
+**3 couches d'isolation** :
+1. **Vault-level** : `allowed_resources=[]` → owner-based (seuls les vaults créés par le token), ou liste explicite
+2. **Tool-level** : policies avec `allowed_tools`/`denied_tools` (wildcards fnmatch)
+3. **Path-level** : `allowed_paths` dans les `path_rules` → contrôle par secret individuel
 
 ---
 
@@ -279,21 +283,21 @@ docker compose exec mcp-vault python tests/test_e2e.py --test password
 
 ### Couverture e2e (276 tests, 14 catégories)
 
-| Catégorie              | Tests  | Description                                                                       |
-| ---------------------- | ------ | --------------------------------------------------------------------------------- |
-| Système                | 7      | health, about, services, tools_count (24)                                         |
-| Vault CRUD             | 28     | create + métadonnées, list, info + owner, update, delete, confirm, erreurs        |
-| Secrets CRUD           | 24     | 10 types écrits, read/list/delete, validation                                     |
-| Versioning             | 8      | v1→v2→v3, read latest, read spécifique                                            |
-| Passwords              | 14     | longueurs, options, exclusions, CSPRNG                                            |
-| Isolation              | 7      | secrets cloisonnés entre vaults                                                   |
-| Erreurs                | 10     | edge cases, vault inexistant, type invalide, protection `_vault_meta`             |
-| S3 Sync                | 3      | archive tar.gz sur S3                                                             |
-| SSH CA                 | 33     | setup, rôles multiples, signature ed25519, list/info roles, isolation CA, cleanup |
-| Types                  | 14     | 14 types vérifiés individuellement                                                |
-| Admin API              | 15     | health, whoami, generate-password, logs, unicité CSPRNG                           |
-| Policies MCP           | 43     | CRUD, validation, wildcards, path_rules, doublons, erreurs, Admin API REST        |
-| **Policy Enforcement** | **37** | check_policy, token_update, denied/allowed, changement policy, Admin API          |
+| Catégorie              | Tests  | Description                                                                        |
+| ---------------------- | ------ | ---------------------------------------------------------------------------------- |
+| Système                | 7      | health, about, services, tools_count (24)                                          |
+| Vault CRUD             | 28     | create + métadonnées, list, info + owner, update, delete, confirm, erreurs         |
+| Secrets CRUD           | 24     | 10 types écrits, read/list/delete, validation                                      |
+| Versioning             | 8      | v1→v2→v3, read latest, read spécifique                                             |
+| Passwords              | 14     | longueurs, options, exclusions, CSPRNG                                             |
+| Isolation              | 7      | secrets cloisonnés entre vaults                                                    |
+| Erreurs                | 10     | edge cases, vault inexistant, type invalide, protection `_vault_meta`              |
+| S3 Sync                | 3      | archive tar.gz sur S3                                                              |
+| SSH CA                 | 33     | setup, rôles multiples, signature ed25519, list/info roles, isolation CA, cleanup  |
+| Types                  | 14     | 14 types vérifiés individuellement                                                 |
+| Admin API              | 15     | health, whoami, generate-password, logs, unicité CSPRNG                            |
+| Policies MCP           | 43     | CRUD, validation, wildcards, path_rules, doublons, erreurs, Admin API REST         |
+| **Policy Enforcement** | **37** | check_policy, token_update, denied/allowed, changement policy, Admin API           |
 | **Audit Log**          | **31** | audit_log MCP, filtres (category/tool/status/since/limit), stats, Admin API /audit |
 
 ---
@@ -335,7 +339,8 @@ mcp-vault/
 │       ├── js/               # Modules JS (config, api, app, dashboard, vaults, tokens, activity)
 │       └── img/              # logo-cloudtemple.svg
 ├── tests/
-│   ├── test_e2e.py           # 276 tests MCP e2e (14 catégories)
+│   ├── test_e2e.py           # ~290 tests MCP e2e (14 catégories)
+│   ├── TEST_CATALOG.md       # Catalogue des tests pour auditeurs
 │   ├── test_service.py       # 78 tests bas niveau
 │   └── test_integration.py   # Tests pytest
 └── waf/                      # Caddy reverse proxy

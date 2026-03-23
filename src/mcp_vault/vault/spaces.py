@@ -59,6 +59,41 @@ def _write_vault_meta(client, vault_id: str, meta: dict):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Owner check (utilisé par check_access pour l'isolation)
+# ═══════════════════════════════════════════════════════════════════════
+
+def check_vault_owner(vault_id: str, client_name: str) -> bool:
+    """
+    Vérifie si un client est le propriétaire d'un vault.
+
+    Lit _vault_meta.created_by et compare avec client_name.
+    Retourne True si :
+    - Le client est le propriétaire (created_by == client_name)
+    - Le vault n'existe pas encore (permet la création)
+
+    Note: synchrone car appelé depuis check_access() (contextvar).
+    """
+    client = get_hvac_client()
+    if not client:
+        return False
+
+    # Vérifier si le vault (mount) existe
+    try:
+        mounts = client.sys.list_mounted_secrets_engines()
+        mount_key = f"{vault_id}/"
+        if mount_key not in mounts.get("data", mounts):
+            return True  # Vault n'existe pas encore → autoriser (création)
+    except Exception:
+        return False
+
+    meta = _read_vault_meta(client, vault_id)
+    if not meta:
+        return True  # Pas de métadonnées → vault legacy, autoriser
+
+    return meta.get("created_by", "") == client_name
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # CRUD — Create
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -116,13 +151,18 @@ async def create_space(vault_id: str, description: str = "") -> dict:
 # CRUD — List
 # ═══════════════════════════════════════════════════════════════════════
 
-async def list_spaces(allowed_vault_ids: Optional[list] = None) -> dict:
+async def list_spaces(
+    allowed_vault_ids: Optional[list] = None,
+    owner_filter: Optional[str] = None,
+) -> dict:
     """
     Liste les espaces vault (mount points KV v2).
 
     Args:
         allowed_vault_ids: Si fourni, ne retourne que les vaults de cette liste.
-                           None ou [] = pas de filtre (admin).
+                           None = pas de filtre par liste (admin ou owner-based).
+        owner_filter: Si fourni, ne retourne que les vaults dont created_by == owner_filter.
+                      Utilisé pour l'isolation owner-based (allowed_resources vide).
     """
     client = get_hvac_client()
     if not client:
@@ -135,9 +175,15 @@ async def list_spaces(allowed_vault_ids: Optional[list] = None) -> dict:
             # Filtrer les mount points système (cubbyhole, identity, sys, secret)
             clean_path = path.rstrip("/")
             if info.get("type") == "kv" and clean_path not in ("cubbyhole", "identity", "sys", "secret"):
-                # ── Filtrage par token ────────────────────────────
+                # ── Filtrage par liste explicite ──────────────────
                 if allowed_vault_ids and clean_path not in allowed_vault_ids:
                     continue
+
+                # ── Filtrage par propriétaire (owner-based) ──────
+                if owner_filter:
+                    meta = _read_vault_meta(client, clean_path)
+                    if meta.get("created_by", "") != owner_filter:
+                        continue
 
                 vault_entry = {
                     "vault_id": clean_path,

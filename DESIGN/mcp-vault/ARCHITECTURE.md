@@ -1,6 +1,6 @@
 # Architecture — MCP Vault
 
-> **Version** : 0.2.2-draft | **Date** : 2026-03-18 | **Auteur** : Cloud Temple  
+> **Version** : 0.2.0 | **Date** : 2026-03-22 | **Auteur** : Cloud Temple  
 > **Projet** : mcp-vault | **Licence** : Apache 2.0  
 > **Statut** : 📐 Design — non implémenté
 
@@ -14,7 +14,7 @@
 
 1. **OpenBao embedded** — Le binaire OpenBao tourne en process intégré, pas comme service séparé
 2. **Vaults libres** — L'utilisateur organise ses secrets par serveur, application, groupe... comme il veut
-3. **Même pattern que Live Memory** — Tokens Bearer, `vault_ids`, `check_access()`, starter-kit
+3. **Même pattern que Live Memory** — Tokens Bearer, `allowed_resources`, `check_access()`, starter-kit
 4. **S3 comme source de vérité** — Le storage OpenBao est synchronisé avec S3 (download au start, upload au stop)
 5. **Missions découplées** — Les vaults sont indépendants des missions. On donne à la mission le vault à utiliser.
 6. **SSH Certificate Authority** — Signer des clés publiques à la volée (certificats éphémères)

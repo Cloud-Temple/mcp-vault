@@ -1124,6 +1124,8 @@ async def test_13_enforcement():
     check("Créer policy test-readonly-only", r, "created")
 
     # ── 13c. Créer un token non-admin (read,write) ─────────────────
+    # Phase 8d : allowed_resources vide = owner-based isolation
+    # Le token ne verra que les vaults qu'il crée lui-même
     r = admin_post("/tokens", {
         "client_name": "test-enforcement-agent",
         "permissions": ["read", "write"],
@@ -1136,16 +1138,169 @@ async def test_13_enforcement():
     check_true("raw_token obtenu", len(agent_token) > 10, f"len={len(agent_token)}")
     check_true("hash obtenu", len(agent_hash) >= 8, f"hash={agent_hash}")
 
-    # ── 13d. Token sans policy → tout autorisé ─────────────────────
-    r = await call_tool("vault_list", {}, token_override=agent_token)
-    check("Token sans policy → vault_list OK", r)
-
+    # ── 13d. Owner-based isolation — l'agent crée son propre vault ──
+    # Avec allowed_resources=[], il ne voit PAS test-e2e-alpha (créé par admin)
     r = await call_tool("secret_read", {
         "vault_id": "test-e2e-alpha", "path": "web/github",
     }, token_override=agent_token)
-    check("Token sans policy → secret_read OK", r)
+    check("Token owner-based → secret_read sur vault admin REFUSÉ", r, "error")
 
-    # ── 13e. Assigner policy via token_update (MCP tool) ───────────
+    # L'agent crée SON vault → il en devient propriétaire
+    agent_vault = "test-e2e-agent-owned"
+    # Cleanup préventif (si résidu d'une exécution précédente)
+    await call_tool("vault_delete", {"vault_id": agent_vault, "confirm": True})
+    r = await call_tool("vault_create", {
+        "vault_id": agent_vault, "description": "Vault créé par l'agent",
+    }, token_override=agent_token)
+    check("Agent crée son propre vault", r, "created")
+
+    # L'agent écrit un secret dans SON vault → autorisé
+    r = await call_tool("secret_write", {
+        "vault_id": agent_vault, "path": "web/test",
+        "data": {"username": "agent", "password": "secret"}, "secret_type": "login",
+    }, token_override=agent_token)
+    check("Agent écrit dans son vault → autorisé", r)
+
+    # L'agent lit son secret → autorisé
+    r = await call_tool("secret_read", {
+        "vault_id": agent_vault, "path": "web/test",
+    }, token_override=agent_token)
+    check("Agent lit son vault → autorisé", r)
+
+    # vault_list ne retourne que le vault de l'agent
+    r = await call_tool("vault_list", {}, token_override=agent_token)
+    check("Agent vault_list OK", r)
+    agent_vaults = [v.get("vault_id") for v in r.get("vaults", [])]
+    check_true("Agent ne voit que son vault", agent_vault in agent_vaults and "test-e2e-alpha" not in agent_vaults,
+               f"vaults={agent_vaults}")
+
+    # ── 13e. Cross-user sharing — Alice et Bob, partage sélectif ───
+    # Alice et Bob créent chacun 2 vaults, puis partagent le 2ème avec l'autre
+    r_alice = admin_post("/tokens", {
+        "client_name": "test-alice",
+        "permissions": ["read", "write"],
+        "allowed_resources": [],
+        "expires_in_days": 1,
+    })
+    alice_token = r_alice.get("raw_token", "")
+    alice_hash = r_alice.get("hash", "")[:12]
+
+    r_bob = admin_post("/tokens", {
+        "client_name": "test-bob",
+        "permissions": ["read", "write"],
+        "allowed_resources": [],
+        "expires_in_days": 1,
+    })
+    bob_token = r_bob.get("raw_token", "")
+    bob_hash = r_bob.get("hash", "")[:12]
+
+    # Alice crée ses 2 vaults
+    await call_tool("vault_create", {"vault_id": "test-alice-private", "description": "Alice privé"}, token_override=alice_token)
+    await call_tool("vault_create", {"vault_id": "test-alice-shared", "description": "Alice partagé"}, token_override=alice_token)
+    await call_tool("secret_write", {"vault_id": "test-alice-private", "path": "secret/priv", "data": {"val": "alice-priv"}, "secret_type": "custom"}, token_override=alice_token)
+    await call_tool("secret_write", {"vault_id": "test-alice-shared", "path": "secret/shared", "data": {"val": "alice-shared"}, "secret_type": "custom"}, token_override=alice_token)
+
+    # Bob crée ses 2 vaults
+    await call_tool("vault_create", {"vault_id": "test-bob-private", "description": "Bob privé"}, token_override=bob_token)
+    await call_tool("vault_create", {"vault_id": "test-bob-shared", "description": "Bob partagé"}, token_override=bob_token)
+    await call_tool("secret_write", {"vault_id": "test-bob-private", "path": "secret/priv", "data": {"val": "bob-priv"}, "secret_type": "custom"}, token_override=bob_token)
+    await call_tool("secret_write", {"vault_id": "test-bob-shared", "path": "secret/shared", "data": {"val": "bob-shared"}, "secret_type": "custom"}, token_override=bob_token)
+
+    # Admin donne à Alice accès à ses vaults + bob-shared (liste explicite)
+    await call_tool("token_update", {"hash_prefix": alice_hash, "vaults": "test-alice-private,test-alice-shared,test-bob-shared"})
+    # Admin donne à Bob accès à ses vaults + alice-shared
+    await call_tool("token_update", {"hash_prefix": bob_hash, "vaults": "test-bob-private,test-bob-shared,test-alice-shared"})
+
+    # Alice lit bob-shared → AUTORISÉ
+    r = await call_tool("secret_read", {"vault_id": "test-bob-shared", "path": "secret/shared"}, token_override=alice_token)
+    check("Alice lit bob-shared → autorisé", r)
+    check_value("Alice voit la valeur bob-shared", r.get("data", {}).get("val"), "bob-shared")
+
+    # Alice lit bob-private → REFUSÉ
+    r = await call_tool("secret_read", {"vault_id": "test-bob-private", "path": "secret/priv"}, token_override=alice_token)
+    check("Alice lit bob-private → REFUSÉ", r, "error")
+
+    # Bob lit alice-shared → AUTORISÉ
+    r = await call_tool("secret_read", {"vault_id": "test-alice-shared", "path": "secret/shared"}, token_override=bob_token)
+    check("Bob lit alice-shared → autorisé", r)
+    check_value("Bob voit la valeur alice-shared", r.get("data", {}).get("val"), "alice-shared")
+
+    # Bob lit alice-private → REFUSÉ
+    r = await call_tool("secret_read", {"vault_id": "test-alice-private", "path": "secret/priv"}, token_override=bob_token)
+    check("Bob lit alice-private → REFUSÉ", r, "error")
+
+    # vault_list : Alice ne voit que ses 2 vaults + bob-shared (pas bob-private)
+    r = await call_tool("vault_list", {}, token_override=alice_token)
+    alice_vids = [v.get("vault_id") for v in r.get("vaults", [])]
+    check_true("Alice voit ses vaults + bob-shared",
+               "test-alice-private" in alice_vids and "test-bob-shared" in alice_vids and "test-bob-private" not in alice_vids,
+               f"vaults={alice_vids}")
+
+    # vault_list : Bob ne voit que ses 2 vaults + alice-shared (pas alice-private)
+    r = await call_tool("vault_list", {}, token_override=bob_token)
+    bob_vids = [v.get("vault_id") for v in r.get("vaults", [])]
+    check_true("Bob voit ses vaults + alice-shared",
+               "test-bob-private" in bob_vids and "test-alice-shared" in bob_vids and "test-alice-private" not in bob_vids,
+               f"vaults={bob_vids}")
+
+    # ── 13e-bis. Path-level enforcement — accès par secret ─────────
+    # Chacun écrit 3 secrets dans son vault shared
+    for s in ["shared/for-other", "private/secret1", "private/secret2"]:
+        await call_tool("secret_write", {"vault_id": "test-alice-shared", "path": s,
+            "data": {"val": f"alice-{s}"}, "secret_type": "custom"}, token_override=alice_token)
+        await call_tool("secret_write", {"vault_id": "test-bob-shared", "path": s,
+            "data": {"val": f"bob-{s}"}, "secret_type": "custom"}, token_override=bob_token)
+
+    # Créer une policy qui restreint l'accès au path "shared/*" uniquement
+    await call_tool("policy_create", {
+        "policy_id": "test-path-restrict",
+        "description": "Accès uniquement aux chemins shared/* dans les vaults partagés",
+        "allowed_tools": [],
+        "denied_tools": [],
+        "path_rules": [
+            {"vault_pattern": "test-bob-shared", "permissions": ["read"], "allowed_paths": ["shared/*"]},
+            {"vault_pattern": "test-alice-shared", "permissions": ["read"], "allowed_paths": ["shared/*"]},
+        ],
+    })
+
+    # Assigner la policy à Alice et Bob
+    await call_tool("token_update", {"hash_prefix": alice_hash, "policy_id": "test-path-restrict"})
+    await call_tool("token_update", {"hash_prefix": bob_hash, "policy_id": "test-path-restrict"})
+
+    # Alice lit bob-shared/shared/for-other → AUTORISÉ (path matche "shared/*")
+    r = await call_tool("secret_read", {"vault_id": "test-bob-shared", "path": "shared/for-other"}, token_override=alice_token)
+    check("Alice lit bob shared/for-other → autorisé", r)
+    check_value("Alice voit la valeur partagée", r.get("data", {}).get("val"), "bob-shared/for-other")
+
+    # Alice lit bob-shared/private/secret1 → REFUSÉ (path ne matche pas "shared/*")
+    r = await call_tool("secret_read", {"vault_id": "test-bob-shared", "path": "private/secret1"}, token_override=alice_token)
+    check("Alice lit bob private/secret1 → REFUSÉ", r, "error")
+
+    # Alice lit bob-shared/private/secret2 → REFUSÉ
+    r = await call_tool("secret_read", {"vault_id": "test-bob-shared", "path": "private/secret2"}, token_override=alice_token)
+    check("Alice lit bob private/secret2 → REFUSÉ", r, "error")
+
+    # Bob lit alice-shared/shared/for-other → AUTORISÉ
+    r = await call_tool("secret_read", {"vault_id": "test-alice-shared", "path": "shared/for-other"}, token_override=bob_token)
+    check("Bob lit alice shared/for-other → autorisé", r)
+    check_value("Bob voit la valeur partagée", r.get("data", {}).get("val"), "alice-shared/for-other")
+
+    # Bob lit alice-shared/private/secret1 → REFUSÉ
+    r = await call_tool("secret_read", {"vault_id": "test-alice-shared", "path": "private/secret1"}, token_override=bob_token)
+    check("Bob lit alice private/secret1 → REFUSÉ", r, "error")
+
+    # Cleanup path-level policy
+    await call_tool("token_update", {"hash_prefix": alice_hash, "policy_id": "_remove"})
+    await call_tool("token_update", {"hash_prefix": bob_hash, "policy_id": "_remove"})
+    await call_tool("policy_delete", {"policy_id": "test-path-restrict", "confirm": True})
+
+    # Cleanup cross-user
+    admin_delete(f"/tokens/{alice_hash}")
+    admin_delete(f"/tokens/{bob_hash}")
+    for v in ["test-alice-private", "test-alice-shared", "test-bob-private", "test-bob-shared"]:
+        await call_tool("vault_delete", {"vault_id": v, "confirm": True})
+
+    # ── 13f. Assigner policy via token_update (MCP tool) ───────────
     r = await call_tool("token_update", {
         "hash_prefix": agent_hash,
         "policy_id": "test-deny-write",
@@ -1156,7 +1311,7 @@ async def test_13_enforcement():
 
     # ── 13f. Token avec policy deny-write → secret_write REFUSÉ ───
     r = await call_tool("secret_write", {
-        "vault_id": "test-e2e-alpha", "path": "enforcement/test",
+        "vault_id": agent_vault, "path": "enforcement/test",
         "data": {"value": "should-fail"}, "secret_type": "custom",
     }, token_override=agent_token)
     check("Token + deny-write → secret_write REFUSÉ", r, "error")
@@ -1182,7 +1337,7 @@ async def test_13_enforcement():
 
     # ── 13j. Token avec policy deny-write → secret_read AUTORISÉ ──
     r = await call_tool("secret_read", {
-        "vault_id": "test-e2e-alpha", "path": "web/github",
+        "vault_id": agent_vault, "path": "web/test",
     }, token_override=agent_token)
     check("Token + deny-write → secret_read AUTORISÉ", r)
 
@@ -1204,14 +1359,14 @@ async def test_13_enforcement():
 
     # ── 13n. Token + readonly-only → secret_read AUTORISÉ ──────────
     r = await call_tool("secret_read", {
-        "vault_id": "test-e2e-alpha", "path": "web/github",
+        "vault_id": agent_vault, "path": "web/test",
     }, token_override=agent_token)
     check("Token + readonly-only → secret_read AUTORISÉ", r)
 
     # ── 13o. Token + readonly-only → secret_write REFUSÉ ───────────
     # (secret_write n'est PAS dans allowed_tools)
     r = await call_tool("secret_write", {
-        "vault_id": "test-e2e-alpha", "path": "enforcement/test",
+        "vault_id": agent_vault, "path": "enforcement/test",
         "data": {"value": "should-fail"}, "secret_type": "custom",
     }, token_override=agent_token)
     check("Token + readonly-only → secret_write REFUSÉ", r, "error")
@@ -1236,14 +1391,14 @@ async def test_13_enforcement():
     check("token_update retirer policy", r, "updated")
     check_value("policy_id vide après retrait", r.get("policy_id"), "")
 
-    # ── 13s. Token sans policy → secret_write AUTORISÉ ─────────────
+    # ── 13s. Token sans policy → secret_write AUTORISÉ (sur son vault) ──
     r = await call_tool("secret_write", {
-        "vault_id": "test-e2e-alpha", "path": "enforcement/after-remove",
+        "vault_id": agent_vault, "path": "enforcement/after-remove",
         "data": {"value": "should-work"}, "secret_type": "custom",
     }, token_override=agent_token)
     check("Token sans policy → secret_write AUTORISÉ", r)
     # Cleanup secret
-    await call_tool("secret_delete", {"vault_id": "test-e2e-alpha", "path": "enforcement/after-remove"})
+    await call_tool("secret_delete", {"vault_id": agent_vault, "path": "enforcement/after-remove"})
 
     # ── 13t. Token update — modifier permissions ───────────────────
     r = await call_tool("token_update", {
@@ -1589,7 +1744,7 @@ async def run_demo():
 async def cleanup():
     """Nettoyage des vaults de test."""
     print("\n  ── CLEANUP ──")
-    for space in ["test-e2e-alpha", "test-e2e-beta", "test-e2e-gamma", "test-e2e-empty"]:
+    for space in ["test-e2e-alpha", "test-e2e-beta", "test-e2e-gamma", "test-e2e-empty", "test-e2e-agent-owned"]:
         r = await call_tool("vault_delete", {"vault_id": space, "confirm": True})
         status = r.get("status", "?")
         if status == "deleted":

@@ -158,15 +158,24 @@ async def vault_list() -> dict:
     if policy_err:
         return policy_err
 
-    # ── Filtrage par token : les non-admin ne voient que leurs vaults ──
+    # ── Filtrage par token : isolation owner-based ──────────────────
     token_info = current_token_info.get()
     allowed_vault_ids = None
-    if token_info and "admin" not in token_info.get("permissions", []):
-        allowed = token_info.get("vault_ids", [])
-        if allowed:
-            allowed_vault_ids = allowed
+    owner_filter = None
 
-    return _r("vault_list", await list_spaces(allowed_vault_ids=allowed_vault_ids))
+    if token_info and "admin" not in token_info.get("permissions", []):
+        allowed = token_info.get("allowed_resources", [])
+        if allowed:
+            # Liste explicite de vaults autorisés
+            allowed_vault_ids = allowed
+        else:
+            # Pas de liste → owner-based : ne voir que ses propres vaults
+            owner_filter = token_info.get("client_name", "")
+
+    return _r("vault_list", await list_spaces(
+        allowed_vault_ids=allowed_vault_ids,
+        owner_filter=owner_filter,
+    ))
 
 
 @mcp.tool()
@@ -269,7 +278,7 @@ async def secret_write(vault_id: str, path: str, data: dict,
         tags: Tags séparés par des virgules (ex: "prod,critical")
         favorite: Marquer comme favori
     """
-    from .auth.context import check_access, check_write_permission, check_policy
+    from .auth.context import check_access, check_write_permission, check_policy, check_path_policy
     from .vault.secrets import write_secret
 
     policy_err = check_policy("secret_write")
@@ -278,6 +287,9 @@ async def secret_write(vault_id: str, path: str, data: dict,
     access_err = check_access(vault_id)
     if access_err:
         return access_err
+    path_err = check_path_policy(vault_id, path)
+    if path_err:
+        return path_err
     write_err = check_write_permission()
     if write_err:
         return write_err
@@ -295,7 +307,7 @@ async def secret_read(vault_id: str, path: str, version: int = 0) -> dict:
         path: Chemin du secret
         version: Version spécifique (0 = dernière)
     """
-    from .auth.context import check_access, check_policy
+    from .auth.context import check_access, check_policy, check_path_policy
     from .vault.secrets import read_secret
 
     policy_err = check_policy("secret_read")
@@ -304,6 +316,9 @@ async def secret_read(vault_id: str, path: str, version: int = 0) -> dict:
     access_err = check_access(vault_id)
     if access_err:
         return access_err
+    path_err = check_path_policy(vault_id, path)
+    if path_err:
+        return path_err
 
     return _r("secret_read", await read_secret(vault_id, path, version), vault_id, path)
 
@@ -339,7 +354,7 @@ async def secret_delete(vault_id: str, path: str) -> dict:
         vault_id: Vault cible
         path: Chemin du secret à supprimer
     """
-    from .auth.context import check_access, check_write_permission, check_policy
+    from .auth.context import check_access, check_write_permission, check_policy, check_path_policy
     from .vault.secrets import delete_secret
 
     policy_err = check_policy("secret_delete")
@@ -348,6 +363,9 @@ async def secret_delete(vault_id: str, path: str) -> dict:
     access_err = check_access(vault_id)
     if access_err:
         return access_err
+    path_err = check_path_policy(vault_id, path)
+    if path_err:
+        return path_err
     write_err = check_write_permission()
     if write_err:
         return write_err

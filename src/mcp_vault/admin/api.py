@@ -49,7 +49,14 @@ async def handle_admin_api(scope, receive, send, mcp):
 
     # --- Routes vaults (read = list/detail, write = create/update, admin = delete) ---
     if path == "/admin/api/vaults" and method == "GET":
-        return await _api_list_vaults(send, allowed_vaults if not is_admin else None)
+        if is_admin:
+            return await _api_list_vaults(send)
+        elif allowed_vaults:
+            return await _api_list_vaults(send, allowed_vault_ids=allowed_vaults)
+        else:
+            # Owner-based isolation : ne voir que ses propres vaults
+            client_name = token_info.get("client_name", "")
+            return await _api_list_vaults(send, owner_filter=client_name)
 
     if path == "/admin/api/vaults" and method == "POST":
         if not can_write:
@@ -308,11 +315,11 @@ async def _api_delete_secret(send, vault_id, secret_path):
     await _json_response(send, status, result)
 
 
-async def _api_list_vaults(send, allowed_vault_ids=None):
+async def _api_list_vaults(send, allowed_vault_ids=None, owner_filter=None):
     """GET /admin/api/vaults — Liste des vaults avec métadonnées."""
     from ..vault.spaces import list_spaces, get_space_info
 
-    result = await list_spaces(allowed_vault_ids)
+    result = await list_spaces(allowed_vault_ids, owner_filter=owner_filter)
     if result.get("status") != "ok":
         return await _json_response(send, 500, result)
 

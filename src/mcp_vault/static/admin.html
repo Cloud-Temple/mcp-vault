@@ -141,12 +141,40 @@
             </div>
         </div>
         <div class="form-group">
-            <label for="ctVaults">Vaults autorisés (vide = tous)</label>
+            <label for="ctVaults">Vaults autorisés (vide = mes vaults)</label>
             <input type="text" id="ctVaults" placeholder="vault1, vault2">
         </div>
         <div class="modal-actions">
             <button class="btn btn-ghost" onclick="closeModal('modalCreateToken')">Annuler</button>
             <button class="btn btn-primary" onclick="doCreateToken()">Créer</button>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════ MODAL — Modifier token ═══════════════ -->
+<div id="modalEditToken" class="modal-overlay">
+    <div class="modal">
+        <h2>✏️ Modifier le token</h2>
+        <input type="hidden" id="etHashPrefix">
+        <div class="form-group">
+            <label>Permissions</label>
+            <div class="checkbox-group">
+                <label><input type="checkbox" id="etPermRead"> read</label>
+                <label><input type="checkbox" id="etPermWrite"> write</label>
+                <label><input type="checkbox" id="etPermAdmin"> admin</label>
+            </div>
+        </div>
+        <div class="form-group">
+            <label for="etVaults">Vaults autorisés (vide = mes vaults)</label>
+            <input type="text" id="etVaults" placeholder="vault1, vault2">
+        </div>
+        <div class="form-group">
+            <label for="etPolicy">Policy ID (optionnel)</label>
+            <input type="text" id="etPolicy" placeholder="ex: read-only">
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeModal('modalEditToken')">Annuler</button>
+            <button class="btn btn-primary" onclick="doUpdateToken()">💾 Enregistrer</button>
         </div>
     </div>
 </div>

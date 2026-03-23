@@ -1,6 +1,6 @@
 # Documentation Technique — MCP Vault
 
-> **Version** : 0.2.0 | **Date** : 2026-03-18 | **Auteur** : Cloud Temple
+> **Version** : 0.2.0 | **Date** : 2026-03-22 | **Auteur** : Cloud Temple
 > **Licence** : Apache 2.0 | **Statut** : 🚧 Implémentation en cours
 
 ---
@@ -157,15 +157,24 @@ Utilise les `contextvars` Python pour injecter les infos du token sans dépendre
 | -------------------------- | ------------------------- | --------------------- | -------------- | ------------- |
 | Aucun                      | ❌                        | ❌                    | ❌             | ❌            |
 | `read` + vaults restreints | ✅                        | ❌                    | ❌             | ❌            |
-| `read` + vaults vides      | ✅                        | ✅                    | ❌             | ❌            |
+| `read` + vaults vides      | ✅ (owner-based)          | ❌ (sauf si owner)    | ❌             | ❌            |
 | `read,write` + vaults      | ✅                        | ❌                    | ✅             | ❌            |
 | `admin`                    | ✅                        | ✅                    | ✅ (implicite) | ✅            |
 
-**Règles** :
-- `vault_ids: []` (vide) → accès à **tous** les vaults
-- `vault_ids: ["a", "b"]` → accès **uniquement** à "a" et "b"
+**Règles (v0.2.0 — owner-based isolation)** :
+- `allowed_resources: []` (vide) → accès **uniquement** aux vaults dont `_vault_meta.created_by == client_name`
+- `allowed_resources: ["a", "b"]` → accès **uniquement** à "a" et "b" (liste explicite)
+- `admin` → accès à **tous** les vaults
 - La comparaison est **case-sensitive** et **exacte** (pas de wildcard)
 - `admin` implique `read` et `write`
+- Si le vault n'existe pas encore (création) → accès autorisé
+- Si le vault n'a pas de `_vault_meta` (legacy) → accès autorisé
+
+**Owner-based isolation** :
+Quand `allowed_resources` est vide (par défaut), `check_access()` vérifie la propriété
+du vault via `check_vault_owner(vault_id, client_name)` dans `spaces.py`. Ce mécanisme
+élimine le problème "vide = tous" qui permettait à un token d'accéder aux vaults créés par
+d'autres tokens. La sémantique est désormais "vide = mes vaults".
 
 ### 3.5 `auth/middleware.py` — Authentification HTTP
 
@@ -682,4 +691,5 @@ Voir `ARCHITECTURE.md §11.3` pour les diagrammes d'architecture et les étapes 
 | Phase 8a — Policies CRUD      | ✅     | PolicyStore S3-backed, 4 outils MCP (create, list, get, delete), wildcards fnmatch, path_rules, Admin API, 206 tests e2e |
 | Phase 8b — Policy Enforcement | ✅     | `check_policy()` dans 15 outils MCP, champ `policy_id` dans tokens, outil `token_update`, 276 tests e2e / 14 catégories |
 | Phase 8c — Audit Log          | ✅     | AuditStore (ring buffer 5000 + JSONL), outil `audit_log` filtrable, timeline SPA, CLI audit, catégorisation auto, stats dashboard |
+| Phase 8d — Owner Isolation     | ✅     | **Owner-based vault isolation** : `vide = mes vaults` (au lieu de `vide = tous`). Fix bug `vault_ids` → `allowed_resources`. `check_vault_owner()`, `list_spaces(owner_filter)`. SPA : modal édition token + label mis à jour. |
 | Phase 9 — HSM Integration     | ⏳     | **En attente HSM** — Design et prérequis documentés (ARCHITECTURE.md §11.3). Bloqué par la disponibilité du Thales Luna chez Cloud Temple. Config HCL cible, migration 11 étapes, commandes Luna préparées. Reprise dès que le matériel HSM sera opérationnel. |

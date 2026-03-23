@@ -160,6 +160,7 @@ class PolicyStore:
                 validated_rules.append({
                     "vault_pattern": rule["vault_pattern"],
                     "permissions": perms,
+                    "allowed_paths": rule.get("allowed_paths", []),
                 })
 
         now = datetime.now(timezone.utc).isoformat()
@@ -267,3 +268,38 @@ class PolicyStore:
                 return rule.get("permissions", ["read"])
 
         return []  # Aucune règle applicable
+
+    def is_path_allowed(self, policy_id: str, vault_id: str, path: str) -> bool:
+        """
+        Vérifie si un chemin de secret est autorisé dans un vault selon les path_rules.
+
+        Logique :
+        1. Pas de policy → autorisé
+        2. Pas de path_rule matchant le vault → autorisé (pas de restriction path)
+        3. path_rule sans allowed_paths → autorisé (restriction vault-level seulement)
+        4. path_rule avec allowed_paths → le path doit matcher au moins un pattern
+
+        Les patterns supportent les wildcards (* via fnmatch).
+
+        Args:
+            policy_id: ID de la policy
+            vault_id: ID du vault
+            path: Chemin du secret (ex: "web/github", "db/postgres")
+
+        Returns:
+            True si le chemin est autorisé
+        """
+        policy = self.get(policy_id)
+        if not policy:
+            return True  # Policy inexistante = pas de restriction
+
+        # Chercher la première path_rule qui matche le vault
+        for rule in policy.get("path_rules", []):
+            if fnmatch.fnmatch(vault_id, rule["vault_pattern"]):
+                allowed_paths = rule.get("allowed_paths", [])
+                if not allowed_paths:
+                    return True  # Pas de restriction path dans cette règle
+                # Vérifier si le path matche au moins un pattern autorisé
+                return any(fnmatch.fnmatch(path, p) for p in allowed_paths)
+
+        return True  # Aucune règle vault matchante = pas de restriction path
