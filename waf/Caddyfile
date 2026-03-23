@@ -1,37 +1,59 @@
-# Caddyfile — Reverse Proxy pour MCP Vault
-# Caddy standard (Coraza WAF sera ajouté en production via xcaddy)
+# Caddyfile — Reverse Proxy WAF pour MCP Vault
 #
-# Architecture : Internet → Caddy (:8085) → mcp-vault (:8030, réseau interne)
+# Architecture : Internet → Caddy+Coraza WAF (:8085) → mcp-vault (:8030)
+#
+# Sécurité L7 :
+#   - Coraza WAF avec OWASP CoreRuleSet v4
+#   - Protection contre injections SQL, XSS, LFI, RCE, SSRF
+#   - Headers de sécurité (HSTS, nosniff, X-Frame-Options)
+#   - Exceptions spécifiques pour les endpoints MCP et Admin API
+
+{
+	# IMPORTANT : coraza_waf doit être exécuté AVANT les autres handlers
+	order coraza_waf first
+
+	# Désactiver l'API admin Caddy (sécurité)
+	admin off
+}
 
 {$SITE_ADDRESS::8085} {
 
-    # --- Reverse proxy vers MCP Vault ---
-    reverse_proxy mcp-vault:8030 {
-        header_up X-Real-IP {remote_host}
-        header_up X-Forwarded-For {remote_host}
-        header_up X-Forwarded-Proto {scheme}
+	# ── WAF Coraza avec OWASP CRS ─────────────────────────────────
+	coraza_waf {
+		directives `
+			Include /etc/coraza/coraza.conf
+		`
+	}
 
-        # Timeouts adaptés aux appels MCP (qui peuvent être longs)
-        transport http {
-            dial_timeout 10s
-            response_header_timeout 120s
-            read_timeout 120s
-            write_timeout 120s
-        }
-    }
+	# ── Reverse proxy vers MCP Vault ──────────────────────────────
+	reverse_proxy mcp-vault:8030 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
 
-    # --- Headers de sécurité ---
-    header {
-        X-Content-Type-Options nosniff
-        X-Frame-Options DENY
-        Referrer-Policy strict-origin-when-cross-origin
-        -Server
-    }
+		# Timeouts adaptés aux appels MCP (qui peuvent être longs)
+		transport http {
+			dial_timeout 10s
+			response_header_timeout 120s
+			read_timeout 120s
+			write_timeout 120s
+		}
+	}
 
-    # --- Logs ---
-    log {
-        output stderr
-        format console
-        level INFO
-    }
+	# ── Headers de sécurité ────────────────────────────────────────
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		X-XSS-Protection "1; mode=block"
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;"
+		-Server
+	}
+
+	# ── Logs ───────────────────────────────────────────────────────
+	log {
+		output stderr
+		format console
+		level INFO
+	}
 }

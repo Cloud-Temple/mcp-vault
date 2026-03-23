@@ -42,10 +42,15 @@ class AdminMiddleware:
         if path in ("/admin", "/admin/"):
             return await self._serve_file(send, "admin.html", "text/html")
 
-        # --- Fichiers statiques ---
+        # --- Fichiers statiques (sécurisé contre LFI/path traversal) ---
         if path.startswith("/admin/static/"):
             rel = path[len("/admin/static/"):]
-            if ".." in rel:
+            # Bloquer les traversées de répertoire ET les chemins absolus
+            if ".." in rel or rel.startswith("/") or not rel:
+                return await self._error(send, 403, "Forbidden")
+            # Résoudre le chemin et vérifier qu'il reste dans static_dir
+            resolved = (self.static_dir / rel).resolve()
+            if not str(resolved).startswith(str(self.static_dir.resolve())):
                 return await self._error(send, 403, "Forbidden")
             return await self._serve_file(send, rel)
 

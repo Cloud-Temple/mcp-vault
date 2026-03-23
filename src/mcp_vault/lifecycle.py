@@ -38,6 +38,19 @@ async def vault_startup() -> bool:
     """
     settings = get_settings()
 
+    # ── 0. Validation de la bootstrap key ──────────────────────────
+    logger.info("🔐 Validation de la bootstrap key...")
+    try:
+        from .openbao.crypto import validate_bootstrap_key
+        is_valid, msg = validate_bootstrap_key(settings.admin_bootstrap_key)
+        if not is_valid:
+            logger.warning(f"⚠️  Bootstrap key : {msg}")
+            logger.warning("⚠️  Le service démarre mais le chiffrement des clés unseal échouera.")
+        else:
+            logger.info("✅ Bootstrap key validée (entropie suffisante)")
+    except Exception as e:
+        logger.warning(f"⚠️ Validation bootstrap key : {e}")
+
     # ── 1. Token Store S3 ──────────────────────────────────────────
     logger.info("🔑 Initialisation du Token Store...")
     try:

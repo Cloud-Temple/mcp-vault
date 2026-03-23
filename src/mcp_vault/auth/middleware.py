@@ -106,10 +106,13 @@ class AuthMiddleware:
     """
     Middleware ASGI d'authentification par Bearer token.
 
-    - Extrait le token du header Authorization ou query string ?token=
+    - Extrait le token du header Authorization: Bearer <token>
     - Valide via bootstrap key ou Token Store S3
     - Injecte les infos du token dans les contextvars
     - Les routes publiques passent sans token
+
+    SÉCURITÉ : seul le header Authorization est accepté.
+    L'auth par query string (?token=) a été supprimée (risque de fuite dans les logs).
     """
 
     PUBLIC_PATHS = {"/health", "/healthz", "/ready", "/favicon.ico"}
@@ -143,17 +146,17 @@ class AuthMiddleware:
             current_token_info.reset(tok)
 
     def _extract_token(self, scope) -> Optional[str]:
-        """Extrait le token depuis le header Authorization ou query string."""
+        """Extrait le token depuis le header Authorization uniquement.
+
+        SÉCURITÉ : l'authentification par query string (?token=) a été
+        supprimée pour éviter les fuites de tokens dans les logs HTTP,
+        l'historique navigateur, les proxies et les outils de monitoring.
+        Seul le header Authorization: Bearer <token> est accepté.
+        """
         headers = dict(scope.get("headers", []))
         auth = headers.get(b"authorization", b"").decode()
         if auth.startswith("Bearer "):
             return auth[7:]
-
-        # Fallback: query string ?token=xxx
-        qs = scope.get("query_string", b"").decode()
-        for param in qs.split("&"):
-            if param.startswith("token="):
-                return param[6:]
         return None
 
     def _validate_token(self, token: str) -> Optional[dict]:

@@ -9,6 +9,8 @@ Ces tests vérifient :
     4. Bootstrap key trop courte → erreur
     5. Données vides / edge cases
     6. Unicité du chiffrement (sel + nonce aléatoires)
+    7. Validation de l'entropie de la bootstrap key
+    8. Zeroing mémoire des clés dérivées
 """
 
 import json
@@ -18,16 +20,20 @@ import os
 # Ajouter le répertoire source au path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+# Clé de test conforme aux nouvelles exigences :
+# ≥ 32 chars, 3+ classes (majuscules, minuscules, chiffres, symboles)
+_TEST_KEY = "Test-Bootstrap-Key-2026-Pour-Crypto!!"
+_TEST_KEY_ALT = "Another-Secure-Key-9876-For-Tests!!"
+
 
 def test_roundtrip_simple():
     """Chiffrer puis déchiffrer retourne le texte original."""
     from mcp_vault.openbao.crypto import encrypt_with_bootstrap_key, decrypt_with_bootstrap_key
 
     plaintext = "Hello, World! 🔐"
-    key = "ma-super-clé-bootstrap-64-caractères-minimum-pour-la-production!!"
 
-    encrypted = encrypt_with_bootstrap_key(plaintext, key)
-    decrypted = decrypt_with_bootstrap_key(encrypted, key)
+    encrypted = encrypt_with_bootstrap_key(plaintext, _TEST_KEY)
+    decrypted = decrypt_with_bootstrap_key(encrypted, _TEST_KEY)
 
     assert decrypted == plaintext, f"Roundtrip échoué : {decrypted!r} != {plaintext!r}"
     print("  ✅ Roundtrip simple OK")
@@ -43,10 +49,9 @@ def test_roundtrip_json_keys():
         "keys_base64": ["q7wTN...base64...=="],
     }
     plaintext = json.dumps(init_data)
-    key = "test-bootstrap-key-assez-longue-pour-passer-la-validation"
 
-    encrypted = encrypt_with_bootstrap_key(plaintext, key)
-    decrypted = decrypt_with_bootstrap_key(encrypted, key)
+    encrypted = encrypt_with_bootstrap_key(plaintext, _TEST_KEY)
+    decrypted = decrypt_with_bootstrap_key(encrypted, _TEST_KEY)
     recovered = json.loads(decrypted)
 
     assert recovered == init_data, f"JSON roundtrip échoué"
@@ -60,13 +65,11 @@ def test_wrong_key_fails():
     from mcp_vault.openbao.crypto import encrypt_with_bootstrap_key, decrypt_with_bootstrap_key
 
     plaintext = "secret data"
-    good_key = "the-correct-bootstrap-key-1234567890"
-    bad_key = "the-WRONG-bootstrap-key-9876543210!!"
 
-    encrypted = encrypt_with_bootstrap_key(plaintext, good_key)
+    encrypted = encrypt_with_bootstrap_key(plaintext, _TEST_KEY)
 
     try:
-        decrypt_with_bootstrap_key(encrypted, bad_key)
+        decrypt_with_bootstrap_key(encrypted, _TEST_KEY_ALT)
         assert False, "Aurait dû lever ValueError"
     except ValueError as e:
         assert "incorrecte" in str(e).lower() or "corrompue" in str(e).lower()
@@ -77,18 +80,16 @@ def test_corrupted_data_fails():
     """Données corrompues doivent lever ValueError."""
     from mcp_vault.openbao.crypto import decrypt_with_bootstrap_key
 
-    key = "bootstrap-key-pour-test-corruption"
-
     # Base64 valide mais données trop courtes
     try:
-        decrypt_with_bootstrap_key("AAAA", key)
+        decrypt_with_bootstrap_key("AAAA", _TEST_KEY)
         assert False, "Aurait dû lever ValueError (données trop courtes)"
     except ValueError as e:
         print(f"  ✅ Données trop courtes → ValueError : {e}")
 
     # Base64 invalide
     try:
-        decrypt_with_bootstrap_key("!!!pas-du-base64!!!", key)
+        decrypt_with_bootstrap_key("!!!pas-du-base64!!!", _TEST_KEY)
         assert False, "Aurait dû lever ValueError (base64 invalide)"
     except ValueError as e:
         print(f"  ✅ Base64 invalide → ValueError : {e}")
@@ -99,10 +100,10 @@ def test_short_key_fails():
     from mcp_vault.openbao.crypto import encrypt_with_bootstrap_key
 
     try:
-        encrypt_with_bootstrap_key("data", "short")
+        encrypt_with_bootstrap_key("data", "Short-Key-1!")
         assert False, "Aurait dû lever ValueError (clé trop courte)"
     except ValueError as e:
-        assert "16 caractères" in str(e)
+        assert "32" in str(e) or "trop courte" in str(e).lower()
         print(f"  ✅ Clé trop courte → ValueError : {e}")
 
 
@@ -128,10 +129,9 @@ def test_unique_ciphertext():
     from mcp_vault.openbao.crypto import encrypt_with_bootstrap_key
 
     plaintext = "même texte"
-    key = "bootstrap-key-pour-test-unicité-1234"
 
-    enc1 = encrypt_with_bootstrap_key(plaintext, key)
-    enc2 = encrypt_with_bootstrap_key(plaintext, key)
+    enc1 = encrypt_with_bootstrap_key(plaintext, _TEST_KEY)
+    enc2 = encrypt_with_bootstrap_key(plaintext, _TEST_KEY)
 
     assert enc1 != enc2, "Deux chiffrements identiques ! Le sel/nonce n'est pas aléatoire"
     print(f"  ✅ Unicité OK (enc1={enc1[:20]}... != enc2={enc2[:20]}...)")
@@ -142,10 +142,9 @@ def test_large_payload():
     from mcp_vault.openbao.crypto import encrypt_with_bootstrap_key, decrypt_with_bootstrap_key
 
     plaintext = "x" * 10_000
-    key = "bootstrap-key-pour-test-grande-taille!"
 
-    encrypted = encrypt_with_bootstrap_key(plaintext, key)
-    decrypted = decrypt_with_bootstrap_key(encrypted, key)
+    encrypted = encrypt_with_bootstrap_key(plaintext, _TEST_KEY)
+    decrypted = decrypt_with_bootstrap_key(encrypted, _TEST_KEY)
 
     assert decrypted == plaintext
     assert len(decrypted) == 10_000
@@ -157,13 +156,96 @@ def test_unicode_content():
     from mcp_vault.openbao.crypto import encrypt_with_bootstrap_key, decrypt_with_bootstrap_key
 
     plaintext = '{"note": "Clé générée le 18/03/2026 🔐", "accents": "éàü", "cjk": "漢字"}'
-    key = "bootstrap-key-unicode-test-1234567!"
 
-    encrypted = encrypt_with_bootstrap_key(plaintext, key)
-    decrypted = decrypt_with_bootstrap_key(encrypted, key)
+    encrypted = encrypt_with_bootstrap_key(plaintext, _TEST_KEY)
+    decrypted = decrypt_with_bootstrap_key(encrypted, _TEST_KEY)
 
     assert decrypted == plaintext
     print("  ✅ Unicode (emojis, accents, CJK) OK")
+
+
+# ─── Nouveaux tests de sécurité ───────────────────────────────────────────────
+
+
+def test_validate_bootstrap_key_good():
+    """Clés valides doivent passer la validation."""
+    from mcp_vault.openbao.crypto import validate_bootstrap_key
+
+    # Clé avec 4 classes (maj, min, chiffres, symboles) — 32+ chars
+    ok, msg = validate_bootstrap_key("My-Super-Secure-Key-2026-Prod!!!")
+    assert ok, f"Devrait être valide : {msg}"
+
+    # Clé générée par secrets.token_urlsafe (3 classes : maj, min, chiffres + _-)
+    ok, msg = validate_bootstrap_key("aBcDeFgHiJkLmNoPqRsTuVwXyZ012345-_")
+    assert ok, f"Devrait être valide : {msg}"
+
+    print("  ✅ validate_bootstrap_key — clés valides OK")
+
+
+def test_validate_bootstrap_key_default_rejected():
+    """La valeur par défaut 'change_me_in_production' doit être rejetée."""
+    from mcp_vault.openbao.crypto import validate_bootstrap_key
+
+    ok, msg = validate_bootstrap_key("change_me_in_production")
+    assert not ok, "La valeur par défaut devrait être rejetée"
+    assert "par défaut" in msg.lower() or "change_me" in msg
+    print(f"  ✅ Valeur par défaut rejetée : {msg}")
+
+
+def test_validate_bootstrap_key_too_short():
+    """Clés trop courtes doivent être rejetées."""
+    from mcp_vault.openbao.crypto import validate_bootstrap_key
+
+    ok, msg = validate_bootstrap_key("Short-1!")
+    assert not ok, "Clé courte devrait être rejetée"
+    assert "32" in msg or "trop courte" in msg.lower()
+    print(f"  ✅ Clé courte rejetée : {msg}")
+
+
+def test_validate_bootstrap_key_low_diversity():
+    """Clés sans diversité de caractères doivent être rejetées."""
+    from mcp_vault.openbao.crypto import validate_bootstrap_key
+
+    # Que des minuscules et tirets — 2 classes seulement
+    ok, msg = validate_bootstrap_key("abcdefghijklmnopqrstuvwxyz-abcdefg")
+    assert not ok, "Clé sans diversité devrait être rejetée"
+    assert "diversité" in msg.lower() or "classes" in msg.lower()
+    print(f"  ✅ Clé faible diversité rejetée : {msg}")
+
+
+def test_validate_bootstrap_key_repetitive():
+    """Clés avec trop de répétitions doivent être rejetées."""
+    from mcp_vault.openbao.crypto import validate_bootstrap_key
+
+    # Même caractère répété (passe longueur et classes mais échoue en diversité unique)
+    ok, msg = validate_bootstrap_key("aaAAaaAAaaAAaaAAaaAAaaAAaaAAaaAA11")
+    # Ce cas a 3 classes mais seulement 3 caractères uniques sur 32
+    assert not ok, "Clé répétitive devrait être rejetée"
+    assert "répétition" in msg.lower()
+    print(f"  ✅ Clé répétitive rejetée : {msg}")
+
+
+def test_zero_fill():
+    """Le zeroing mémoire doit effacer tous les bytes d'un bytearray."""
+    from mcp_vault.openbao.crypto import _zero_fill
+
+    buf = bytearray(b"\xff" * 32)
+    assert all(b == 0xff for b in buf), "Buffer initial mal rempli"
+
+    _zero_fill(buf)
+    assert all(b == 0 for b in buf), "Zero-fill n'a pas tout effacé"
+    assert len(buf) == 32, "Longueur modifiée par zero-fill"
+    print("  ✅ _zero_fill — effacement mémoire OK")
+
+
+def test_derive_key_returns_bytearray():
+    """_derive_key doit retourner un bytearray (mutable pour zeroing)."""
+    from mcp_vault.openbao.crypto import _derive_key
+
+    key = _derive_key("test-passphrase", b"\x00" * 16)
+    assert isinstance(key, bytearray), f"Attendu bytearray, obtenu {type(key)}"
+    assert len(key) == 32, f"Attendu 32 bytes, obtenu {len(key)}"
+    print("  ✅ _derive_key retourne bytearray (32 bytes)")
 
 
 if __name__ == "__main__":
@@ -177,9 +259,16 @@ if __name__ == "__main__":
         test_unique_ciphertext,
         test_large_payload,
         test_unicode_content,
+        test_validate_bootstrap_key_good,
+        test_validate_bootstrap_key_default_rejected,
+        test_validate_bootstrap_key_too_short,
+        test_validate_bootstrap_key_low_diversity,
+        test_validate_bootstrap_key_repetitive,
+        test_zero_fill,
+        test_derive_key_returns_bytearray,
     ]
 
-    print(f"\n🧪 Tests crypto.py — Option C ({len(tests)} tests)\n")
+    print(f"\n🧪 Tests crypto.py — Option C + Sécurité ({len(tests)} tests)\n")
 
     passed = 0
     failed = 0

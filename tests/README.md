@@ -11,7 +11,7 @@ MCP Vault dispose de **4 niveaux de tests**, couvrant de la cryptographie bas-ni
 | `tests/test_cli_all.py`  | **197**  | ❌ Non          | ~2s   | Parsing CLI Click + affichage Rich  |
 | `tests/test_cli_live.py` | **79**   | ✅ Oui          | ~10s  | Cycle complet live (8 sections)     |
 | `tests/test_e2e.py`      | **~290** | ✅ Oui (Docker) | ~5s   | Tous les outils MCP (14 catégories) |
-| `tests/test_crypto.py`   | **9**    | ❌ Non          | <1s   | Chiffrement AES-256-GCM             |
+| `tests/test_crypto.py`   | **16**   | ❌ Non          | <1s   | Chiffrement AES-256-GCM + sécurité  |
 
 ---
 
@@ -98,8 +98,12 @@ Chaque test affiche la **commande CLI équivalente** avant exécution :
 
 Teste **tous les outils MCP** (24) avec un OpenBao réel, sans mocking. C'est la suite de tests la plus complète.
 
+### Méthode 1 — Dans le conteneur (recommandé)
+
+La manière la plus simple : les variables d'environnement sont déjà chargées.
+
 ```bash
-# Build et exécution
+# Tous les tests (~295 tests)
 docker compose exec mcp-vault python tests/test_e2e.py
 
 # Un seul groupe
@@ -109,6 +113,25 @@ docker compose exec mcp-vault python tests/test_e2e.py --test enforcement
 # Mode démo (lent, pour visualiser /admin en temps réel)
 docker compose exec mcp-vault python tests/test_e2e.py --demo
 ```
+
+### Méthode 2 — Depuis l'hôte via le WAF (port 8085)
+
+Permet de valider que le **WAF Coraza** ne bloque rien. Nécessite d'exporter les variables `.env` :
+
+```bash
+# ⚠️ IMPORTANT : set -a exporte les variables pour Python
+set -a && source .env && set +a
+
+# Lancer via le WAF (port 8085)
+MCP_URL=http://localhost:8085 MCP_TOKEN="$ADMIN_BOOTSTRAP_KEY" python tests/test_e2e.py
+
+# Un seul groupe via le WAF
+MCP_URL=http://localhost:8085 MCP_TOKEN="$ADMIN_BOOTSTRAP_KEY" python tests/test_e2e.py --test ssh_ca
+```
+
+> 💡 **Pourquoi `set -a` ?** La commande `source .env` charge les variables dans le shell mais ne les **exporte** pas. Sans `set -a`, Python (`os.getenv`) ne les voit pas — les tests S3 utiliseraient les valeurs par défaut du `.env.example` et échoueraient.
+
+> ⚠️ **Depuis v0.3.1**, seul le header `Authorization: Bearer <token>` est accepté. L'authentification par `?token=` dans l'URL a été supprimée pour des raisons de sécurité.
 
 ### 14 catégories
 
@@ -131,13 +154,23 @@ docker compose exec mcp-vault python tests/test_e2e.py --demo
 
 ---
 
-## 4. Tests Cryptographie (sans serveur)
+## 4. Tests Cryptographie et Sécurité (sans serveur)
 
-Valide le module de chiffrement AES-256-GCM utilisé pour sécuriser les clés unseal.
+Valide le module de chiffrement AES-256-GCM et les contrôles de sécurité ajoutés en v0.3.1.
 
 ```bash
 python tests/test_crypto.py
 ```
+
+### Ce qui est validé (16 tests)
+
+- ✅ Roundtrip encrypt/decrypt (texte, JSON, Unicode, 10 KB)
+- ✅ Mauvaise clé → erreur explicite
+- ✅ Données corrompues / base64 invalide → erreur
+- ✅ Unicité CSPRNG (sel + nonce aléatoires)
+- ✅ `validate_bootstrap_key()` — clés valides acceptées, valeur par défaut rejetée, clé courte rejetée, faible diversité rejetée, patterns répétitifs rejetés
+- ✅ `_zero_fill()` — effacement mémoire vérifié (tous les bytes à 0)
+- ✅ `_derive_key()` — retourne `bytearray` (mutable pour zeroing, pas `bytes`)
 
 ---
 
@@ -152,7 +185,7 @@ tests/
 ├── test_cli_all.py            ← 197 tests CLI parsing (sans serveur)
 ├── test_cli_live.py           ← 79 tests CLI live (serveur réel)
 ├── test_e2e.py                ← ~290 tests MCP complets (Docker)
-├── test_crypto.py             ← 9 tests AES-256-GCM
+├── test_crypto.py             ← 16 tests AES-256-GCM + sécurité (v0.3.1)
 ├── test_integration.py        ← tests d'intégration S3/Auth
 ├── test_service.py            ← tests de service
 │
@@ -202,8 +235,8 @@ Les tests valident les **3 couches d'isolation** :
 | Tests CLI parsing        | **197** (sans serveur)                                 |
 | Tests CLI live           | **79** (serveur réel)                                  |
 | Tests e2e MCP            | **~290** (OpenBao + S3 réel)                           |
-| Tests crypto             | **9**                                                  |
-| **Total**                | **~575 tests**                                         |
+| Tests crypto + sécurité  | **16**                                                 |
+| **Total**                | **~590 tests**                                         |
 | Couverture fonctionnelle | 24 outils MCP, 14 types secrets                        |
 | Couverture sécurité      | 3 couches isolation, enforcement tool + path           |
 | Mocking                  | **Zéro** — tous les tests utilisent des services réels |

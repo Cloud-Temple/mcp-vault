@@ -1,5 +1,53 @@
 # Changelog — MCP Vault
 
+## [0.3.1] — 2026-03-23
+
+### Security — Audit & Correctifs critiques
+
+Suite à un **audit de sécurité complet** ([SECURITY_AUDIT.md](DESIGN/mcp-vault/SECURITY_AUDIT.md)), 5 vulnérabilités ont été identifiées et corrigées dans cette release.
+
+#### 🔴 Corrections critiques
+
+- **Arbitrary File Read (LFI)** dans `admin/middleware.py` : la route `/admin/static/` permettait de lire n'importe quel fichier du système via un chemin absolu (ex: `/admin/static//etc/passwd`). Corrigé avec `Path.resolve()` + vérification de parenté avec `static_dir` + rejet des chemins absolus et `..`.
+
+- **WAF Coraza réel** : le Dockerfile WAF utilisait `caddy:2-alpine` brut sans Coraza. Reconstruit avec un **build multi-stage** :
+  - Stage 1 : compilation Caddy + `coraza-caddy v2.2.0` via `xcaddy`
+  - Stage 2 : téléchargement **OWASP CoreRuleSet v4.7.0** (24 fichiers de règles)
+  - Stage 3 : image Alpine minimale avec config Coraza
+  - Nouveau fichier `waf/coraza.conf` avec stratégie WAF documentée
+  - Mode **Blocking** pour les chemins non-authentifiés
+  - Mode **DetectionOnly** pour les APIs authentifiées (`/mcp`, `/admin/api`)
+  - Headers de sécurité : CSP, X-Frame-Options DENY, X-XSS-Protection, nosniff
+
+#### 🟠 Corrections moyennes
+
+- **Auth par query string supprimée** : le fallback `?token=` dans `auth/middleware.py` a été supprimé. Seul le header `Authorization: Bearer <token>` est désormais accepté, éliminant le risque de fuite de tokens dans les logs HTTP, proxies et historiques navigateur.
+
+- **Validation de l'entropie de la bootstrap key** : nouvelle fonction `validate_bootstrap_key()` dans `crypto.py` avec vérification au démarrage dans `lifecycle.py`. Exigences : ≥32 caractères, 3+ classes de caractères (majuscules, minuscules, chiffres, symboles), détection de la valeur par défaut et des patterns faibles (répétitions).
+
+- **Zeroing mémoire des clés dérivées** : `_derive_key()` retourne un `bytearray` (mutable) au lieu de `bytes`. Nouvelle fonction `_zero_fill()` efface les clés dans les blocs `finally` après chaque opération crypto, limitant la fenêtre d'exposition en RAM.
+
+### Tests
+
+- **295/295 tests e2e** passent (dans le conteneur et via le WAF)
+- **16/16 tests crypto** (anciennement 9) — 7 nouveaux tests de sécurité :
+  - `validate_bootstrap_key` (clés valides, défaut rejeté, trop courte, faible diversité, répétitive)
+  - `_zero_fill` (effacement mémoire)
+  - `_derive_key` (retourne bytearray)
+- **197/197 tests CLI** — zéro régression
+
+### Fichiers modifiés (8)
+- `src/mcp_vault/admin/middleware.py` — fix LFI (resolve + parenté)
+- `src/mcp_vault/auth/middleware.py` — suppression `?token=`
+- `src/mcp_vault/openbao/crypto.py` — validate_bootstrap_key, bytearray, _zero_fill
+- `src/mcp_vault/lifecycle.py` — validation bootstrap key au startup
+- `waf/Dockerfile` — multi-stage xcaddy + CRS v4.7.0
+- `waf/Caddyfile` — `order coraza_waf first`, headers CSP, admin off
+- `waf/coraza.conf` — **nouveau** (config Coraza + CRS + exceptions MCP)
+- `tests/test_crypto.py` — 16 tests (7 nouveaux)
+
+---
+
 ## [0.3.0] — 2026-03-23
 
 ### Console Admin SPA — Parité complète avec le CLI

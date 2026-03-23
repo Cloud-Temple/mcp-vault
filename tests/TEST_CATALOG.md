@@ -1,9 +1,9 @@
 # Catalogue des Tests E2E — MCP Vault
 
-> **Version** : v0.2.0 — Phase 8d (Owner-based isolation + Path-level enforcement)
-> **Dernière exécution** : 56+ tests par catégorie, ~290 assertions au total
-> **Durée** : ~5 secondes
-> **Environnement** : Docker (OpenBao embedded + S3 Dell ECS)
+> **Version** : v0.3.1 — Phase sécurité (audit + correctifs critiques + WAF Coraza)
+> **Dernière exécution** : ~295 assertions au total (14 catégories e2e + 16 tests crypto)
+> **Durée** : ~5 secondes (e2e) + <1s (crypto)
+> **Environnement** : Docker (OpenBao embedded + S3 Dell ECS + WAF Caddy/Coraza CRS v4)
 
 ---
 
@@ -353,10 +353,39 @@
 
 ---
 
+## 15. Cryptographie et Sécurité — `test_crypto.py` (16 tests)
+
+> ⚠️ Ces tests sont dans un fichier séparé (`tests/test_crypto.py`), pas dans `test_e2e.py`.
+
+**Objectif** : Valider le module de chiffrement AES-256-GCM utilisé pour sécuriser les clés unseal d'OpenBao, et les contrôles de sécurité ajoutés en v0.3.1 (validation entropie, zeroing mémoire).
+
+| #    | Test                                  | Comportement attendu                                     |
+| ---- | ------------------------------------- | -------------------------------------------------------- |
+| 15.1 | Roundtrip simple                      | Chiffrer puis déchiffrer retourne le texte original      |
+| 15.2 | Roundtrip JSON (clés unseal)          | Structure JSON restituée fidèlement                      |
+| 15.3 | Mauvaise clé                          | `ValueError` avec message explicite                      |
+| 15.4 | Données corrompues / trop courtes     | `ValueError`                                             |
+| 15.5 | Base64 invalide                       | `ValueError`                                             |
+| 15.6 | Clé trop courte (<32 chars)           | `ValueError` avec suggestion `secrets.token_urlsafe`     |
+| 15.7 | Clé vide (encrypt + decrypt)          | `ValueError`                                             |
+| 15.8 | Unicité CSPRNG                        | 2 chiffrements identiques → résultats différents         |
+| 15.9 | Payload 10 KB                         | Roundtrip OK, taille préservée                           |
+| 15.10 | Unicode (emojis, accents, CJK)       | Roundtrip fidèle                                         |
+| 15.11 | Clés valides acceptées               | ≥32 chars, 3+ classes → `(True, "OK")`                  |
+| 15.12 | Valeur par défaut rejetée            | `change_me_in_production` → `(False, "...")`             |
+| 15.13 | Clé trop courte rejetée              | <32 chars → `(False, "...")`                             |
+| 15.14 | Faible diversité rejetée             | Seulement 2 classes de chars → `(False, "...")`          |
+| 15.15 | Patterns répétitifs rejetés          | Trop de caractères identiques → `(False, "...")`         |
+| 15.16 | `_zero_fill()` efface la mémoire     | Tous les bytes à 0 après appel                           |
+
+---
+
 ## Comment lancer les tests
 
 ```bash
-# Suite complète (~290 tests, ~5s)
+# ── Méthode 1 — Dans le conteneur (recommandé) ──
+
+# Suite e2e complète (~295 tests, ~5s)
 docker compose exec mcp-vault python tests/test_e2e.py
 
 # Un groupe spécifique
@@ -366,4 +395,18 @@ docker compose exec mcp-vault python tests/test_e2e.py --test policies
 
 # Mode démo visuel (pour /admin)
 docker compose exec mcp-vault python tests/test_e2e.py --demo
+
+# ── Méthode 2 — Depuis l'hôte via le WAF (:8085) ──
+
+# Exporter les variables .env (OBLIGATOIRE)
+set -a && source .env && set +a
+
+# Lancer les tests via le WAF Coraza
+MCP_URL=http://localhost:8085 MCP_TOKEN="$ADMIN_BOOTSTRAP_KEY" python tests/test_e2e.py
+
+# ── Tests crypto (sans serveur) ──
+python tests/test_crypto.py
+
+# ── Tests CLI parsing (sans serveur) ──
+python tests/test_cli_all.py
 ```

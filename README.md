@@ -177,6 +177,8 @@ Chaque secret supporte : `tags`, `favorite`, versioning KV v2 automatique.
 
 ## 🔒 Authentification
 
+> ⚠️ **Seul le header `Authorization: Bearer <token>` est accepté.** L'authentification par query string (`?token=`) a été supprimée pour des raisons de sécurité (v0.3.1).
+
 ```
 Authorization: Bearer <token>
 ```
@@ -229,10 +231,20 @@ Voir [scripts/README.md](scripts/README.md) pour la documentation complète du C
 > 📐 **Documentation complète** : le dossier [`DESIGN/mcp-vault/`](DESIGN/mcp-vault/) contient la spécification détaillée ([ARCHITECTURE.md](DESIGN/mcp-vault/ARCHITECTURE.md) — vision, sécurité, SSH CA, policies, roadmap HSM) et la documentation technique ([TECHNICAL.md](DESIGN/mcp-vault/TECHNICAL.md) — modules, Docker, tests, dépendances).
 
 ```
-Internet → WAF (Caddy :8085) → MCP Vault (Python :8030) → OpenBao (:8200 localhost)
-                                     ↕
-                              S3 Dell ECS (persistance)
+Internet → WAF (Caddy + Coraza :8085) → MCP Vault (Python :8030) → OpenBao (:8200 localhost)
+                  ↕ OWASP CRS v4                  ↕
+              Protection L7                 S3 Dell ECS (persistance)
 ```
+
+### WAF — Caddy + Coraza (OWASP CRS v4)
+
+Le WAF protège l'API contre les attaques L7 (injections SQL, XSS, LFI, RCE, SSRF) :
+- **Caddy v2.11.2** compilé avec **coraza-caddy v2.2.0** via `xcaddy`
+- **24 règles OWASP CoreRuleSet v4.7.0** chargées
+- Mode **Blocking** pour les chemins non-authentifiés (statiques, health)
+- Mode **DetectionOnly** pour les APIs authentifiées (`/mcp`, `/admin/api`) — déjà protégées par Bearer token + policies
+- **Headers de sécurité** : CSP, X-Frame-Options DENY, X-XSS-Protection, nosniff
+- Méthodes autorisées adaptées au protocole MCP : GET, POST, DELETE, PUT, PATCH
 
 ### Stack ASGI (5 couches)
 ```
@@ -271,7 +283,7 @@ Les clés unseal d'OpenBao sont protégées par **séparation physique à 3 fact
 
 ---
 
-## 📋 Tests (~575 tests, zéro mocking)
+## 📋 Tests (~590 tests, zéro mocking)
 
 > 📖 Voir [tests/README.md](tests/README.md) pour le guide complet d'exécution.
 
@@ -285,7 +297,7 @@ MCP_URL=http://localhost:8085 MCP_TOKEN=<key> python tests/test_cli_live.py
 # 3. Tests e2e MCP (~290 tests, dans Docker)
 docker compose exec mcp-vault python tests/test_e2e.py
 
-# 4. Tests crypto (9 tests, SANS serveur)
+# 4. Tests crypto (16 tests, SANS serveur — AES-256-GCM + validation entropie)
 python tests/test_crypto.py
 
 # Un seul groupe CLI
@@ -324,7 +336,7 @@ mcp-vault/
 ├── docker-compose.yml        # WAF + MCP Vault + volumes
 ├── Dockerfile                # Multi-stage (OpenBao 2.5.1 + Python 3.12)
 ├── requirements.txt          # Dépendances Python
-├── VERSION                   # 0.3.0
+├── VERSION                   # 0.3.1
 ├── DESIGN/mcp-vault/
 │   ├── ARCHITECTURE.md       # Spécification détaillée (v0.2.2-draft)
 │   └── TECHNICAL.md          # Documentation technique (v0.2.0)
@@ -362,7 +374,10 @@ mcp-vault/
 │   ├── test_service.py       # 78 tests bas niveau
 │   ├── test_integration.py   # Tests pytest
 │   └── cli/                  # Tests CLI découpés par groupe (7 fichiers)
-└── waf/                      # Caddy reverse proxy
+└── waf/                      # WAF Caddy + Coraza (OWASP CRS v4)
+    ├── Dockerfile            # Multi-stage (xcaddy + CRS v4.7.0)
+    ├── Caddyfile             # Reverse proxy + coraza_waf
+    └── coraza.conf           # Config Coraza + exceptions MCP
 ```
 
 ---
@@ -380,4 +395,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.3.0
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.3.1
