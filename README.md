@@ -21,6 +21,7 @@ MCP Vault est un serveur [MCP](https://modelcontextprotocol.io/) qui fournit un 
 | [**ARCHITECTURE.md**](DESIGN/mcp-vault/ARCHITECTURE.md) | Spécification complète — vision, architecture ASGI 5 couches, vaults, SSH CA, policies MCP (6 exemples prêts à l'emploi), sécurité des clés unseal (3 facteurs), roadmap HSM |
 | [**TECHNICAL.md**](DESIGN/mcp-vault/TECHNICAL.md)       | Documentation technique — 14 modules source, modèle de données, Docker, ~290 tests e2e, dépendances, roadmap                                                                 |
 | [**scripts/README.md**](scripts/README.md)              | Guide CLI complet — 7 groupes de commandes, shell interactif, exemples                                                                                                       |
+| [**tests/README.md**](tests/README.md)                  | Guide d'exécution des tests — 4 niveaux, ~575 tests, commandes pour auditeurs                                                                                                |
 | [**TEST_CATALOG.md**](tests/TEST_CATALOG.md)            | Catalogue des tests e2e — 14 catégories, ~290 assertions, objectif de chaque section (pour auditeurs)                                                                        |
 
 ---
@@ -207,11 +208,17 @@ python scripts/mcp_cli.py vault create serveurs-prod -d "Clés SSH prod"
 python scripts/mcp_cli.py secret write serveurs-prod web/github -d '{"username":"me","password":"s3cr3t"}' -t login
 python scripts/mcp_cli.py secret read serveurs-prod web/github
 python scripts/mcp_cli.py secret password -l 32
+python scripts/mcp_cli.py token create agent-sre --vaults prod --policy readonly
 python scripts/mcp_cli.py token list
+python scripts/mcp_cli.py policy create no-ssh -d "Pas de SSH" --denied "ssh_*"
+python scripts/mcp_cli.py policy create team-x --allowed "secret_*" --path-rules '[{"vault_pattern":"shared-*","allowed_paths":["shared/*"]}]'
+python scripts/mcp_cli.py audit --status denied --limit 10
 
 # Shell interactif
 python scripts/mcp_cli.py shell
 ```
+
+> L'aide `--help` de chaque commande explique le modèle de sécurité à 3 couches et guide l'utilisateur.
 
 Voir [scripts/README.md](scripts/README.md) pour la documentation complète du CLI.
 
@@ -240,7 +247,7 @@ SHUTDOWN: seal → S3 upload final → stop process
 CRASH:    Docker volume local → redémarrage immédiat
 ```
 
-### 🔐 Sécurité des clés unseal (Option C)
+### Sécurité des clés unseal
 
 Les clés unseal d'OpenBao sont protégées par **séparation physique à 3 facteurs** :
 
@@ -254,31 +261,38 @@ Les clés unseal d'OpenBao sont protégées par **séparation physique à 3 fact
 
 **Roadmap sécurité** :
 
-| Version             | Approche                                                                                                                |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| **v0.2.x** (actuel) | Clés sur S3 chiffrées AES-256-GCM, mémoire seule au runtime                                                             |
-| **v0.3.0**          | Transit Auto-Unseal via OpenBao dédié (KMS Cloud Temple)                                                                |
-| **v2.0**            | 🔐 **Connexion HSM** (Hardware Security Module) Cloud Temple — les clés ne quittent jamais le module matériel certifié |
+| Version             | Approche                                                                                                            |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| **v0.2.x** (actuel) | Clés sur S3 chiffrées AES-256-GCM, mémoire seule au runtime                                                         |
+| **v0.3.0**          | Transit Auto-Unseal via OpenBao dédié (KMS Cloud Temple)                                                            |
+| **v2.0**            | **Connexion HSM** (Hardware Security Module) Cloud Temple — les clés ne quittent jamais le module matériel certifié |
 
 > 📖 Voir [DESIGN/mcp-vault/ARCHITECTURE.md](DESIGN/mcp-vault/ARCHITECTURE.md) §8 et §11 pour les détails complets.
 
 ---
 
-## 📋 Tests
+## 📋 Tests (~575 tests, zéro mocking)
+
+> 📖 Voir [tests/README.md](tests/README.md) pour le guide complet d'exécution.
 
 ```bash
-# Tests e2e MCP (276 tests, OpenBao réel)
+# 1. Tests CLI — parsing + affichage (197 tests, SANS serveur)
+python tests/test_cli_all.py
+
+# 2. Tests CLI LIVE — cycle complet (79 tests, serveur réel)
+MCP_URL=http://localhost:8085 MCP_TOKEN=<key> python tests/test_cli_live.py
+
+# 3. Tests e2e MCP (~290 tests, dans Docker)
 docker compose exec mcp-vault python tests/test_e2e.py
 
-# Tests bas niveau (78 tests, S3, auth, types)
-docker compose exec mcp-vault python tests/test_service.py --no-docker
+# 4. Tests crypto (9 tests, SANS serveur)
+python tests/test_crypto.py
 
-# Tests pytest (intégration S3/auth)
-docker compose exec mcp-vault python -m pytest tests/test_integration.py -v
+# Un seul groupe CLI
+python tests/test_cli_all.py --only policy
 
-# Test spécifique
-docker compose exec mcp-vault python tests/test_e2e.py --test secrets
-docker compose exec mcp-vault python tests/test_e2e.py --test password
+# Un seul groupe e2e
+docker compose exec mcp-vault python tests/test_e2e.py --test enforcement
 ```
 
 ### Couverture e2e (276 tests, 14 catégories)
@@ -339,10 +353,15 @@ mcp-vault/
 │       ├── js/               # Modules JS (config, api, app, dashboard, vaults, tokens, activity)
 │       └── img/              # logo-cloudtemple.svg
 ├── tests/
-│   ├── test_e2e.py           # ~290 tests MCP e2e (14 catégories)
+│   ├── README.md             # Guide d'exécution des tests (auditeurs)
 │   ├── TEST_CATALOG.md       # Catalogue des tests pour auditeurs
+│   ├── test_cli_all.py       # 197 tests CLI parsing (sans serveur)
+│   ├── test_cli_live.py      # 79 tests CLI live (serveur réel)
+│   ├── test_e2e.py           # ~290 tests MCP e2e (14 catégories)
+│   ├── test_crypto.py        # 9 tests AES-256-GCM
 │   ├── test_service.py       # 78 tests bas niveau
-│   └── test_integration.py   # Tests pytest
+│   ├── test_integration.py   # Tests pytest
+│   └── cli/                  # Tests CLI découpés par groupe (7 fichiers)
 └── waf/                      # Caddy reverse proxy
 ```
 
@@ -361,4 +380,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.1.0
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.2.0

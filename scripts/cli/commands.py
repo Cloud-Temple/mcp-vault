@@ -29,7 +29,14 @@ from .display import (
 @click.option("--token", "-t", envvar=["MCP_TOKEN"], default=TOKEN, help="Token d'authentification")
 @click.pass_context
 def cli(ctx, url, token):
-    """🔐 CLI pour MCP Vault — Gestion sécurisée des secrets pour agents IA."""
+    """🔐 CLI pour MCP Vault — Gestion sécurisée des secrets pour agents IA.
+
+    \b
+    Sécurité à 3 couches :
+      1. Owner-based   — chaque token ne voit que ses propres vaults (par défaut)
+      2. Vault-level   — restriction explicite via allowed_resources sur le token
+      3. Path-level    — restriction par chemin via allowed_paths dans les policies
+    """
     ctx.ensure_object(dict)
     ctx.obj["url"] = url
     ctx.obj["token"] = token
@@ -99,11 +106,12 @@ def whoami_cmd(ctx, output_json):
 @cli.group("vault")
 @click.pass_context
 def vault_group(ctx):
-    """🏛️  Gestion des vaults vault (mount KV v2).
+    """🏛️  Gestion des vaults (coffres de secrets KV v2).
 
     \b
-    Sous-commandes : create, list, info, delete.
-    Chaque vault est un mount point KV v2 dans OpenBao.
+    Sous-commandes : create, list, info, update, delete.
+    Chaque vault est isolé — vous ne voyez que les vaults dont vous êtes propriétaire
+    (sauf si votre token a des vaults explicitement autorisés, ou si vous êtes admin).
     """
     pass
 
@@ -531,7 +539,12 @@ def policy_group(ctx):
 
     \b
     Sous-commandes : create, list, get, delete.
-    Les policies définissent quels outils MCP sont accessibles par token.
+
+    \b
+    Une policy contrôle 3 niveaux d'accès :
+      - allowed_tools / denied_tools : quels outils MCP (wildcards: ssh_*)
+      - path_rules  : quels vaults et quels chemins de secrets
+    Les denied_tools sont TOUJOURS prioritaires sur les allowed_tools.
     """
     pass
 
@@ -540,25 +553,52 @@ def policy_group(ctx):
 @click.argument("policy_id")
 @click.option("--description", "-d", default="", help="Description de la policy")
 @click.option("--allowed", "-a", default="", help="Outils autorisés (virgule, wildcards, ex: 'secret_*,vault_list')")
-@click.option("--denied", "-D", default="", help="Outils refusés (virgule, prioritaire, ex: 'vault_delete')")
+@click.option("--denied", "-D", default="", help="Outils refusés (virgule, PRIORITAIRE, ex: 'vault_delete')")
+@click.option("--path-rules", "-R", "path_rules_json", default="",
+              help="Règles par chemin JSON (ex: '[{\"vault_pattern\":\"shared-*\",\"permissions\":[\"read\"],\"allowed_paths\":[\"shared/*\"]}]')")
 @click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
 @click.pass_context
-def policy_create_cmd(ctx, policy_id, description, allowed, denied, output_json):
-    """Créer une policy MCP.
+def policy_create_cmd(ctx, policy_id, description, allowed, denied, path_rules_json, output_json):
+    """Créer une policy MCP (contrôle d'accès outils + chemins).
 
     \b
-    Exemples :
+    Exemples simples (outils) :
       policy create readonly -d "Lecture seule" --allowed "system_*,vault_list,secret_read,secret_list"
       policy create no-ssh -d "Pas de SSH" --denied "ssh_*"
       policy create full-except-delete --denied "vault_delete,secret_delete"
+
+    \b
+    Exemple avancé (restriction par chemin de secret) :
+      policy create team-alice -d "Accès shared/* uniquement" \\
+        --allowed "secret_*,vault_list" \\
+        --path-rules '[{"vault_pattern":"shared-*","permissions":["read","write"],"allowed_paths":["shared/*","config/*"]}]'
+
+    \b
+    Structure d'une path_rule :
+      vault_pattern  — pattern fnmatch du vault (ex: "prod-*", "shared-*")
+      permissions    — ["read"], ["read","write"], ou ["read","write","admin"]
+      allowed_paths  — patterns de chemins autorisés (ex: ["shared/*", "db/*"])
+                       vide = tous les chemins du vault sont accessibles
     """
+    import json as json_module
     async def _run():
         client = MCPClient(ctx.obj["url"], ctx.obj["token"])
         at = [t.strip() for t in allowed.split(",") if t.strip()] if allowed else []
         dt = [t.strip() for t in denied.split(",") if t.strip()] if denied else []
+        pr = []
+        if path_rules_json:
+            try:
+                pr = json_module.loads(path_rules_json)
+                if not isinstance(pr, list):
+                    show_error("--path-rules doit être un tableau JSON (ex: '[{...}]')")
+                    return
+            except json_module.JSONDecodeError as e:
+                show_error(f"JSON invalide dans --path-rules : {e}")
+                return
         result = await client.call_tool("policy_create", {
             "policy_id": policy_id, "description": description,
             "allowed_tools": at, "denied_tools": dt,
+            "path_rules": pr,
         })
         if output_json:
             show_json(result)
@@ -630,43 +670,59 @@ def token_group(ctx):
 
     \b
     Sous-commandes : create, list, update, revoke.
+
+    \b
+    Comportement par défaut (vaults vide) :
+      Le token ne voit que les vaults qu'il a créés (owner-based isolation).
+      Pour donner accès à des vaults spécifiques, utilisez --vaults.
+      Pour assigner une policy de sécurité, utilisez --policy ou token update.
     """
     pass
 
 
 @token_group.command("create")
 @click.argument("name")
-@click.option("--permissions", "-p", default="read,write", help="Permissions (séparées par virgule)")
-@click.option("--vaults", "-s", default="", help="Vaults autorisés (virgule, vide=tous)")
+@click.option("--permissions", "-p", default="read,write", help="Permissions (virgule: read,write,admin)")
+@click.option("--vaults", "-s", default="", help="Vaults autorisés (virgule, vide = owner-based)")
+@click.option("--policy", default="", help="Policy ID à assigner (contrôle outils + chemins)")
 @click.option("--expires", "-e", default=90, type=int, help="Expiration en jours (0=jamais)")
 @click.option("--email", default="", help="Email du propriétaire")
 @click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
 @click.pass_context
-def token_create_cmd(ctx, name, permissions, vaults, expires, email, output_json):
-    """Créer un nouveau token.
+def token_create_cmd(ctx, name, permissions, vaults, policy, expires, email, output_json):
+    """Créer un nouveau token d'accès.
+
+    \b
+    Par défaut (vaults vide), le token ne voit que les vaults qu'il crée.
+    Utilisez --vaults pour donner accès à des vaults spécifiques.
+    Utilisez --policy pour restreindre les outils et chemins de secrets.
 
     \b
     Exemples :
       token create agent-sre --vaults serveurs-prod --permissions read
       token create admin-user --permissions admin --expires 365
       token create ci-cd --email ci@company.com --permissions read,write
+      token create agent-deploy --policy readonly --vaults prod-app
     """
     async def _run():
         perms = [p.strip() for p in permissions.split(",") if p.strip()]
         vault_list_ids = [s.strip() for s in vaults.split(",") if s.strip()] if vaults else []
         import httpx
+        payload = {
+            "client_name": name,
+            "permissions": perms,
+            "allowed_resources": vault_list_ids,
+            "expires_in_days": expires,
+            "email": email,
+        }
+        if policy:
+            payload["policy_id"] = policy
         try:
             async with httpx.AsyncClient(timeout=10) as http:
                 resp = await http.post(
                     f"{ctx.obj['url']}/admin/api/tokens",
                     headers={"Authorization": f"Bearer {ctx.obj['token']}"},
-                    json={
-                        "client_name": name,
-                        "permissions": perms,
-                        "allowed_resources": vault_list_ids,
-                        "expires_in_days": expires,
-                        "email": email,
-                    },
+                    json=payload,
                 )
                 result = resp.json()
         except Exception as e:

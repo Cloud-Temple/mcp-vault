@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Fonctions d'affichage Rich — MCP Vault.message:%3CTu40nr-QR5qWTsOCzcBI3w@geopod-ismtpd-5%3E
+Fonctions d'affichage Rich — MCP Vault.
 """
 
 from rich.console import Console
@@ -88,18 +88,21 @@ def show_whoami_result(result: dict):
     resources = result.get("allowed_resources", [])
 
     perms_str = ", ".join(perms) if perms else "(aucune)"
-    resources_str = ", ".join(resources) if resources else "(tous)"
+    resources_str = ", ".join(resources) if resources else "(tous — isolation par propriétaire)"
+    policy_id = result.get("policy_id", "")
 
     auth_icon = "🔑" if auth_type == "bootstrap" else "🎫"
 
-    console.print(Panel.fit(
+    info = (
         f"[bold]Client      :[/bold] [cyan]{client}[/cyan]\n"
         f"[bold]Auth        :[/bold] {auth_icon} {auth_type}\n"
         f"[bold]Permissions :[/bold] [green]{perms_str}[/green]\n"
-        f"[bold]Vaults      :[/bold] {resources_str}",
-        title="👤 Identité du token",
-        border_style="blue",
-    ))
+        f"[bold]Vaults      :[/bold] {resources_str}"
+    )
+    if policy_id:
+        info += f"\n[bold]Policy      :[/bold] [yellow]{policy_id}[/yellow]"
+
+    console.print(Panel.fit(info, title="👤 Identité du token", border_style="blue"))
 
 
 # =============================================================================
@@ -131,13 +134,15 @@ def show_vault_result(result: dict):
         console.print(f"\n✅ [bold]{len(vaults)} vault(s)[/bold]")
         if vaults:
             table = Table(show_header=True)
-            table.add_column("Space ID", style="cyan bold", min_width=20)
+            table.add_column("Vault ID", style="cyan bold", min_width=20)
             table.add_column("Description", style="dim")
+            table.add_column("Owner", style="blue")
             table.add_column("Secrets", style="green", justify="right")
             for s in vaults:
                 table.add_row(
                     s.get("vault_id", "?"),
                     s.get("description", ""),
+                    s.get("created_by", ""),
                     str(s.get("secrets_count", "?")),
                 )
             console.print(table)
@@ -478,7 +483,16 @@ def show_policy_result(result: dict):
         if pr:
             console.print(f"\n  📋 Path rules ({len(pr)}):")
             for rule in pr:
-                console.print(f"    • {rule.get('vault_pattern', '?')} → {rule.get('permissions', [])}")
+                vp = rule.get("vault_pattern", "?")
+                perms = ", ".join(rule.get("permissions", []))
+                ap = rule.get("allowed_paths", [])
+                console.print(f"    [cyan]{vp}[/cyan] → permissions: [green]{perms}[/green]")
+                if ap:
+                    console.print(f"      allowed_paths: [yellow]{', '.join(ap)}[/yellow]")
+                else:
+                    console.print(f"      allowed_paths: [dim](tous les chemins)[/dim]")
+        else:
+            console.print(f"\n  [dim]Path rules : (aucune restriction par chemin)[/dim]")
         return
 
     # --- UPDATE token with policy ---
@@ -519,9 +533,12 @@ def show_token_result(result: dict):
         console.print(f"  Permissions : [green]{', '.join(result.get('permissions', []))}[/green]")
         resources = result.get("allowed_resources", [])
         if resources:
-            console.print(f"  Spaces      : [cyan]{', '.join(resources)}[/cyan]")
+            console.print(f"  Vaults      : [cyan]{', '.join(resources)}[/cyan]")
         else:
-            console.print(f"  Spaces      : [dim](tous)[/dim]")
+            console.print(f"  Vaults      : [dim](tous — isolation par propriétaire)[/dim]")
+        policy = result.get("policy_id", "")
+        if policy:
+            console.print(f"  Policy      : [yellow]{policy}[/yellow]")
         console.print(f"  Expire      : {result.get('expires_at') or 'jamais'}")
         return
 
@@ -532,13 +549,14 @@ def show_token_result(result: dict):
         if tokens:
             table = Table(show_header=True)
             table.add_column("Client", style="cyan bold", min_width=15)
-            table.add_column("Email", style="dim")
             table.add_column("Permissions", style="green")
-            table.add_column("Spaces", style="white")
+            table.add_column("Vaults", style="white")
+            table.add_column("Policy", style="yellow")
             table.add_column("Expire", style="dim")
             table.add_column("Hash", style="dim")
             for t in tokens:
-                allowed_vaults = ", ".join(t.get("allowed_resources", [])) or "(tous)"
+                allowed_vaults = ", ".join(t.get("allowed_resources", [])) or "(owner)"
+                policy = t.get("policy_id", "") or ""
                 exp = t.get("expires_at") or "jamais"
                 if t.get("revoked"):
                     exp = f"[red]RÉVOQUÉ[/red]"
@@ -546,9 +564,9 @@ def show_token_result(result: dict):
                     exp = exp[:10]
                 table.add_row(
                     t.get("client_name", "?"),
-                    t.get("email", "") or "",
                     ", ".join(t.get("permissions", [])),
                     allowed_vaults,
+                    policy,
                     exp,
                     t.get("hash_prefix", "?"),
                 )

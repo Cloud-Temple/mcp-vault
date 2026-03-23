@@ -303,8 +303,12 @@ async def cmd_policy(client, args="", json_output=False):
         show_warning("  policy list")
         show_warning("  policy create readonly --desc 'Lecture seule' --allowed 'secret_read,vault_list'")
         show_warning("  policy create no-ssh --denied 'ssh_*'")
+        show_warning("  policy create team-x --allowed 'secret_*' --path-rules '[{\"vault_pattern\":\"shared-*\",\"allowed_paths\":[\"shared/*\"]}]'")
         show_warning("  policy get readonly")
         show_warning("  policy delete readonly")
+        show_warning("")
+        show_warning("  denied_tools est TOUJOURS prioritaire sur allowed_tools.")
+        show_warning("  --path-rules : JSON pour restreindre les chemins de secrets (fnmatch wildcards).")
         return
 
     op = parts[0]
@@ -313,9 +317,11 @@ async def cmd_policy(client, args="", json_output=False):
     elif op == "get" and len(parts) >= 2:
         result = await client.call_tool("policy_get", {"policy_id": parts[1]})
     elif op == "create" and len(parts) >= 2:
+        import json as json_module
         desc = ""
         allowed = []
         denied = []
+        path_rules = []
         i = 2
         while i < len(parts):
             if parts[i] == "--desc" and i + 1 < len(parts):
@@ -327,11 +333,22 @@ async def cmd_policy(client, args="", json_output=False):
             elif parts[i] == "--denied" and i + 1 < len(parts):
                 denied = [t.strip() for t in parts[i + 1].split(",") if t.strip()]
                 i += 2
+            elif parts[i] == "--path-rules" and i + 1 < len(parts):
+                try:
+                    path_rules = json_module.loads(parts[i + 1])
+                    if not isinstance(path_rules, list):
+                        show_error("--path-rules doit etre un tableau JSON")
+                        return
+                except json_module.JSONDecodeError as e:
+                    show_error(f"JSON invalide dans --path-rules: {e}")
+                    return
+                i += 2
             else:
                 i += 1
         result = await client.call_tool("policy_create", {
             "policy_id": parts[1], "description": desc,
             "allowed_tools": allowed, "denied_tools": denied,
+            "path_rules": path_rules,
         })
     elif op == "delete" and len(parts) >= 2:
         result = await client.call_tool("policy_delete", {
@@ -357,8 +374,13 @@ async def cmd_token(client, args="", json_output=False):
         show_warning("")
         show_warning("  token list")
         show_warning("  token create agent-prod --permissions read --vaults prod")
-        show_warning("  token update <hash_prefix> --policy readonly")
-        show_warning("  token revoke <hash_prefix>")
+        show_warning("  token create agent-deploy --policy readonly --vaults prod-app")
+        show_warning("  token update <hash> --policy readonly       — assigner une policy")
+        show_warning("  token update <hash> --policy _remove        — retirer la policy")
+        show_warning("  token update <hash> --vaults prod,staging   — restreindre les vaults")
+        show_warning("  token revoke <hash>")
+        show_warning("")
+        show_warning("  Par defaut (vaults vide), le token ne voit que les vaults qu'il cree.")
         return
 
     op = parts[0]
@@ -379,6 +401,7 @@ async def cmd_token(client, args="", json_output=False):
         vaults = []
         expires = 90
         email = ""
+        policy_id = ""
         i = 2
         while i < len(parts):
             if parts[i] == "--permissions" and i + 1 < len(parts):
@@ -393,20 +416,26 @@ async def cmd_token(client, args="", json_output=False):
             elif parts[i] == "--email" and i + 1 < len(parts):
                 email = parts[i + 1]
                 i += 2
+            elif parts[i] == "--policy" and i + 1 < len(parts):
+                policy_id = parts[i + 1]
+                i += 2
             else:
                 i += 1
+        payload = {
+            "client_name": parts[1],
+            "permissions": perms,
+            "allowed_resources": vaults,
+            "expires_in_days": expires,
+            "email": email,
+        }
+        if policy_id:
+            payload["policy_id"] = policy_id
         try:
             async with httpx.AsyncClient(timeout=10) as http:
                 resp = await http.post(
                     f"{client.base_url}/admin/api/tokens",
                     headers={"Authorization": f"Bearer {client.token}"},
-                    json={
-                        "client_name": parts[1],
-                        "permissions": perms,
-                        "allowed_resources": vaults,
-                        "expires_in_days": expires,
-                        "email": email,
-                    },
+                    json=payload,
                 )
                 result = resp.json()
         except Exception as e:
