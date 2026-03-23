@@ -1,5 +1,71 @@
 # Changelog — MCP Vault
 
+## [0.3.0] — 2026-03-23
+
+### Console Admin SPA — Parité complète avec le CLI
+
+La console web `/admin` atteint la **parité fonctionnelle totale** avec le CLI. Chaque fonctionnalité testée dans `tests/cli/` est désormais accessible visuellement dans l'interface web.
+
+#### Nouvel onglet Policies (CRUD complet)
+- **Liste des policies** : tableau avec colonnes (ID, Description, Mode allow/deny, Outils, Path Rules)
+- **Détail d'une policy** : panneau avec outils autorisés/refusés, `path_rules` avec patterns `fnmatch` formatés
+- **Création de policy** : modal guidé avec mode allow/deny, checkboxes des outils MCP catégorisés (Système, Vaults, Secrets, SSH CA, Policies, Tokens, Audit), ajout dynamique de règles de chemin
+- **Suppression** avec confirmation
+- Nouveau fichier : `static/js/policies.js`
+
+#### SSH CA dans la SPA (5 opérations)
+- **Setup SSH CA** : modal pour créer une CA + rôle (nom, utilisateur par défaut, TTL, utilisateurs autorisés)
+- **Signer une clé SSH** : modal pour coller une clé publique et recevoir le certificat signé avec bouton copier
+- **Clé publique CA** : affichage inline avec bouton copier et instructions serveur
+- **Liste des rôles** : section dans le détail vault avec détail au clic (key_type, TTL, users)
+- **5 nouveaux endpoints admin API** : `POST .../ssh/setup`, `POST .../ssh/sign`, `GET .../ssh/ca-key`, `GET .../ssh/roles`, `GET .../ssh/roles/{name}`
+
+#### Tokens enrichis
+- **Colonne Policy** dans le tableau des tokens (badge cliquable → navigation vers la policy)
+- **Select `policy_id` dynamique** dans les modals de création et édition (chargé depuis l'API)
+- Envoi du `policy_id` à la création du token
+- Indication `owner` quand les vaults autorisés sont vides
+
+#### Vaults enrichis
+- **Vue tableau** avec 5 colonnes : Vault, Description, Secrets, Owner, Créé le
+- **Badges Owner** : 👤 vert = propriétaire, 👥 bleu = partagé
+- **Section SSH CA** dans le détail vault avec boutons setup, signer, clé CA
+
+#### Dashboard enrichi
+- **Compteur Policies** (admin) + cards cliquables vers les pages correspondantes
+- **Générateur de mot de passe standalone** : CSPRNG 24 caractères avec bouton copier
+- **Référence des 14 types de secrets** : grille avec champs requis/optionnels par type
+
+#### UX Guidance
+- **Tooltips ⓘ** sur tous les champs sensibles (permissions, vaults autorisés, policy, path_rules)
+- **Help-text** sous chaque champ (ex: "Vide = accès uniquement aux vaults créés par ce token")
+- **Descriptions des permissions** au survol (read/write/admin)
+- **Aide contextuelle** pour les patterns fnmatch dans les path_rules
+
+### Bug fixes
+- **CORS middleware** : ajout de `PUT` dans `access-control-allow-methods` (manquait pour token update cross-origin)
+- **Routage API** : fix du matching vault detail vs SSH routes (`/ssh/` exclu du routage vault)
+
+### Fichiers modifiés (10)
+- `static/js/policies.js` (nouveau — 310 lignes)
+- `static/admin.html` (3 modals ajoutés, champs enrichis)
+- `static/js/app.js` (sidebar + navigation policies)
+- `static/js/tokens.js` (colonne Policy, select dynamique)
+- `static/js/vaults.js` (tableau Owner, section SSH CA, 7 nouvelles fonctions)
+- `static/js/dashboard.js` (compteur policies, générateur MdP, référence types)
+- `static/css/admin.css` (styles help, tooltips, tools checklist, path rules)
+- `admin/api.py` (5 endpoints SSH CA + fix routage)
+- `admin/middleware.py` (CORS PUT)
+- `VERSION` (0.2.0 → 0.3.0)
+
+### Bilan SPA
+- **25+ endpoints admin API** (Système 5, Vaults 5, Secrets 4, SSH CA 5, Policies 4, Tokens 4)
+- **11 fichiers JS** (config, api, app, dashboard, vaults, tokens, policies, activity)
+- **7 modals** (vault, secret, token create, token edit, policy, SSH setup, SSH sign)
+- **Parité CLI 100%** : chaque commande testée dans `tests/cli/` a son équivalent SPA
+
+---
+
 ## [0.2.0] — 2026-03-23
 
 ### Security — 3 couches d'isolation

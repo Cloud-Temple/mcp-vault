@@ -50,6 +50,7 @@
         <div class="main-content">
             <div id="page-dashboard" class="hidden"></div>
             <div id="page-vaults" class="hidden"></div>
+            <div id="page-policies" class="hidden"></div>
             <div id="page-tokens" class="hidden"></div>
             <div id="page-activity" class="hidden"></div>
         </div>
@@ -119,8 +120,9 @@
     <div class="modal">
         <h2>🔑 Nouveau token</h2>
         <div class="form-group">
-            <label for="ctName">Nom du client *</label>
+            <label for="ctName">Nom du client <span class="field-required">*</span></label>
             <input type="text" id="ctName" placeholder="ex: mcp-agent-sre">
+            <div class="help-text">Identifiant unique de l'agent ou de l'utilisateur qui utilisera ce token.</div>
         </div>
         <div class="form-row">
             <div class="form-group">
@@ -130,19 +132,28 @@
             <div class="form-group">
                 <label for="ctExpires">Expiration (jours)</label>
                 <input type="number" id="ctExpires" value="90" min="0">
+                <div class="help-text">0 = pas d'expiration</div>
             </div>
         </div>
         <div class="form-group">
-            <label>Permissions</label>
+            <label>Permissions <span class="help-icon" title="read = lecture seule&#10;write = lecture + écriture de secrets et vaults&#10;admin = accès total (tokens, policies, suppression)">ⓘ</span></label>
             <div class="checkbox-group">
-                <label><input type="checkbox" checked disabled> read</label>
-                <label><input type="checkbox" id="ctPermWrite"> write</label>
-                <label><input type="checkbox" id="ctPermAdmin"> admin</label>
+                <label title="Accès en lecture aux vaults et secrets autorisés"><input type="checkbox" checked disabled> read</label>
+                <label title="Création de vaults, écriture et suppression de secrets"><input type="checkbox" id="ctPermWrite"> write</label>
+                <label title="Gestion des tokens, policies, suppression de vaults — accès total"><input type="checkbox" id="ctPermAdmin"> admin</label>
             </div>
         </div>
         <div class="form-group">
-            <label for="ctVaults">Vaults autorisés (vide = mes vaults)</label>
+            <label for="ctVaults">Vaults autorisés <span class="help-icon" title="Liste de vault_id séparés par des virgules.&#10;Si vide : le token n'accède qu'aux vaults qu'il a créés (isolation par propriétaire).">ⓘ</span></label>
             <input type="text" id="ctVaults" placeholder="vault1, vault2">
+            <div class="help-text">Vide = accès uniquement aux vaults créés par ce token (isolation owner-based)</div>
+        </div>
+        <div class="form-group">
+            <label for="ctPolicy">Policy <span class="help-icon" title="Associe une policy de sécurité à ce token.&#10;La policy contrôle quels outils MCP sont accessibles et quels chemins de secrets sont autorisés.&#10;Sans policy : tous les outils sont accessibles.">ⓘ</span></label>
+            <select id="ctPolicy">
+                <option value="">— Aucune policy —</option>
+            </select>
+            <div class="help-text">Contrôle les outils MCP et les chemins de secrets accessibles</div>
         </div>
         <div class="modal-actions">
             <button class="btn btn-ghost" onclick="closeModal('modalCreateToken')">Annuler</button>
@@ -157,24 +168,134 @@
         <h2>✏️ Modifier le token</h2>
         <input type="hidden" id="etHashPrefix">
         <div class="form-group">
-            <label>Permissions</label>
+            <label>Permissions <span class="help-icon" title="read = lecture seule&#10;write = lecture + écriture&#10;admin = accès total">ⓘ</span></label>
             <div class="checkbox-group">
-                <label><input type="checkbox" id="etPermRead"> read</label>
-                <label><input type="checkbox" id="etPermWrite"> write</label>
-                <label><input type="checkbox" id="etPermAdmin"> admin</label>
+                <label title="Accès en lecture"><input type="checkbox" id="etPermRead"> read</label>
+                <label title="Écriture de secrets et vaults"><input type="checkbox" id="etPermWrite"> write</label>
+                <label title="Accès total — tokens, policies, suppression"><input type="checkbox" id="etPermAdmin"> admin</label>
             </div>
         </div>
         <div class="form-group">
-            <label for="etVaults">Vaults autorisés (vide = mes vaults)</label>
+            <label for="etVaults">Vaults autorisés <span class="help-icon" title="Vide = accès uniquement aux vaults créés par ce token">ⓘ</span></label>
             <input type="text" id="etVaults" placeholder="vault1, vault2">
+            <div class="help-text">Vide = isolation par propriétaire (owner-based)</div>
         </div>
         <div class="form-group">
-            <label for="etPolicy">Policy ID (optionnel)</label>
-            <input type="text" id="etPolicy" placeholder="ex: read-only">
+            <label for="etPolicy">Policy <span class="help-icon" title="Contrôle les outils MCP et chemins de secrets accessibles.&#10;Vide = aucune restriction d'outils.&#10;Tapez '_remove' pour retirer la policy.">ⓘ</span></label>
+            <select id="etPolicy">
+                <option value="">— Aucune policy —</option>
+            </select>
+            <div class="help-text">Contrôle les outils et chemins accessibles. Sélectionnez « Aucune » pour retirer.</div>
         </div>
         <div class="modal-actions">
             <button class="btn btn-ghost" onclick="closeModal('modalEditToken')">Annuler</button>
             <button class="btn btn-primary" onclick="doUpdateToken()">💾 Enregistrer</button>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════ MODAL — Créer policy ═══════════════ -->
+<div id="modalCreatePolicy" class="modal-overlay">
+    <div class="modal modal-lg">
+        <h2>📋 Nouvelle policy</h2>
+        <div class="form-group">
+            <label for="cpPolicyId">Identifiant <span class="field-required">*</span></label>
+            <input type="text" id="cpPolicyId" placeholder="ex: agent-readonly, sre-full-access">
+            <div class="help-text">Identifiant unique. Sera référencé dans les tokens.</div>
+        </div>
+        <div class="form-group">
+            <label for="cpDescription">Description</label>
+            <input type="text" id="cpDescription" placeholder="ex: Accès lecture seule pour les agents de monitoring">
+        </div>
+
+        <!-- Mode de restriction -->
+        <div class="form-group">
+            <label for="cpMode">Mode de restriction <span class="help-icon" title="Allow-list : seuls les outils cochés sont autorisés&#10;Deny-list : les outils cochés sont bloqués, le reste autorisé&#10;Aucune : pas de restriction sur les outils">ⓘ</span></label>
+            <select id="cpMode" onchange="_updateToolModeVisibility()">
+                <option value="deny">🚫 Deny-list — bloquer certains outils</option>
+                <option value="allow">✅ Allow-list — n'autoriser que certains outils</option>
+                <option value="none">🔓 Aucune restriction sur les outils</option>
+            </select>
+        </div>
+
+        <!-- Sélection des outils -->
+        <div class="form-group">
+            <label id="cpToolsLabel">🚫 Outils refusés</label>
+            <div class="help-text" id="cpToolsHelp">Les outils cochés seront bloqués. Tous les autres resteront accessibles.</div>
+            <div id="cpToolsList" class="tools-checklist"></div>
+        </div>
+
+        <!-- Règles de chemin -->
+        <div class="form-group">
+            <label>🛤️ Règles de chemin (optionnel) <span class="help-icon" title="Restreint l'accès aux secrets par chemin.&#10;Utilisez des patterns fnmatch (ex: shared/*, config/**)&#10;Si aucune règle : pas de restriction par chemin.">ⓘ</span></label>
+            <div class="help-text" style="margin-bottom:0.4rem">Contrôle quels chemins de secrets sont accessibles par vault. Sans règle = tout accessible.</div>
+            <div id="cpPathRulesContainer"></div>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="addPathRule()" style="margin-top:0.4rem">+ Ajouter une règle de chemin</button>
+        </div>
+
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeModal('modalCreatePolicy')">Annuler</button>
+            <button class="btn btn-primary" onclick="doCreatePolicy()">📋 Créer la policy</button>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════ MODAL — SSH CA Setup ═══════════════ -->
+<div id="modalSshSetup" class="modal-overlay">
+    <div class="modal">
+        <h2>🔏 Configurer SSH CA</h2>
+        <input type="hidden" id="ssVaultId">
+        <div class="form-group">
+            <label for="ssRoleName">Nom du rôle <span class="field-required">*</span></label>
+            <input type="text" id="ssRoleName" placeholder="ex: sre-deploy">
+            <div class="help-text">Identifiant du rôle SSH (ex: sre-deploy, dev-access)</div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label for="ssDefaultUser">Utilisateur par défaut</label>
+                <input type="text" id="ssDefaultUser" value="ubuntu" placeholder="ubuntu">
+            </div>
+            <div class="form-group">
+                <label for="ssTtl">TTL du certificat</label>
+                <input type="text" id="ssTtl" value="30m" placeholder="30m">
+                <div class="help-text">Ex: 15m, 1h, 24h</div>
+            </div>
+        </div>
+        <div class="form-group">
+            <label for="ssAllowedUsers">Utilisateurs autorisés <span class="help-icon" title="Liste d'utilisateurs SSH séparés par des virgules.&#10;* = tous les utilisateurs autorisés.">ⓘ</span></label>
+            <input type="text" id="ssAllowedUsers" value="*" placeholder="deploy,admin ou *">
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeModal('modalSshSetup')">Annuler</button>
+            <button class="btn btn-primary" onclick="doSshSetup()">🔏 Configurer</button>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════ MODAL — SSH Sign Key ═══════════════ -->
+<div id="modalSshSign" class="modal-overlay">
+    <div class="modal modal-lg">
+        <h2>✍️ Signer une clé SSH</h2>
+        <input type="hidden" id="sgVaultId">
+        <div class="form-row">
+            <div class="form-group">
+                <label for="sgRoleName">Rôle SSH <span class="field-required">*</span></label>
+                <select id="sgRoleName"></select>
+            </div>
+            <div class="form-group">
+                <label for="sgTtl">TTL du certificat</label>
+                <input type="text" id="sgTtl" value="30m" placeholder="30m">
+            </div>
+        </div>
+        <div class="form-group">
+            <label for="sgPublicKey">Clé publique SSH <span class="field-required">*</span></label>
+            <textarea id="sgPublicKey" rows="4" class="mono-textarea" placeholder="ssh-ed25519 AAAA... ou ssh-rsa AAAA..."></textarea>
+            <div class="help-text">Collez la clé publique SSH à signer (contenu de id_ed25519.pub ou id_rsa.pub)</div>
+        </div>
+        <div id="sgResult"></div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeModal('modalSshSign')">Fermer</button>
+            <button class="btn btn-primary" onclick="doSshSign()">✍️ Signer</button>
         </div>
     </div>
 </div>
@@ -185,6 +306,7 @@
 <script src="/admin/static/js/dashboard.js"></script>
 <script src="/admin/static/js/vaults.js"></script>
 <script src="/admin/static/js/tokens.js"></script>
+<script src="/admin/static/js/policies.js"></script>
 <script src="/admin/static/js/activity.js"></script>
 <script src="/admin/static/js/app.js"></script>
 </body>

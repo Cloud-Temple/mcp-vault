@@ -224,6 +224,92 @@ label { display: block; color: var(--text2); font-size: 0.8rem; margin-bottom: 0
 /* ═══ EMPTY STATE ═══ */
 .empty-state { text-align: center; padding: 2rem; color: var(--muted); font-size: 0.85rem; }
 
+/* ═══ HELP & TOOLTIPS ═══ */
+.help-text {
+    font-size: 0.72rem; color: var(--muted); margin-top: 0.15rem; line-height: 1.4;
+}
+.help-text code {
+    background: rgba(65,168,144,0.1); color: var(--accent); padding: 1px 4px;
+    border-radius: 3px; font-size: 0.68rem;
+}
+.help-icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: rgba(65,168,144,0.15); color: var(--accent);
+    font-size: 0.65rem; font-weight: 700; cursor: help;
+    vertical-align: middle; margin-left: 0.2rem;
+    position: relative;
+}
+.help-icon:hover { background: rgba(65,168,144,0.3); }
+
+/* ═══ TOOLS CHECKLIST (Policy creation) ═══ */
+.tools-checklist {
+    max-height: 280px; overflow-y: auto;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--bg); margin-top: 0.3rem;
+}
+.tool-category { border-bottom: 1px solid rgba(42,42,72,0.3); }
+.tool-category:last-child { border-bottom: none; }
+.tool-category-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 0.4rem 0.7rem; cursor: pointer;
+    font-size: 0.78rem; font-weight: 600; color: var(--text2);
+    background: rgba(65,168,144,0.04);
+    transition: background 0.15s;
+}
+.tool-category-header:hover { background: rgba(65,168,144,0.08); }
+.tool-category-count {
+    font-size: 0.68rem; background: rgba(65,168,144,0.15);
+    color: var(--accent); padding: 1px 6px; border-radius: 10px;
+}
+.tool-category-items { padding: 0.2rem 0.5rem; }
+.tool-category-items.collapsed { display: none; }
+.tool-checkbox {
+    display: flex !important; align-items: center; gap: 0.4rem;
+    padding: 0.2rem 0.3rem !important; margin: 0 !important;
+    font-size: 0.78rem !important; cursor: pointer;
+    border-radius: 4px; background: none !important;
+    transition: background 0.1s;
+}
+.tool-checkbox:hover { background: rgba(65,168,144,0.06) !important; }
+.tool-checkbox input[type="checkbox"] { width: auto; flex-shrink: 0; }
+.tool-name { color: var(--text); flex: 1; }
+.tool-id { color: var(--muted); font-size: 0.68rem; font-family: 'SF Mono', monospace; }
+
+/* ═══ PATH RULES (Policy) ═══ */
+.path-rule-card {
+    background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 0.6rem 0.8rem; margin-top: 0.4rem;
+}
+.path-rule-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 0.3rem;
+}
+.path-rule-vault {
+    font-family: 'SF Mono', monospace; font-size: 0.82rem; font-weight: 600;
+    color: var(--accent); background: rgba(65,168,144,0.1);
+    padding: 2px 8px; border-radius: 4px;
+}
+.path-rule-paths {
+    display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center;
+    margin-top: 0.3rem;
+}
+.path-pattern {
+    font-family: 'SF Mono', monospace; font-size: 0.75rem;
+    background: rgba(243,156,18,0.1); color: var(--warning);
+    padding: 2px 6px; border-radius: 4px;
+}
+
+/* Path rule form (in modal) */
+.path-rule-form {
+    background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 0.6rem 0.8rem; margin-bottom: 0.4rem;
+}
+.path-rule-form-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 0.4rem;
+}
+
 /* ═══ UTILS ═══ */
 .hidden { display: none !important; }
 .mt-1 { margin-top: 0.8rem; }

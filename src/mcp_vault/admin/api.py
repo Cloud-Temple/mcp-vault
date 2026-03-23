@@ -64,7 +64,7 @@ async def handle_admin_api(scope, receive, send, mcp):
         body = await _read_body(receive)
         return await _api_create_vault(send, body)
 
-    if path.startswith("/admin/api/vaults/") and not "/secrets" in path:
+    if path.startswith("/admin/api/vaults/") and "/secrets" not in path and "/ssh/" not in path:
         vault_id = path[len("/admin/api/vaults/"):]
         if "/" not in vault_id and vault_id:
             if method == "GET":
@@ -78,6 +78,35 @@ async def handle_admin_api(scope, receive, send, mcp):
                 if not is_admin:
                     return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
                 return await _api_delete_vault(send, vault_id)
+
+    # --- Routes SSH CA (write = setup/sign, read = ca-key/roles/role-info) ---
+    if path.startswith("/admin/api/vaults/") and "/ssh/" in path:
+        parts = path[len("/admin/api/vaults/"):].split("/ssh/", 1)
+        vault_id = parts[0]
+        ssh_path = parts[1] if len(parts) > 1 else ""
+
+        if method == "POST" and ssh_path == "setup":
+            if not can_write:
+                return await _json_response(send, 403, {"status": "error", "message": "Permission write requise"})
+            body = await _read_body(receive)
+            return await _api_ssh_setup(send, vault_id, body)
+
+        if method == "POST" and ssh_path == "sign":
+            if not can_write:
+                return await _json_response(send, 403, {"status": "error", "message": "Permission write requise"})
+            body = await _read_body(receive)
+            return await _api_ssh_sign(send, vault_id, body)
+
+        if method == "GET" and ssh_path == "ca-key":
+            return await _api_ssh_ca_key(send, vault_id)
+
+        if method == "GET" and ssh_path == "roles":
+            return await _api_ssh_roles(send, vault_id)
+
+        if method == "GET" and ssh_path.startswith("roles/"):
+            role_name = ssh_path[len("roles/"):]
+            if role_name:
+                return await _api_ssh_role_info(send, vault_id, role_name)
 
     # --- Routes secrets (read = list/get, write = create, admin = delete) ---
     if path.startswith("/admin/api/vaults/") and "/secrets" in path:
@@ -501,6 +530,72 @@ async def _api_delete_policy(send, policy_id):
         await _json_response(send, 200, {"status": "deleted", "policy_id": policy_id})
     else:
         await _json_response(send, 404, {"status": "error", "message": f"Policy '{policy_id}' non trouvée"})
+
+
+# =============================================================================
+# Endpoints — SSH CA
+# =============================================================================
+
+async def _api_ssh_setup(send, vault_id, body):
+    """POST /admin/api/vaults/{vault_id}/ssh/setup — Configurer SSH CA + rôle."""
+    from ..vault.ssh_ca import setup_ssh_ca
+    data = json.loads(body) if body else {}
+    role_name = data.get("role_name", "").strip()
+    if not role_name:
+        return await _json_response(send, 400, {"status": "error", "message": "role_name requis"})
+    result = await setup_ssh_ca(
+        vault_id=vault_id,
+        role_name=role_name,
+        allowed_users=data.get("allowed_users", "*"),
+        default_user=data.get("default_user", "ubuntu"),
+        ttl=data.get("ttl", "30m"),
+    )
+    status = 200 if result.get("status") == "ok" else 400
+    await _json_response(send, status, result)
+
+
+async def _api_ssh_sign(send, vault_id, body):
+    """POST /admin/api/vaults/{vault_id}/ssh/sign — Signer une clé publique SSH."""
+    from ..vault.ssh_ca import sign_ssh_key
+    data = json.loads(body) if body else {}
+    public_key = data.get("public_key", "").strip()
+    role_name = data.get("role_name", "").strip()
+    if not public_key:
+        return await _json_response(send, 400, {"status": "error", "message": "public_key requis"})
+    if not role_name:
+        return await _json_response(send, 400, {"status": "error", "message": "role_name requis"})
+    result = await sign_ssh_key(
+        vault_id=vault_id,
+        role_name=role_name,
+        public_key=public_key,
+        ttl=data.get("ttl", "30m"),
+    )
+    status = 200 if result.get("status") == "ok" else 400
+    await _json_response(send, status, result)
+
+
+async def _api_ssh_ca_key(send, vault_id):
+    """GET /admin/api/vaults/{vault_id}/ssh/ca-key — Récupérer la clé publique CA."""
+    from ..vault.ssh_ca import get_ca_public_key
+    result = await get_ca_public_key(vault_id)
+    status = 200 if result.get("status") == "ok" else 400
+    await _json_response(send, status, result)
+
+
+async def _api_ssh_roles(send, vault_id):
+    """GET /admin/api/vaults/{vault_id}/ssh/roles — Lister les rôles SSH."""
+    from ..vault.ssh_ca import list_ssh_roles
+    result = await list_ssh_roles(vault_id)
+    status = 200 if result.get("status") == "ok" else 400
+    await _json_response(send, status, result)
+
+
+async def _api_ssh_role_info(send, vault_id, role_name):
+    """GET /admin/api/vaults/{vault_id}/ssh/roles/{role_name} — Détail d'un rôle."""
+    from ..vault.ssh_ca import get_ssh_role_info
+    result = await get_ssh_role_info(vault_id, role_name)
+    status = 200 if result.get("status") == "ok" else 400
+    await _json_response(send, status, result)
 
 
 # =============================================================================

@@ -12,6 +12,7 @@ function buildSidebar() {
     if (isAdmin()) {
         html += `
         <div class="sidebar-section">Administration</div>
+        <button onclick="navigate('policies')" id="nav-policies">📋 <span>Policies</span></button>
         <button onclick="navigate('tokens')" id="nav-tokens">🔑 <span>Tokens</span></button>`;
     }
 
@@ -41,6 +42,7 @@ function navigate(page) {
     // Load data
     if (page === 'dashboard') loadDashboard();
     else if (page === 'vaults') loadVaults();
+    else if (page === 'policies') loadPolicies();
     else if (page === 'tokens') loadTokens();
     else if (page === 'activity') { loadActivity(); STATE.activityTimer = setInterval(loadActivity, 5000); }
 

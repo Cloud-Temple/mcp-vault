@@ -556,6 +556,8 @@ docker compose exec mcp-vault python tests/test_e2e.py --verbose
 
 ## 6. Sécurité
 
+> **Audit de Sécurité** : Un audit complet a été réalisé en mars 2026. Voir [`SECURITY_AUDIT.md`](SECURITY_AUDIT.md) pour les détails des vulnérabilités (LFI, WAF, etc.) et le plan de remédiation.
+
 ### 6.1 Chiffrement
 
 - **OpenBao barrier** : Chiffrement at-rest de toutes les données du file backend (XChaCha20-Poly1305)

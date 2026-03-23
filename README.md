@@ -19,7 +19,7 @@ MCP Vault est un serveur [MCP](https://modelcontextprotocol.io/) qui fournit un 
 | Document                                                | Description                                                                                                                                                                  |
 | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [**ARCHITECTURE.md**](DESIGN/mcp-vault/ARCHITECTURE.md) | Spécification complète — vision, architecture ASGI 5 couches, vaults, SSH CA, policies MCP (6 exemples prêts à l'emploi), sécurité des clés unseal (3 facteurs), roadmap HSM |
-| [**TECHNICAL.md**](DESIGN/mcp-vault/TECHNICAL.md)       | Documentation technique — 14 modules source, modèle de données, Docker, ~290 tests e2e, dépendances, roadmap                                                                 |
+| [**TECHNICAL.md**](DESIGN/mcp-vault/TECHNICAL.md)       | Documentation technique — 14 modules source, modèle de données, Docker, ~290 tests e2e, dépendances, roadmap                                                                |
 | [**scripts/README.md**](scripts/README.md)              | Guide CLI complet — 7 groupes de commandes, shell interactif, exemples                                                                                                       |
 | [**tests/README.md**](tests/README.md)                  | Guide d'exécution des tests — 4 niveaux, ~575 tests, commandes pour auditeurs                                                                                                |
 | [**TEST_CATALOG.md**](tests/TEST_CATALOG.md)            | Catalogue des tests e2e — 14 catégories, ~290 assertions, objectif de chaque section (pour auditeurs)                                                                        |
@@ -263,8 +263,8 @@ Les clés unseal d'OpenBao sont protégées par **séparation physique à 3 fact
 
 | Version             | Approche                                                                                                            |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| **v0.2.x** (actuel) | Clés sur S3 chiffrées AES-256-GCM, mémoire seule au runtime                                                         |
-| **v0.3.0**          | Transit Auto-Unseal via OpenBao dédié (KMS Cloud Temple)                                                            |
+| **v0.3.x** (actuel) | Clés sur S3 chiffrées AES-256-GCM, mémoire seule au runtime — console SPA parité CLI                                |
+| **v0.4.0**          | Transit Auto-Unseal via OpenBao dédié (KMS Cloud Temple)                                                            |
 | **v2.0**            | **Connexion HSM** (Hardware Security Module) Cloud Temple — les clés ne quittent jamais le module matériel certifié |
 
 > 📖 Voir [DESIGN/mcp-vault/ARCHITECTURE.md](DESIGN/mcp-vault/ARCHITECTURE.md) §8 et §11 pour les détails complets.
@@ -324,7 +324,7 @@ mcp-vault/
 ├── docker-compose.yml        # WAF + MCP Vault + volumes
 ├── Dockerfile                # Multi-stage (OpenBao 2.5.1 + Python 3.12)
 ├── requirements.txt          # Dépendances Python
-├── VERSION                   # 0.1.0
+├── VERSION                   # 0.3.0
 ├── DESIGN/mcp-vault/
 │   ├── ARCHITECTURE.md       # Spécification détaillée (v0.2.2-draft)
 │   └── TECHNICAL.md          # Documentation technique (v0.2.0)
@@ -347,10 +347,10 @@ mcp-vault/
 │   ├── admin/                # Console web /admin + API REST
 │   ├── openbao/              # Process manager, HCL config, lifecycle
 │   ├── vault/                # Spaces, secrets, SSH CA, types
-│   └── static/               # Console admin (SPA modulaire)
-│       ├── admin.html        # HTML structure (162 lignes)
-│       ├── css/admin.css     # Design Cloud Temple
-│       ├── js/               # Modules JS (config, api, app, dashboard, vaults, tokens, activity)
+│   └── static/               # Console admin SPA (parité CLI 100%)
+│       ├── admin.html        # HTML structure + 7 modals
+│       ├── css/admin.css     # Design Cloud Temple (dark theme)
+│       ├── js/               # 8 modules JS (config, api, app, dashboard, vaults, tokens, policies, activity)
 │       └── img/              # logo-cloudtemple.svg
 ├── tests/
 │   ├── README.md             # Guide d'exécution des tests (auditeurs)
@@ -380,4 +380,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.2.0
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.3.0

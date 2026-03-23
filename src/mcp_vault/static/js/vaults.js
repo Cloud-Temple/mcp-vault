@@ -290,16 +290,26 @@ async function loadVaults() {
     if (vaults.length === 0) {
         html += '<div class="empty-state">Aucun vault. Créez-en un pour commencer.</div>';
     } else {
-        html += '<div id="vaultsList">';
+        // Vue tableau pour mieux afficher les colonnes
+        html += '<div class="card" style="padding:0;overflow-x:auto"><table>';
+        html += '<thead><tr><th>Vault</th><th>Description</th><th>Secrets</th><th>Owner</th><th>Créé le</th></tr></thead><tbody>';
         for (const v of vaults) {
-            html += `<div class="secret-item" onclick="selectVault('${esc(v.vault_id)}')">
-                <span>📁</span>
-                <code>${esc(v.vault_id)}</code>
-                <span style="color:var(--muted);font-size:0.75rem;margin-left:auto">${v.secrets_count || 0} secrets</span>
-                ${v.created_by ? `<span style="color:var(--muted);font-size:0.75rem">👤 ${esc(v.created_by)}</span>` : ''}
-            </div>`;
+            const isOwner = v.created_by === STATE.clientName;
+            const ownerBadge = v.created_by
+                ? (isOwner
+                    ? `<span class="badge badge-ok" title="Vous êtes le propriétaire">👤 ${esc(v.created_by)}</span>`
+                    : `<span class="badge" style="background:rgba(52,152,219,0.15);color:#3498db" title="Vault partagé avec vous">👥 ${esc(v.created_by)}</span>`)
+                : '<span style="color:var(--muted)">—</span>';
+
+            html += `<tr style="cursor:pointer" onclick="selectVault('${esc(v.vault_id)}')">
+                <td><strong style="color:var(--accent)">📁 ${esc(v.vault_id)}</strong></td>
+                <td style="color:var(--text2);max-width:200px;overflow:hidden;text-overflow:ellipsis">${esc(v.description || '')}</td>
+                <td><span class="badge badge-info">${v.secrets_count || 0}</span></td>
+                <td>${ownerBadge}</td>
+                <td style="color:var(--muted);font-size:0.75rem">${fmtDate(v.created_at)}</td>
+            </tr>`;
         }
-        html += '</div>';
+        html += '</tbody></table></div>';
     }
 
     html += '<div id="vaultDetail"></div>';
@@ -339,6 +349,31 @@ async function selectVault(vaultId) {
             <tr><td style="color:var(--muted)">Modifié</td><td>${fmtDate(data.updated_at)}</td></tr>
             ${roles.length > 0 ? `<tr><td style="color:var(--muted)">SSH CA</td><td>${roles.map(r => `<span class="badge badge-info">${esc(r)}</span>`).join(' ')}</td></tr>` : ''}
         </table>`;
+
+    // SSH CA section
+    html += '<div class="flex-between mt-1"><h2>🔏 SSH Certificate Authority</h2>';
+    if (canWrite()) html += `<div style="display:flex;gap:0.3rem">
+        <button class="btn btn-ghost btn-sm" onclick="promptSshSetup('${esc(vaultId)}')">+ Ajouter un rôle</button>
+        ${data.has_ssh_ca ? `<button class="btn btn-ghost btn-sm" onclick="showCaKey('${esc(vaultId)}')">🔑 Clé publique CA</button>` : ''}
+        ${data.has_ssh_ca ? `<button class="btn btn-primary btn-sm" onclick="promptSshSign('${esc(vaultId)}')">✍️ Signer une clé</button>` : ''}
+    </div>`;
+    html += '</div>';
+
+    if (roles.length > 0) {
+        html += '<div id="sshRolesList">';
+        for (const r of roles) {
+            html += `<div class="secret-item" onclick="showRoleInfo('${esc(vaultId)}','${esc(r)}','ri_${esc(r)}')">
+                <span>🔏</span><code>${esc(r)}</code>
+                <span style="color:var(--muted);font-size:0.75rem;margin-left:auto">Cliquer pour détails</span>
+            </div>
+            <div id="ri_${esc(r)}" class="hidden"></div>`;
+        }
+        html += '</div>';
+    } else {
+        html += '<div class="empty-state" style="padding:0.8rem"><p>Aucun rôle SSH CA configuré.</p><p style="font-size:0.72rem;color:var(--muted)">Cliquez « + Ajouter un rôle » pour créer une CA et un premier rôle.</p></div>';
+    }
+
+    html += '<div id="sshCaKeyDisplay"></div>';
 
     // Secrets section
     html += '<div class="flex-between mt-1"><h2>🔐 Secrets</h2>';
@@ -498,4 +533,148 @@ async function doWriteSecret() {
 function promptDeleteSecret(vaultId, path) {
     if (!confirm(`Supprimer le secret "${path}" ? Irréversible.`)) return;
     api(`/vaults/${vaultId}/secrets/${path}`, { method: 'DELETE' }).then(() => selectVault(vaultId));
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════
+   SSH Certificate Authority — Setup, Sign, CA Key, Role Info
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ─── SSH Setup ─── */
+function promptSshSetup(vaultId) {
+    document.getElementById('ssVaultId').value = vaultId;
+    document.getElementById('ssRoleName').value = '';
+    document.getElementById('ssDefaultUser').value = 'ubuntu';
+    document.getElementById('ssTtl').value = '30m';
+    document.getElementById('ssAllowedUsers').value = '*';
+    openModal('modalSshSetup');
+}
+
+async function doSshSetup() {
+    const vaultId = document.getElementById('ssVaultId').value;
+    const roleName = document.getElementById('ssRoleName').value.trim();
+    if (!roleName) { alert('Le nom du rôle est requis'); return; }
+
+    const body = {
+        role_name: roleName,
+        default_user: document.getElementById('ssDefaultUser').value.trim() || 'ubuntu',
+        ttl: document.getElementById('ssTtl').value.trim() || '30m',
+        allowed_users: document.getElementById('ssAllowedUsers').value.trim() || '*',
+    };
+
+    const data = await api(`/vaults/${vaultId}/ssh/setup`, {
+        method: 'POST', body: JSON.stringify(body)
+    });
+    closeModal('modalSshSetup');
+
+    if (data.status === 'ok') {
+        selectVault(vaultId);
+    } else {
+        alert('Erreur : ' + (data.message || 'Échec du setup SSH CA'));
+    }
+}
+
+/* ─── SSH Sign Key ─── */
+async function promptSshSign(vaultId) {
+    document.getElementById('sgVaultId').value = vaultId;
+    document.getElementById('sgPublicKey').value = '';
+    document.getElementById('sgTtl').value = '30m';
+    document.getElementById('sgResult').innerHTML = '';
+
+    // Charger les rôles dans le select
+    const rolesData = await api(`/vaults/${vaultId}/ssh/roles`);
+    const select = document.getElementById('sgRoleName');
+    select.innerHTML = '';
+    for (const r of (rolesData.roles || [])) {
+        const opt = document.createElement('option');
+        opt.value = r;
+        opt.textContent = r;
+        select.appendChild(opt);
+    }
+
+    openModal('modalSshSign');
+}
+
+async function doSshSign() {
+    const vaultId = document.getElementById('sgVaultId').value;
+    const roleName = document.getElementById('sgRoleName').value;
+    const publicKey = document.getElementById('sgPublicKey').value.trim();
+    const ttl = document.getElementById('sgTtl').value.trim() || '30m';
+
+    if (!publicKey) { alert('Collez votre clé publique SSH'); return; }
+    if (!roleName) { alert('Sélectionnez un rôle SSH'); return; }
+
+    const resultEl = document.getElementById('sgResult');
+    resultEl.innerHTML = '<div class="empty-state">Signature en cours…</div>';
+
+    const data = await api(`/vaults/${vaultId}/ssh/sign`, {
+        method: 'POST', body: JSON.stringify({ role_name: roleName, public_key: publicKey, ttl: ttl })
+    });
+
+    if (data.status === 'ok') {
+        resultEl.innerHTML = `<div class="card" style="border-color:var(--success);margin-top:0.8rem">
+            <h2 style="color:var(--success)">✅ Certificat signé</h2>
+            <p style="font-size:0.75rem;color:var(--text2)">Serial : ${esc(data.serial_number || '—')} — TTL : ${esc(data.ttl || ttl)}</p>
+            <div class="token-display" style="border-color:var(--success)">
+                <span id="signedKeyValue">${esc(data.signed_key || '')}</span>
+                <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('signedKeyValue').textContent)">📋</button>
+            </div>
+            <div class="help-text">Sauvegardez ce certificat dans un fichier (ex: id_ed25519-cert.pub) et utilisez-le avec <code>ssh -i id_ed25519 -o CertificateFile=id_ed25519-cert.pub user@host</code></div>
+        </div>`;
+    } else {
+        resultEl.innerHTML = `<div class="card" style="border-color:var(--danger);margin-top:0.8rem">
+            <p style="color:var(--danger)">❌ Erreur : ${esc(data.message || 'Échec de la signature')}</p>
+        </div>`;
+    }
+}
+
+/* ─── SSH CA Public Key ─── */
+async function showCaKey(vaultId) {
+    const el = document.getElementById('sshCaKeyDisplay');
+    if (!el) return;
+
+    if (!el.classList.contains('hidden') && el.innerHTML) {
+        el.innerHTML = '';
+        return;
+    }
+
+    const data = await api(`/vaults/${vaultId}/ssh/ca-key`);
+    if (data.status === 'ok') {
+        el.innerHTML = `<div class="card mt-1" style="border-color:var(--accent)">
+            <h2>🔑 Clé publique CA SSH</h2>
+            <div class="token-display">
+                <span id="caKeyValue">${esc(data.public_key || '')}</span>
+                <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('caKeyValue').textContent)">📋</button>
+            </div>
+            <div class="help-text">${esc(data.usage || 'Ajouter dans TrustedUserCAKeys sur les serveurs cibles')}</div>
+        </div>`;
+    } else {
+        el.innerHTML = `<div class="card mt-1"><p style="color:var(--danger)">Erreur : ${esc(data.message)}</p></div>`;
+    }
+}
+
+/* ─── SSH Role Info ─── */
+async function showRoleInfo(vaultId, roleName, elId) {
+    const el = document.getElementById(elId);
+    if (!el) return;
+    if (!el.classList.contains('hidden')) { el.classList.add('hidden'); return; }
+
+    el.innerHTML = '<div class="secret-detail">Chargement…</div>';
+    el.classList.remove('hidden');
+
+    const data = await api(`/vaults/${vaultId}/ssh/roles/${roleName}`);
+    if (data.status !== 'ok') {
+        el.innerHTML = `<div class="secret-detail" style="color:var(--danger)">Erreur : ${esc(data.message)}</div>`;
+        return;
+    }
+
+    el.innerHTML = `<div class="secret-detail">
+        <span style="color:var(--muted)">key_type</span>: <span>${esc(data.key_type)}</span>
+        <span style="color:var(--muted)">ttl</span>: <span>${esc(data.ttl)}</span>
+        <span style="color:var(--muted)">max_ttl</span>: <span>${esc(data.max_ttl)}</span>
+        <span style="color:var(--muted)">default_user</span>: <span>${esc(data.default_user)}</span>
+        <span style="color:var(--muted)">allowed_users</span>: <span>${esc(data.allowed_users)}</span>
+        <span style="color:var(--muted)">user_certs</span>: <span>${data.allow_user_certificates ? '✅' : '❌'}</span>
+        <span style="color:var(--muted)">host_certs</span>: <span>${data.allow_host_certificates ? '✅' : '❌'}</span>
+    </div>`;
 }

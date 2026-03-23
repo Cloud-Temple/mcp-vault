@@ -85,7 +85,7 @@ class AdminMiddleware:
             "status": 204,
             "headers": [
                 (b"access-control-allow-origin", b"*"),
-                (b"access-control-allow-methods", b"GET, POST, DELETE, OPTIONS"),
+                (b"access-control-allow-methods", b"GET, POST, PUT, DELETE, OPTIONS"),
                 (b"access-control-allow-headers", b"Authorization, Content-Type"),
                 (b"access-control-max-age", b"3600"),
             ],

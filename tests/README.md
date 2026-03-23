@@ -180,12 +180,12 @@ Les tests valident les **3 couches d'isolation** :
 │                                             │
 │  ┌─────────────────────────────────────┐    │
 │  │  Couche 2 — Vault-level             │    │
-│  │  allowed_resources=[prod, staging]   │    │
+│  │  allowed_resources=[prod, staging]  │    │
 │  │                                     │    │
 │  │  ┌─────────────────────────────┐    │    │
-│  │  │  Couche 3 — Path-level     │    │    │
+│  │  │  Couche 3 — Path-level      │    │    │
 │  │  │  allowed_paths=[shared/*]   │    │    │
-│  │  │  → web/* BLOQUÉ            │    │    │
+│  │  │  → web/* BLOQUÉ             │    │    │
 │  │  └─────────────────────────────┘    │    │
 │  └─────────────────────────────────────┘    │
 └─────────────────────────────────────────────┘

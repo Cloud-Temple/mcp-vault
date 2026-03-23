@@ -2,6 +2,8 @@
 
 > CLI complet pour interagir avec le serveur MCP Vault — Click + Rich + shell interactif.
 
+> 💡 **Console web** : toutes les fonctionnalités du CLI sont également disponibles dans la **console admin SPA** accessible à `/admin` (dashboard, vaults, secrets, SSH CA, policies, tokens, audit, générateur de mot de passe, référence des 14 types). L'interface guide l'utilisateur avec des tooltips et de l'aide contextuelle.
+
 ---
 
 ## ⚡ Utilisation rapide
