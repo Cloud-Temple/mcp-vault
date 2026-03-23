@@ -1784,6 +1784,270 @@ docker exec mcp-vault /opt/luna/bin/lunacm -c "slot list"
 | Monitoring de la console admin (logs d'accès)                            | 🟡 Moyenne  |
 | User non-root + seccomp profile dans Docker                              | 🟡 Moyenne  |
 
+### 11.6 WAF Coraza — Architecture et Fine-tuning
+
+Le WAF (Web Application Firewall) est la **première couche de sécurité** du
+MCP Vault. Il intercepte toutes les requêtes HTTP avant qu'elles n'atteignent
+l'application, bloquant les attaques L7 connues (injections, XSS, LFI, RCE...).
+
+#### 11.6.1 Architecture du WAF
+
+```
+                     Internet / Réseau interne
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  WAF Caddy + Coraza (:8085, configurable WAF_PORT)              │
+│                                                                  │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │  Caddy v2.11.2 (compilé avec xcaddy)                       │  │
+│  │  └─ Plugin coraza-caddy v2.2.0                             │  │
+│  │     └─ OWASP CoreRuleSet (CRS) v4.7.0                     │  │
+│  └────────────────────────────────────────────────────────────┘  │
+│                                                                  │
+│  Rôles :                                                         │
+│  1. Reverse proxy → mcp-vault:8030 (réseau interne Docker)      │
+│  2. Détection et blocage des attaques (anomaly scoring CRS)     │
+│  3. Headers de sécurité (CSP, X-Frame-Options, nosniff...)      │
+│  4. Timeouts adaptés MCP (120s pour les appels longs)           │
+└──────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼ reverse proxy (réseau Docker mcp-net)
+┌──────────────────────────────────────────────────────────────────┐
+│  MCP Vault (:8030, expose uniquement — PAS de ports:)           │
+│  Non accessible directement depuis l'extérieur                   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Build multi-stage du Dockerfile WAF** (`waf/Dockerfile`) :
+
+| Stage              | Image              | Rôle                                                |
+| ------------------ | ------------------- | --------------------------------------------------- |
+| `builder`          | `caddy:2-builder`   | Compile Caddy avec le plugin `coraza-caddy/v2`      |
+| `crs-downloader`   | `alpine:latest`     | Télécharge les règles OWASP CRS v4.7.0 depuis GitHub |
+| Image finale       | `caddy:2-alpine`    | Image minimale avec binaire compilé + règles CRS    |
+
+#### 11.6.2 Règles OWASP CRS chargées
+
+Le fichier `waf/coraza.conf` charge **19 fichiers de règles CRS** couvrant
+l'ensemble du spectre d'attaques L7 :
+
+**Règles de requête (REQUEST)** — Analysent les requêtes entrantes :
+
+| Fichier CRS                              | Protection                                            |
+| ---------------------------------------- | ----------------------------------------------------- |
+| `REQUEST-901-INITIALIZATION`             | Initialisation du moteur CRS, variables de scoring     |
+| `REQUEST-905-COMMON-EXCEPTIONS`          | Exceptions communes (crawlers légitimes, etc.)        |
+| `REQUEST-911-METHOD-ENFORCEMENT`         | Méthodes HTTP autorisées (GET, POST, PUT, DELETE...)  |
+| `REQUEST-913-SCANNER-DETECTION`          | Détection de scanners de vulnérabilités (Nikto, etc.) |
+| `REQUEST-920-PROTOCOL-ENFORCEMENT`       | Conformité protocole HTTP (encodages, longueurs...)   |
+| `REQUEST-921-PROTOCOL-ATTACK`            | Attaques protocolaires (HTTP smuggling, etc.)         |
+| `REQUEST-930-APPLICATION-ATTACK-LFI`     | Local File Inclusion (path traversal `../../etc/passwd`) |
+| `REQUEST-931-APPLICATION-ATTACK-RFI`     | Remote File Inclusion (inclusion de fichiers distants) |
+| `REQUEST-932-APPLICATION-ATTACK-RCE`     | Remote Code Execution (commandes shell, PowerShell)   |
+| `REQUEST-933-APPLICATION-ATTACK-PHP`     | Injections PHP (fonctions dangereuses, wrappers)      |
+| `REQUEST-934-APPLICATION-ATTACK-GENERIC` | Attaques génériques (injections de code)              |
+| `REQUEST-941-APPLICATION-ATTACK-XSS`     | Cross-Site Scripting (`<script>`, événements JS)      |
+| `REQUEST-942-APPLICATION-ATTACK-SQLI`    | SQL Injection (UNION, OR 1=1, commentaires SQL)       |
+| `REQUEST-943-SESSION-FIXATION`           | Fixation de session (vol de cookies)                  |
+| `REQUEST-944-APPLICATION-ATTACK-JAVA`    | Injections Java (OGNL, deserialization)               |
+| `REQUEST-949-BLOCKING-EVALUATION`        | Évaluation du score d'anomalie → décision de blocage  |
+
+**Règles de réponse (RESPONSE)** — Analysent les réponses du serveur :
+
+| Fichier CRS                         | Protection                                            |
+| ------------------------------------ | ----------------------------------------------------- |
+| `RESPONSE-950-DATA-LEAKAGES`        | Fuites de données dans les réponses                   |
+| `RESPONSE-951-DATA-LEAKAGES-SQL`    | Fuites de messages d'erreur SQL                       |
+| `RESPONSE-952-DATA-LEAKAGES-JAVA`   | Fuites de stack traces Java                           |
+| `RESPONSE-953-DATA-LEAKAGES-PHP`    | Fuites d'erreurs PHP                                  |
+| `RESPONSE-954-DATA-LEAKAGES-IIS`    | Fuites spécifiques IIS/ASP.NET                        |
+| `RESPONSE-959-BLOCKING-EVALUATION`  | Évaluation du score d'anomalie côté réponse           |
+| `RESPONSE-980-CORRELATION`          | Corrélation requête/réponse pour le scoring final     |
+
+#### 11.6.3 Mode de fonctionnement — Anomaly Scoring
+
+Les CRS fonctionnent en **mode anomaly scoring** (mode par défaut, recommandé) :
+
+```
+Requête entrante
+     │
+     ├─ Règle 920xxx matche → score += 3 (WARNING)
+     ├─ Règle 942xxx matche → score += 5 (CRITICAL)
+     ├─ Règle 941xxx matche → score += 5 (CRITICAL)
+     │
+     ▼
+  Score total = 13
+     │
+     ├─ Seuil (inbound_anomaly_score_threshold) = 5
+     │
+     ▼
+  Score 13 ≥ Seuil 5 → BLOQUÉ (403 Forbidden)
+```
+
+**Avantage du mode anomaly scoring** : une seule règle de faible gravité
+(score 2-3) ne bloque pas la requête. Il faut accumuler suffisamment de
+signaux suspects pour dépasser le seuil. Cela **réduit les faux positifs**
+tout en maintenant une détection efficace.
+
+Le mode de MCP Vault est **BLOCKING** (`SecRuleEngine On`) sur **tous les
+endpoints** : `/health`, `/mcp` et `/admin/api`.
+
+#### 11.6.4 Exclusions ciblées (fine-tuning)
+
+Après activation du mode blocking, un fine-tuning a été réalisé en exécutant
+les 295 tests e2e via le WAF. Deux règles CRS généraient des **faux positifs**
+légitimes sur les payloads JSON-RPC et REST de MCP Vault :
+
+##### Faux positif 1 — Règle 920540 (Unicode bypass)
+
+| Aspect        | Détail                                                                      |
+| ------------- | --------------------------------------------------------------------------- |
+| **Règle CRS** | `REQUEST-920-PROTOCOL-ENFORCEMENT` / ID 920540                             |
+| **Description**| "Possible Unicode character bypass detected"                                |
+| **Cause**     | Les payloads JSON contiennent des caractères français encodés UTF-8 :       |
+|               | `\u00e9` (é), `\u00e8` (è), `\u2014` (—) dans les descriptions de vaults, |
+|               | policies et secrets. Le CRS les interprète comme une tentative de bypass.   |
+| **Impact**    | Bloque les créations/mises à jour de vaults et policies avec accents        |
+| **Exclusion** | `SecRule REQUEST_URI "@beginsWith /mcp" ... ctl:ruleRemoveById=920540`      |
+| **Scope**     | `/mcp` (JSON-RPC) et `/admin/api` (REST JSON) uniquement                   |
+| **Risque**    | Faible — l'authentification Bearer + policies MCP protègent déjà ces endpoints |
+| **ID interne**| Règles 10001 et 10002 dans `coraza.conf`                                   |
+
+##### Faux positif 2 — Règle 932120 (PowerShell RCE)
+
+| Aspect        | Détail                                                                      |
+| ------------- | --------------------------------------------------------------------------- |
+| **Règle CRS** | `REQUEST-932-APPLICATION-ATTACK-RCE` / ID 932120                           |
+| **Description**| "Remote Command Execution: Windows PowerShell Command Found"                |
+| **Cause**     | Les noms de policies comme `"test-path-restrict"` contiennent `"test-path"` |
+|               | qui matche le cmdlet PowerShell `Test-Path`. Les noms d'outils MCP comme   |
+|               | `"secret_write"` ou `"vault_delete"` peuvent aussi déclencher cette règle. |
+| **Impact**    | Bloque les créations de policies et certains appels MCP avec policy_id      |
+| **Exclusion** | `SecRule REQUEST_URI "@beginsWith /mcp" ... ctl:ruleRemoveById=932120`      |
+| **Scope**     | `/mcp` (JSON-RPC) et `/admin/api` (REST JSON) uniquement                   |
+| **Risque**    | Faible — MCP Vault ne traite aucune commande PowerShell. La couche MCP     |
+|               | valide et typifie tous les inputs avant traitement.                         |
+| **ID interne**| Règles 10003 et 10004 dans `coraza.conf`                                   |
+| **Note**      | La règle 932120 reste **active** sur `/health` pour sécurité maximale       |
+
+##### Récapitulatif des exclusions
+
+| ID interne | Endpoint        | Règle CRS | Motif du faux positif                    |
+| ---------- | --------------- | --------- | ---------------------------------------- |
+| 10001      | `/mcp`          | 920540    | Unicode français dans les payloads JSON  |
+| 10002      | `/admin/api`    | 920540    | Unicode français dans les payloads JSON  |
+| 10003      | `/mcp`          | 932120    | `test-path` dans les noms de policies    |
+| 10004      | `/admin/api`    | 932120    | `test-path` dans les noms de policies    |
+
+#### 11.6.5 Headers de sécurité
+
+Le Caddyfile injecte les headers de sécurité suivants sur toutes les réponses :
+
+| Header                          | Valeur                                                                        | Protection                                    |
+| ------------------------------- | ----------------------------------------------------------------------------- | --------------------------------------------- |
+| `X-Content-Type-Options`        | `nosniff`                                                                     | Empêche le MIME sniffing                      |
+| `X-Frame-Options`               | `DENY`                                                                        | Empêche l'intégration en iframe (clickjacking)|
+| `Referrer-Policy`               | `strict-origin-when-cross-origin`                                             | Limite les informations envoyées au referer   |
+| `X-XSS-Protection`              | `1; mode=block`                                                               | Active le filtre XSS du navigateur (legacy)   |
+| `Content-Security-Policy`       | `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;` | Restreint les sources de contenu |
+| `-Server`                       | *(supprimé)*                                                                  | Masque l'identité du serveur Caddy            |
+
+> **Note** : `unsafe-inline` est nécessaire dans `script-src` et `style-src`
+> car la SPA admin utilise du JavaScript et CSS inline. C'est mitigé par le fait
+> que la console admin est protégée par authentification Bearer admin.
+
+#### 11.6.6 Configuration réseau et timeouts
+
+| Paramètre                     | Valeur  | Justification                                          |
+| ----------------------------- | ------- | ------------------------------------------------------ |
+| Port WAF externe              | 8085    | Configurable via `WAF_PORT` (`.env`)                   |
+| Port MCP interne              | 8030    | `expose` uniquement (non accessible depuis l'extérieur)|
+| `dial_timeout`                | 10s     | Temps max pour établir la connexion vers mcp-vault     |
+| `response_header_timeout`     | 120s    | Appels MCP potentiellement longs (ingestion, SSH sign) |
+| `read_timeout`                | 120s    | Idem, pour la lecture de la réponse complète            |
+| `write_timeout`               | 120s    | Idem, pour l'envoi de la requête                       |
+| `SecRequestBodyLimit`         | 10 MB   | Taille max du corps de requête (payloads MCP JSON)     |
+| `SecRequestBodyNoFilesLimit`  | 5 MB    | Taille max sans fichiers uploadés                      |
+| Admin Caddy                   | `off`   | L'API d'administration Caddy est désactivée (sécurité) |
+
+#### 11.6.7 Méthodes HTTP autorisées
+
+Le WAF n'autorise que les méthodes nécessaires au protocole MCP et à l'API admin :
+
+```
+GET HEAD POST OPTIONS PUT PATCH DELETE
+```
+
+Configuré via `SecAction id:900200` avant le chargement des CRS. La méthode
+`DELETE` est requise par le protocole MCP pour fermer les sessions SSE.
+`PUT` est utilisé par l'API admin pour mettre à jour les tokens.
+
+#### 11.6.8 Procédure de diagnostic et ajout d'exclusions
+
+Quand des tests échouent après un changement de configuration WAF, voici la
+procédure de diagnostic :
+
+```
+1. Exécuter les tests via le WAF
+   $ MCP_URL=http://localhost:8085 MCP_TOKEN="$ADMIN_BOOTSTRAP_KEY" \
+     python tests/test_e2e.py
+
+2. Identifier les tests en échec
+   → Un test en échec retourne status=error avec "MCP call failed"
+
+3. Consulter les logs Coraza
+   $ docker compose logs waf 2>&1 | grep "Coraza\|id \"9"
+   → Chercher les lignes avec "id" suivi du numéro de règle
+   → Exemple : "id \"932120\"" identifie la règle 932120
+
+4. Comprendre la règle
+   → Consulter https://coreruleset.org/docs/ (documentation CRS)
+   → Vérifier si c'est un faux positif (payload légitime détecté comme attaque)
+
+5. Ajouter une exclusion ciblée dans waf/coraza.conf
+   SecRule REQUEST_URI "@beginsWith /mcp" \
+       "id:100XX,phase:1,pass,nolog,\
+        ctl:ruleRemoveById=XXXXXX"
+   → Toujours limiter le scope à l'endpoint concerné
+   → Toujours documenter le motif du faux positif en commentaire
+   → Utiliser des IDs internes à partir de 10005
+
+6. Rebuild et retester
+   $ docker compose build waf && docker compose up -d waf
+   $ MCP_URL=http://localhost:8085 MCP_TOKEN="$ADMIN_BOOTSTRAP_KEY" \
+     python tests/test_e2e.py
+```
+
+> ⚠️ **Règle d'or** : ne jamais désactiver une règle CRS globalement.
+> Toujours limiter l'exclusion au scope minimum (`@beginsWith /mcp`
+> ou `@beginsWith /admin/api`). Les règles restent actives sur `/health`
+> et tout autre endpoint non spécifiquement exclu.
+
+#### 11.6.9 Tests e2e WAF dédiés (TEST 15)
+
+Les tests e2e incluent un groupe dédié (`--test waf_security`) qui valide
+que le WAF bloque bien les attaques simulées :
+
+| Catégorie         | Attaque simulée                                            | Résultat attendu |
+| ----------------- | ---------------------------------------------------------- | ---------------- |
+| **LFI**           | `GET /admin/static/../../etc/passwd`                       | 403 Forbidden    |
+| **LFI**           | `GET /../../../etc/shadow`                                 | 403 Forbidden    |
+| **SQLi**           | `POST /mcp` avec `' OR 1=1 --` dans le body               | 403 Forbidden    |
+| **SQLi**           | `POST /mcp` avec `UNION SELECT` dans le body               | 403 Forbidden    |
+| **XSS**           | `POST /mcp` avec `<script>alert(1)</script>` dans le body  | 403 Forbidden    |
+| **XSS**           | `POST /admin/api` avec `<img onerror=alert(1)>` dans data  | 403 Forbidden    |
+| **RCE**           | `POST /mcp` avec `; cat /etc/passwd` dans le body          | 403 Forbidden    |
+| **RCE**           | `POST /mcp` avec `$(whoami)` dans le body                  | 403 Forbidden    |
+| **Scanner**       | `GET /health` avec `User-Agent: Nikto`                     | 403 Forbidden    |
+| **Non-régression**| Requête MCP légitime via le WAF                            | 200 OK           |
+| **Non-régression**| Payload JSON avec accents français (Unicode)               | 200 OK           |
+| **Non-régression**| Création de policy avec `test-path` dans le nom            | 200 OK           |
+
+> **Note** : ces tests ne s'exécutent que quand `MCP_URL` pointe vers le WAF
+> (`:8085`). Si les tests tournent directement contre mcp-vault (`:8030`),
+> le groupe WAF est automatiquement skippé.
+
 ---
 
 ## 12. Exemple d'utilisation

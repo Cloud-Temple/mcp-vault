@@ -1752,11 +1752,143 @@ async def cleanup():
 
 
 # =============================================================================
+# TEST 15 — WAF Security (Coraza OWASP CRS)
+# =============================================================================
+
+async def test_15_waf_security():
+    """WAF Security — attaques simulées (LFI, SQLi, XSS, RCE, Scanner) + non-régression."""
+    print("\n  ── TEST 15 — WAF Security (Coraza OWASP CRS) ──")
+
+    # Ce test ne fonctionne que via le WAF (port 8085 par défaut).
+    # Si on pointe directement vers mcp-vault (:8030), on skippe.
+    if ":8030" in BASE_URL:
+        print("    ⏭️  SKIPPED — tests WAF uniquement via le WAF (MCP_URL=http://localhost:8085)")
+        return
+
+    import urllib.request
+    import urllib.error
+
+    def waf_request(method, path, body=None, headers=None):
+        """Envoie une requête HTTP brute et retourne le status code."""
+        url = f"{BASE_URL}{path}"
+        req_headers = {"Authorization": f"Bearer {TOKEN}"}
+        if headers:
+            req_headers.update(headers)
+        data = body.encode("utf-8") if body else None
+        if data and "Content-Type" not in req_headers:
+            req_headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=data, headers=req_headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status
+        except urllib.error.HTTPError as e:
+            return e.code
+        except Exception:
+            return 0
+
+    # ── 15a. Attaques LFI (Local File Inclusion / Path Traversal) ──
+    print("\n    ── 15a. LFI (Path Traversal) ──")
+
+    status = waf_request("GET", "/admin/static/../../etc/passwd")
+    check_true("LFI /admin/static/../../etc/passwd bloqué", status == 403, f"status={status}")
+
+    status = waf_request("GET", "/../../../etc/shadow")
+    check_true("LFI /../../../etc/shadow bloqué", status == 403, f"status={status}")
+
+    status = waf_request("GET", "/admin/static/..%2f..%2f..%2fetc%2fpasswd")
+    check_true("LFI encoded %2f bloqué", status == 403, f"status={status}")
+
+    # ── 15b. Attaques SQLi (SQL Injection) ──
+    print("\n    ── 15b. SQLi (SQL Injection) ──")
+
+    sqli1 = '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"system_health","arguments":{"test":"1 OR 1=1 --"}},"id":1}'
+    status = waf_request("POST", "/mcp", body=sqli1)
+    check_true("SQLi OR 1=1 bloqué", status == 403, f"status={status}")
+
+    sqli2 = '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"system_health","arguments":{"test":"UNION SELECT * FROM users"}},"id":1}'
+    status = waf_request("POST", "/mcp", body=sqli2)
+    check_true("SQLi UNION SELECT bloqué", status == 403, f"status={status}")
+
+    sqli3 = '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"vault_list","arguments":{"test":"1; DROP TABLE secrets;--"}},"id":1}'
+    status = waf_request("POST", "/mcp", body=sqli3)
+    check_true("SQLi DROP TABLE bloqué", status == 403, f"status={status}")
+
+    # ── 15c. Attaques XSS (Cross-Site Scripting) ──
+    print("\n    ── 15c. XSS (Cross-Site Scripting) ──")
+
+    xss1 = '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"system_health","arguments":{"test":"<script>alert(1)</script>"}},"id":1}'
+    status = waf_request("POST", "/mcp", body=xss1)
+    check_true("XSS script alert bloqué", status == 403, f"status={status}")
+
+    xss2 = '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"vault_list","arguments":{"test":"<img src=x onerror=alert(1)>"}},"id":1}'
+    status = waf_request("POST", "/mcp", body=xss2)
+    check_true("XSS img onerror bloqué", status == 403, f"status={status}")
+
+    # ── 15d. Attaques RCE (Remote Code Execution) ──
+    print("\n    ── 15d. RCE (Remote Code Execution) ──")
+
+    rce1 = '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"system_health","arguments":{"cmd":"; cat /etc/passwd"}},"id":1}'
+    status = waf_request("POST", "/mcp", body=rce1)
+    check_true("RCE cat /etc/passwd bloqué", status == 403, f"status={status}")
+
+    rce2 = '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"vault_list","arguments":{"cmd":"$(whoami)"}},"id":1}'
+    status = waf_request("POST", "/mcp", body=rce2)
+    check_true("RCE $(whoami) bloqué", status == 403, f"status={status}")
+
+    rce3 = '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"vault_list","arguments":{"cmd":"|ls -la /etc"}},"id":1}'
+    status = waf_request("POST", "/mcp", body=rce3)
+    check_true("RCE pipe ls bloqué", status == 403, f"status={status}")
+
+    # ── 15e. Scanner Detection ──
+    print("\n    ── 15e. Scanner Detection ──")
+
+    status = waf_request("GET", "/health", headers={"User-Agent": "Nikto/2.1.6"})
+    check_true("Scanner Nikto bloqué", status == 403, f"status={status}")
+
+    status = waf_request("GET", "/health", headers={"User-Agent": "sqlmap/1.7"})
+    check_true("Scanner sqlmap bloqué", status == 403, f"status={status}")
+
+    # ── 15f. Non-régression — requêtes légitimes passent ──
+    print("\n    ── 15f. Non-regression (legitimate requests) ──")
+
+    status = waf_request("GET", "/health")
+    check_true("GET /health légitime passe", status == 200, f"status={status}")
+
+    r = await call_tool("system_health", {})
+    check("MCP system_health via WAF", r)
+
+    # Unicode français (exclusion 920540 active)
+    # Cleanup préventif (si résidu d'un run précédent)
+    await call_tool("vault_delete", {"vault_id": "test-waf-unicode", "confirm": True})
+    r = await call_tool("vault_create", {
+        "vault_id": "test-waf-unicode",
+        "description": "Vault avec accents éèà — unicode"
+    })
+    check("Vault create avec accents français", r, "created")
+
+    # Policy avec test-path dans le nom (exclusion 932120 active)
+    # Cleanup préventif
+    await call_tool("policy_delete", {"policy_id": "test-path-waf-check", "confirm": True})
+    r = await call_tool("policy_create", {
+        "policy_id": "test-path-waf-check",
+        "description": "Policy WAF test-path dans le nom",
+        "allowed_tools": ["system_*", "vault_list"],
+        "denied_tools": []
+    })
+    check("Policy create avec test-path (exclu 932120)", r, "created")
+
+    # ── 15g. Cleanup ──
+    await call_tool("policy_delete", {"policy_id": "test-path-waf-check", "confirm": True})
+    await call_tool("vault_delete", {"vault_id": "test-waf-unicode"})
+    print("    🧹 Cleanup WAF test resources")
+
+
+# =============================================================================
 # Registre des tests
 # =============================================================================
 
 TEST_REGISTRY = {
-    "system":      test_01_system,
+"system":      test_01_system,
     "vaults":      test_02_spaces,
     "secrets":     test_03_secrets,
     "versioning":  test_04_versioning,
@@ -1770,6 +1902,7 @@ TEST_REGISTRY = {
     "policies":    test_12_policies,
     "enforcement": test_13_enforcement,
     "audit":       test_14_audit,
+    "waf_security": test_15_waf_security,
 }
 
 

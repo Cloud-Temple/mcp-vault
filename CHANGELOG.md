@@ -1,5 +1,42 @@
 # Changelog — MCP Vault
 
+## [0.3.3] — 2026-03-23
+
+### Documentation WAF complète (ARCHITECTURE.md §11.6)
+
+Ajout de 9 sous-sections documentant en détail l'architecture du WAF Coraza :
+- Architecture (Caddy v2.11.2 + coraza-caddy v2.2.0 + CRS v4.7.0), build multi-stage
+- 19 règles CRS chargées (tableau complet REQUEST + RESPONSE)
+- Mode anomaly scoring (fonctionnement, seuil de blocage)
+- 4 exclusions ciblées documentées (920540 Unicode, 932120 PowerShell) avec motifs et risques
+- Headers de sécurité (CSP, X-Frame-Options, nosniff...) avec valeurs et justifications
+- Configuration réseau et timeouts
+- Procédure de diagnostic pas-à-pas pour identifier et résoudre les faux positifs WAF
+
+### Tests e2e WAF dédiés (TEST 15 — `--test waf_security`)
+
+Nouveau groupe de tests (17 assertions) validant le WAF Coraza en mode blocking :
+- **LFI** : 3 attaques path traversal → 403
+- **SQLi** : 3 injections SQL → 403
+- **XSS** : 2 cross-site scripting → 403
+- **RCE** : 3 remote code execution → 403
+- **Scanner** : 2 détections (Nikto, sqlmap) → 403
+- **Non-régression** : 4 requêtes légitimes (health, MCP, Unicode, test-path) → 200
+- Auto-skip si MCP_URL pointe vers `:8030` (sans WAF)
+
+### Métriques
+
+- **312/312 tests e2e** via WAF (15 catégories, ~15s)
+- **197 tests CLI** inchangés
+- **16 tests crypto** inchangés
+
+### Fichiers modifiés (3)
+- `DESIGN/mcp-vault/ARCHITECTURE.md` — section §11.6 WAF (9 sous-sections)
+- `tests/test_e2e.py` — TEST 15 waf_security (17 assertions)
+- `VERSION` — 0.3.2 → 0.3.3
+
+---
+
 ## [0.3.2] — 2026-03-23
 
 ### WAF — Mode Blocking complet
