@@ -221,16 +221,20 @@ class PolicyStore:
         Vérifie si un outil est autorisé par la policy.
 
         Logique :
-        1. Si denied_tools match → refusé (prioritaire)
-        2. Si allowed_tools est vide → autorisé (tout est permis)
-        3. Si allowed_tools match → autorisé
-        4. Sinon → refusé
+        1. Policy inexistante → REFUSÉ (fail-close, sécurité)
+        2. Si denied_tools match → refusé (prioritaire)
+        3. Si allowed_tools est vide → autorisé (tout est permis)
+        4. Si allowed_tools match → autorisé
+        5. Sinon → refusé
 
         Les patterns supportent les wildcards (* via fnmatch).
+
+        SÉCURITÉ : fail-close — si la policy référencée par un token a été
+        supprimée, le token est bloqué plutôt que devenir non-restreint.
         """
         policy = self.get(policy_id)
         if not policy:
-            return True  # Policy inexistante = pas de restriction
+            return False  # SÉCURITÉ : fail-close — policy supprimée = tout bloqué
 
         # denied_tools a priorité
         for pattern in policy.get("denied_tools", []):

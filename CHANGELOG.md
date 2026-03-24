@@ -1,5 +1,49 @@
 # Changelog — MCP Vault
 
+## [0.4.0] — 2026-03-24
+
+### Security — Audit complet v0.3.3 et correctifs majeurs
+
+Suite à un **audit de sécurité complet** (19 fichiers analysés, 18 vulnérabilités identifiées), 7 correctifs de sécurité sont appliqués dans cette release majeure.
+
+Rapport complet : [SECURITY_AUDIT.md](DESIGN/mcp-vault/SECURITY_AUDIT.md)
+
+#### 🔴 Corrections critiques (3)
+
+- **Admin API bypass des contrôles d'accès vault** (`admin/api.py`) : les routes `/admin/api/vaults/{id}`, `/admin/api/vaults/{id}/secrets/*` et `/admin/api/vaults/{id}/ssh/*` ne vérifiaient pas `check_access()`. Un token non-admin pouvait accéder à **tous** les vaults via l'API admin, contournant l'isolation owner-based et `allowed_resources`. Corrigé avec `_check_vault_access()` appliqué sur les 3 groupes de routes (vault detail, SSH CA, secrets).
+
+- **Timing attack sur la bootstrap key** (`auth/middleware.py`, `admin/api.py`) : la comparaison `==` de la bootstrap key n'était pas constant-time. Remplacée par `hmac.compare_digest()` dans les 3 occurrences.
+
+- **Path traversal via tarfile** (`s3_sync.py`) : `tar.extractall()` sans filtre permettait l'écriture de fichiers arbitraires via une archive S3 malveillante (CVE-2007-4559). Corrigé avec `filter='data'` (Python 3.12+).
+
+#### 🟠 Corrections élevées (4)
+
+- **CORS wildcard supprimé** (`admin/api.py`) : le header `Access-Control-Allow-Origin: *` a été retiré de toutes les réponses API admin. Les requêtes cross-origin depuis des domaines tiers sont désormais bloquées.
+
+- **Fail-close sur policies supprimées** (`auth/policies.py`) : `is_tool_allowed()` retournait `True` si la policy référencée n'existait plus (fail-open). Désormais retourne `False` (fail-close) — un token dont la policy a été supprimée est bloqué.
+
+- **Limite de taille du body HTTP** (`admin/api.py`) : `_read_body()` est désormais plafonné à 10 MB pour prévenir les attaques OOM (Out Of Memory).
+
+- **Validation vault_id** (`vault/spaces.py`) : ajout de la validation du format vault_id (alphanumérique + tirets, 1-64 chars) avant passage à OpenBao, bloquant les injections de mount path.
+
+- **Rate limiting WAF** (`waf/Caddyfile`) : ajout du plugin `caddy-rate-limit` avec limitation à 100 req/s par IP sur tous les endpoints. Protection contre le brute-force et le DoS applicatif.
+
+#### 🟡 Corrections moyennes
+
+- **Docker resource limits** (`docker-compose.yml`) : ajout de `mem_limit: 2g` et `cpus: 2.0` pour les services mcp-vault et waf.
+
+### Fichiers modifiés (8)
+- `src/mcp_vault/admin/api.py` — C1 (vault access), C2 (timing), E1 (CORS), E4 (body limit)
+- `src/mcp_vault/auth/middleware.py` — C2 (timing attack)
+- `src/mcp_vault/auth/policies.py` — E3 (fail-close)
+- `src/mcp_vault/s3_sync.py` — C3 (tarfile filter)
+- `src/mcp_vault/vault/spaces.py` — M1 (vault_id validation)
+- `waf/Caddyfile` — E2 (rate limiting)
+- `docker-compose.yml` — M3 (resource limits)
+- `DESIGN/mcp-vault/SECURITY_AUDIT.md` — rapport complet v0.3.3
+
+---
+
 ## [0.3.3] — 2026-03-23
 
 ### Documentation WAF complète (ARCHITECTURE.md §11.6)

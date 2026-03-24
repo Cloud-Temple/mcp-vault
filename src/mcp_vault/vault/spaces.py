@@ -97,6 +97,34 @@ def check_vault_owner(vault_id: str, client_name: str) -> bool:
 # CRUD — Create
 # ═══════════════════════════════════════════════════════════════════════
 
+import re
+
+# Regex de validation vault_id : alphanumérique + tirets, 1-64 caractères
+_VAULT_ID_PATTERN = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$')
+
+
+def _validate_vault_id(vault_id: str) -> Optional[str]:
+    """
+    Valide le format du vault_id.
+
+    SÉCURITÉ : empêche les injections de mount path dans OpenBao.
+    Accepte : alphanumérique + tirets + underscores, 1-64 chars, commence par alphanum.
+    Rejette : chemins relatifs, caractères spéciaux, espaces, vide.
+
+    Returns:
+        None si OK, message d'erreur sinon
+    """
+    if not vault_id:
+        return "vault_id est requis"
+    if not _VAULT_ID_PATTERN.match(vault_id):
+        return (
+            f"vault_id '{vault_id}' invalide — "
+            "seuls les caractères alphanumériques, tirets et underscores sont autorisés "
+            "(1-64 chars, doit commencer par une lettre ou un chiffre)"
+        )
+    return None
+
+
 async def create_space(vault_id: str, description: str = "") -> dict:
     """
     Crée un espace vault (mount KV v2 dans OpenBao).
@@ -108,6 +136,11 @@ async def create_space(vault_id: str, description: str = "") -> dict:
         vault_id: Identifiant unique (utilisé comme mount path)
         description: Description optionnelle
     """
+    # Validation du format vault_id (sécurité : empêche injections mount path)
+    err = _validate_vault_id(vault_id)
+    if err:
+        return {"status": "error", "message": err}
+
     client = get_hvac_client()
     if not client:
         return {"status": "error", "message": "OpenBao non connecté"}

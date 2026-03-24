@@ -1,6 +1,6 @@
 # Documentation Technique — MCP Vault
 
-> **Version** : 0.2.0 | **Date** : 2026-03-22 | **Auteur** : Cloud Temple
+> **Version** : 0.4.0 | **Date** : 2026-03-24 | **Auteur** : Cloud Temple
 > **Licence** : Apache 2.0 | **Statut** : 🚧 Implémentation en cours
 
 ---
@@ -503,7 +503,7 @@ volumes:
 
 ### 5.2 Tests e2e (`tests/test_e2e.py`)
 
-**276 tests** e2e via protocole MCP Streamable HTTP, 14 catégories :
+**310 tests** e2e via protocole MCP Streamable HTTP, 15 catégories :
 
 | #   | Catégorie                     | Tests  | Description                                                     |
 | --- | ----------------------------- | ------ | --------------------------------------------------------------- |
@@ -556,7 +556,7 @@ docker compose exec mcp-vault python tests/test_e2e.py --verbose
 
 ## 6. Sécurité
 
-> **Audit de Sécurité** : Un audit complet a été réalisé en mars 2026. Voir [`SECURITY_AUDIT.md`](SECURITY_AUDIT.md) pour les détails des vulnérabilités (LFI, WAF, etc.) et le plan de remédiation.
+> **Audit de Sécurité** : Deux audits complets ont été réalisés (v0.2.0 et v0.3.3) — 23 vulnérabilités identifiées au total, toutes corrigées. Voir [`SECURITY_AUDIT.md`](SECURITY_AUDIT.md) pour le rapport complet incluant les correctifs (timing attack, admin API bypass, tarfile CVE, CORS, rate limiting, fail-close policies, body limit, vault_id validation).
 
 ### 6.1 Chiffrement
 
@@ -691,7 +691,7 @@ Voir `ARCHITECTURE.md §11.3` pour les diagrammes d'architecture et les étapes 
 | Phase 6 — SSH CA            | ✅     | CA isolée par vault, 5 outils MCP (setup, sign, public_key, list_roles, role_info), 148 tests e2e, CLI ssh complet, cleanup CA auto      |
 | Phase 7 — Interface web     | ✅     | Console admin SPA modulaire (sidebar, CRUD vaults/secrets, permissions granulaires, 15 endpoints API, 10 fichiers frontend < 200 lignes) |
 | Phase 8a — Policies CRUD      | ✅     | PolicyStore S3-backed, 4 outils MCP (create, list, get, delete), wildcards fnmatch, path_rules, Admin API, 206 tests e2e |
-| Phase 8b — Policy Enforcement | ✅     | `check_policy()` dans 15 outils MCP, champ `policy_id` dans tokens, outil `token_update`, 276 tests e2e / 14 catégories |
+| Phase 8b — Policy Enforcement | ✅     | `check_policy()` dans 15 outils MCP, champ `policy_id` dans tokens, outil `token_update`, 310 tests e2e / 15 catégories |
 | Phase 8c — Audit Log          | ✅     | AuditStore (ring buffer 5000 + JSONL), outil `audit_log` filtrable, timeline SPA, CLI audit, catégorisation auto, stats dashboard |
 | Phase 8d — Owner Isolation     | ✅     | **Owner-based vault isolation** : `vide = mes vaults` (au lieu de `vide = tous`). Fix bug `vault_ids` → `allowed_resources`. `check_vault_owner()`, `list_spaces(owner_filter)`. SPA : modal édition token + label mis à jour. |
 | Phase 9 — HSM Integration     | ⏳     | **En attente HSM** — Design et prérequis documentés (ARCHITECTURE.md §11.3). Bloqué par la disponibilité du Thales Luna chez Cloud Temple. Config HCL cible, migration 11 étapes, commandes Luna préparées. Reprise dès que le matériel HSM sera opérationnel. |

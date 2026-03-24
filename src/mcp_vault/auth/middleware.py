@@ -6,6 +6,7 @@ Pile d'exécution (ordre) :
     AdminMiddleware → HealthCheckMiddleware → AuthMiddleware → LoggingMiddleware → FastMCP
 """
 
+import hmac
 import json
 import sys
 import time
@@ -184,8 +185,8 @@ class AuthMiddleware:
         """
         settings = get_settings()
 
-        # Bootstrap key → admin total
-        if token == settings.admin_bootstrap_key:
+        # Bootstrap key → admin total (comparaison constant-time contre timing attacks)
+        if hmac.compare_digest(token, settings.admin_bootstrap_key):
             return {
                 "client_name": "admin",
                 "permissions": ["admin", "read", "write"],

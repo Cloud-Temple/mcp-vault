@@ -11,12 +11,29 @@
 {
 	# IMPORTANT : coraza_waf doit être exécuté AVANT les autres handlers
 	order coraza_waf first
+	order rate_limit before coraza_waf
 
 	# Désactiver l'API admin Caddy (sécurité)
 	admin off
 }
 
 {$SITE_ADDRESS::8085} {
+
+	# ── Rate Limiting — Protection brute-force et DoS ─────────────
+	# 10 000 requêtes par 5 minutes par IP (~33 req/s soutenu)
+	# SÉCURITÉ : empêche le brute-force de tokens et le DoS applicatif
+	# Note : le protocole MCP (Streamable HTTP) génère 3-4 requêtes
+	# HTTP par appel outil (POST init + GET SSE + POST call + DELETE).
+	# Un agent actif fait 10-20 appels MCP/s = 30-80 req/s en burst.
+	# La fenêtre de 5 min lisse les pics tout en protégeant contre
+	# les attaques soutenues.
+	rate_limit {
+		zone mcp_vault {
+			key    {remote_host}
+			events 10000
+			window 5m
+		}
+	}
 
 	# ── WAF Coraza avec OWASP CRS ─────────────────────────────────
 	coraza_waf {

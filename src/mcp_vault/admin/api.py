@@ -6,6 +6,8 @@ Tous les endpoints requièrent un Bearer token admin.
 Routage depuis AdminMiddleware pour /admin/api/*.
 """
 
+import hashlib
+import hmac
 import json
 import platform
 from pathlib import Path
@@ -13,6 +15,9 @@ from pathlib import Path
 from ..config import get_settings
 from ..auth.token_store import get_token_store
 from ..auth.middleware import get_activity_log
+
+# Limite maximale de taille du body HTTP (10 MB)
+_MAX_BODY_SIZE = 10 * 1024 * 1024
 
 
 async def handle_admin_api(scope, receive, send, mcp):
@@ -67,6 +72,10 @@ async def handle_admin_api(scope, receive, send, mcp):
     if path.startswith("/admin/api/vaults/") and "/secrets" not in path and "/ssh/" not in path:
         vault_id = path[len("/admin/api/vaults/"):]
         if "/" not in vault_id and vault_id:
+            # SÉCURITÉ : vérifier l'accès au vault (owner/allowed_resources)
+            access_err = _check_vault_access(token_info, vault_id)
+            if access_err:
+                return await _json_response(send, 403, access_err)
             if method == "GET":
                 return await _api_vault_detail(send, vault_id)
             if method == "PUT":
@@ -84,6 +93,11 @@ async def handle_admin_api(scope, receive, send, mcp):
         parts = path[len("/admin/api/vaults/"):].split("/ssh/", 1)
         vault_id = parts[0]
         ssh_path = parts[1] if len(parts) > 1 else ""
+
+        # SÉCURITÉ : vérifier l'accès au vault (owner/allowed_resources)
+        access_err = _check_vault_access(token_info, vault_id)
+        if access_err:
+            return await _json_response(send, 403, access_err)
 
         if method == "POST" and ssh_path == "setup":
             if not can_write:
@@ -113,6 +127,11 @@ async def handle_admin_api(scope, receive, send, mcp):
         parts = path[len("/admin/api/vaults/"):].split("/secrets", 1)
         vault_id = parts[0]
         secret_path = parts[1].lstrip("/") if len(parts) > 1 else ""
+
+        # SÉCURITÉ : vérifier l'accès au vault (owner/allowed_resources)
+        access_err = _check_vault_access(token_info, vault_id)
+        if access_err:
+            return await _json_response(send, 403, access_err)
 
         if method == "GET" and not secret_path:
             return await _api_list_secrets(send, vault_id)
@@ -616,11 +635,11 @@ def _is_admin(token: str) -> bool:
     if not token:
         return False
     settings = get_settings()
-    if token == settings.admin_bootstrap_key:
+    # Comparaison constant-time contre timing attacks
+    if hmac.compare_digest(token, settings.admin_bootstrap_key):
         return True
     store = get_token_store()
     if store:
-        import hashlib
         h = hashlib.sha256(token.encode()).hexdigest()
         info = store.get_by_hash(h)
         if info and "admin" in info.get("permissions", []) and not info.get("revoked"):
@@ -633,8 +652,8 @@ def _get_token_info(token: str) -> dict | None:
     if not token:
         return None
     settings = get_settings()
-    # Bootstrap key = admin total
-    if token == settings.admin_bootstrap_key:
+    # Bootstrap key = admin total (comparaison constant-time contre timing attacks)
+    if hmac.compare_digest(token, settings.admin_bootstrap_key):
         return {
             "client_name": "admin",
             "permissions": ["read", "write", "admin"],
@@ -644,7 +663,6 @@ def _get_token_info(token: str) -> dict | None:
     # Token S3
     store = get_token_store()
     if store:
-        import hashlib
         h = hashlib.sha256(token.encode()).hexdigest()
         info = store.get_by_hash(h)
         if info and not info.get("revoked"):
@@ -652,24 +670,73 @@ def _get_token_info(token: str) -> dict | None:
                 "client_name": info.get("client_name", "unknown"),
                 "permissions": info.get("permissions", ["read"]),
                 "allowed_resources": info.get("allowed_resources", []),
+                "policy_id": info.get("policy_id", ""),
                 "auth_type": "token",
             }
     return None
 
 
+def _check_vault_access(token_info: dict, vault_id: str) -> dict | None:
+    """
+    Vérifie que le token a accès au vault spécifié.
+
+    SÉCURITÉ : applique les mêmes contrôles que check_access() dans context.py :
+    1. Admin → accès total
+    2. allowed_resources non vide → vault_id doit y figurer
+    3. allowed_resources vide → owner-based isolation (created_by == client_name)
+
+    Returns:
+        None si OK, dict {"status": "error", ...} si refusé
+    """
+    perms = token_info.get("permissions", [])
+
+    # Admin → accès total
+    if "admin" in perms:
+        return None
+
+    # Liste explicite de vaults autorisés
+    allowed = token_info.get("allowed_resources", [])
+    if allowed:
+        if vault_id not in allowed:
+            return {"status": "error", "message": f"Accès refusé à '{vault_id}'"}
+        return None
+
+    # Owner-based isolation (allowed_resources vide)
+    client_name = token_info.get("client_name", "")
+    if client_name:
+        from ..vault.spaces import check_vault_owner
+        if not check_vault_owner(vault_id, client_name):
+            return {"status": "error", "message": f"Accès refusé à '{vault_id}' (vous n'en êtes pas le propriétaire)"}
+
+    return None
+
+
 async def _read_body(receive) -> bytes:
-    """Lit le body complet d'une requête ASGI."""
+    """
+    Lit le body complet d'une requête ASGI.
+
+    SÉCURITÉ : limite la taille à _MAX_BODY_SIZE (10 MB) pour
+    prévenir les attaques OOM (Out Of Memory).
+    """
     body = b""
     while True:
         message = await receive()
         body += message.get("body", b"")
+        if len(body) > _MAX_BODY_SIZE:
+            raise ValueError(f"Body trop volumineux (>{_MAX_BODY_SIZE // (1024*1024)} MB)")
         if not message.get("more_body", False):
             break
     return body
 
 
 async def _json_response(send, status, data):
-    """Envoie une réponse JSON avec headers CORS."""
+    """
+    Envoie une réponse JSON.
+
+    SÉCURITÉ : CORS restreint — le header Access-Control-Allow-Origin
+    est défini uniquement pour les requêtes same-origin depuis /admin.
+    Les requêtes cross-origin depuis des domaines tiers sont bloquées.
+    """
     body = json.dumps(data, default=str).encode()
     await send({
         "type": "http.response.start",
@@ -677,7 +744,6 @@ async def _json_response(send, status, data):
         "headers": [
             (b"content-type", b"application/json"),
             (b"content-length", str(len(body)).encode()),
-            (b"access-control-allow-origin", b"*"),
         ],
     })
     await send({"type": "http.response.body", "body": body})

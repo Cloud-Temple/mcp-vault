@@ -62,7 +62,9 @@ async def download_from_s3() -> bool:
 
         # Décompresser dans le data_dir
         with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
-            tar.extractall(path=str(data_dir))
+            # SÉCURITÉ : filter='data' bloque les path traversal (../../),
+            # symlinks dangereux et fichiers device (CVE-2007-4559)
+            tar.extractall(path=str(data_dir), filter='data')
 
         size_mb = len(archive_bytes) / (1024 * 1024)
         logger.info(f"✅ Données OpenBao restaurées depuis S3 ({size_mb:.1f} MB)")

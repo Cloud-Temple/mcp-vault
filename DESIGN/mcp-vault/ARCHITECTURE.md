@@ -1,6 +1,6 @@
 # Architecture — MCP Vault
 
-> **Version** : 0.2.0 | **Date** : 2026-03-22 | **Auteur** : Cloud Temple  
+> **Version** : 0.4.0 | **Date** : 2026-03-24 | **Auteur** : Cloud Temple  
 > **Projet** : mcp-vault | **Licence** : Apache 2.0  
 > **Statut** : 📐 Design — non implémenté
 

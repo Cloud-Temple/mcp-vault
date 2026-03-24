@@ -10,7 +10,7 @@ MCP Vault dispose de **4 niveaux de tests**, couvrant de la cryptographie bas-ni
 | ------------------------ | -------- | --------------- | ----- | ----------------------------------- |
 | `tests/test_cli_all.py`  | **197**  | ❌ Non          | ~2s   | Parsing CLI Click + affichage Rich  |
 | `tests/test_cli_live.py` | **79**   | ✅ Oui          | ~10s  | Cycle complet live (8 sections)     |
-| `tests/test_e2e.py`      | **~290** | ✅ Oui (Docker) | ~5s   | Tous les outils MCP (14 catégories) |
+| `tests/test_e2e.py`      | **310** | ✅ Oui (Docker) | ~5s   | Tous les outils MCP (15 catégories) |
 | `tests/test_crypto.py`   | **16**   | ❌ Non          | <1s   | Chiffrement AES-256-GCM + sécurité  |
 
 ---
@@ -103,7 +103,7 @@ Teste **tous les outils MCP** (24) avec un OpenBao réel, sans mocking. C'est la
 La manière la plus simple : les variables d'environnement sont déjà chargées.
 
 ```bash
-# Tous les tests (~295 tests)
+# Tous les tests (310 tests)
 docker compose exec mcp-vault python tests/test_e2e.py
 
 # Un seul groupe
@@ -133,7 +133,7 @@ MCP_URL=http://localhost:8085 MCP_TOKEN="$ADMIN_BOOTSTRAP_KEY" python tests/test
 
 > ⚠️ **Depuis v0.3.1**, seul le header `Authorization: Bearer <token>` est accepté. L'authentification par `?token=` dans l'URL a été supprimée pour des raisons de sécurité.
 
-### 14 catégories
+### 15 catégories
 
 | #   | Catégorie   | Tests | Description                          |
 | --- | ----------- | ----- | ------------------------------------ |
@@ -184,7 +184,7 @@ tests/
 │
 ├── test_cli_all.py            ← 197 tests CLI parsing (sans serveur)
 ├── test_cli_live.py           ← 79 tests CLI live (serveur réel)
-├── test_e2e.py                ← ~290 tests MCP complets (Docker)
+├── test_e2e.py                ← 310 tests MCP complets (Docker)
 ├── test_crypto.py             ← 16 tests AES-256-GCM + sécurité (v0.3.1)
 ├── test_integration.py        ← tests d'intégration S3/Auth
 ├── test_service.py            ← tests de service
@@ -234,7 +234,7 @@ Les tests valident les **3 couches d'isolation** :
 | ------------------------ | ------------------------------------------------------ |
 | Tests CLI parsing        | **197** (sans serveur)                                 |
 | Tests CLI live           | **79** (serveur réel)                                  |
-| Tests e2e MCP            | **~290** (OpenBao + S3 réel)                           |
+| Tests e2e MCP            | **310** (OpenBao + S3 réel)                           |
 | Tests crypto + sécurité  | **16**                                                 |
 | **Total**                | **~590 tests**                                         |
 | Couverture fonctionnelle | 24 outils MCP, 14 types secrets                        |
