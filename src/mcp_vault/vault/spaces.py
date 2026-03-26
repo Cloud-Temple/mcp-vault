@@ -88,7 +88,9 @@ def check_vault_owner(vault_id: str, client_name: str) -> bool:
 
     meta = _read_vault_meta(client, vault_id)
     if not meta:
-        return True  # Pas de métadonnées → vault legacy, autoriser
+        # SÉCURITÉ V3-09 : fail-close — vault sans métadonnées = accès refusé
+        logger.warning(f"SECURITY: vault {vault_id} has no _vault_meta — access denied")
+        return False
 
     return meta.get("created_by", "") == client_name
 

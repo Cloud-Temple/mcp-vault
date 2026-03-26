@@ -1,7 +1,7 @@
 # Documentation Technique — MCP Vault
 
-> **Version** : 0.4.0 | **Date** : 2026-03-24 | **Auteur** : Cloud Temple
-> **Licence** : Apache 2.0 | **Statut** : 🚧 Implémentation en cours
+> **Version** : 0.4.5 | **Date** : 2026-03-26 | **Auteur** : Cloud Temple
+> **Licence** : Apache 2.0 | **Statut** : ✅ Production-ready (audit V2.1 complété)
 
 ---
 
@@ -183,8 +183,7 @@ d'autres tokens. La sémantique est désormais "vide = mes vaults".
 2. Token Store S3 (lookup par hash SHA-256) → permissions du token
 
 **Extraction du token** :
-1. Header `Authorization: Bearer <token>`
-2. Query string `?token=<token>` (fallback)
+1. Header `Authorization: Bearer <token>` (seule méthode acceptée depuis v0.3.1)
 
 ### 3.6 `auth/token_store.py` — Token Store S3
 
@@ -364,7 +363,7 @@ listener "tcp" {
   address     = "127.0.0.1:8200"
   tls_disable = true
 }
-disable_mlock = true
+disable_mlock = false
 api_addr = "http://127.0.0.1:8200"
 ui = false
 ```
@@ -397,41 +396,41 @@ Journal d'audit de toutes les opérations MCP, avec double persistance :
 
 **Chaque entrée d'audit contient** :
 
-| Champ         | Type   | Description                                                    |
-| ------------- | ------ | -------------------------------------------------------------- |
-| `ts`          | string | Timestamp ISO 8601 UTC                                         |
-| `client`      | string | Nom du client (auto-détecté via `get_current_client_name()`)   |
-| `tool`        | string | Nom de l'outil MCP (ex: `vault_create`, `secret_read`)        |
+| Champ         | Type   | Description                                                                   |
+| ------------- | ------ | ----------------------------------------------------------------------------- |
+| `ts`          | string | Timestamp ISO 8601 UTC                                                        |
+| `client`      | string | Nom du client (auto-détecté via `get_current_client_name()`)                  |
+| `tool`        | string | Nom de l'outil MCP (ex: `vault_create`, `secret_read`)                        |
 | `category`    | string | Catégorisation automatique (system, vault, secret, ssh, policy, token, audit) |
-| `vault_id`    | string | Vault concerné (vide si non applicable)                        |
-| `status`      | string | Résultat (ok, created, deleted, error, updated, denied)        |
-| `detail`      | string | Détail additionnel (path du secret, message d'erreur…)         |
-| `duration_ms` | float  | Durée de l'opération en millisecondes                          |
+| `vault_id`    | string | Vault concerné (vide si non applicable)                                       |
+| `status`      | string | Résultat (ok, created, deleted, error, updated, denied)                       |
+| `detail`      | string | Détail additionnel (path du secret, message d'erreur…)                        |
+| `duration_ms` | float  | Durée de l'opération en millisecondes                                         |
 
 **Catégorisation automatique** : basée sur le préfixe du nom d'outil (`_categorize_tool()`).
 
-| Préfixe    | Catégorie |
-| ---------- | --------- |
-| `system_`  | system    |
-| `vault_`   | vault     |
-| `secret_`  | secret    |
-| `ssh_`     | ssh       |
-| `policy_`  | policy    |
-| `token_`   | token     |
-| `audit_`   | audit     |
-| *(autre)*  | other     |
+| Préfixe   | Catégorie |
+| --------- | --------- |
+| `system_` | system    |
+| `vault_`  | vault     |
+| `secret_` | secret    |
+| `ssh_`    | ssh       |
+| `policy_` | policy    |
+| `token_`  | token     |
+| `audit_`  | audit     |
+| *(autre)* | other     |
 
 **Filtrage** (`get_entries()`) : tous les filtres sont combinables.
 
-| Filtre     | Description                                              |
-| ---------- | -------------------------------------------------------- |
-| `limit`    | Nombre max d'entrées (défaut 100, max 1000)              |
-| `client`   | Filtrer par client_name exact                            |
-| `vault_id` | Filtrer par vault_id exact                               |
-| `tool`     | Filtrer par outil (supporte `*` via startswith)           |
-| `category` | Filtrer par catégorie                                    |
-| `status`   | Filtrer par statut                                       |
-| `since`    | Entrées après cette date ISO 8601                        |
+| Filtre     | Description                                     |
+| ---------- | ----------------------------------------------- |
+| `limit`    | Nombre max d'entrées (défaut 100, max 1000)     |
+| `client`   | Filtrer par client_name exact                   |
+| `vault_id` | Filtrer par vault_id exact                      |
+| `tool`     | Filtrer par outil (supporte `*` via startswith) |
+| `category` | Filtrer par catégorie                           |
+| `status`   | Filtrer par statut                              |
+| `since`    | Entrées après cette date ISO 8601               |
 
 **Statistiques** (`get_stats()`) : agrégations pour le dashboard.
 
@@ -503,23 +502,25 @@ volumes:
 
 ### 5.2 Tests e2e (`tests/test_e2e.py`)
 
-**310 tests** e2e via protocole MCP Streamable HTTP, 15 catégories :
+**312 tests** e2e via protocole MCP Streamable HTTP, 15 catégories :
 
-| #   | Catégorie                     | Tests  | Description                                                     |
-| --- | ----------------------------- | ------ | --------------------------------------------------------------- |
-| 1   | Système                       | 7      | health, about, services, version, tools_count (24)              |
-| 2   | Vault Spaces CRUD             | ~28    | create, list, info, update, delete, metadata, erreurs           |
-| 3   | Secrets CRUD                  | ~24    | 14 types, write/read/list/delete, validation                    |
-| 4   | Versioning & Rotation         | 8      | v1/v2/v3, lecture version spécifique                            |
-| 5   | Password Generator            | 14     | longueurs, options, exclusions, unicité CSPRNG                  |
-| 6   | Isolation inter-vaults        | 7      | cloisonnement strict entre vaults                               |
-| 7   | Gestion d'erreurs             | ~10    | edge cases, _vault_meta protection                              |
-| 8   | S3 Sync                       | 3      | HEAD bucket, list archives, archive existe                      |
-| 9   | SSH CA                        | ~33    | setup, roles multiples, signing ed25519, isolation              |
-| 10  | Secret Types                  | 14     | validation des 14 types                                         |
-| 11  | Admin API                     | 15     | health, whoami, generate-password, logs, CSPRNG                 |
-| 12  | Policies MCP                  | 43     | CRUD, validation, wildcards, path_rules, Admin API              |
-| 13  | **Policy Enforcement**        | **37** | check_policy, token_update, denied/allowed, changement policy   |
+| #   | Catégorie              | Tests  | Description                                                                 |
+| --- | ---------------------- | ------ | --------------------------------------------------------------------------- |
+| 1   | Système                | 7      | health, about, services, version, tools_count (24)                          |
+| 2   | Vault Spaces CRUD      | ~28    | create, list, info, update, delete, metadata, erreurs                       |
+| 3   | Secrets CRUD           | ~24    | 14 types, write/read/list/delete, validation                                |
+| 4   | Versioning & Rotation  | 8      | v1/v2/v3, lecture version spécifique                                        |
+| 5   | Password Generator     | 14     | longueurs, options, exclusions, unicité CSPRNG                              |
+| 6   | Isolation inter-vaults | 7      | cloisonnement strict entre vaults                                           |
+| 7   | Gestion d'erreurs      | ~10    | edge cases, _vault_meta protection                                          |
+| 8   | S3 Sync                | 3      | HEAD bucket, list archives, archive existe                                  |
+| 9   | SSH CA                 | ~33    | setup, roles multiples, signing ed25519, isolation                          |
+| 10  | Secret Types           | 14     | validation des 14 types                                                     |
+| 11  | Admin API              | 15     | health, whoami, generate-password, logs, CSPRNG                             |
+| 12  | Policies MCP           | 43     | CRUD, validation, wildcards, path_rules, Admin API                          |
+| 13  | **Policy Enforcement** | **37** | check_policy, token_update, denied/allowed, changement policy               |
+| 14  | **Audit Log**          | **31** | audit_log MCP, filtres (category/tool/status/since/limit), stats, Admin API |
+| 15  | **WAF Security**       | **17** | LFI, SQLi, XSS, RCE, Scanner Detection → 403 + non-régression               |
 
 ### 5.3 Scénarios SSH CA testés (Phase 6)
 
@@ -556,7 +557,7 @@ docker compose exec mcp-vault python tests/test_e2e.py --verbose
 
 ## 6. Sécurité
 
-> **Audit de Sécurité** : Deux audits complets ont été réalisés (v0.2.0 et v0.3.3) — 23 vulnérabilités identifiées au total, toutes corrigées. Voir [`SECURITY_AUDIT.md`](SECURITY_AUDIT.md) pour le rapport complet incluant les correctifs (timing attack, admin API bypass, tarfile CVE, CORS, rate limiting, fail-close policies, body limit, vault_id validation).
+> **Audit de Sécurité** : Trois audits ont été réalisés (v0.2.0, v0.3.3, V2.1 externe). L'audit V2.1 (60 findings) est la référence unique : 28 corrigés (v0.3.1→v0.4.5), 13 résiduels documentés, 18 informationnels. Aucune vulnérabilité Élevée ouverte. Voir [`SECURITY_AUDIT.md`](SECURITY_AUDIT.md) pour le rapport consolidé.
 
 ### 6.1 Chiffrement
 
@@ -649,8 +650,8 @@ Voir `ARCHITECTURE.md §7.8` pour les détails complets.
 
 | Version             | Mécanisme                                    | Où vivent les clés         | Niveau         |
 | ------------------- | -------------------------------------------- | -------------------------- | -------------- |
-| **v0.2.x** (actuel) | AES-256-GCM + PBKDF2 + bootstrap key env var | Mémoire Python au runtime  | 🟡 Bonne      |
-| **v0.3.0**          | Transit Auto-Unseal via OpenBao KMS dédié    | KMS dédié (Shamir 5/3)     | 🟢 Excellente |
+| **v0.4.5** (actuel) | AES-256-GCM+AAD + PBKDF2 + bootstrap key env | Mémoire Python au runtime  | 🟡 Bonne      |
+| **v1.0**            | Transit Auto-Unseal via OpenBao KMS dédié    | KMS dédié (Shamir 5/3)     | 🟢 Excellente |
 | **v2.0**            | HSM matériel (PKCS#11 / KMIP)                | HSM certifié FIPS 140-2 L3 | 🟢 Maximale   |
 
 Voir `ARCHITECTURE.md §11.3` pour les diagrammes d'architecture et les étapes de migration détaillées.
@@ -680,18 +681,20 @@ Voir `ARCHITECTURE.md §11.3` pour les diagrammes d'architecture et les étapes 
 
 ## 8. Roadmap
 
-| Phase                       | Statut | Description                                                                                                                              |
-| --------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Phase 0 — Bootstrap         | ✅     | Starter-kit, structure, config, Docker                                                                                                   |
-| Phase 1 — S3 + Auth         | ✅     | Client S3 hybride, Token Store, middleware                                                                                               |
-| Phase 2 — Types             | ✅     | 14 types de secrets, validation, password generator                                                                                      |
-| Phase 3 — Tests             | ✅     | 78 tests e2e (permissions, S3, admin)                                                                                                    |
-| Phase 4 — OpenBao lifecycle | ✅     | Init/unseal/seal intégré, clés chiffrées AES-256-GCM sur S3, 104 tests                                                                   |
-| Phase 5 — Vault Spaces CRUD | ✅     | Métadonnées (owner, dates), vault_update, filtrage token, protection _vault_meta                                                         |
-| Phase 6 — SSH CA            | ✅     | CA isolée par vault, 5 outils MCP (setup, sign, public_key, list_roles, role_info), 148 tests e2e, CLI ssh complet, cleanup CA auto      |
-| Phase 7 — Interface web     | ✅     | Console admin SPA modulaire (sidebar, CRUD vaults/secrets, permissions granulaires, 15 endpoints API, 10 fichiers frontend < 200 lignes) |
-| Phase 8a — Policies CRUD      | ✅     | PolicyStore S3-backed, 4 outils MCP (create, list, get, delete), wildcards fnmatch, path_rules, Admin API, 206 tests e2e |
-| Phase 8b — Policy Enforcement | ✅     | `check_policy()` dans 15 outils MCP, champ `policy_id` dans tokens, outil `token_update`, 310 tests e2e / 15 catégories |
-| Phase 8c — Audit Log          | ✅     | AuditStore (ring buffer 5000 + JSONL), outil `audit_log` filtrable, timeline SPA, CLI audit, catégorisation auto, stats dashboard |
-| Phase 8d — Owner Isolation     | ✅     | **Owner-based vault isolation** : `vide = mes vaults` (au lieu de `vide = tous`). Fix bug `vault_ids` → `allowed_resources`. `check_vault_owner()`, `list_spaces(owner_filter)`. SPA : modal édition token + label mis à jour. |
-| Phase 9 — HSM Integration     | ⏳     | **En attente HSM** — Design et prérequis documentés (ARCHITECTURE.md §11.3). Bloqué par la disponibilité du Thales Luna chez Cloud Temple. Config HCL cible, migration 11 étapes, commandes Luna préparées. Reprise dès que le matériel HSM sera opérationnel. |
+| Phase                            | Statut | Description                                                                                                                                                                                                                    |
+| -------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Phase 0 — Bootstrap              | ✅     | Starter-kit, structure, config, Docker                                                                                                                                                                                         |
+| Phase 1 — S3 + Auth              | ✅     | Client S3 hybride, Token Store, middleware                                                                                                                                                                                     |
+| Phase 2 — Types                  | ✅     | 14 types de secrets, validation, password generator                                                                                                                                                                            |
+| Phase 3 — Tests                  | ✅     | 78 tests e2e (permissions, S3, admin)                                                                                                                                                                                          |
+| Phase 4 — OpenBao lifecycle      | ✅     | Init/unseal/seal intégré, clés chiffrées AES-256-GCM sur S3, 104 tests                                                                                                                                                         |
+| Phase 5 — Vault Spaces CRUD      | ✅     | Métadonnées (owner, dates), vault_update, filtrage token, protection _vault_meta                                                                                                                                               |
+| Phase 6 — SSH CA                 | ✅     | CA isolée par vault, 5 outils MCP (setup, sign, public_key, list_roles, role_info), 148 tests e2e, CLI ssh complet, cleanup CA auto                                                                                            |
+| Phase 7 — Interface web          | ✅     | Console admin SPA modulaire (sidebar, CRUD vaults/secrets, permissions granulaires, 15 endpoints API, 10 fichiers frontend < 200 lignes)                                                                                       |
+| Phase 8a — Policies CRUD         | ✅     | PolicyStore S3-backed, 4 outils MCP (create, list, get, delete), wildcards fnmatch, path_rules, Admin API, 206 tests e2e                                                                                                       |
+| Phase 8b — Policy Enforcement    | ✅     | `check_policy()` dans 15 outils MCP, champ `policy_id` dans tokens, outil `token_update`, 310 tests e2e / 15 catégories                                                                                                        |
+| Phase 8c — Audit Log             | ✅     | AuditStore (ring buffer 5000 + JSONL), outil `audit_log` filtrable, timeline SPA, CLI audit, catégorisation auto, stats dashboard                                                                                              |
+| Phase 8d — Owner Isolation       | ✅     | **Owner-based vault isolation** : `vide = mes vaults` (au lieu de `vide = tous`). Fix bug `vault_ids` → `allowed_resources`. `check_vault_owner()`, `list_spaces(owner_filter)`. SPA : modal édition token + label mis à jour. |
+| Phase 8e — Path Enforcement      | ✅     | `allowed_paths` dans les `path_rules`, `is_path_allowed()` dans PolicyStore, `check_path_policy()` dans context.py. Intégré dans secret_read/write/delete.                                                                     |
+| Phase 9 — Sécurité v0.3.1-v0.4.5 | ✅     | **3 audits** (interne v0.2.0, interne v0.3.3, externe v0.4.0). 60 findings identifiés, 28 corrigés (P0/P1/P2), 13 résiduels documentés. WAF Coraza blocking, Docker hardening, AES-GCM AAD, HSTS, images par digest.           |
+| Phase 10 — HSM Integration       | ⏳      | **En attente HSM** — Design et prérequis documentés (ARCHITECTURE.md §11.3). Bloqué par la disponibilité du Thales Luna chez Cloud Temple. Config HCL cible, migration 11 étapes, commandes Luna préparées.                    |

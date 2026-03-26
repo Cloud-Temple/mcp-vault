@@ -124,7 +124,8 @@ class TokenStore:
                 if datetime.now(timezone.utc) > expires:
                     return None  # Token expiré
             except (ValueError, TypeError):
-                pass
+                # SÉCURITÉ V2-17 : fail-close — expires_at corrompu = token invalide
+                return None
         return token
 
     def create(self, client_name: str, permissions: list, allowed_resources: list = None,

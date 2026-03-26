@@ -227,7 +227,8 @@ async def initialize_vault() -> dict:
     _in_memory_keys = init_data
 
     logger.info("✅ OpenBao initialisé — clés chiffrées sur S3, mémoire seule au runtime")
-    return {"status": "initialized", **init_data}
+    # SÉCURITÉ V3-07 : ne pas retourner root_token/keys dans la réponse
+    return {"status": "initialized", "s3_persisted": True}
 
 
 async def unseal_vault() -> dict:

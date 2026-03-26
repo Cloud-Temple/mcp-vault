@@ -7,6 +7,8 @@ Supporte le versioning natif de KV v2.
 """
 
 import logging
+import re
+from typing import Optional
 
 from ..openbao.manager import get_hvac_client
 from .spaces import VAULT_META_PATH
@@ -14,8 +16,37 @@ from .types import validate_secret, enrich_secret_data, list_types, generate_pas
 
 logger = logging.getLogger("mcp-vault.secrets")
 
-# Chemins réservés — protégés contre l'écriture directe
+# Chemins réservés — protégés contre l'écriture/lecture/suppression directe
 RESERVED_PATHS = {VAULT_META_PATH}
+
+# SÉCURITÉ V3-23 : Validation regex des chemins de secrets
+_PATH_PATTERN = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9/_.\-]{0,255}$')
+
+
+def _validate_secret_path(path: str) -> Optional[dict]:
+    """
+    Valide le format d'un chemin de secret.
+
+    SÉCURITÉ V3-23 : empêche les traversals vers endpoints OpenBao internes.
+    Rejette : ../, \\, chemins vides, caractères spéciaux.
+    """
+    if not path:
+        return None  # Chemin vide = listing racine, OK
+    if ".." in path or "\\" in path or not _PATH_PATTERN.match(path):
+        return {"status": "error", "message": f"Chemin invalide: '{path}'"}
+    return None
+
+
+def _is_reserved_path(path: str) -> bool:
+    """
+    Vérifie si un chemin est réservé (match exact OU sous-chemin).
+
+    SÉCURITÉ V3-24 : match préfixe pour empêcher le bypass via _vault_meta/injected.
+    """
+    return any(
+        path == rp or path.rstrip("/") == rp or path.startswith(rp + "/")
+        for rp in RESERVED_PATHS
+    )
 
 
 async def write_secret(vault_id: str, path: str, data: dict,
@@ -32,8 +63,13 @@ async def write_secret(vault_id: str, path: str, data: dict,
         tags: Tags séparés par des virgules
         favorite: Marquer comme favori
     """
-    # Protection des chemins réservés
-    if path in RESERVED_PATHS or path.rstrip("/") in RESERVED_PATHS:
+    # SÉCURITÉ V3-23 : validation du chemin
+    path_err = _validate_secret_path(path)
+    if path_err:
+        return path_err
+
+    # SÉCURITÉ V3-24 : protection des chemins réservés (match préfixe)
+    if _is_reserved_path(path):
         return {"status": "error", "message": f"Le chemin '{path}' est réservé au système"}
 
     # Validation du type
@@ -72,6 +108,15 @@ async def write_secret(vault_id: str, path: str, data: dict,
 
 async def read_secret(vault_id: str, path: str, version: int = 0) -> dict:
     """Lit un secret (dernière version ou version spécifique)."""
+    # SÉCURITÉ V3-23 : validation du chemin
+    path_err = _validate_secret_path(path)
+    if path_err:
+        return path_err
+
+    # SÉCURITÉ V3-25 : protection des chemins réservés en lecture
+    if _is_reserved_path(path):
+        return {"status": "error", "message": f"Le chemin '{path}' est réservé au système"}
+
     client = get_hvac_client()
     if not client:
         return {"status": "error", "message": "OpenBao non connecté"}
@@ -121,8 +166,13 @@ async def list_secrets(vault_id: str, path: str = "") -> dict:
 
 async def delete_secret(vault_id: str, path: str) -> dict:
     """Supprime un secret et toutes ses versions."""
-    # Protection des chemins réservés
-    if path in RESERVED_PATHS or path.rstrip("/") in RESERVED_PATHS:
+    # SÉCURITÉ V3-23 : validation du chemin
+    path_err = _validate_secret_path(path)
+    if path_err:
+        return path_err
+
+    # SÉCURITÉ V3-24 : protection des chemins réservés (match préfixe)
+    if _is_reserved_path(path):
         return {"status": "error", "message": f"Le chemin '{path}' est réservé au système"}
 
     client = get_hvac_client()

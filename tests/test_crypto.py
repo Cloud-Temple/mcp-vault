@@ -248,6 +248,66 @@ def test_derive_key_returns_bytearray():
     print("  ✅ _derive_key retourne bytearray (32 bytes)")
 
 
+def test_aad_legacy_fallback():
+    """Données chiffrées SANS AAD (pré-v0.4.5) doivent être déchiffrables via fallback."""
+    import base64, os
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from mcp_vault.openbao.crypto import (
+        decrypt_with_bootstrap_key, _derive_key, _SALT_LENGTH, _NONCE_LENGTH, _zero_fill,
+    )
+
+    # Simuler un chiffrement legacy SANS AAD (comme le faisait v0.4.0)
+    plaintext = '{"root_token": "hvs.legacy-test"}'
+    salt = os.urandom(_SALT_LENGTH)
+    nonce = os.urandom(_NONCE_LENGTH)
+    key = _derive_key(_TEST_KEY, salt)
+    try:
+        aesgcm = AESGCM(bytes(key))
+        ciphertext_with_tag = aesgcm.encrypt(nonce, plaintext.encode("utf-8"), None)  # PAS d'AAD
+    finally:
+        _zero_fill(key)
+
+    encrypted_b64 = base64.b64encode(salt + nonce + ciphertext_with_tag).decode("ascii")
+
+    # Le déchiffrement doit fonctionner via le fallback legacy
+    decrypted = decrypt_with_bootstrap_key(encrypted_b64, _TEST_KEY)
+    assert decrypted == plaintext, f"Fallback legacy échoué : {decrypted!r} != {plaintext!r}"
+    print("  ✅ AAD legacy fallback (pré-v0.4.5) OK")
+
+
+def test_aad_context_binding():
+    """Le chiffrement avec AAD empêche le déchiffrement avec un AAD différent."""
+    import base64, os
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from mcp_vault.openbao.crypto import (
+        _derive_key, _SALT_LENGTH, _NONCE_LENGTH, _AAD, _zero_fill,
+    )
+
+    plaintext = "secret-data"
+    salt = os.urandom(_SALT_LENGTH)
+    nonce = os.urandom(_NONCE_LENGTH)
+    key = _derive_key(_TEST_KEY, salt)
+    try:
+        aesgcm = AESGCM(bytes(key))
+        ciphertext = aesgcm.encrypt(nonce, plaintext.encode("utf-8"), _AAD)
+    finally:
+        _zero_fill(key)
+
+    # Tenter de déchiffrer avec un AAD différent → doit échouer
+    key2 = _derive_key(_TEST_KEY, salt)
+    try:
+        aesgcm2 = AESGCM(bytes(key2))
+        try:
+            aesgcm2.decrypt(nonce, ciphertext, b"wrong-context")
+            assert False, "Aurait dû lever une exception (AAD différent)"
+        except Exception:
+            pass  # Attendu : InvalidTag
+    finally:
+        _zero_fill(key2)
+
+    print("  ✅ AAD context binding — AAD différent → rejet OK")
+
+
 if __name__ == "__main__":
     tests = [
         test_roundtrip_simple,
@@ -266,9 +326,11 @@ if __name__ == "__main__":
         test_validate_bootstrap_key_repetitive,
         test_zero_fill,
         test_derive_key_returns_bytearray,
+        test_aad_legacy_fallback,
+        test_aad_context_binding,
     ]
 
-    print(f"\n🧪 Tests crypto.py — Option C + Sécurité ({len(tests)} tests)\n")
+    print(f"\n🧪 Tests crypto.py — Option C + Sécurité + AAD ({len(tests)} tests)\n")
 
     passed = 0
     failed = 0

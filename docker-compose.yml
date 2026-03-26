@@ -28,6 +28,15 @@ services:
     restart: unless-stopped
     mem_limit: 512m
     cpus: 1.0
+    # SÉCURITÉ P2-7 : hardening Docker
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /var/log/coraza:size=50m
+      - /data:size=10m
+      - /config:size=10m
+      - /tmp:size=10m
     networks:
       - mcp-net
 
@@ -35,7 +44,9 @@ services:
   # MCP Vault — Python + OpenBao embedded (réseau interne)
   # ─────────────────────────────────────────────────────────────
   mcp-vault:
-    build: .
+    build:
+      context: .
+      target: production
     # PAS de "ports:" — expose uniquement sur le réseau interne
     expose:
       - "8030"
@@ -50,6 +61,11 @@ services:
     restart: unless-stopped
     mem_limit: 2g
     cpus: 2.0
+    # SÉCURITÉ P2-7 : hardening Docker
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=50m
     networks:
       - mcp-net
 
@@ -57,11 +73,15 @@ services:
   # Tests — Lance les tests d'intégration (usage ponctuel)
   # docker compose run --rm test
   # ─────────────────────────────────────────────────────────────
+  # P2-8 : Tests dans un stage dédié (hors image prod)
   test:
-    build: .
+    build:
+      context: .
+      target: test
     env_file: .env
-    entrypoint: ["python", "-m", "pytest", "tests/", "-v", "--tb=short"]
     profiles: ["test"]
+    security_opt:
+      - no-new-privileges:true
     networks:
       - mcp-net
 

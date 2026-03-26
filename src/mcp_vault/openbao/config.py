@@ -28,8 +28,8 @@ listener "tcp" {{
   tls_disable = true
 }}
 
-# Docker : pas de IPC_LOCK capability dans tous les cas
-disable_mlock = true
+# SÉCURITÉ V3-05 : mlock activé — IPC_LOCK est accordé dans docker-compose.yml
+disable_mlock = false
 
 api_addr = "{api_addr}"
 

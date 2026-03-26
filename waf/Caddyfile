@@ -59,12 +59,29 @@
 
 	# ── Headers de sécurité ────────────────────────────────────────
 	header {
+		# SÉCURITÉ V2-13 : HSTS — force HTTPS pour tous les sous-domaines
+		# max-age=1 an, includeSubDomains pour couverture complète
+		# Note : ignoré si pas de TLS, mais prêt pour la production
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options nosniff
 		X-Frame-Options DENY
 		Referrer-Policy strict-origin-when-cross-origin
 		X-XSS-Protection "1; mode=block"
 		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;"
+		# Pas de header Server (fingerprinting)
 		-Server
+	}
+
+	# ── CORS restrictif (P2-6) ─────────────────────────────────────
+	# Bloque les requêtes cross-origin sauf depuis la même origine.
+	# Le SPA admin est servi par le même serveur, donc pas besoin de CORS.
+	@cors_preflight method OPTIONS
+	handle @cors_preflight {
+		header Access-Control-Allow-Methods "GET, POST, PUT, DELETE"
+		header Access-Control-Allow-Headers "Authorization, Content-Type"
+		header Access-Control-Max-Age "3600"
+		# Pas de Access-Control-Allow-Origin → bloque toute origine cross-origin
+		respond 204
 	}
 
 	# ── Logs ───────────────────────────────────────────────────────

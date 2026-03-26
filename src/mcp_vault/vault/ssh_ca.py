@@ -8,6 +8,8 @@ un certificat éphémère pour se connecter aux serveurs cibles.
 """
 
 import logging
+import re
+from typing import Optional
 
 from ..openbao.manager import get_hvac_client
 
@@ -15,6 +17,24 @@ logger = logging.getLogger("mcp-vault.ssh-ca")
 
 # Préfixe pour le mount path SSH dans OpenBao
 SSH_MOUNT_PREFIX = "ssh-ca-"
+
+# SÉCURITÉ V3-11 : Validation regex de role_name (même pattern que vault_id)
+_ROLE_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$')
+
+
+def _validate_role_name(role_name: str) -> Optional[dict]:
+    """
+    Valide le format d'un nom de rôle SSH.
+
+    SÉCURITÉ V3-11 : empêche l'injection de chemin OpenBao via role_name.
+    Accepte : alphanumérique + tirets + underscores, 1-64 chars.
+    Rejette : ../, caractères spéciaux, chemins relatifs.
+    """
+    if not role_name:
+        return {"status": "error", "message": "role_name est requis"}
+    if not _ROLE_NAME_PATTERN.match(role_name):
+        return {"status": "error", "message": f"role_name '{role_name}' invalide (alphanum, tirets, underscores, 1-64 chars)"}
+    return None
 
 
 def _ssh_mount_point(vault_id: str) -> str:
@@ -31,6 +51,11 @@ async def setup_ssh_ca(vault_id: str, role_name: str, allowed_users: str = "*",
     2. Génère la paire de clés CA (si pas déjà générée)
     3. Crée le rôle SSH
     """
+    # SÉCURITÉ V3-11 : validation de role_name
+    role_err = _validate_role_name(role_name)
+    if role_err:
+        return role_err
+
     client = get_hvac_client()
     if not client:
         return {"status": "error", "message": "OpenBao non connecté"}
@@ -88,6 +113,11 @@ async def setup_ssh_ca(vault_id: str, role_name: str, allowed_users: str = "*",
 async def sign_ssh_key(vault_id: str, role_name: str, public_key: str,
                        ttl: str = "30m") -> dict:
     """Signe une clé publique SSH avec la CA du vault."""
+    # SÉCURITÉ V3-11 : validation de role_name
+    role_err = _validate_role_name(role_name)
+    if role_err:
+        return role_err
+
     client = get_hvac_client()
     if not client:
         return {"status": "error", "message": "OpenBao non connecté"}
@@ -182,6 +212,11 @@ async def get_ssh_role_info(vault_id: str, role_name: str) -> dict:
     Retourne : key_type, ttl, max_ttl, allowed_users, default_user,
     allowed_extensions, allow_user_certificates, etc.
     """
+    # SÉCURITÉ V3-11 : validation de role_name
+    role_err = _validate_role_name(role_name)
+    if role_err:
+        return role_err
+
     client = get_hvac_client()
     if not client:
         return {"status": "error", "message": "OpenBao non connecté"}

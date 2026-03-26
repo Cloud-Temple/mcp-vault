@@ -1,5 +1,6 @@
 # --- MCP Framework ---
-mcp[cli]>=1.9.0
+# SÉCURITÉ V3-01 : >=1.23.0 corrige CVE-2025-53366 (DoS) et CVE-2025-66416 (DNS rebinding)
+mcp[cli]>=1.23.0
 
 # --- Configuration ---
 pydantic-settings>=2.0

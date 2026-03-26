@@ -2,6 +2,8 @@
 
 > **Gestion sécurisée des secrets pour agents IA — OpenBao embedded**
 
+> 🇬🇧 [English version](README.en.md)
+
 MCP Vault est un serveur [MCP](https://modelcontextprotocol.io/) qui fournit un coffre-fort de secrets pour les agents IA et les missions. Il embarque [OpenBao](https://openbao.org/) (fork open-source de HashiCorp Vault, Linux Foundation) comme moteur de chiffrement.
 
 **Pensez 1Password, mais pour vos agents IA.**
@@ -19,10 +21,11 @@ MCP Vault est un serveur [MCP](https://modelcontextprotocol.io/) qui fournit un 
 | Document                                                | Description                                                                                                                                                                  |
 | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [**ARCHITECTURE.md**](DESIGN/mcp-vault/ARCHITECTURE.md) | Spécification complète — vision, architecture ASGI 5 couches, vaults, SSH CA, policies MCP (6 exemples prêts à l'emploi), sécurité des clés unseal (3 facteurs), roadmap HSM |
-| [**TECHNICAL.md**](DESIGN/mcp-vault/TECHNICAL.md)       | Documentation technique — 14 modules source, modèle de données, Docker, 310 tests e2e, dépendances, roadmap                                                                |
+| [**TECHNICAL.md**](DESIGN/mcp-vault/TECHNICAL.md)       | Documentation technique — 14 modules source, modèle de données, Docker, 312 tests e2e, dépendances, roadmap                                                                |
+| [**SECURITY_AUDIT.md**](DESIGN/mcp-vault/SECURITY_AUDIT.md) | Rapport d'audit de sécurité consolidé — 60 findings V2.1, 28 corrigés, 13 résiduels documentés                                                                         |
 | [**scripts/README.md**](scripts/README.md)              | Guide CLI complet — 7 groupes de commandes, shell interactif, exemples                                                                                                       |
 | [**tests/README.md**](tests/README.md)                  | Guide d'exécution des tests — 4 niveaux, ~600 tests, commandes pour auditeurs                                                                                                |
-| [**TEST_CATALOG.md**](tests/TEST_CATALOG.md)            | Catalogue des tests e2e — 14 catégories, 310 assertions, objectif de chaque section (pour auditeurs)                                                                        |
+| [**TEST_CATALOG.md**](tests/TEST_CATALOG.md)            | Catalogue des tests e2e — 15 catégories, 312 assertions, objectif de chaque section (pour auditeurs)                                                                        |
 
 ---
 
@@ -40,7 +43,7 @@ docker compose up -d
 # 3. Vérifier (depuis le conteneur)
 docker compose exec mcp-vault python scripts/mcp_cli.py health
 
-# 4. Tester (310 tests e2e)
+# 4. Tester (312 tests e2e)
 docker compose exec mcp-vault python tests/test_e2e.py
 ```
 
@@ -273,17 +276,17 @@ Les clés unseal d'OpenBao sont protégées par **séparation physique à 3 fact
 
 **Roadmap sécurité** :
 
-| Version             | Approche                                                                                                            |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| **v0.3.x** (actuel) | Clés sur S3 chiffrées AES-256-GCM, mémoire seule au runtime — console SPA parité CLI                                |
-| **v0.4.0**          | Transit Auto-Unseal via OpenBao dédié (KMS Cloud Temple)                                                            |
-| **v2.0**            | **Connexion HSM** (Hardware Security Module) Cloud Temple — les clés ne quittent jamais le module matériel certifié |
+| Version              | Approche                                                                                                            |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| **v0.4.5** (actuel)  | Clés sur S3 chiffrées AES-256-GCM+AAD, mémoire seule au runtime — 60 findings audités (28 corrigés, 13 résiduels documentés) |
+| **v1.0**             | Transit Auto-Unseal via OpenBao dédié (KMS Cloud Temple)                                                            |
+| **v2.0**             | **Connexion HSM** (Hardware Security Module) Cloud Temple — les clés ne quittent jamais le module matériel certifié |
 
 > 📖 Voir [DESIGN/mcp-vault/ARCHITECTURE.md](DESIGN/mcp-vault/ARCHITECTURE.md) §8 et §11 pour les détails complets.
 
 ---
 
-## 📋 Tests (~590 tests, zéro mocking)
+## 📋 Tests (~600 tests, zéro mocking)
 
 > 📖 Voir [tests/README.md](tests/README.md) pour le guide complet d'exécution.
 
@@ -294,10 +297,10 @@ python tests/test_cli_all.py
 # 2. Tests CLI LIVE — cycle complet (79 tests, serveur réel)
 MCP_URL=http://localhost:8085 MCP_TOKEN=<key> python tests/test_cli_live.py
 
-# 3. Tests e2e MCP (310 tests, dans Docker)
+# 3. Tests e2e MCP (312 tests, dans Docker)
 docker compose exec mcp-vault python tests/test_e2e.py
 
-# 4. Tests crypto (16 tests, SANS serveur — AES-256-GCM + validation entropie)
+# 4. Tests crypto (18 tests, SANS serveur — AES-256-GCM + AAD + validation entropie)
 python tests/test_crypto.py
 
 # Un seul groupe CLI
@@ -307,7 +310,7 @@ python tests/test_cli_all.py --only policy
 docker compose exec mcp-vault python tests/test_e2e.py --test enforcement
 ```
 
-### Couverture e2e (310 tests, 15 catégories)
+### Couverture e2e (312 tests, 15 catégories)
 
 | Catégorie              | Tests  | Description                                                                        |
 | ---------------------- | ------ | ---------------------------------------------------------------------------------- |
@@ -325,6 +328,7 @@ docker compose exec mcp-vault python tests/test_e2e.py --test enforcement
 | Policies MCP           | 43     | CRUD, validation, wildcards, path_rules, doublons, erreurs, Admin API REST         |
 | **Policy Enforcement** | **37** | check_policy, token_update, denied/allowed, changement policy, Admin API           |
 | **Audit Log**          | **31** | audit_log MCP, filtres (category/tool/status/since/limit), stats, Admin API /audit |
+| **WAF Security**       | **17** | LFI, SQLi, XSS, RCE, Scanner Detection → 403 + non-régression requêtes légitimes |
 
 ---
 
@@ -336,10 +340,12 @@ mcp-vault/
 ├── docker-compose.yml        # WAF + MCP Vault + volumes
 ├── Dockerfile                # Multi-stage (OpenBao 2.5.1 + Python 3.12)
 ├── requirements.txt          # Dépendances Python
-├── VERSION                   # 0.4.0
+├── requirements.lock         # Dépendances pinnées (versions exactes)
+├── VERSION                   # 0.4.5
 ├── DESIGN/mcp-vault/
 │   ├── ARCHITECTURE.md       # Spécification détaillée (v0.2.2-draft)
-│   └── TECHNICAL.md          # Documentation technique (v0.2.0)
+│   ├── TECHNICAL.md          # Documentation technique (v0.4.5)
+│   └── SECURITY_AUDIT.md     # Rapport d'audit consolidé (60 findings V2.1)
 ├── scripts/
 │   ├── mcp_cli.py            # CLI entry point
 │   ├── README.md             # Documentation CLI
@@ -369,8 +375,8 @@ mcp-vault/
 │   ├── TEST_CATALOG.md       # Catalogue des tests pour auditeurs
 │   ├── test_cli_all.py       # 197 tests CLI parsing (sans serveur)
 │   ├── test_cli_live.py      # 79 tests CLI live (serveur réel)
-│   ├── test_e2e.py           # 310 tests MCP e2e (14 catégories)
-│   ├── test_crypto.py        # 9 tests AES-256-GCM
+│   ├── test_e2e.py           # 312 tests MCP e2e (15 catégories)
+│   ├── test_crypto.py        # 18 tests AES-256-GCM + AAD
 │   ├── test_service.py       # 78 tests bas niveau
 │   ├── test_integration.py   # Tests pytest
 │   └── cli/                  # Tests CLI découpés par groupe (7 fichiers)
@@ -395,4 +401,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.4.0
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.4.5

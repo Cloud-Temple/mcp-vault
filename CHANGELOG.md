@@ -1,5 +1,59 @@
 # Changelog — MCP Vault
 
+## [0.4.5] — 2026-03-26
+
+### Security — Hardening P2 : 8 correctifs de durcissement
+
+Suite à l'audit de sécurité V2.1 (60 findings), après la remédiation P0 (4 élevés) et P1 (9 moyens) de la v0.4.0, cette release applique les **8 correctifs P2 (hardening)** restants.
+
+#### 🟡 Corrections moyennes et durcissement (8)
+
+- **V2-12 — Docker images pinnées par digest** (`Dockerfile`, `waf/Dockerfile`) : toutes les images base (python:3.12-slim, alpine:3.20, caddy:2-builder, caddy:2-alpine) sont désormais pinnées par SHA256 digest au lieu de tags mutables, protégeant contre les attaques supply chain par remplacement d'image.
+
+- **V2-16 — Plugins Caddy pinnés en version** (`waf/Dockerfile`) : `coraza-caddy/v2@v2.2.0` et `caddy-ratelimit@v0.1.0` sont désormais pinnés en version exacte dans le build xcaddy, empêchant l'intégration silencieuse de versions non testées.
+
+- **V3-08 — Lock file Python** (`requirements.lock`, nouveau) : fichier de dépendances avec versions exactes (`==`) généré depuis l'image Docker de production. Garantit des builds reproductibles et protège contre le typosquatting et le version hijacking.
+
+- **V3-04 — AES-GCM AAD** (`openbao/crypto.py`) : ajout d'Associated Authenticated Data (`mcp-vault:unseal-keys:v1`) dans le chiffrement AES-256-GCM des clés unseal. Empêche la réutilisation d'un blob chiffré dans un contexte différent. Migration backward-compatible : le déchiffrement tente d'abord avec AAD, puis fallback sans AAD pour les données pré-v0.4.5.
+
+- **V2-13 — HSTS** (`waf/Caddyfile`) : ajout du header `Strict-Transport-Security: max-age=31536000; includeSubDomains` pour forcer HTTPS sur tous les sous-domaines en production.
+
+- **P2-6 — CORS preflight restrictif** (`waf/Caddyfile`) : les requêtes OPTIONS sont désormais gérées explicitement par le WAF avec des méthodes et headers restreints, sans `Access-Control-Allow-Origin` (bloque toute origine cross-origin).
+
+- **P2-7 — Docker hardening** (`docker-compose.yml`) : ajout de `security_opt: [no-new-privileges:true]` sur tous les services, `read_only: true` pour le WAF avec tmpfs pour les chemins writable, et `tmpfs: /tmp` pour mcp-vault.
+
+- **P2-8 — Tests hors image production** (`Dockerfile`, `docker-compose.yml`) : l'image production ne contient plus `tests/` ni `scripts/`. Un stage Docker dédié `test` (stage 3) est utilisé pour les tests d'intégration, réduisant la surface d'attaque de l'image de production.
+
+#### 🧪 Tests
+
+- **18/18 tests crypto** passent (16 existants + 2 nouveaux AAD : `test_aad_legacy_fallback`, `test_aad_context_binding`)
+- Tests e2e : validation post-build requise (docker compose)
+
+### Documentation
+
+- **SECURITY_AUDIT.md réécrit** : consolidation des 3 audits (v0.2.0, v0.3.3, V2.1 externe) en un document unique avec V2.1 comme source de vérité. 60 findings cross-référencés : 28 corrigés, 13 résiduels documentés avec justification, 18 informationnels. Statuts vérifiés dans le code source.
+- **README.md mis à jour** : version 0.4.5, tests 312/15 catégories, table docs enrichie (SECURITY_AUDIT.md), roadmap sécurité corrigée, structure projet avec requirements.lock.
+- **TECHNICAL.md mis à jour** : header v0.4.5, statut Production-ready, suppression fallback `?token=`, correction `disable_mlock=false`, référence audit V2.1, roadmap enrichie (Phase 8e, 9, 10).
+- **requirements.lock nettoyé** : suppression des dépendances de test (pytest, pytest-asyncio) — production-only conformément au stage Docker séparé (P2-8).
+
+### Risques résiduels documentés (non corrigés)
+
+- **CSP unsafe-inline** (§5.2) : le SPA admin utilise des scripts inline — refonte avec nonces/hashes CSP planifiée mais reportée (effort significatif).
+- **Race conditions S3** (§5.4) : last-writer-wins en single-instance — risque faible, asyncio.Lock reporté.
+- **Clés str en mémoire** (§5.5) : limitation fondamentale Python — les strings sont immuables et non-effaçables.
+
+### Fichiers modifiés (8)
+- `Dockerfile` — V2-12 (digests), P2-8 (stage test séparé), version label 0.4.5
+- `waf/Dockerfile` — V2-12 (digests), V2-16 (plugins pinnés)
+- `waf/Caddyfile` — V2-13 (HSTS), P2-6 (CORS preflight)
+- `docker-compose.yml` — P2-7 (hardening), P2-8 (target stages)
+- `src/mcp_vault/openbao/crypto.py` — V3-04 (AAD)
+- `tests/test_crypto.py` — 2 tests AAD ajoutés (18 total)
+- `requirements.lock` — **nouveau** (V3-08)
+- `VERSION` — 0.4.0 → 0.4.5
+
+---
+
 ## [0.4.0] — 2026-03-24
 
 ### Security — Audit complet v0.3.3 et correctifs majeurs

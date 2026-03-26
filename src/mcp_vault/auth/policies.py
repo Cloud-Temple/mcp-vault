@@ -295,7 +295,7 @@ class PolicyStore:
         """
         policy = self.get(policy_id)
         if not policy:
-            return True  # Policy inexistante = pas de restriction
+            return False  # SÉCURITÉ V2-02 : fail-close cohérent avec is_tool_allowed()
 
         # Chercher la première path_rule qui matche le vault
         for rule in policy.get("path_rules", []):

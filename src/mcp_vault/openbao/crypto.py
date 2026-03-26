@@ -37,6 +37,13 @@ _SALT_LENGTH = 16   # bytes
 _NONCE_LENGTH = 12  # bytes (requis par AES-GCM)
 _KEY_LENGTH = 32    # bytes (AES-256)
 
+# SÉCURITÉ V3-04 : Associated Authenticated Data (AAD)
+# Lie le ciphertext à son contexte d'utilisation.
+# Empêche la réutilisation d'un blob chiffré dans un autre contexte
+# (ex: copier le blob d'un bucket S3 vers un autre).
+# v1 = format actuel (salt || nonce || ciphertext+tag)
+_AAD = b"mcp-vault:unseal-keys:v1"
+
 # Exigences minimales pour la bootstrap key
 _MIN_KEY_LENGTH = 32
 _MIN_CHAR_CLASSES = 3  # sur 4 classes possibles (maj, min, chiffres, symboles)
@@ -167,8 +174,9 @@ def encrypt_with_bootstrap_key(plaintext: str, bootstrap_key: str) -> str:
 
     try:
         # Chiffrer (AES-256-GCM — le tag est automatiquement ajouté)
+        # AAD lie le ciphertext à son contexte (V3-04)
         aesgcm = AESGCM(bytes(key))
-        ciphertext_with_tag = aesgcm.encrypt(nonce, plaintext.encode("utf-8"), None)
+        ciphertext_with_tag = aesgcm.encrypt(nonce, plaintext.encode("utf-8"), _AAD)
     finally:
         # Effacer la clé dérivée de la mémoire
         _zero_fill(key)
@@ -222,10 +230,17 @@ def decrypt_with_bootstrap_key(encrypted_b64: str, bootstrap_key: str) -> str:
     # Dériver la même clé (bytearray mutable pour zeroing)
     key = _derive_key(bootstrap_key, salt)
 
-    # Déchiffrer (lève InvalidTag si la clé est mauvaise ou données corrompues)
+    # Déchiffrer — tenter avec AAD (v1), puis fallback sans AAD (legacy)
+    # SÉCURITÉ V3-04 : migration transparente vers AAD
     try:
         aesgcm = AESGCM(bytes(key))
-        plaintext_bytes = aesgcm.decrypt(nonce, ciphertext_with_tag, None)
+        try:
+            # Tentative avec AAD (format courant)
+            plaintext_bytes = aesgcm.decrypt(nonce, ciphertext_with_tag, _AAD)
+        except Exception:
+            # Fallback sans AAD (données chiffrées avant v0.4.5)
+            logger.info("Fallback déchiffrement sans AAD (format legacy pré-v0.4.5)")
+            plaintext_bytes = aesgcm.decrypt(nonce, ciphertext_with_tag, None)
     except Exception:
         raise ValueError(
             "Déchiffrement impossible — ADMIN_BOOTSTRAP_KEY incorrecte "

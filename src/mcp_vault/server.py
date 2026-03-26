@@ -332,7 +332,7 @@ async def secret_list(vault_id: str, path: str = "") -> dict:
         vault_id: Vault cible
         path: Préfixe pour filtrer (optionnel)
     """
-    from .auth.context import check_access, check_policy
+    from .auth.context import check_access, check_policy, check_path_policy
     from .vault.secrets import list_secrets
 
     policy_err = check_policy("secret_list")
@@ -341,6 +341,10 @@ async def secret_list(vault_id: str, path: str = "") -> dict:
     access_err = check_access(vault_id)
     if access_err:
         return access_err
+    # SÉCURITÉ V2-05b : check_path_policy sur secret_list (consistance avec read/write/delete)
+    path_err = check_path_policy(vault_id, path)
+    if path_err:
+        return path_err
 
     return _r("secret_list", await list_secrets(vault_id, path), vault_id)
 
@@ -753,6 +757,8 @@ async def audit_log(limit: int = 50, client: str = "", vault_id: str = "",
     """
     Journal d'audit — toutes les opérations MCP avec filtres.
 
+    Requiert la permission admin.
+
     Retourne les événements les plus récents en premier. Chaque entrée
     contient : timestamp, client, outil, vault, statut, détail, durée.
 
@@ -773,6 +779,12 @@ async def audit_log(limit: int = 50, client: str = "", vault_id: str = "",
         status: Filtrer par statut
         since: Entrées après cette date
     """
+    # SÉCURITÉ V2-03 : audit_log requiert admin (conformément à ARCHITECTURE.md §6.7)
+    from .auth.context import check_admin_permission
+    admin_err = check_admin_permission()
+    if admin_err:
+        return admin_err
+
     from .audit import get_audit_store
 
     store = get_audit_store()

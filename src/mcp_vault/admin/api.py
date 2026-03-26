@@ -43,14 +43,19 @@ async def handle_admin_api(scope, receive, send, mcp):
     if path == "/admin/api/whoami" and method == "GET":
         return await _json_response(send, 200, {"status": "ok", **token_info})
 
+    if path == "/admin/api/generate-password" and method == "GET":
+        return await _api_generate_password(send)
+
+    # SÉCURITÉ V3-02 : audit/logs requièrent admin (données sensibles de tous les clients)
     if path == "/admin/api/logs" and method == "GET":
+        if not is_admin:
+            return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
         return await _api_logs(send)
 
     if path == "/admin/api/audit" and method == "GET":
+        if not is_admin:
+            return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
         return await _api_audit(send, scope)
-
-    if path == "/admin/api/generate-password" and method == "GET":
-        return await _api_generate_password(send)
 
     # --- Routes vaults (read = list/detail, write = create/update, admin = delete) ---
     if path == "/admin/api/vaults" and method == "GET":
@@ -240,10 +245,19 @@ async def _api_create_token(send, body):
     if not store:
         return await _json_response(send, 400, {"status": "error", "message": "S3 non configuré"})
 
-    data = json.loads(body) if body else {}
+    try:
+        data = json.loads(body) if body else {}
+    except (json.JSONDecodeError, ValueError):
+        return await _json_response(send, 400, {"status": "error", "message": "JSON invalide"})
+
     client_name = data.get("client_name", "")
     permissions = data.get("permissions", ["read"])
     allowed_resources = data.get("allowed_resources", [])
+
+    # SÉCURITÉ V3-03 : validation whitelist des permissions (cohérent avec TokenStore.update)
+    valid_perms = {"read", "write", "admin"}
+    if not isinstance(permissions, list) or not all(p in valid_perms for p in permissions):
+        return await _json_response(send, 400, {"status": "error", "message": f"Permissions invalides: {permissions}. Valides: read, write, admin"})
     email = data.get("email", "")
     expires_in_days = data.get("expires_in_days", 90)
     policy_id = data.get("policy_id", "")
@@ -466,8 +480,14 @@ async def _api_audit(send, scope):
             k, v = param.split("=", 1)
             params[k] = v
 
+    # SÉCURITÉ V3-12 : validation numérique du paramètre limit
+    try:
+        limit = max(1, min(int(params.get("limit", "100")), 1000))
+    except (ValueError, TypeError):
+        limit = 100
+
     entries = store.get_entries(
-        limit=int(params.get("limit", "100")),
+        limit=limit,
         client=params.get("client", ""),
         vault_id=params.get("vault_id", ""),
         tool=params.get("tool", ""),
