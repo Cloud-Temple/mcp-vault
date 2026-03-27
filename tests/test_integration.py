@@ -560,7 +560,7 @@ class TestOpenBaoConfig:
         assert 'listener "tcp"' in content
         assert "127.0.0.1:8200" in content
         assert "tls_disable = true" in content
-        assert "disable_mlock = true" in content
+        assert "disable_mlock" not in content  # OpenBao ≥2.0 ne supporte plus mlock
         assert "ui = false" in content
         print(f"✅ HCL généré OK: {config_path}")
         print(f"   Contenu:\n{content}")

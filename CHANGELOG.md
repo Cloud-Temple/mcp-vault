@@ -1,5 +1,35 @@
 # Changelog — MCP Vault
 
+## [0.4.6] — 2026-03-26
+
+### Bugfix — Suppression de `disable_mlock` (crash OpenBao au démarrage)
+
+OpenBao ≥2.0 a supprimé le support du paramètre `disable_mlock` ([RFC mlock-removal](https://openbao.org/docs/rfcs/mlock-removal/)). Sa présence dans la config HCL générée provoquait un crash systématique au démarrage : `error loading configuration from /openbao/config/server.hcl: OpenBao has dropped support for mlock`.
+
+#### Correctif
+
+- **`src/mcp_vault/openbao/config.py`** : suppression totale de la ligne `disable_mlock = false` et du commentaire associé dans `HCL_TEMPLATE`. La protection mémoire est désormais gérée au niveau OS (swap désactivé dans le conteneur Docker).
+
+#### Tests
+
+- **`tests/test_integration.py`** : assertion mise à jour — vérifie que `disable_mlock` n'apparaît **plus** dans la config HCL générée (`assert "disable_mlock" not in content`).
+
+#### Documentation mise à jour (5 fichiers)
+
+- `DESIGN/mcp-vault/TECHNICAL.md` — exemple HCL §3.13 nettoyé, description config.py mise à jour
+- `DESIGN/mcp-vault/ARCHITECTURE.md` — exemple HCL §4.5 nettoyé
+- `DESIGN/mcp-vault/SECURITY_AUDIT.md` — V3-05 mis à jour (remédiation finale v0.4.6, lien RFC)
+
+#### Fichiers modifiés (6)
+- `src/mcp_vault/openbao/config.py` — suppression `disable_mlock`
+- `tests/test_integration.py` — assertion inversée
+- `DESIGN/mcp-vault/TECHNICAL.md` — doc HCL + description
+- `DESIGN/mcp-vault/ARCHITECTURE.md` — doc HCL
+- `DESIGN/mcp-vault/SECURITY_AUDIT.md` — V3-05 mise à jour
+- `VERSION` — 0.4.5 → 0.4.6
+
+---
+
 ## [0.4.5] — 2026-03-26
 
 ### Security — Hardening P2 : 8 correctifs de durcissement

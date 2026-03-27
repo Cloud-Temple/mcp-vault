@@ -103,7 +103,7 @@ L'audit V2.1 valide explicitement les éléments suivants comme **conformes** :
 | V2-06 | MCP Server | SSH CA `allowed_users="*"` par défaut             | 5.0  | ⚠️ Résiduel | —       |
 | V3-09 | Auth       | `check_vault_owner` fail-open si metadata absente | 5.0  | ✅ Corrigé    | v0.4.0  |
 | V2-13 | Infra      | Docker hardening manquant                         | 4.8  | ✅ Corrigé    | v0.4.5  |
-| V3-05 | Infra      | `disable_mlock=true` contredit `IPC_LOCK`         | 4.5  | ✅ Corrigé    | v0.4.0  |
+| V3-05 | Infra      | `disable_mlock` supprimé (OpenBao ≥2.0)           | 4.5  | ✅ Corrigé    | v0.4.6  |
 | V3-03 | Admin SPA  | Token creation sans validation permissions        | 4.5  | ✅ Corrigé    | v0.4.0  |
 | V3-08 | Infra      | Pas de lock file — builds non-reproductibles      | 4.5  | ✅ Corrigé    | v0.4.5  |
 | V3-07 | Infra      | `initialize_vault()` retourne root_token/keys     | 4.0  | ✅ Corrigé    | v0.4.0  |
@@ -221,11 +221,12 @@ Cette section documente chaque finding corrigé avec la remédiation appliquée.
 - **Remédiation :** Ajout de `security_opt: [no-new-privileges:true]`, `read_only: true`, `tmpfs`, `cap_drop: ALL`, `cap_add: IPC_LOCK`.
 - **Vérifié :** ✅ v0.4.5
 
-#### V3-05 — `disable_mlock=true` contredit `IPC_LOCK`
+#### V3-05 — `disable_mlock` supprimé (OpenBao ≥2.0)
 - **CVSS :** 4.5 | **CWE :** CWE-316
-- **Problème :** Le template HCL disait `disable_mlock = true` alors que Docker accordait `IPC_LOCK`.
-- **Remédiation :** `disable_mlock = false`, commentaire corrigé.
-- **Vérifié :** ✅ v0.4.0
+- **Problème :** Le template HCL contenait `disable_mlock` (d'abord `true` en v0.3.x, puis `false` en v0.4.0). OpenBao ≥2.0 a supprimé le support de mlock et rejette ce paramètre au démarrage (`error loading configuration`). Voir [RFC mlock-removal](https://openbao.org/docs/rfcs/mlock-removal/).
+- **Remédiation v0.4.0 :** `disable_mlock = false` (correctif initial).
+- **Remédiation v0.4.6 :** Suppression totale de `disable_mlock` du template HCL. La protection mémoire est gérée au niveau OS (swap désactivé).
+- **Vérifié :** ✅ v0.4.6
 
 #### V3-03 — Token creation sans validation permissions
 - **CVSS :** 4.5 | **CWE :** CWE-20

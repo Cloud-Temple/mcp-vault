@@ -331,7 +331,7 @@ Même pattern que `token_store.py` : singleton + cache mémoire TTL 5 min + stoc
 | Module         | Rôle                                                                         |
 | -------------- | ---------------------------------------------------------------------------- |
 | `manager.py`   | Démarrage/arrêt du process `bao server`, health check, client hvac singleton |
-| `config.py`    | Génération du fichier HCL (file backend, listener localhost, disable_mlock)  |
+| `config.py`    | Génération du fichier HCL (file backend, listener localhost)                 |
 | `lifecycle.py` | Init (Shamir shares=1), unseal, seal, status, chiffrement clés unseal        |
 | `crypto.py`    | Chiffrement AES-256-GCM + PBKDF2 pour les clés unseal                        |
 
@@ -363,10 +363,12 @@ listener "tcp" {
   address     = "127.0.0.1:8200"
   tls_disable = true
 }
-disable_mlock = false
 api_addr = "http://127.0.0.1:8200"
 ui = false
 ```
+
+> **Note** : `disable_mlock` a été supprimé — OpenBao ≥2.0 ne supporte plus ce paramètre.
+> La protection mémoire est gérée au niveau OS (swap désactivé dans le conteneur Docker).
 
 ### 3.14 `audit.py` — Audit Store MCP
 

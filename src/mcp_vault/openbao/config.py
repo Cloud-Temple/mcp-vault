@@ -5,7 +5,9 @@ OpenBao HCL Config Generator.
 Génère le fichier de configuration HCL pour OpenBao :
     - File backend (storage locale)
     - Listener TCP localhost:8200 (TLS désactivé car localhost only)
-    - disable_mlock pour Docker
+
+Note: disable_mlock a été supprimé — OpenBao ≥2.0 ne supporte plus ce paramètre.
+      La protection mémoire est gérée au niveau OS (swap désactivé).
 """
 
 import logging
@@ -27,9 +29,6 @@ listener "tcp" {{
   address     = "127.0.0.1:8200"
   tls_disable = true
 }}
-
-# SÉCURITÉ V3-05 : mlock activé — IPC_LOCK est accordé dans docker-compose.yml
-disable_mlock = false
 
 api_addr = "{api_addr}"
 
