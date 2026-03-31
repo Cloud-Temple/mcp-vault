@@ -19,19 +19,33 @@ async function loadTokens() {
         html += '<div class="empty-state">Aucun token configuré</div>';
     } else {
         html += '<div class="card" style="padding:0;overflow-x:auto"><table>';
-        html += '<thead><tr><th>Client</th><th>Permissions</th><th>Vaults</th><th>Policy</th><th>Hash</th><th>Statut</th><th>Actions</th></tr></thead><tbody>';
+        html += '<thead><tr><th>Client</th><th>Permissions</th><th>Vaults</th><th>Policy</th><th>Créé le</th><th>Hash</th><th>Statut</th><th>Actions</th></tr></thead><tbody>';
         for (const t of tokens) {
             const policyBadge = t.policy_id
                 ? `<span class="badge badge-info" title="Policy : ${esc(t.policy_id)}" style="cursor:pointer" onclick="event.stopPropagation();navigate('policies');setTimeout(()=>selectPolicy('${esc(t.policy_id)}'),300)">${esc(t.policy_id)}</span>`
                 : '<span style="color:var(--muted);font-size:0.75rem">aucune</span>';
+
+            // Dates formatées
+            const createdAt = t.created_at ? new Date(t.created_at).toLocaleDateString('fr-FR', {day:'2-digit',month:'2-digit',year:'numeric'}) : '';
+            const createdTime = t.created_at ? new Date(t.created_at).toLocaleTimeString('fr-FR', {hour:'2-digit',minute:'2-digit'}) : '';
+
+            // Statut avec date de révocation
+            let statusHtml;
+            if (t.revoked) {
+                const revokedAt = t.revoked_at ? new Date(t.revoked_at).toLocaleDateString('fr-FR', {day:'2-digit',month:'2-digit',year:'numeric'}) : '';
+                statusHtml = `<span class="badge badge-err">révoqué</span>${revokedAt ? `<br><span style="color:var(--muted);font-size:0.68rem">${revokedAt}</span>` : ''}`;
+            } else {
+                statusHtml = '<span class="badge badge-ok">actif</span>';
+            }
 
             html += `<tr>
                 <td><strong>${esc(t.client_name)}</strong>${t.email ? `<br><span style="color:var(--muted);font-size:0.75rem">${esc(t.email)}</span>` : ''}</td>
                 <td>${(t.permissions||[]).map(p => `<span class="badge ${p==='admin'?'badge-warn':p==='write'?'badge-info':'badge-ok'}">${p}</span>`).join(' ')}</td>
                 <td>${t.allowed_resources && t.allowed_resources.length ? t.allowed_resources.map(r => `<code style="font-size:0.75rem">${esc(r)}</code>`).join(', ') : '<span style="color:var(--muted);font-size:0.75rem" title="Accès uniquement aux vaults créés par ce token">owner</span>'}</td>
                 <td>${policyBadge}</td>
+                <td><span style="font-size:0.78rem">${createdAt}</span>${createdTime ? `<br><span style="color:var(--muted);font-size:0.68rem">${createdTime}</span>` : ''}</td>
                 <td><code style="font-size:0.75rem">${esc(t.hash_prefix || '')}…</code></td>
-                <td>${t.revoked ? '<span class="badge badge-err">révoqué</span>' : '<span class="badge badge-ok">actif</span>'}</td>
+                <td>${statusHtml}</td>
                 <td>${!t.revoked ? `<button onclick="openEditToken('${esc(t.hash_prefix)}', ${JSON.stringify(t.permissions||[]).replace(/"/g,'&quot;')}, '${esc((t.allowed_resources||[]).join(", "))}', '${esc(t.policy_id||"")}')" class="btn btn-sm" style="margin-right:0.3rem" title="Modifier">✏️</button><button onclick="revokeToken('${esc(t.hash_prefix)}')" class="btn btn-danger btn-sm" title="Révoquer">🗑️</button>` : ''}</td>
             </tr>`;
         }
@@ -86,22 +100,29 @@ async function doCreateToken() {
     const data = await api('/tokens', { method: 'POST', body: JSON.stringify(body) });
     closeModal('modalCreateToken');
 
-    if (data.status === 'created' && data.token) {
+    // Recharger la liste AVANT d'afficher le token (sinon loadTokens écrase le DOM)
+    await loadTokens();
+
+    if (data.status === 'created' && data.raw_token) {
         const el = document.getElementById('newTokenResult');
         if (el) {
             el.innerHTML = `<div class="card" style="border-color:var(--accent)">
                 <h2>✅ Token créé pour "${esc(body.client_name)}"</h2>
-                <p style="color:var(--danger);font-size:0.8rem">⚠️ Ce token ne sera affiché qu'<strong>une seule fois</strong>.</p>
+                <p style="color:var(--danger);font-size:0.8rem">⚠️ Ce token ne sera affiché qu'<strong>une seule fois</strong>. Copiez-le maintenant.</p>
                 <div class="token-display">
-                    <span id="newTokenValue">${esc(data.token)}</span>
+                    <span id="newTokenValue">${esc(data.raw_token)}</span>
                     <button class="copy-btn" onclick="copyNewToken()">📋 Copier</button>
                 </div>
-                ${policyId ? `<p style="font-size:0.8rem;color:var(--text2);margin-top:0.5rem">📋 Policy associée : <strong>${esc(policyId)}</strong></p>` : ''}
+                <div style="margin-top:0.6rem;font-size:0.78rem;color:var(--text2)">
+                    <span>🔑 Hash : <code>${esc(data.hash ? data.hash.substring(0,12) : '')}…</code></span>
+                    ${data.expires_at ? `<span style="margin-left:1rem">📅 Expire : ${new Date(data.expires_at).toLocaleDateString('fr-FR')}</span>` : '<span style="margin-left:1rem">📅 Expire : jamais</span>'}
+                    ${policyId ? `<span style="margin-left:1rem">📋 Policy : <strong>${esc(policyId)}</strong></span>` : ''}
+                </div>
             </div>`;
+            // Scroll vers le token affiché
+            el.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
     }
-
-    loadTokens();
 }
 
 async function revokeToken(hashPrefix) {

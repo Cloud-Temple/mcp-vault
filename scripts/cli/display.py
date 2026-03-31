@@ -552,22 +552,35 @@ def show_token_result(result: dict):
             table.add_column("Permissions", style="green")
             table.add_column("Vaults", style="white")
             table.add_column("Policy", style="yellow")
-            table.add_column("Expire", style="dim")
+            table.add_column("Créé le", style="dim")
+            table.add_column("Statut", min_width=10)
             table.add_column("Hash", style="dim")
             for t in tokens:
                 allowed_vaults = ", ".join(t.get("allowed_resources", [])) or "(owner)"
                 policy = t.get("policy_id", "") or ""
-                exp = t.get("expires_at") or "jamais"
+
+                # Date de création
+                created = t.get("created_at", "")
+                created_str = created[:10] if created else ""
+
+                # Statut avec date de révocation ou d'expiration
                 if t.get("revoked"):
-                    exp = f"[red]RÉVOQUÉ[/red]"
-                elif exp != "jamais":
-                    exp = exp[:10]
+                    revoked_at = t.get("revoked_at", "")
+                    revoked_str = revoked_at[:10] if revoked_at else ""
+                    status_str = f"[red]RÉVOQUÉ[/red]" + (f" {revoked_str}" if revoked_str else "")
+                else:
+                    exp = t.get("expires_at") or "jamais"
+                    if exp != "jamais":
+                        exp = exp[:10]
+                    status_str = f"[green]actif[/green] → {exp}"
+
                 table.add_row(
                     t.get("client_name", "?"),
                     ", ".join(t.get("permissions", [])),
                     allowed_vaults,
                     policy,
-                    exp,
+                    created_str,
+                    status_str,
                     t.get("hash_prefix", "?"),
                 )
             console.print(table)

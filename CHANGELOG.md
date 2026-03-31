@@ -1,5 +1,52 @@
 # Changelog — MCP Vault
 
+## [0.4.7] — 2026-03-31
+
+### Bugfix — Affichage du token créé dans /admin + dates dans toutes les interfaces
+
+#### 🔴 Token non affiché après création dans /admin SPA
+
+Le token créé via la console `/admin` n'était **jamais affiché** à l'utilisateur — impossible de le copier.
+
+**Triple cause racine :**
+1. `tokens.js` vérifiait `data.token` alors que l'API retourne `data.raw_token` → condition toujours fausse
+2. `loadTokens()` était appelé **après** l'affichage du token, recréant le DOM et écrasant le résultat
+3. Aucun scroll vers le token affiché
+
+**Correctifs :**
+- `data.token` → `data.raw_token` dans la condition d'affichage
+- `await loadTokens()` appelé **avant** l'affichage du token (le div `newTokenResult` est recréé par `loadTokens`, puis rempli)
+- Ajout de `scrollIntoView()` pour garantir la visibilité du token
+- Affichage enrichi : hash tronqué, date d'expiration, policy associée
+
+#### 🟡 Dates de création et de révocation manquantes
+
+Les dates de création et de révocation des tokens n'étaient pas visibles dans aucune des 3 interfaces (SPA, CLI Click, Shell interactif).
+
+**Correctifs backend (`token_store.py`) :**
+- `list_all()` retourne désormais `created_at` et `revoked_at`
+- `revoke()` stocke `revoked_at` avec timestamp ISO UTC
+
+**Correctifs SPA `/admin` (`tokens.js`) :**
+- Nouvelle colonne **Créé le** (date + heure formatées en `fr-FR`)
+- Colonne **Statut** enrichie : affiche la date de révocation sous le badge "révoqué"
+
+**Correctifs CLI Click + Shell (`display.py`) :**
+- Nouvelle colonne **Créé le** (date ISO tronquée `YYYY-MM-DD`)
+- Colonne **Statut** unifiée : `actif → YYYY-MM-DD` (expiration) ou `RÉVOQUÉ YYYY-MM-DD`
+
+### Fichiers modifiés (4)
+- `src/mcp_vault/auth/token_store.py` — `list_all()` + `revoke()` enrichis
+- `src/mcp_vault/static/js/tokens.js` — fix affichage token + colonnes dates
+- `scripts/cli/display.py` — colonnes Créé le / Statut dans `show_token_result()`
+- `VERSION` — 0.4.6 → 0.4.7
+
+### Tests
+- **18/18 tests crypto** — zéro régression
+- **197/197 tests CLI** — zéro régression
+
+---
+
 ## [0.4.6] — 2026-03-26
 
 ### Bugfix — Suppression de `disable_mlock` (crash OpenBao au démarrage)

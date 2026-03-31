@@ -170,8 +170,10 @@ class TokenStore:
                 "email": t.get("email", ""),
                 "hash_prefix": t["hash"][:12],
                 "allowed_resources": t.get("allowed_resources", []),
+                "created_at": t.get("created_at", ""),
                 "expires_at": t.get("expires_at"),
                 "revoked": t.get("revoked", False),
+                "revoked_at": t.get("revoked_at", ""),
             }
             for t in self._tokens.values()
         ]
@@ -234,9 +236,11 @@ class TokenStore:
 
     def revoke(self, hash_prefix: str) -> bool:
         """Révoque un token par préfixe de hash."""
+        from datetime import datetime, timezone
         for h, t in self._tokens.items():
             if h.startswith(hash_prefix):
                 t["revoked"] = True
+                t["revoked_at"] = datetime.now(timezone.utc).isoformat()
                 self._save()
                 return True
         return False
