@@ -31,3 +31,4 @@ Thumbs.db
 /DESIGN/mcp-agent
 /DESIGN/mcp-tools
 /DESIGN/mcp-mission
+.venv/

@@ -13,6 +13,7 @@ import platform
 from pathlib import Path
 
 from ..config import get_settings
+from ..auth.context import current_token_info
 from ..auth.token_store import get_token_store
 from ..auth.middleware import get_activity_log
 
@@ -30,6 +31,22 @@ async def handle_admin_api(scope, receive, send, mcp):
     token_info = _get_token_info(token)
     if not token_info:
         return await _json_response(send, 401, {"status": "error", "message": "Valid token required"})
+
+    # FIX: Injecter token_info dans le ContextVar pour que les fonctions
+    # downstream (create_space, update_space, etc.) puissent résoudre
+    # le client_name via get_current_client_name() au lieu de "anonymous".
+    # Même pattern que AuthMiddleware._validate_token() → current_token_info.set()
+    ctx_token = current_token_info.set(token_info)
+    try:
+        return await _handle_admin_routes(scope, receive, send, mcp, token_info)
+    finally:
+        current_token_info.reset(ctx_token)
+
+
+async def _handle_admin_routes(scope, receive, send, mcp, token_info):
+    """Routage interne des routes admin (appelé avec ContextVar injecté)."""
+    path = scope.get("path", "")
+    method = scope.get("method", "GET")
 
     perms = token_info.get("permissions", [])
     is_admin = "admin" in perms
@@ -522,6 +539,7 @@ async def _api_list_policies(send):
 
 async def _api_create_policy(send, body):
     """POST /admin/api/policies — Créer une policy."""
+    from ..auth.context import get_current_client_name
     from ..auth.policies import get_policy_store
     store = get_policy_store()
     if not store:
@@ -538,7 +556,7 @@ async def _api_create_policy(send, body):
         allowed_tools=data.get("allowed_tools", []),
         denied_tools=data.get("denied_tools", []),
         path_rules=data.get("path_rules", []),
-        created_by="admin",
+        created_by=get_current_client_name(),
     )
     status_code = 201 if result.get("status") == "created" else 400
     await _json_response(send, status_code, result)
