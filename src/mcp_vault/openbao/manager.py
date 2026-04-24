@@ -22,6 +22,23 @@ from ..config import get_settings
 
 logger = logging.getLogger("mcp-vault.openbao")
 
+
+def _openbao_log_paths() -> tuple[Path, Path]:
+    settings = get_settings()
+    log_dir = Path(settings.openbao_data_dir).parent / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir / "openbao-stdout.log", log_dir / "openbao-stderr.log"
+
+
+def _read_process_tail(path: Path, lines: int = 20) -> str:
+    try:
+        if not path.exists():
+            return ""
+        content = path.read_text(errors="replace").splitlines()
+        return "\n".join(content[-lines:])
+    except Exception:
+        return ""
+
 # =============================================================================
 # Singleton — processus OpenBao et client hvac
 # =============================================================================
@@ -45,6 +62,17 @@ def set_hvac_client(client: hvac.Client):
     _client = client
 
 
+async def _is_openbao_reachable() -> bool:
+    settings = get_settings()
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=2) as http:
+            resp = await http.get(f"{settings.openbao_addr}/v1/sys/health")
+            return resp.status_code in (200, 501, 503)
+    except Exception:
+        return False
+
+
 async def start_openbao() -> bool:
     """
     Démarre le serveur OpenBao en arrière-plan.
@@ -59,17 +87,23 @@ async def start_openbao() -> bool:
     global _process, _client
     settings = get_settings()
 
-    # Générer la config HCL
+    if await _is_openbao_reachable():
+        logger.info("♻️ OpenBao déjà joignable — réutilisation de l'instance existante")
+        _client = hvac.Client(url=settings.openbao_addr)
+        return True
+
     from .config import generate_hcl_config
     config_path = generate_hcl_config()
 
-    # Lancer le processus
     logger.info("🚀 Démarrage d'OpenBao...")
     try:
+        stdout_log, stderr_log = _openbao_log_paths()
+        stdout_fh = open(stdout_log, "ab", buffering=0)
+        stderr_fh = open(stderr_log, "ab", buffering=0)
         _process = subprocess.Popen(
             ["bao", "server", f"-config={config_path}"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=stdout_fh,
+            stderr=stderr_fh,
         )
     except FileNotFoundError:
         logger.error("❌ Binaire 'bao' non trouvé. OpenBao n'est pas installé.")
@@ -82,10 +116,18 @@ async def start_openbao() -> bool:
 
     for attempt in range(30):  # 30 secondes max
         await asyncio.sleep(1)
+
+        if _process.poll() is not None:
+            _, stderr_log = _openbao_log_paths()
+            tail = _read_process_tail(stderr_log, lines=40)
+            logger.error("❌ OpenBao s'est arrêté prématurément")
+            if tail:
+                logger.error(f"Dernières lignes stderr bao:\n{tail}")
+            return False
+
         try:
             async with httpx.AsyncClient(timeout=2) as http:
                 resp = await http.get(f"{settings.openbao_addr}/v1/sys/health")
-                # Toute réponse HTTP (200, 501, 503) = OpenBao écoute
                 logger.info(
                     f"✅ OpenBao écoute (HTTP {resp.status_code}, tentative {attempt + 1})"
                 )
@@ -94,7 +136,11 @@ async def start_openbao() -> bool:
         except Exception:
             pass
 
+    _, stderr_log = _openbao_log_paths()
+    tail = _read_process_tail(stderr_log, lines=40)
     logger.error("❌ OpenBao n'a pas démarré dans les 30 secondes")
+    if tail:
+        logger.error(f"Dernières lignes stderr bao:\n{tail}")
     return False
 
 
