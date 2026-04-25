@@ -1,5 +1,35 @@
 # Changelog — MCP Vault
 
+## [0.4.8] — 2026-04-25
+
+### Bugfix — Contexte d'authentification dans l'Admin API (PR #1)
+
+Le `created_by` des vaults et policies créés via `/admin/api/*` était toujours `anonymous` au lieu du vrai `client_name` du token Bearer.
+
+**Cause racine :**
+- `AdminMiddleware` court-circuite la stack ASGI avant `AuthMiddleware`, donc la `ContextVar` `current_token_info` n'était jamais peuplée pour les requêtes admin API.
+
+**Correctifs :**
+- `handle_admin_api()` injecte désormais `current_token_info` (même pattern que `AuthMiddleware`) avec `try/finally/reset`
+- Logique de routage extraite dans `_handle_admin_routes()` pour un scoping propre
+- `_api_create_policy()` utilise `get_current_client_name()` au lieu de `'admin'` hardcodé
+
+### Tests
+- Nouveau `tests/test_admin_context.py` (15 tests, 0 dépendance S3/OpenBao)
+  - `TestAdminApiContextVar` : injection, bootstrap, anonymous, isolation
+  - `TestAuthContextPermissions` : access, write, admin, client_name
+  - `TestAdminApiCodeStructure` : vérification AST du fix
+
+### Fichiers modifiés (3)
+- `src/mcp_vault/admin/api.py` — injection ContextVar dans handle_admin_api()
+- `tests/test_admin_context.py` — nouvelle suite de 15 tests
+- `.gitignore` — ajout d'entrée
+
+### Contributeur
+- PR #1 par [@camilleein](https://github.com/camilleein)
+
+---
+
 ## [0.4.7] — 2026-03-31
 
 ### Bugfix — Affichage du token créé dans /admin + dates dans toutes les interfaces
