@@ -13,7 +13,7 @@ import platform
 from pathlib import Path
 
 from ..config import get_settings
-from ..auth.context import current_token_info
+from ..auth.context import current_token_info, check_path_policy
 from ..auth.token_store import get_token_store
 from ..auth.middleware import get_activity_log
 
@@ -156,17 +156,33 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
             return await _json_response(send, 403, access_err)
 
         if method == "GET" and not secret_path:
+            path_err = check_path_policy(vault_id, "")
+            if path_err:
+                return await _json_response(send, 403, path_err)
             return await _api_list_secrets(send, vault_id)
         if method == "GET" and secret_path:
+            path_err = check_path_policy(vault_id, secret_path)
+            if path_err:
+                return await _json_response(send, 403, path_err)
             return await _api_read_secret(send, vault_id, secret_path)
         if method == "POST":
             if not can_write:
                 return await _json_response(send, 403, {"status": "error", "message": "Permission write requise"})
             body = await _read_body(receive)
+            try:
+                data = json.loads(body) if body else {}
+            except (json.JSONDecodeError, ValueError):
+                return await _json_response(send, 400, {"status": "error", "message": "JSON invalide"})
+            path_err = check_path_policy(vault_id, data.get("path", "").strip())
+            if path_err:
+                return await _json_response(send, 403, path_err)
             return await _api_write_secret(send, vault_id, body)
         if method == "DELETE" and secret_path:
             if not can_write:
                 return await _json_response(send, 403, {"status": "error", "message": "Permission write requise"})
+            path_err = check_path_policy(vault_id, secret_path)
+            if path_err:
+                return await _json_response(send, 403, path_err)
             return await _api_delete_secret(send, vault_id, secret_path)
 
     # --- Routes policies (admin only) ---
