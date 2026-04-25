@@ -1,7 +1,7 @@
 # Rapport d'Audit de Sécurité — MCP Vault
 
 **Version auditée :** v0.4.0  
-**Version courante :** v0.4.5  
+**Version courante :** v0.4.9  
 **Audit externe :** White-box V2.1, revue de code multi-passe (v2 + v3) + revue par pair POC externe  
 **Audit interne :** Cline (Opus), v0.2.0 puis v0.3.3  
 **Date de consolidation :** 26 Mars 2026  
@@ -423,6 +423,17 @@ Correctifs des 5 findings initiaux (pré-V2.1) :
 **9 Moyens** : V2-17, V3-11, V3-23, V3-02, V3-09, V3-05, V3-03, V3-07, V3-12 (+ V2-10)  
 **3 Faibles** : V3-24, V3-25, V3-10  
 Fichiers modifiés : server.py, policies.py, requirements.txt, token_store.py, secrets.py, ssh_ca.py, spaces.py, api.py, config.py, lifecycle.py
+
+### v0.4.9 (25 avril 2026) — PR #2 path_rules enforcement sur API REST
+- Enforcement `check_path_policy()` sur les 4 routes REST admin secrets (GET list/read, POST write, DELETE)
+- Corrige un contournement des `allowed_paths` via l'API REST admin (les outils MCP avaient déjà ce check)
+- Hardening OpenBao : listener HCL dynamique, startup idempotent, logs fichiers
+- 3 findings non-bloquants documentés (F7 binding, F9 trust aveugle, F10 singleton)
+- PR par @camilleein
+
+### v0.4.8 (25 avril 2026) — PR #1 admin API context fix
+- Injection `ContextVar` dans `AdminMiddleware` → résout `created_by=anonymous`
+- PR par @camilleein
 
 ### v0.4.5 (26 mars 2026) — P2 Hardening
 **3 Moyens** : V2-12, V2-16, V3-08  

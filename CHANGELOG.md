@@ -1,5 +1,48 @@
 # Changelog — MCP Vault
 
+## [0.4.9] — 2026-04-25
+
+### Security — Enforcement `path_rules` sur l'API REST admin (PR #2)
+
+**Faille corrigée** : les `allowed_paths` des policies étaient appliquées sur les outils MCP (`server.py`) mais **pas** sur les routes REST admin `/admin/api/vaults/{vault}/secrets/*`. Un token non-admin avec `allowed_paths: ["app/creds"]` pouvait lire `other/secret` via l'API REST.
+
+**Correctifs (`admin/api.py`)** :
+- `check_path_policy()` ajouté sur les 4 routes REST secrets : GET list, GET read, POST write, DELETE
+- Ajout de `try/except json.JSONDecodeError` sur le POST (meilleure gestion du body invalide)
+- Aligne le comportement REST admin avec les outils MCP (qui avaient déjà ces checks)
+
+**Hardening OpenBao (`openbao/config.py`)** :
+- L'adresse listener HCL est désormais dérivée de `OPENBAO_ADDR` au lieu d'être hardcodée `127.0.0.1:8200`
+- Permet les environnements de test avec port custom
+
+**Robustesse startup (`openbao/manager.py`)** :
+- `start_openbao()` est idempotent : si OpenBao est déjà accessible, réutilise l'instance
+- stdout/stderr redirigés vers des fichiers log (`/openbao/logs/`)
+- Détection de crash immédiat avec affichage des 40 dernières lignes stderr
+
+### Tests
+- `tests/test_admin_path_policy.py` — 3 tests (vérification de l'import et de l'application de `check_path_policy`)
+- `tests/test_openbao_config.py` — 2 tests fonctionnels (`_compute_openbao_listen_addr` port défaut + custom)
+- `tests/test_openbao_manager.py` — 2 tests (redirection logs + réutilisation instance)
+
+### Fichiers modifiés (6)
+- `src/mcp_vault/admin/api.py` — enforcement `check_path_policy()` sur 4 routes secrets
+- `src/mcp_vault/openbao/config.py` — listener dynamique via `_compute_openbao_listen_addr()`
+- `src/mcp_vault/openbao/manager.py` — idempotency, logs fichiers, détection crash
+- `tests/test_admin_path_policy.py` — nouveau
+- `tests/test_openbao_config.py` — nouveau
+- `tests/test_openbao_manager.py` — nouveau
+
+### Audit Review — 3 findings non-bloquants documentés
+- **F7** : Si `OPENBAO_ADDR=http://0.0.0.0:8200`, listener ouvert (mitigé : port non exposé dans Docker)
+- **F9** : Réutilisation d'instance sans vérification d'identité (mitigé : réseau Docker isolé)
+- **F10** : `_process=None` après réutilisation → `stop_openbao()` no-op (impact limité)
+
+### Contributeur
+- PR #2 par [@camilleein](https://github.com/camilleein)
+
+---
+
 ## [0.4.8] — 2026-04-25
 
 ### Bugfix — Contexte d'authentification dans l'Admin API (PR #1)

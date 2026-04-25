@@ -1,6 +1,6 @@
 # Documentation Technique — MCP Vault
 
-> **Version** : 0.4.5 | **Date** : 2026-03-26 | **Auteur** : Cloud Temple
+> **Version** : 0.4.9 | **Date** : 2026-04-25 | **Auteur** : Cloud Temple
 > **Licence** : Apache 2.0 | **Statut** : ✅ Production-ready (audit V2.1 complété)
 
 ---
