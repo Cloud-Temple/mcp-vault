@@ -16,6 +16,7 @@ from ..config import get_settings
 from ..auth.context import current_token_info, check_policy, check_path_policy
 from ..auth.token_store import get_token_store, TokenStore
 from ..auth.middleware import get_activity_log
+from ..audit import log_audit
 
 # Limite maximale de taille du body HTTP (10 MB)
 _MAX_BODY_SIZE = 10 * 1024 * 1024
@@ -401,6 +402,10 @@ async def _api_create_token(send, body):
     if result.get("status") == "error":
         status_code = 503 if result.get("error_type") == "storage_unavailable" else 400
         return await _json_response(send, status_code, result)
+    # Audit (SecNumCloud/HDS) — JAMAIS le token brut dans le détail
+    log_audit("token_create", "created",
+              detail=f"client={client_name} perms={permissions} "
+                     f"scope={allowed_resources or 'owner-based'}")
     await _json_response(send, 201, {"status": "created", **result})
 
 
@@ -433,6 +438,9 @@ async def _api_update_token(send, hash_prefix, body):
     if result.get("error_type") == "storage_unavailable":
         return await _json_response(send, 503, result)
     status_code = 200 if result.get("status") == "updated" else 400
+    if result.get("status") == "updated":
+        log_audit("token_update", "updated",
+                  detail=f"hash={hash_prefix[:12]} fields={result.get('updated_fields', [])}")
     await _json_response(send, status_code, result)
 
 
@@ -448,8 +456,13 @@ async def _api_revoke_token(send, hash_prefix):
     # (le status interne dict est distinct du status JSON retourné au client)
     err_body = {"status": "error", "message": result.get("message", "Erreur révocation")}
     if revoke_status == "ok":
+        # Audit (SecNumCloud/HDS) : trace persistante, indépendante du token store
+        log_audit("token_revoke", "ok", detail=f"hash={hash_prefix[:12]}")
         await _json_response(send, 200, result)
     elif revoke_status == "storage_unavailable":
+        # Révocation NON persistée = le token reste valide → événement critique
+        log_audit("token_revoke", "error",
+                  detail=f"hash={hash_prefix[:12]} NON PERSISTÉE (S3 indisponible) — token reste valide")
         await _json_response(send, 503, err_body)
     elif revoke_status == "invalid_prefix":
         await _json_response(send, 400, err_body)  # mauvaise entrée → 400, pas 404
@@ -695,6 +708,7 @@ async def _api_create_policy(send, body):
     )
     if result.get("status") == "created":
         status_code = 201
+        log_audit("policy_create", "created", detail=f"policy={policy_id}")
     elif result.get("error_type") == "storage_unavailable":
         status_code = 503
     else:
@@ -725,8 +739,10 @@ async def _api_delete_policy(send, policy_id):
 
     result = store.delete(policy_id)
     if result is True:
+        log_audit("policy_delete", "deleted", detail=f"policy={policy_id}")
         await _json_response(send, 200, {"status": "deleted", "policy_id": policy_id})
     elif result == "storage_error":
+        log_audit("policy_delete", "error", detail=f"policy={policy_id} NON PERSISTÉE (S3 indisponible)")
         await _json_response(send, 503, {"status": "error", "message": "Suppression non persistée (S3 indisponible)"})
     else:
         await _json_response(send, 404, {"status": "error", "message": f"Policy '{policy_id}' non trouvée"})
