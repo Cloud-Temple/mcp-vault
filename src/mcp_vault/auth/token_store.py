@@ -62,6 +62,10 @@ class TokenStore:
 
     CACHE_TTL = 300  # 5 minutes
     S3_KEY = "_system/tokens.json"
+    # Source unique de vérité des niveaux de permission valides (flags non
+    # hiérarchiques). Utilisée par create() et update(), et référencée par
+    # admin/api.py (_api_create_token) pour éviter toute divergence.
+    VALID_PERMISSIONS = frozenset({"read", "write", "admin"})
 
     def __init__(self, settings):
         self.settings = settings
@@ -154,6 +158,17 @@ class TokenStore:
     def create(self, client_name: str, permissions: list, allowed_resources: list = None,
                expires_in_days: int = 90, email: str = "", policy_id: str = "") -> dict:
         """Crée un nouveau token et le sauvegarde sur S3."""
+        # Validation des permissions — défense en profondeur (issue #48).
+        # Le store ne doit JAMAIS persister un flag inconnu ni une liste vide,
+        # quel que soit l'appelant (le point d'entrée HTTP valide déjà, mais le
+        # store doit être sûr par lui-même). Cohérent avec update().
+        if not isinstance(permissions, list) or not permissions:
+            return {"status": "error", "error_type": "invalid_permissions",
+                    "message": "permissions doit être une liste non vide (read|write|admin)"}
+        if not all(isinstance(p, str) and p in self.VALID_PERMISSIONS for p in permissions):
+            return {"status": "error", "error_type": "invalid_permissions",
+                    "message": f"Permissions invalides: {permissions}. Valides: read, write, admin"}
+
         import secrets
         from datetime import datetime, timezone, timedelta
 
@@ -271,8 +286,7 @@ class TokenStore:
 
         # ── TOUTES les validations AVANT toute mutation ──────────────────
         if permissions is not None:
-            valid_perms = {"read", "write", "admin"}
-            if not all(p in valid_perms for p in permissions):
+            if not all(isinstance(p, str) and p in self.VALID_PERMISSIONS for p in permissions):
                 return {"status": "error", "message": f"Permissions invalides: {permissions}"}
 
         updated_fields = []
