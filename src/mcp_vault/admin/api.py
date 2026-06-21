@@ -14,7 +14,7 @@ from pathlib import Path
 
 from ..config import get_settings
 from ..auth.context import current_token_info, check_policy, check_path_policy
-from ..auth.token_store import get_token_store
+from ..auth.token_store import get_token_store, TokenStore
 from ..auth.middleware import get_activity_log
 
 # Limite maximale de taille du body HTTP (10 MB)
@@ -377,9 +377,9 @@ async def _api_create_token(send, body):
     permissions = data.get("permissions", ["read"])
     allowed_resources = data.get("allowed_resources", [])
 
-    # SÉCURITÉ V3-03 : validation whitelist des permissions (cohérent avec TokenStore.update)
-    valid_perms = {"read", "write", "admin"}
-    if not isinstance(permissions, list) or not all(p in valid_perms for p in permissions):
+    # SÉCURITÉ V3-03 : validation whitelist des permissions
+    # (source unique : TokenStore.VALID_PERMISSIONS — cohérent avec create/update)
+    if not isinstance(permissions, list) or not all(isinstance(p, str) and p in TokenStore.VALID_PERMISSIONS for p in permissions):
         return await _json_response(send, 400, {"status": "error", "message": f"Permissions invalides: {permissions}. Valides: read, write, admin"})
     email = data.get("email", "")
     expires_in_days = data.get("expires_in_days", 90)
