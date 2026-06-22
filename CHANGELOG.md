@@ -1,5 +1,42 @@
 # Changelog — MCP Vault
 
+## [0.7.0] — 2026-06-22
+
+Milestone **« Durcissement auth & conformité »** : traçabilité d'audit du plan de contrôle d'accès (SecNumCloud/HDS), purge des tokens révoqués, et défense en profondeur sur la création de tokens.
+
+### Purge des tokens révoqués (issue #50)
+
+Opération admin pour purger les tokens révoqués accumulés dans `_system/tokens.json` (aucune GC n'existait). Exposée dans `/admin` et `mcpcli.py` (commande click + shell).
+
+- **`TokenStore.purge_revoked(older_than_days=30, dry_run=False)`** : ne supprime que les tokens **révoqués** dont `revoked_at` est antérieur à la rétention (défaut 30 j ; la valeur est bornée `[0, 36500]` par la route REST). **Fail-close** : un token révoqué sans `revoked_at` parseable (absent / corrompu / sans fuseau) n'est jamais purgé. Discipline `_save()` + **rollback complet** si S3 indisponible (aucun token perdu).
+- **N'affecte jamais** un token actif, ni un token **expiré mais non révoqué** — ce dernier doit rester visible (on a besoin de savoir qu'un token est expiré, quitte à le révoquer ensuite).
+- **Route `POST /admin/api/tokens/purge`** réservée admin ; `dry_run` retourne le décompte des candidats sans rien supprimer.
+- **Audit** : chaque token réellement purgé + un récapitulatif sont journalisés (`token_purge`). La trace vit dans `audit-mcp.jsonl`, indépendant de `tokens.json` → elle **survit** à la purge. Échec de persistance → 503 + audit `error`. Jamais de secret dans le détail.
+- **dry-run + confirmation** : SPA (dry-run → confirmation du décompte → exécution), CLI click (`--older-than`, `--dry-run`, `--yes`), shell (exige `--yes` ; **fail-close** sur `--older-than` invalide/incomplet ou dry-run en échec).
+
+### Traçabilité d'audit du cycle de vie des accès (issue #49)
+
+Les mutations du plan de contrôle d'accès via l'API REST admin n'étaient **pas** journalisées (`log_audit` jamais appelé dans `admin/api.py`) — écart de traçabilité SecNumCloud/HDS.
+
+- **REST** : audit ajouté sur `_api_create_token` (`token_create`), `_api_update_token` (`token_update`), `_api_revoke_token` (`token_revoke` — succès **et** échec de persistance), `_api_create_policy` (`policy_create`), `_api_delete_policy` (`policy_delete` — succès + échec).
+- **MCP** : `policy_create` et `token_update` passent désormais par le helper `_r()` (comme `policy_delete`) ; `policy_delete` trace aussi le chemin « suppression non persistée ».
+- Jamais le token brut dans le détail. La trace est physiquement indépendante de `tokens.json`.
+
+### Validation des permissions à la création de token — défense en profondeur (issue #48)
+
+- `TokenStore.create()` valide désormais les permissions (rejet : liste vide, non-liste, flag hors `{read, write, admin}`, élément non-hashable) **avant** toute écriture S3. Le point d'entrée HTTP validait déjà type et flags (V3-03) mais pas la liste vide ; ce correctif sécurise le store lui-même (liste vide incluse) quel que soit l'appelant.
+- Source unique de vérité `TokenStore.VALID_PERMISSIONS` (frozenset), réutilisée par `create()`, `update()` et `admin/api.py` (suppression de 3 copies dupliquées).
+
+### Tests
+
+- `tests/test_token_permissions.py`, `tests/test_audit_lifecycle.py`, `tests/test_purge_revoked.py`, `tests/cli/test_purge_shell.py` — tests offline **non-complaisants** : garde admin 403, fail-close, rollback S3, audit par opération, token brut jamais exposé, fail-close du shell.
+
+### Revue
+
+Chaque lot a passé une revue **Codex** (read-only) jusqu'à `APPROUVÉ` ; #50 a aussi fait l'objet d'une **revue adversariale multi-agents**.
+
+> **Note dette** : `AuditStore.log()` avale silencieusement les erreurs d'écriture JSONL (`except: pass`) — préexistant, à corriger séparément.
+
 ## [0.6.8] — 2026-06-11
 
 ### PKI/ACME — enrollment end-to-end fonctionnel (issue #41)
