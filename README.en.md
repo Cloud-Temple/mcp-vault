@@ -343,7 +343,7 @@ OpenBao's unseal keys are protected by **3-factor physical separation**:
 
 | Version              | Approach                                                                                                            |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| **v0.6.8** (current) | Keys on S3 encrypted AES-256-GCM+AAD, memory-only at runtime — C18 hardening: singleton JWT + full tenant_id/aud binding |
+| **v0.7.0** (current) | Keys on S3 encrypted AES-256-GCM+AAD, memory-only at runtime — C18 hardening: singleton JWT + full tenant_id/aud binding |
 | **v1.0**             | Transit Auto-Unseal via dedicated OpenBao (Cloud Temple KMS)                                                        |
 | **v2.0**             | **HSM connection** (Hardware Security Module) Cloud Temple — keys never leave the certified hardware module        |
 
@@ -406,10 +406,10 @@ mcp-vault/
 ├── Dockerfile                # Multi-stage (OpenBao 2.5.1 + Python 3.12)
 ├── requirements.txt          # Python dependencies
 ├── requirements.lock         # Pinned dependencies (exact versions)
-├── VERSION                   # 0.6.8
+├── VERSION                   # 0.7.0
 ├── DESIGN/mcp-vault/
-│   ├── ARCHITECTURE.md       # Detailed specification (v0.6.8)
-│   ├── TECHNICAL.md          # Technical documentation (v0.6.8)
+│   ├── ARCHITECTURE.md       # Detailed specification (v0.7.0)
+│   ├── TECHNICAL.md          # Technical documentation (v0.7.0)
 │   └── SECURITY_AUDIT.md     # Consolidated audit report (60 V2.1 findings)
 ├── scripts/
 │   ├── mcp_cli.py            # CLI entry point
@@ -468,4 +468,4 @@ mcp-vault/
 
 ---
 
-**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.6.8
+**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.7.0

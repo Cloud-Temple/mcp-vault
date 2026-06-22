@@ -1,6 +1,6 @@
 # Architecture — MCP Vault
 
-> **Version** : 0.6.8 | **Date** : 2026-06-11 | **Auteur** : Cloud Temple  
+> **Version** : 0.7.0 | **Date** : 2026-06-22 | **Auteur** : Cloud Temple  
 > **Projet** : mcp-vault | **Licence** : Apache 2.0  
 > **Statut** : ✅ Implémenté — Production-ready (PKI interne v0.5.x + C18 v0.6.x)
 
@@ -191,7 +191,7 @@ de health check et retourne un JSON directement, **sans passer par MCP** ni par
 l'auth. Ceci permet au WAF/load balancer de vérifier l'état du service :
 
 ```json
-{"status": "healthy", "service": "mcp-vault", "version": "0.6.8", "transport": "streamable-http"}
+{"status": "healthy", "service": "mcp-vault", "version": "0.7.0", "transport": "streamable-http"}
 ```
 
 **AuthMiddleware + ContextVar** — Le middleware stocke les infos du token
@@ -507,7 +507,7 @@ vault-bucket/
 │                                 # ⚠️ JAMAIS stocké en clair — ni sur S3, ni localement
 │                                 # Le fichier local est supprimé après unseal
 │
-└── _meta.json                   # {version: "0.6.8", created_at: "...", vaults_count: 5}
+└── _meta.json                   # {version: "0.7.0", created_at: "...", vaults_count: 5}
 ```
 
 **Séparation données/clés** : Les secrets sont dans `openbao-data.tar.gz` (File storage chiffré par la barrier OpenBao, XChaCha20-Poly1305). Les clés unseal sont dans `_init/init_keys.json.enc` (chiffrées avec ADMIN_BOOTSTRAP_KEY). Sans les **deux** (données + clé de déchiffrement des unseal keys), les secrets sont illisibles. Cette séparation physique garantit qu'un vol du bucket S3 seul est insuffisant sans la `ADMIN_BOOTSTRAP_KEY` (variable d'environnement, jamais sur S3).
@@ -2109,4 +2109,4 @@ result = await vault_client.call("ssh_sign_key", {
 
 ---
 
-*Document mis à jour le 11 juin 2026 — MCP Vault v0.6.8 (36 outils MCP, pile ASGI 6 couches avec PkiMiddleware, PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer)*
+*Document mis à jour le 22 juin 2026 — MCP Vault v0.7.0 (36 outils MCP, pile ASGI 6 couches avec PkiMiddleware, PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer)*
