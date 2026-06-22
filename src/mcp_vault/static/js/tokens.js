@@ -10,7 +10,12 @@ async function loadTokens() {
 
     let html = '<div class="flex-between" style="margin-bottom:1rem">';
     html += '<h2 style="color:var(--accent)">🔑 Tokens d\'accès</h2>';
+    html += '<div>';
+    if (tokens.some(t => t.revoked)) {
+        html += '<button class="btn btn-danger" style="margin-right:0.4rem" onclick="purgeRevokedTokens()" title="Supprimer définitivement les tokens révoqués depuis longtemps">🧹 Purger révoqués</button>';
+    }
     html += '<button class="btn btn-primary" onclick="openCreateTokenModal()">+ Nouveau token</button>';
+    html += '</div>';
     html += '</div>';
 
     html += '<div id="newTokenResult"></div>';
@@ -132,6 +137,24 @@ async function revokeToken(hashPrefix) {
     if (!confirm(`Révoquer le token ${hashPrefix}… ? Irréversible.`)) return;
     await api(`/tokens/${hashPrefix}`, { method: 'DELETE' });
     loadTokens();
+}
+
+async function purgeRevokedTokens() {
+    // Étape 1 : dry-run pour obtenir le décompte (rétention appliquée côté serveur)
+    const preview = await api('/tokens/purge', { method: 'POST', body: JSON.stringify({ dry_run: true }) });
+    if (preview.status !== 'ok') { alert('Erreur: ' + (preview.message || 'dry-run impossible')); return; }
+    const n = preview.count || 0;
+    const days = (preview.older_than_days != null) ? preview.older_than_days : 30;
+    if (n === 0) { alert(`Aucun token révoqué depuis plus de ${days} jours à purger.`); return; }
+    // Étape 2 : confirmation explicite — irréversible
+    if (!confirm(`Purger DÉFINITIVEMENT ${n} token(s) révoqué(s) depuis plus de ${days} jours ?\n\nIrréversible. (La révocation, elle, reste réversible tant que le token n'est pas purgé.)`)) return;
+    // Étape 3 : exécution
+    const res = await api('/tokens/purge', { method: 'POST', body: JSON.stringify({ dry_run: false }) });
+    if (res.status === 'ok') {
+        loadTokens();
+    } else {
+        alert('Erreur: ' + (res.message || 'purge non persistée (S3 indisponible)'));
+    }
 }
 
 function copyNewToken() {

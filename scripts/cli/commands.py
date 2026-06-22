@@ -1147,6 +1147,51 @@ def token_revoke_cmd(ctx, hash_prefix, output_json):
     asyncio.run(_run())
 
 
+@token_group.command("purge-revoked")
+@click.option("--older-than", type=int, default=30, show_default=True,
+              help="Ne purger que les tokens révoqués depuis plus de N jours")
+@click.option("--dry-run", is_flag=True, help="Lister les candidats sans rien supprimer")
+@click.option("--yes", "-y", is_flag=True, help="Confirmer la purge sans prompt")
+@click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
+@click.pass_context
+def token_purge_revoked_cmd(ctx, older_than, dry_run, yes, output_json):
+    """Purger définitivement les tokens révoqués depuis plus de N jours (irréversible)."""
+    async def _run():
+        import httpx
+        base = ctx.obj["url"]
+        headers = {"Authorization": f"Bearer {ctx.obj['token']}"}
+        # Toujours un dry-run d'abord pour connaître le décompte
+        try:
+            async with httpx.AsyncClient(timeout=10) as http:
+                preview = (await http.post(f"{base}/admin/api/tokens/purge", headers=headers,
+                           json={"older_than_days": older_than, "dry_run": True})).json()
+        except Exception as e:
+            preview = {"status": "error", "message": str(e)}
+        if preview.get("status") != "ok":
+            return show_json(preview) if output_json else show_token_result(preview)
+
+        n = preview.get("count", 0)
+        if dry_run:
+            return show_json(preview) if output_json else show_token_result(preview)
+        if n == 0:
+            if output_json:
+                show_json(preview)
+            else:
+                click.echo(f"Aucun token révoqué depuis plus de {older_than} jours à purger.")
+            return
+        if not yes:
+            click.confirm(f"Purger DÉFINITIVEMENT {n} token(s) révoqué(s) depuis >{older_than}j ? Irréversible.",
+                          abort=True)
+        try:
+            async with httpx.AsyncClient(timeout=10) as http:
+                result = (await http.post(f"{base}/admin/api/tokens/purge", headers=headers,
+                          json={"older_than_days": older_than, "dry_run": False})).json()
+        except Exception as e:
+            result = {"status": "error", "message": str(e)}
+        show_json(result) if output_json else show_token_result(result)
+    asyncio.run(_run())
+
+
 # =============================================================================
 # Audit Log
 # =============================================================================

@@ -367,6 +367,72 @@ class TokenStore:
                     "message": f"Révocation non persistée — S3 indisponible (token {hash_prefix[:12]}...)"}
         return {"status": "ok", "message": f"Token {hash_prefix[:12]}... révoqué"}
 
+    def purge_revoked(self, older_than_days: int = 30, dry_run: bool = False) -> dict:
+        """
+        Purge définitivement les tokens RÉVOQUÉS depuis plus de `older_than_days`
+        jours (rétention). N'affecte JAMAIS les tokens actifs, ni les tokens
+        expirés non révoqués (qui doivent rester visibles).
+
+        Fail-close : un token révoqué sans `revoked_at` parseable n'est PAS purgé
+        — on ne détruit pas une preuve qu'on ne sait pas dater.
+
+        Args:
+            older_than_days: rétention (défaut 30). 0 = purger tous les révoqués.
+            dry_run: si True, ne supprime rien et retourne les candidats.
+
+        Retourne {"status": "ok"|"storage_unavailable", "count", "dry_run",
+                  "older_than_days", "candidates"|"purged": [...]}.
+        """
+        from datetime import datetime, timezone, timedelta
+        self._maybe_refresh()
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max(0, older_than_days))
+
+        candidates = []
+        for h, t in self._tokens.items():
+            if not t.get("revoked"):
+                continue
+            try:
+                revoked_dt = datetime.fromisoformat(t.get("revoked_at"))
+                if revoked_dt.tzinfo is None or revoked_dt >= cutoff:
+                    continue  # date non comparable, ou révoqué trop récemment (rétention)
+            except (ValueError, TypeError):
+                continue  # fail-close : revoked_at absent / corrompu → non purgé
+            candidates.append((h, t))
+
+        summary = [
+            {"client_name": t.get("client_name", ""), "hash_prefix": h[:12],
+             "revoked_at": t.get("revoked_at", "")}
+            for h, t in candidates
+        ]
+
+        if dry_run:
+            return {"status": "ok", "dry_run": True, "count": len(summary),
+                    "older_than_days": older_than_days, "candidates": summary,
+                    "message": f"{len(summary)} token(s) révoqué(s) seraient purgés "
+                               f"(rétention {older_than_days} j)"}
+
+        if not candidates:
+            return {"status": "ok", "dry_run": False, "count": 0,
+                    "older_than_days": older_than_days, "purged": [],
+                    "message": "Aucun token révoqué à purger (rétention respectée)"}
+
+        # Snapshot pour rollback si _save échoue (cohérent avec revoke())
+        import copy
+        removed = {h: copy.deepcopy(self._tokens[h]) for h, _ in candidates}
+        for h in removed:
+            del self._tokens[h]
+
+        if not self._save():
+            self._tokens.update(removed)  # rollback : restaurer les tokens supprimés
+            logger.error("Purge de %d token(s) révoqué(s) non persistée — S3 indisponible", len(removed))
+            return {"status": "storage_unavailable", "dry_run": False, "count": 0,
+                    "older_than_days": older_than_days,
+                    "message": "Purge non persistée — S3 indisponible"}
+
+        return {"status": "ok", "dry_run": False, "count": len(summary),
+                "older_than_days": older_than_days, "purged": summary,
+                "message": f"{len(summary)} token(s) révoqué(s) purgé(s)"}
+
     @staticmethod
     def _is_expired(token: dict) -> bool:
         """Vérifie si un token est expiré (cohérent avec get_by_hash)."""
