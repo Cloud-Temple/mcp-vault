@@ -818,7 +818,7 @@ async def policy_create(policy_id: str, description: str = "",
     if not store:
         return {"status": "error", "message": "Policy Store non configuré (S3 requis)"}
 
-    return store.create(
+    result = store.create(
         policy_id=policy_id,
         description=description,
         allowed_tools=allowed_tools or [],
@@ -826,6 +826,7 @@ async def policy_create(policy_id: str, description: str = "",
         path_rules=path_rules or [],
         created_by=get_current_client_name(),
     )
+    return _r("policy_create", result, detail=f"policy={policy_id}")
 
 
 @mcp.tool()
@@ -908,10 +909,14 @@ async def policy_delete(policy_id: str, confirm: bool = False) -> dict:
 
     result = store.delete(policy_id)
     if result is True:
-        return _r("policy_delete", {"status": "deleted", "policy_id": policy_id})
+        return _r("policy_delete", {"status": "deleted", "policy_id": policy_id},
+                  detail=f"policy={policy_id}")
     elif result == "storage_error":
-        return {"status": "error", "error_type": "storage_unavailable",
-                "message": "Suppression non persistée (S3 indisponible)"}
+        # Suppression non persistée = la policy reste active → événement critique à tracer
+        return _r("policy_delete",
+                  {"status": "error", "error_type": "storage_unavailable",
+                   "message": "Suppression non persistée (S3 indisponible)"},
+                  detail=f"policy={policy_id} NON PERSISTÉE (S3 indisponible)")
     else:
         return {"status": "error", "message": f"Policy '{policy_id}' non trouvée"}
 
@@ -1278,12 +1283,13 @@ async def token_update(hash_prefix: str, policy_id: str = "",
         else:
             new_resources = [v.strip() for v in vaults.split(",") if v.strip()]
 
-    return store.update(
+    result = store.update(
         hash_prefix=hash_prefix,
         policy_id=new_policy,
         permissions=new_perms,
         allowed_resources=new_resources,
     )
+    return _r("token_update", result, detail=f"hash={hash_prefix[:12]}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
