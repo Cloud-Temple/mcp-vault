@@ -266,6 +266,12 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
         body = await _read_body(receive)
         return await _api_create_token(send, body)
 
+    if path == "/admin/api/tokens/purge" and method == "POST":
+        if not is_admin:
+            return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
+        body = await _read_body(receive)
+        return await _api_purge_revoked_tokens(send, body)
+
     if path.startswith("/admin/api/tokens/") and method == "PUT":
         if not is_admin:
             return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
@@ -469,6 +475,51 @@ async def _api_revoke_token(send, hash_prefix):
     else:
         # not_found | ambiguous
         await _json_response(send, 404, err_body)
+
+
+async def _api_purge_revoked_tokens(send, body):
+    """POST /admin/api/tokens/purge — Purger les tokens révoqués (rétention).
+
+    Body JSON optionnel : {"older_than_days": int (défaut 30), "dry_run": bool}.
+    Réservé admin. Chaque token réellement purgé est audité (trace persistante
+    dans audit-mcp.jsonl, indépendant de tokens.json → survit au purge)."""
+    store = get_token_store()
+    if not store:
+        return await _json_response(send, 400, {"status": "error", "message": "S3 non configuré"})
+    try:
+        data = json.loads(body) if body else {}
+    except (json.JSONDecodeError, ValueError):
+        return await _json_response(send, 400, {"status": "error", "message": "JSON invalide"})
+
+    older_than_days = data.get("older_than_days", 30)
+    # bool est sous-classe de int → rejeter explicitement True/False.
+    # Borne sup. : évite un OverflowError sur timedelta(days=...) (≈ DoS auto-infligé).
+    if (isinstance(older_than_days, bool) or not isinstance(older_than_days, int)
+            or older_than_days < 0 or older_than_days > 36500):
+        return await _json_response(send, 400, {"status": "error",
+                "message": "older_than_days doit être un entier entre 0 et 36500"})
+    dry_run = bool(data.get("dry_run", False))
+
+    result = store.purge_revoked(older_than_days, dry_run=dry_run)
+
+    if not dry_run and result.get("status") == "ok":
+        # Audit basé sur ce qui a RÉELLEMENT été purgé (pas sur un dry-run préalable
+        # qui pourrait diverger). Jamais de secret dans le détail.
+        for c in result.get("purged", []):
+            log_audit("token_purge", "deleted",
+                      detail=f"hash={c.get('hash_prefix')} client={c.get('client_name')} "
+                             f"revoked_at={c.get('revoked_at')}")
+        log_audit("token_purge", "ok",
+                  detail=f"count={result.get('count', 0)} older_than_days={older_than_days}")
+    elif not dry_run and result.get("status") == "storage_unavailable":
+        log_audit("token_purge", "error",
+                  detail=f"purge NON persistée (S3) older_than_days={older_than_days}")
+        # Normaliser en status=error : un échec destructif ne doit jamais s'afficher
+        # comme un succès (cohérent avec _api_revoke_token ; CLI/SPA rendent une erreur).
+        return await _json_response(send, 503, {"status": "error",
+                "message": result.get("message", "Purge non persistée — S3 indisponible")})
+
+    await _json_response(send, 200, result)
 
 
 async def _api_create_vault(send, body):

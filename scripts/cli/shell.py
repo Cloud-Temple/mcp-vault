@@ -32,7 +32,7 @@ SHELL_COMMANDS = {
     "password":   "password [length] — Générer un mot de passe CSPRNG",
     "ssh":        "ssh <op> <vault> [args] — setup, sign, ca-key, roles, role-info",
     "policy":     "policy <op> [args] — create, list, get, delete",
-    "token":      "token <op> [args] — create, list, update, revoke",
+    "token":      "token <op> [args] — create, list, update, revoke, purge-revoked",
     "audit":      "audit [options] — journal d'audit complet",
     "pki":        "pki <op> [args] — setup, ca-key, roles, role-info, certs, revoke, rotate",
     "quit":       "Quitter le shell",
@@ -529,7 +529,7 @@ async def cmd_policy(client, args="", json_output=False):
         show_policy_result(result)
 
 
-TOKEN_OPS = ("create", "list", "update", "revoke")
+TOKEN_OPS = ("create", "list", "update", "revoke", "purge-revoked")
 
 
 async def cmd_token(client, args="", json_output=False):
@@ -544,6 +544,7 @@ async def cmd_token(client, args="", json_output=False):
         show_warning("  token update <hash> --policy _remove        — retirer la policy")
         show_warning("  token update <hash> --vaults prod,staging   — restreindre les vaults")
         show_warning("  token revoke <hash>")
+        show_warning("  token purge-revoked [--older-than 30] [--yes]  — purge les révoqués anciens")
         show_warning("")
         show_warning("  Par defaut (vaults vide), le token ne voit que les vaults qu'il cree.")
         return
@@ -648,6 +649,56 @@ async def cmd_token(client, args="", json_output=False):
                 result = resp.json()
         except Exception as e:
             result = {"status": "error", "message": str(e)}
+    elif op == "purge-revoked":
+        older_than = 30
+        older_than_err = False
+        do_purge = "--yes" in parts
+        i = 1
+        while i < len(parts):
+            if parts[i] == "--older-than":
+                # Fail-close : valeur absente ou non entière → on refuse, pas de purge
+                if i + 1 >= len(parts):
+                    older_than_err = True
+                    break
+                try:
+                    older_than = int(parts[i + 1])
+                except ValueError:
+                    older_than_err = True
+                    break
+                i += 2
+            else:
+                i += 1
+        if older_than_err:
+            show_error("--older-than attend un entier (ex: token purge-revoked --older-than 30 --yes)")
+            return
+        try:
+            async with httpx.AsyncClient(timeout=10) as http:
+                preview = (await http.post(
+                    f"{client.base_url}/admin/api/tokens/purge",
+                    headers={"Authorization": f"Bearer {client.token}"},
+                    json={"older_than_days": older_than, "dry_run": True},
+                )).json()
+        except Exception as e:
+            preview = {"status": "error", "message": str(e)}
+        if not isinstance(preview, dict) or preview.get("status") != "ok":
+            # Fail-close : un dry-run en échec n'autorise JAMAIS la purge effective
+            result = preview if isinstance(preview, dict) else {"status": "error", "message": "réponse invalide"}
+        elif not do_purge:
+            # Pas de --yes : on n'exécute QUE le dry-run (le shell n'a pas de prompt interactif)
+            n = preview.get("count", 0)
+            show_warning(f"{n} token(s) révoqué(s) depuis >{older_than}j seraient purgés. "
+                         f"Ajoutez --yes pour confirmer.")
+            result = preview
+        else:
+            try:
+                async with httpx.AsyncClient(timeout=10) as http:
+                    result = (await http.post(
+                        f"{client.base_url}/admin/api/tokens/purge",
+                        headers={"Authorization": f"Bearer {client.token}"},
+                        json={"older_than_days": older_than, "dry_run": False},
+                    )).json()
+            except Exception as e:
+                result = {"status": "error", "message": str(e)}
     else:
         show_warning(f"Usage: token {op} ...")
         return
