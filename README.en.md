@@ -126,6 +126,8 @@ Policies restrict the tools accessible per token, with support for **wildcards**
 | -------------------------------------------------------------- | ----- | ------------------------------------------------------- |
 | `token_update(hash_prefix, policy_id?, permissions?, vaults?)` | admin | Modifies an existing token (policy, permissions, vaults) |
 
+> **Revoked-token purge** *(v0.7.0 — **admin** operation, exposed via REST / CLI / SPA; this is NOT an MCP tool)*: permanently deletes tokens revoked more than N days ago (retention, default 30). **Fail-close** (never an active token nor an expired-but-not-revoked one), **dry-run + confirmation**, rollback if S3 is unavailable, every purge **audited**. Via `POST /admin/api/tokens/purge`, the CLI command `token purge-revoked`, or the « 🧹 Purge revoked » button in the `/admin` console.
+
 ### Internal PKI — CA + ACME (8) *(v0.5.0)*
 
 Sovereign CA for the ecosystem: Caddy WAFs enroll via ACME exactly like with Let's Encrypt, but on an internal CA isolated from the public network. Usable in lab (`*.lesur.lan`) and in air-gapped production.
@@ -164,6 +166,8 @@ Contract for the mcp-mission `CredentialBrokerService`: single-use credential de
 | Tool                                                                       | Perm  | Description                                                              |
 | -------------------------------------------------------------------------- | ----- | ----------------------------------------------------------------------- |
 | `audit_log(limit?, client?, vault_id?, tool?, category?, status?, since?)` | admin | Filterable audit log (5000-entry ring buffer + persistent JSONL)        |
+
+> **Access lifecycle audit trail** *(v0.7.0 — SecNumCloud/HDS compliance)*: every mutation of the access-control plane — token create / update / revoke / purge, policy create / delete — is logged, via the **admin REST API** as well as the **MCP tools**. Persistence failures of **removal** operations (revocation, purge, policy deletion — those that leave an access active if they fail) are also traced. The trace lives in `audit-mcp.jsonl`, **physically independent of `_system/tokens.json`** → it survives a purge. The raw token never appears in audit detail.
 
 <details>
 <summary>💡 Typical SSH CA workflow (e.g. LLMaaS infrastructure)</summary>
@@ -248,6 +252,8 @@ python scripts/mcp_cli.py secret read prod-servers web/github
 python scripts/mcp_cli.py secret password -l 32
 python scripts/mcp_cli.py token create agent-sre --vaults prod --policy readonly
 python scripts/mcp_cli.py token list
+python scripts/mcp_cli.py token purge-revoked --older-than 30 --dry-run    # preview (nothing deleted)
+python scripts/mcp_cli.py token purge-revoked --older-than 30 --yes        # effective purge
 python scripts/mcp_cli.py policy create no-ssh -d "No SSH" --denied "ssh_*"
 python scripts/mcp_cli.py policy create team-x --allowed "secret_*" --path-rules '[{"vault_pattern":"shared-*","allowed_paths":["shared/*"]}]'
 python scripts/mcp_cli.py audit --status denied --limit 10
@@ -343,7 +349,7 @@ OpenBao's unseal keys are protected by **3-factor physical separation**:
 
 | Version              | Approach                                                                                                            |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| **v0.7.0** (current) | Keys on S3 encrypted AES-256-GCM+AAD, memory-only at runtime — C18 hardening: singleton JWT + full tenant_id/aud binding |
+| **v0.7.0** (current) | Keys on S3 encrypted AES-256-GCM+AAD, memory-only at runtime |
 | **v1.0**             | Transit Auto-Unseal via dedicated OpenBao (Cloud Temple KMS)                                                        |
 | **v2.0**             | **HSM connection** (Hardware Security Module) Cloud Temple — keys never leave the certified hardware module        |
 
