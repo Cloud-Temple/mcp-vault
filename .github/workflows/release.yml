@@ -1,0 +1,98 @@
+name: Release on VERSION bump
+
+# Au merge sur `main` qui modifie le fichier VERSION : crée le tag annoté
+# vX.Y.Z + la GitHub Release (notes = section correspondante du CHANGELOG).
+# Idempotent et re-run safe : le tag et la release sont gérés indépendamment
+# (un échec partiel se rattrape au re-run). Évite les releases déployées
+# « par commit nu », sans tag ni release (cf. v0.7.0). — issue #56
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - VERSION
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (historique complet pour les tags)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Résoudre et valider la version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(cat VERSION)"
+          version="${version%$'\r'}"   # tolère au plus un CR final (CRLF)
+          # Validation du contenu RÉEL (pas après normalisation) : la chaîne
+          # entière doit être exactement X.Y.Z. [[ =~ ]] ancre sur toute la
+          # chaîne (^...$), donc un contenu multi-ligne ou espacé est rejeté
+          # (contrairement à grep -q qui matcherait n'importe quelle ligne).
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::VERSION invalide (attendu X.Y.Z exact) : '$version'"; exit 1
+          fi
+          {
+            echo "version=${version}"
+            echo "tag=v${version}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Créer/vérifier le tag annoté
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force origin
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            existing="$(git rev-parse "${TAG}^{}")"
+            if [ "$existing" != "$GITHUB_SHA" ]; then
+              echo "::error::Le tag ${TAG} existe déjà mais pointe sur ${existing} (attendu ${GITHUB_SHA})"
+              exit 1
+            fi
+            echo "Tag ${TAG} déjà présent et aligné sur le commit courant."
+          else
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" -m "$TAG" "$GITHUB_SHA"
+            git push origin "$TAG"
+            echo "Tag ${TAG} créé et poussé."
+          fi
+
+      - name: Créer la GitHub Release (si absente)
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release ${TAG} déjà présente — rien à faire."
+            exit 0
+          fi
+          # Notes = bloc "## [VERSION]" du CHANGELOG (trim des lignes vides de tête).
+          awk -v ver="$VERSION" '
+            index($0, "## [" ver "]") == 1 { capture = 1; next }
+            capture && index($0, "## [") == 1 { exit }
+            capture {
+              if (!started && $0 ~ /^[[:space:]]*$/) next
+              started = 1
+              print
+            }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then
+            printf 'Release %s\n' "$VERSION" > RELEASE_NOTES.md
+          fi
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file RELEASE_NOTES.md \
+            --target "$GITHUB_SHA"
