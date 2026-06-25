@@ -34,7 +34,8 @@ SHELL_COMMANDS = {
     "policy":     "policy <op> [args] — create, list, get, delete",
     "token":      "token <op> [args] — create, list, update, revoke, purge-revoked",
     "audit":      "audit [options] — journal d'audit complet",
-    "pki":        "pki <op> [args] — setup, ca-key, roles, role-info, certs, revoke, rotate",
+    "logs":       "logs — activité HTTP récente du serveur (ring buffer admin)",
+    "pki":        "pki <op> [args] — setup, ca-key, roles, role-info, certs, issue, revoke, rotate",
     "quit":       "Quitter le shell",
 }
 
@@ -709,6 +710,21 @@ async def cmd_token(client, args="", json_output=False):
         show_token_result(result)
 
 
+async def cmd_logs(client, args="", json_output=False):
+    """Activité HTTP récente du serveur (ring buffer admin) — distincte du journal d'audit."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10) as http:
+            resp = await http.get(
+                f"{client.base_url}/admin/api/logs",
+                headers={"Authorization": f"Bearer {client.token}"},
+            )
+            result = resp.json()
+    except Exception as e:
+        result = {"status": "error", "message": str(e)}
+    show_json(result)
+
+
 async def cmd_audit(client, args="", json_output=False):
     params = {"limit": 50}
     parts = args.strip().split()
@@ -807,6 +823,8 @@ async def run_shell(url: str, token: str):
                 await cmd_token(client, args, json_output)
             elif command == "audit":
                 await cmd_audit(client, args, json_output)
+            elif command == "logs":
+                await cmd_logs(client, args, json_output)
             elif command == "pki":
                 await cmd_pki(client, args, json_output)
             else:

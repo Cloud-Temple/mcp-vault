@@ -66,7 +66,7 @@
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │  Console Admin Web (/admin) — voir §2.4                    │  │
 │  │  • SPA HTML (login + 4 vues)                               │  │
-│  │  • API REST admin (8 endpoints, auth admin)                │  │
+│  │  • API REST admin (REST routes, auth admin)                │  │
 │  │  • Design Cloud Temple (dark theme #0f0f23, accent #41a890)│  │
 │  └────────────────────────────────────────────────────────────┘  │
 │                                                                  │
@@ -224,9 +224,11 @@ AdminMiddleware (ASGI, derrière PkiMiddleware)
             ├── POST /admin/api/vaults          → créer un vault
             ├── GET  /admin/api/tokens          → lister les tokens S3
             ├── POST /admin/api/tokens          → créer un token
-            ├── GET  /admin/api/tokens/{name}   → info d'un token
+            ├── PUT  /admin/api/tokens/{name}   → modifier un token (policy / permissions / vaults)
             ├── DELETE /admin/api/tokens/{name}  → révoquer un token
-            └── GET  /admin/api/logs            → activité récente (ring buffer 200)
+            ├── POST /admin/api/tokens/purge    → purger les tokens révoqués (rétention + dry-run)
+            ├── GET  /admin/api/logs            → activité récente (ring buffer 200)
+            └── … + policies, PKI (CA/ACME), audit, whoami, generate-password (cf. admin/api.py)
 ```
 
 #### 4 vues
@@ -235,7 +237,7 @@ AdminMiddleware (ASGI, derrière PkiMiddleware)
 | ------------- | ---------------------------------------------------------------------------------------------------------- |
 | **Dashboard** | État du serveur (version, OpenBao sealed/unsealed, S3 sync status, last sync, vaults count), stats tokens  |
 | **Vaults**    | Grille des vaults avec nombre de secrets, tags, date de création. Clic = détail des clés (pas les valeurs) |
-| **Tokens**    | Table CRUD : créer (checkboxes vault_ids, permissions), info, révoquer. Token brut affiché une seule fois  |
+| **Tokens**    | Table CRUD : créer (checkboxes vault_ids, permissions), info, révoquer, purger les révoqués (dry-run). Token brut affiché une seule fois  |
 | **Activité**  | Logs temps réel (ring buffer mémoire 200 entrées, auto-refresh 5s). Méthode, path, status, durée           |
 
 #### Sécurité de la console admin
@@ -816,7 +818,7 @@ les rôles SSH) sans pouvoir modifier quoi que ce soit.
 
 #### 6.7.1 Architecture du journal d'audit
 
-Le système d'audit trace **toutes** les opérations MCP, avec double persistance :
+Le système d'audit trace **toutes** les opérations MCP — et, depuis v0.7.0 (#49), les mutations du plan de contrôle d'accès via l'**API REST admin** (`token_create`, `token_update`, `token_revoke`, `token_purge`, `policy_create`, `policy_delete` ; les échecs de persistance des opérations de **retrait** — révocation, purge, suppression de policy — sont également tracés) — avec double persistance :
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -1361,7 +1363,7 @@ mcp-vault/
 │   ├── admin/                 # Console d'administration web (/admin)
 │   │   ├── __init__.py
 │   │   ├── middleware.py      # AdminMiddleware ASGI (static + API routing + CORS)
-│   │   └── api.py             # REST API admin (8 endpoints)
+│   │   └── api.py             # REST API admin (toutes routes admin)
 │   ├── auth/                  # Auth standard (starter-kit)
 │   │   ├── __init__.py
 │   │   ├── middleware.py      # AuthMiddleware (Bearer + ContextVar) + LoggingMiddleware (ring buffer)

@@ -126,6 +126,8 @@ Les policies permettent de restreindre finement les outils accessibles par token
 | -------------------------------------------------------------- | ----- | -------------------------------------------------------- |
 | `token_update(hash_prefix, policy_id?, permissions?, vaults?)` | admin | Modifier un token existant (policy, permissions, vaults) |
 
+> **Purge des tokens révoqués** *(v0.7.0 — opération **admin**, exposée en REST / CLI / SPA ; ce n'est PAS un outil MCP)* : supprime définitivement les tokens révoqués depuis plus de N jours (rétention, défaut 30). **Fail-close** (jamais un token actif ni un token expiré non révoqué), **dry-run + confirmation**, rollback si S3 indisponible, chaque purge **auditée**. Via `POST /admin/api/tokens/purge`, la commande CLI `token purge-revoked`, ou le bouton « 🧹 Purger révoqués » de la console `/admin`.
+
 ### PKI interne — CA + ACME (8) *(v0.5.0)*
 
 CA souveraine pour l'écosystème : les WAF Caddy s'enrôlent via ACME exactement comme avec Let's Encrypt, mais sur une CA interne isolée du réseau public. Utilisable en lab (`*.lesur.lan`) et en prod air-gapped.
@@ -164,6 +166,8 @@ Contrat pour le `CredentialBrokerService` de mcp-mission : livraison de credenti
 | Outil                                                                      | Perm  | Description                                                             |
 | -------------------------------------------------------------------------- | ----- | ----------------------------------------------------------------------- |
 | `audit_log(limit?, client?, vault_id?, tool?, category?, status?, since?)` | admin | Journal d'audit filtrable (ring buffer 5000 entrées + JSONL persistant) |
+
+> **Traçabilité du cycle de vie des accès** *(v0.7.0 — conformité SecNumCloud/HDS)* : toute mutation du plan de contrôle — création / mise à jour / révocation / purge de token, création / suppression de policy — est journalisée, via l'**API REST admin** comme via les **outils MCP**. Les échecs de persistance des opérations de **retrait** (révocation, purge, suppression de policy — celles qui laissent un accès actif si elles échouent) sont également tracés. La trace vit dans `audit-mcp.jsonl`, **physiquement indépendant de `_system/tokens.json`** → elle survit à une purge. Le token brut n'apparaît jamais dans le détail d'audit.
 
 <details>
 <summary>💡 Workflow SSH CA typique (ex: infrastructure LLMaaS)</summary>
@@ -248,6 +252,8 @@ python scripts/mcp_cli.py secret read serveurs-prod web/github
 python scripts/mcp_cli.py secret password -l 32
 python scripts/mcp_cli.py token create agent-sre --vaults prod --policy readonly
 python scripts/mcp_cli.py token list
+python scripts/mcp_cli.py token purge-revoked --older-than 30 --dry-run    # aperçu (rien supprimé)
+python scripts/mcp_cli.py token purge-revoked --older-than 30 --yes        # purge effective
 python scripts/mcp_cli.py policy create no-ssh -d "Pas de SSH" --denied "ssh_*"
 python scripts/mcp_cli.py policy create team-x --allowed "secret_*" --path-rules '[{"vault_pattern":"shared-*","allowed_paths":["shared/*"]}]'
 python scripts/mcp_cli.py audit --status denied --limit 10
@@ -343,7 +349,7 @@ Les clés unseal d'OpenBao sont protégées par **séparation physique à 3 fact
 
 | Version              | Approche                                                                                                            |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| **v0.7.0** (actuel)  | Clés sur S3 chiffrées AES-256-GCM+AAD, mémoire seule au runtime — hardening C18 : singleton JWT + binding complet tenant_id/aud |
+| **v0.7.0** (actuel)  | Clés sur S3 chiffrées AES-256-GCM+AAD, mémoire seule au runtime |
 | **v1.0**             | Transit Auto-Unseal via OpenBao dédié (KMS Cloud Temple)                                                            |
 | **v2.0**             | **Connexion HSM** (Hardware Security Module) Cloud Temple — les clés ne quittent jamais le module matériel certifié |
 

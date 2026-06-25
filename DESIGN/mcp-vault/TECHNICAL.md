@@ -222,6 +222,7 @@ d'autres tokens. La sémantique est désormais "vide = mes vaults".
 - `list_all()` → Liste sans les hash complets
 - `revoke(hash_prefix)` → Marque comme révoqué, sauvegarde sur S3
 - `count()` → Nombre de tokens actifs
+- `purge_revoked(older_than_days=30, dry_run=False)` → Supprime définitivement les tokens **révoqués** depuis plus de N jours (rétention). Fail-close si `revoked_at` absent/corrompu/sans fuseau ; rollback si `_save()` échoue ; `dry_run` retourne les candidats sans rien supprimer. N'affecte jamais un token actif ni un token expiré non révoqué. *(v0.7.0)*
 
 ### 3.7 `vault/types.py` — Types de secrets
 

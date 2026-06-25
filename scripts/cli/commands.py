@@ -1231,6 +1231,29 @@ def audit_cmd(ctx, limit, client, vault, tool, category, status, since, output_j
     asyncio.run(_run())
 
 
+@cli.command("logs")
+@click.pass_context
+def logs_cmd(ctx):
+    """🌐 Activité HTTP récente du serveur (ring buffer admin).
+
+    Distinct de `audit` : journal d'activité HTTP (méthode/chemin/statut/durée),
+    pas le journal d'audit de conformité. Réservé admin.
+    """
+    async def _run():
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=10) as http:
+                resp = await http.get(
+                    f"{ctx.obj['url']}/admin/api/logs",
+                    headers={"Authorization": f"Bearer {ctx.obj['token']}"},
+                )
+                result = resp.json()
+        except Exception as e:
+            result = {"status": "error", "message": str(e)}
+        show_json(result)
+    asyncio.run(_run())
+
+
 # =============================================================================
 # Shell interactif
 # =============================================================================
