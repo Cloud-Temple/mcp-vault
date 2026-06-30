@@ -1,5 +1,16 @@
 # Changelog — MCP Vault
 
+## [Unreleased] — v0.8.0
+
+### Observabilité AuditStore (issue #61)
+
+`AuditStore.log()` avalait silencieusement toute erreur d'écriture du fichier JSONL (`except Exception: pass`). En cas de panne disque, répertoire absent ou problème de permission, aucune trace n'était produite.
+
+- `AuditStore.log()` logue désormais sur `stderr` chaque échec d'écriture avec le chemin, le type d'exception et le message.
+- Nouveau compteur `_write_errors` incrémenté à chaque échec.
+- `get_stats()` expose `write_errors` dans tous les cas de retour (buffer vide inclus) — visible via l'outil MCP `audit_log` et l'API admin `/admin/api/audit`.
+- Dead code `self._file = None` supprimé.
+
 ## [0.7.0] — 2026-06-22
 
 Milestone **« Durcissement auth & conformité »** : traçabilité d'audit du plan de contrôle d'accès (SecNumCloud/HDS), purge des tokens révoqués, et défense en profondeur sur la création de tokens.

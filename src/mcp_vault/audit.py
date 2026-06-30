@@ -94,7 +94,7 @@ class AuditStore:
     def __init__(self, jsonl_path: Path):
         self._buffer = collections.deque(maxlen=self.BUFFER_SIZE)
         self._jsonl_path = jsonl_path
-        self._file = None
+        self._write_errors = 0
 
     def load_recent(self):
         """Charge les dernières entrées depuis le fichier JSONL."""
@@ -146,8 +146,13 @@ class AuditStore:
         try:
             with open(self._jsonl_path, "a") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        except Exception:
-            pass  # Ne pas bloquer l'opération si l'écriture audit échoue
+        except Exception as e:
+            self._write_errors += 1
+            print(
+                f"⚠️  AuditStore write error ({self._write_errors}) "
+                f"path={self._jsonl_path}: {type(e).__name__}: {e}",
+                file=sys.stderr,
+            )
 
     def count(self) -> int:
         """Nombre d'entrées dans le ring buffer."""
@@ -204,7 +209,7 @@ class AuditStore:
         """Statistiques d'audit (pour le dashboard)."""
         total = len(self._buffer)
         if total == 0:
-            return {"total": 0, "by_category": {}, "by_status": {}, "by_client": {}}
+            return {"total": 0, "by_category": {}, "by_status": {}, "by_client": {}, "write_errors": self._write_errors}
 
         by_category = {}
         by_status = {}
@@ -225,6 +230,7 @@ class AuditStore:
             "by_category": dict(sorted(by_category.items(), key=lambda x: -x[1])),
             "by_status": dict(sorted(by_status.items(), key=lambda x: -x[1])),
             "by_client": dict(sorted(by_client.items(), key=lambda x: -x[1])),
+            "write_errors": self._write_errors,
         }
 
 
