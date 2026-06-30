@@ -96,7 +96,7 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
         if policy_err:
             return await _json_response(send, 403, policy_err)
         body = await _read_body(receive)
-        return await _api_create_vault(send, body)
+        return await _api_create_vault(send, body, token_info)
 
     if path.startswith("/admin/api/vaults/") and "/secrets" not in path and "/ssh/" not in path:
         vault_id = path[len("/admin/api/vaults/"):]
@@ -522,7 +522,7 @@ async def _api_purge_revoked_tokens(send, body):
     await _json_response(send, 200, result)
 
 
-async def _api_create_vault(send, body):
+async def _api_create_vault(send, body, token_info):
     """POST /admin/api/vaults — Créer un vault."""
     from ..vault.spaces import create_space
     data = json.loads(body) if body else {}
@@ -530,6 +530,9 @@ async def _api_create_vault(send, body):
     description = data.get("description", "")
     if not vault_id:
         return await _json_response(send, 400, {"status": "error", "message": "vault_id requis"})
+    access_err = _check_vault_access(token_info, vault_id)
+    if access_err:
+        return await _json_response(send, 403, access_err)
     result = await create_space(vault_id, description)
     status = 201 if result.get("status") == "created" else 400
     await _json_response(send, status, result)

@@ -1,5 +1,16 @@
 # Changelog — MCP Vault
 
+## [Unreleased] — v0.8.0
+
+### Correction asymétrie vault_create MCP/REST — contrôle d'accès vault-level (issue #58)
+
+`POST /admin/api/vaults` ne vérifiait pas l'accès vault-level (`check_access`) avant de créer un vault, contrairement au chemin MCP `vault_create`. Un token scopé (ex. `allowed_resources=["vault-a"]`) pouvait créer n'importe quel vault via l'API REST.
+
+- **`_api_create_vault`** reçoit désormais `token_info` et appelle `_check_vault_access(token_info, vault_id)` après validation de `vault_id` — retourne 403 si le token n'est pas autorisé sur ce vault.
+- Cohérent avec `_api_update_vault` / `_api_delete_vault` qui appliquaient déjà ce contrôle au routeur (vault_id dans l'URL).
+- Pas de régression admin : un token admin passe toujours.
+- Pas de régression owner-based : `check_vault_owner` retourne `True` pour un vault inexistant (création autorisée pour le créateur).
+
 ## [0.7.0] — 2026-06-22
 
 Milestone **« Durcissement auth & conformité »** : traçabilité d'audit du plan de contrôle d'accès (SecNumCloud/HDS), purge des tokens révoqués, et défense en profondeur sur la création de tokens.
