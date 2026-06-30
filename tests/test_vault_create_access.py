@@ -6,17 +6,14 @@ Tests — Asymétrie MCP/REST vault_create check_access (issue #58).
 Prouve que POST /admin/api/vaults applique désormais le même contrôle
 d'accès vault-level que le chemin MCP vault_create.
 
-Appelle _api_create_vault directement pour isoler le comportement :
-- mock create_space via sys.modules (vault.spaces dépend de hvac non dispo hors Docker)
-- token_info passé explicitement (nouveau style REST cohérent)
+Deux niveaux :
+A) Direct (_api_create_vault) : isole le handler, prouve la logique d'accès.
+B) Route-level (handle_admin_api) : prouve que le routeur passe bien token_info
+   au handler — si le routeur restait avec l'ancien appel à 2 args, ces tests
+   casseraient en 500 même si les tests directs passaient.
 
-Non-complaisant :
-- test RED sur ancien code : _api_create_vault(send, body) sans token_info
-  → TypeError (signature changée) prouve que le check n'existait pas
-- test GREEN avec fix : 403 retourné ET create_space non appelé pour vault non autorisé
-- test admin → toujours autorisé (pas de régression)
-- test allowed vault → 201 (happy path non-admin)
-- test vault_id vide → 400 avant le check d'accès
+- mock create_space via sys.modules (vault.spaces dépend de hvac non dispo hors Docker)
+- token_info injecté via mock _get_token_info (même pattern que test_admin_context.py)
 """
 
 import sys
@@ -155,3 +152,78 @@ async def test_create_vault_owner_based_vault_existant_non_owner():
 
     assert 403 in _statuses(send), f"Attendu 403, obtenu {_statuses(send)}"
     mock_spaces.create_space.assert_not_called()
+
+
+# =============================================================================
+# B) Tests route-level via handle_admin_api (ASGI)
+# =============================================================================
+# Ces tests passent par le vrai routeur handle_admin_api → _handle_admin_routes.
+# Si le routeur avait encore l'ancien appel _api_create_vault(send, body) sans
+# token_info, ces tests casseraient (TypeError → 500) même si les tests directs
+# de la section A passaient. Ce sont eux qui prouvent le bug REST réel.
+
+def _asgi_scope(method: str, path: str) -> dict:
+    return {
+        "type": "http",
+        "method": method,
+        "path": path,
+        "query_string": b"",
+        "headers": [(b"authorization", b"Bearer test-token")],
+    }
+
+
+def _receive_with_body(body: bytes):
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+    return receive
+
+
+async def test_route_create_vault_acces_refuse_vault_non_autorise():
+    """
+    Route-level : token scopé ["vault-a"] POST /admin/api/vaults vault-b → 403.
+
+    Prouve que le routeur passe token_info au handler ET que le handler bloque.
+    RED sur ancien code : TypeError (3 args → 2) → 500 au lieu de 403.
+    """
+    token_info = {
+        "client_name": "agent",
+        "permissions": ["read", "write"],
+        "allowed_resources": ["vault-a"],
+    }
+    body = json.dumps({"vault_id": "vault-b"}).encode()
+    scope = _asgi_scope("POST", "/admin/api/vaults")
+    receive = _receive_with_body(body)
+    send = AsyncMock()
+    mock_spaces = _mock_vault_spaces()
+
+    with patch("mcp_vault.admin.api._get_token_info", return_value=token_info), \
+         patch.dict(sys.modules, {"mcp_vault.vault.spaces": mock_spaces}):
+        from mcp_vault.admin.api import handle_admin_api
+        await handle_admin_api(scope, receive, send, mcp=None)
+
+    assert 403 in _statuses(send), f"Attendu 403 (route-level), obtenu {_statuses(send)}"
+    mock_spaces.create_space.assert_not_called()
+
+
+async def test_route_create_vault_acces_autorise_vault_dans_liste():
+    """
+    Route-level : token scopé ["vault-a"] POST /admin/api/vaults vault-a → 201.
+    """
+    token_info = {
+        "client_name": "agent",
+        "permissions": ["read", "write"],
+        "allowed_resources": ["vault-a"],
+    }
+    body = json.dumps({"vault_id": "vault-a"}).encode()
+    scope = _asgi_scope("POST", "/admin/api/vaults")
+    receive = _receive_with_body(body)
+    send = AsyncMock()
+    mock_spaces = _mock_vault_spaces()
+
+    with patch("mcp_vault.admin.api._get_token_info", return_value=token_info), \
+         patch.dict(sys.modules, {"mcp_vault.vault.spaces": mock_spaces}):
+        from mcp_vault.admin.api import handle_admin_api
+        await handle_admin_api(scope, receive, send, mcp=None)
+
+    assert 201 in _statuses(send), f"Attendu 201 (route-level), obtenu {_statuses(send)}"
+    mock_spaces.create_space.assert_called_once()
