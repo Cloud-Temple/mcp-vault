@@ -2,6 +2,15 @@
 
 ## [Unreleased] — v0.8.0
 
+### Observabilité AuditStore (issue #61)
+
+`AuditStore.log()` avalait silencieusement toute erreur d'écriture du fichier JSONL (`except Exception: pass`). En cas de panne disque, répertoire absent ou problème de permission, aucune trace n'était produite.
+
+- `AuditStore.log()` logue désormais sur `stderr` chaque échec d'écriture avec le chemin, le type d'exception et le message.
+- Nouveau compteur `_write_errors` incrémenté à chaque échec.
+- `get_stats()` expose `write_errors` dans tous les cas de retour (buffer vide inclus) — visible via l'outil MCP `audit_log` et l'API admin `/admin/api/audit`.
+- Dead code `self._file = None` supprimé.
+
 ### Correction asymétrie vault_create MCP/REST — contrôle d'accès vault-level (issue #58)
 
 `POST /admin/api/vaults` ne vérifiait pas l'accès vault-level (`check_access`) avant de créer un vault, contrairement au chemin MCP `vault_create`. Un token scopé (ex. `allowed_resources=["vault-a"]`) pouvait créer n'importe quel vault via l'API REST.
