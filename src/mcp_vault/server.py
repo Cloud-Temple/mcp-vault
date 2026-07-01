@@ -134,6 +134,16 @@ async def system_health() -> dict:
 
     Teste la connectivité OpenBao et S3, retourne le statut de chaque service.
     """
+    from .auth.context import enforce_mission_jwt_tool
+
+    # Refusé aux identités mission JWT : expose des métadonnées d'infrastructure
+    # (détails OpenBao/S3, bucket, exceptions). La liveness reste disponible sans
+    # auth via l'endpoint HTTP /health (HealthCheckMiddleware).
+    # Garde placée AVANT les imports backend (refuser sans rien charger).
+    mission_err = enforce_mission_jwt_tool("system_health")
+    if mission_err:
+        return mission_err
+
     from .openbao.lifecycle import get_vault_status
     from .s3_sync import check_s3_connectivity
 
@@ -158,6 +168,13 @@ async def system_about() -> dict:
     Retourne la version, les outils disponibles, et les infos système.
     """
     import platform
+    from .auth.context import enforce_mission_jwt_tool
+
+    # Refusé aux identités mission JWT : expose openbao_addr, platform, python,
+    # tools_count (reconnaissance d'infrastructure).
+    mission_err = enforce_mission_jwt_tool("system_about")
+    if mission_err:
+        return mission_err
 
     return {
         "service": settings.mcp_server_name,
@@ -202,30 +219,24 @@ async def vault_create(vault_id: str, description: str = "") -> dict:
 @mcp.tool()
 async def vault_list() -> dict:
     """Liste tous les vaults (coffres de secrets) accessibles par le token courant."""
-    from .auth.context import current_token_info, check_policy
+    from .auth.context import check_policy, get_listing_filter
     from .vault.spaces import list_spaces
 
     policy_err = check_policy("vault_list")
     if policy_err:
         return policy_err
 
-    # ── Filtrage par token : isolation owner-based ──────────────────
-    token_info = current_token_info.get()
-    allowed_vault_ids = None
-    owner_filter = None
-
-    if token_info and "admin" not in token_info.get("permissions", []):
-        allowed = token_info.get("allowed_resources", [])
-        if allowed:
-            # Liste explicite de vaults autorisés
-            allowed_vault_ids = allowed
-        else:
-            # Pas de liste → owner-based : ne voir que ses propres vaults
-            owner_filter = token_info.get("client_name", "")
+    # ── Filtrage par token : projection centralisée (issue #47) ─────
+    # get_listing_filter applique admin/allow-list/owner-based ET le
+    # deny-by-default mission_jwt. Court-circuit si rien n'est visible :
+    # list_spaces([]) ignorerait le filtre (liste vide falsy).
+    listing = get_listing_filter()
+    if not listing["visible"]:
+        return _r("vault_list", {"status": "ok", "vaults": [], "count": 0})
 
     return _r("vault_list", await list_spaces(
-        allowed_vault_ids=allowed_vault_ids,
-        owner_filter=owner_filter,
+        allowed_vault_ids=listing["allowed_vault_ids"],
+        owner_filter=listing["owner_filter"],
     ))
 
 
@@ -482,12 +493,16 @@ async def secret_wrap(
     # Les wraps créés sans expected_aud auraient un binding mission_id-only.
     if settings.enforce_mission_token_validation and settings.mission_jwks_url:
         if not expected_aud:
-            if settings.mission_token_aud:
-                expected_aud = settings.mission_token_aud
+            # Source unique d'audience (#47) : mcp_instance_id (canonique) ou
+            # mission_token_aud (alias legacy). Cohérence garantie par
+            # check_mission_pep_config au boot.
+            resolved_aud = settings.resolved_mission_aud
+            if resolved_aud:
+                expected_aud = resolved_aud
             else:
                 return {"status": "error", "error_type": "misconfigured",
                         "message": "expected_aud requis en mode ENFORCE=true "
-                                   "(configurer MISSION_TOKEN_AUD)"}
+                                   "(configurer MCP_INSTANCE_ID ou MISSION_TOKEN_AUD)"}
 
     # Vérification d'accès au vault (owner/allowed_resources) + policy path
     access_err = check_access(vault_id)
@@ -665,7 +680,7 @@ async def secret_consume(
     # expected_aud utilise settings.mission_token_aud (validé par PyJWT decode) — pas
     # jwt_claims["aud"] qui peut être une liste non-ordonnée (MOYEN — issue #29).
     tenant_id_from_jwt = jwt_claims.get("tenant_id", "") if jwt_claims else ""
-    expected_aud_from_jwt = settings.mission_token_aud
+    expected_aud_from_jwt = settings.resolved_mission_aud  # source unique (#47)
 
     result = await consume_wrap_secret(
         wrap_token=wrap_token,
@@ -685,49 +700,11 @@ async def secret_consume(
     return result
 
 
-# Cache mémoire pour les statuts de mission (évite les appels répétés)
-_mission_status_cache: dict[str, tuple[bool, float]] = {}
-# Lock créé au chargement du module — évite la race condition de création lazy
-import asyncio as _asyncio_for_lock
-_mission_status_lock = _asyncio_for_lock.Lock()
-del _asyncio_for_lock
-
-
-async def _check_mission_active(
-    mission_id: str, status_url_template: str, cache_ttl: int
-) -> tuple[bool, str]:
-    """
-    Vérifie si une mission est active auprès de mcp-mission.
-
-    Retourne (True, "") si active, (False, raison) si inactive ou erreur.
-    Fail-close : toute erreur de connexion → (False, "service_unavailable").
-    Cache TTL court (défaut 5s) pour réduire la fenêtre post-abort.
-    """
-    import time as _time
-    now = _time.time()
-    async with _mission_status_lock:
-        if mission_id in _mission_status_cache:
-            cached_ok, cached_at = _mission_status_cache[mission_id]
-            if now - cached_at < cache_ttl:
-                return cached_ok, "" if cached_ok else "mission_inactive_cached"
-
-    try:
-        import httpx
-        url = status_url_template.format(mission_id=mission_id)
-        async with httpx.AsyncClient(timeout=3.0) as http:
-            resp = await http.get(url)
-        if resp.status_code == 200:
-            body = resp.json()
-            state = body.get("status", body.get("state", ""))
-            active = state.upper() not in ("CLOSED", "ABORTED", "CLOSING", "FAILED")
-            async with _mission_status_lock:
-                _mission_status_cache[mission_id] = (active, now)
-            return active, "" if active else f"mission_status:{state}"
-        # 404 = mission inconnue → fail-close
-        return False, f"mission_status_http:{resp.status_code}"
-    except Exception as e:
-        logger.error("_check_mission_active error: %s", type(e).__name__)
-        return False, "service_unavailable"
+# Vérification mission active : déplacée dans auth/mission_jwt.py (issue #47) —
+# partagée entre le PEP /mcp (AuthMiddleware) et secret_consume, avec un cache
+# commun et une allow-list d'états actifs {RUNNING, WAITING_HUMAN, PAUSED}
+# (fail-close : état inconnu = inactif). Alias conservé pour secret_consume.
+from .auth.mission_jwt import check_mission_active as _check_mission_active
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1373,6 +1350,20 @@ def create_app():
             "(ex: python -c \"import secrets; print(secrets.token_urlsafe(48))\")."
         )
 
+    # ── Fail-fast PEP mission JWT (issue #47) ──────────────────────────────
+    # Refuse de démarrer en mode jwt/dual-stack avec une config incohérente
+    # (jwks_url absent, audience absente, drift instance_id/mission_token_aud).
+    pep_ok, pep_msg = settings.check_mission_pep_config()
+    if not pep_ok:
+        raise RuntimeError(f"Config PEP mission JWT invalide — démarrage refusé : {pep_msg}")
+    if settings.mcp_auth_mode != "bearer" and not settings.mission_status_url:
+        # Mode dégradé assumé (aussi signalé ici pour les lancements ASGI directs
+        # via create_app --factory, qui ne passent pas par main()).
+        logger.warning(
+            "⚠️  MISSION_STATUS_URL non configuré : vérification mission active "
+            "DÉSACTIVÉE au PEP /mcp — révocation par expiration du token uniquement."
+        )
+
     from .auth.middleware import AuthMiddleware, LoggingMiddleware, HealthCheckMiddleware
     from .admin.middleware import AdminMiddleware
     from .pki_middleware import PkiMiddleware
@@ -1426,6 +1417,26 @@ def main():
         )
         sys.exit(1)
     logger.info("✅ ADMIN_BOOTSTRAP_KEY validée (entropie suffisante)")
+
+    # ── Fail-fast PEP mission JWT (issue #47) ──────────────────────────────
+    pep_ok, pep_msg = settings.check_mission_pep_config()
+    if not pep_ok:
+        logger.error(f"❌ Config PEP mission JWT invalide : {pep_msg}")
+        logger.error("   Démarrage refusé (fail-fast sécurité).")
+        sys.exit(1)
+    if settings.mcp_auth_mode != "bearer":
+        logger.info(f"🛡️  PEP mission JWT actif (mode={settings.mcp_auth_mode}, "
+                    f"aud={settings.resolved_mission_aud})")
+        if not settings.mission_status_url:
+            # Mode dégradé assumé : sans MISSION_STATUS_URL, aucune vérification de
+            # mission active à la porte → la révocation d'une mission close/abort
+            # repose UNIQUEMENT sur l'expiration (exp ≤ 3600s) du mission_token.
+            logger.warning(
+                "⚠️  MISSION_STATUS_URL non configuré : vérification mission active "
+                "DÉSACTIVÉE au PEP /mcp — révocation par expiration du token uniquement "
+                "(exp ≤ 3600s). Configurez MISSION_STATUS_URL pour une révocation quasi "
+                "temps réel des missions closes/abandonnées."
+            )
 
     app = create_app()
 

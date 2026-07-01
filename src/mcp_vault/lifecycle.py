@@ -88,7 +88,7 @@ async def vault_startup() -> bool:
         from .auth.jwt_validator import init_mission_token_validator
         _v = init_mission_token_validator(
             jwks_url=settings.mission_jwks_url,
-            expected_aud=settings.mission_token_aud,
+            expected_aud=settings.resolved_mission_aud,  # source unique (#47)
             cache_ttl=settings.mission_jwks_cache_ttl,
             max_refresh_per_min=settings.mission_jwks_max_refresh_per_min,
             leeway_seconds=settings.mission_token_leeway_seconds,

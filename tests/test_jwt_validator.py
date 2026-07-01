@@ -111,20 +111,27 @@ def _make_token(
 # ── Fixture : validator avec JWKS mocké ───────────────────────────────────────
 
 def _make_validator(jwks_dict: dict, aud: str = "mcp-vault:test"):
-    """Crée un MissionTokenValidator avec JWKS mocké (pas d'appel réseau)."""
-    from mcp_vault.auth.jwt_validator import MissionTokenValidator
-    from jwt import PyJWKSet
+    """Crée un MissionTokenValidator adossé à un JWKSCache mocké (pas d'appel réseau).
 
-    validator = MissionTokenValidator(
+    Depuis l'issue #47, le validator délègue la résolution des clés au JWKSCache
+    partagé — on injecte ici un cache dont le fetch HTTP est simulé.
+    """
+    import json as _json
+    from mcp_vault.auth.jwt_validator import MissionTokenValidator
+    from mcp_vault.auth.mission_jwt import JWKSCache
+
+    def fake_fetch(url, etag, timeout):
+        return 200, None, _json.dumps(jwks_dict).encode()
+
+    cache = JWKSCache("http://mock-jwks/.well-known/jwks.json",
+                      ttl_seconds=60, fetch=fake_fetch)
+    return MissionTokenValidator(
         jwks_url="http://mock-jwks/.well-known/jwks.json",
         expected_aud=aud,
         cache_ttl=60,
         max_refresh_per_min=3,
+        jwks_cache=cache,
     )
-    # Injecter le JWKS directement (bypass HTTP)
-    validator._jwks = PyJWKSet.from_dict(jwks_dict)
-    validator._jwks_fetched_at = time.monotonic()
-    return validator
 
 
 # ── Tests de validation nominale ──────────────────────────────────────────────
@@ -252,7 +259,6 @@ class TestMissionTokenValidatorC18:
 
     def test_unknown_kid_after_refresh_rejected(self):
         """kid absent du JWKS même après refresh → kid_unknown_or_revoked."""
-        from mcp_vault.auth.jwt_validator import MissionTokenValidator, MissionTokenError
         priv, pub, _ = _make_es256_keypair()
         priv2, pub2, _ = _make_es256_keypair()
         jwks = _make_jwks(pub, kid="key-v1")  # JWKS ne contient que key-v1
@@ -261,9 +267,9 @@ class TestMissionTokenValidatorC18:
         # Token signé avec key-v2 (inconnu du JWKS)
         token = _make_token(priv2, kid="key-v2")
 
-        # Le refresh JWKS est mocké pour retourner le même JWKS (sans key-v2)
-        with patch.object(validator, "_fetch_jwks_from_url", return_value=validator._jwks):
-            self._assert_rejected(validator, token, "kid_unknown_or_revoked")
+        # Le fetch mocké du JWKSCache retourne toujours le même JWKS (sans key-v2) :
+        # le refresh forcé sur kid inconnu ne trouve rien → kid_unknown_or_revoked.
+        self._assert_rejected(validator, token, "kid_unknown_or_revoked")
 
     def test_token_compact_never_in_error_message(self):
         """Le token compact ne doit jamais apparaître dans le message d'erreur."""
@@ -293,60 +299,78 @@ class TestMissionTokenValidatorC18:
                                               "unsupported_algorithm:missing", "validation_failed")
 
 
-# ── Tests JWKS cache et rate-limit ───────────────────────────────────────────
+# ── Tests JWKS cache et anti-DoS (via le JWKSCache partagé — issue #47) ───────
 
 class TestJwksCacheAndRateLimit:
-    """Cache JWKS TTL-borné et rate-limit anti-DoS."""
+    """Cache JWKS TTL-borné et anti-DoS (backoff exponentiel du JWKSCache partagé).
+
+    Depuis l'issue #47, le rate-limit fenêtré interne du validator est remplacé
+    par le backoff exponentiel du JWKSCache — même objectif anti-DoS de
+    l'endpoint JWKS de mcp-mission, sémantique testée ici via délégation.
+    """
 
     def test_jwks_cache_used_within_ttl(self):
-        """Dans le TTL, _fetch_jwks_from_url n'est pas rappelé."""
-        priv, pub, _ = _make_es256_keypair()
-        validator = _make_validator(_make_jwks(pub))
+        """Dans le TTL, le fetch HTTP n'est pas rappelé (cache servi)."""
+        import json as _json
+        from mcp_vault.auth.jwt_validator import MissionTokenValidator
+        from mcp_vault.auth.mission_jwt import JWKSCache
 
+        priv, pub, _ = _make_es256_keypair()
+        jwks_dict = _make_jwks(pub)
         fetch_count = [0]
-        original_fetch = validator._fetch_jwks_from_url
 
-        def counting_fetch():
+        def counting_fetch(url, etag, timeout):
             fetch_count[0] += 1
-            return original_fetch()
+            return 200, None, _json.dumps(jwks_dict).encode()
 
-        validator._fetch_jwks_from_url = counting_fetch
-        validator._jwks_fetched_at = time.monotonic()  # Cache frais
-
-        priv2, pub2, _ = _make_es256_keypair()
+        cache = JWKSCache("http://mock-jwks/x", ttl_seconds=60, fetch=counting_fetch)
+        validator = MissionTokenValidator(
+            jwks_url="http://mock-jwks/x", expected_aud="mcp-vault:test",
+            jwks_cache=cache,
+        )
         token = _make_token(priv)
-        try:
-            validator.validate(token)
-        except Exception:
-            pass
 
-        assert fetch_count[0] == 0, "Cache non utilisé alors que dans le TTL !"
+        validator.validate(token)   # 1er appel → peuple le cache (1 fetch)
+        validator.validate(token)   # cache frais → aucun fetch supplémentaire
 
-    def test_rate_limit_on_unknown_kid(self):
-        """Après max_refresh_per_min refreshes, un unknown kid lève rate_limited."""
-        from mcp_vault.auth.jwt_validator import MissionTokenError
+        assert fetch_count[0] == 1, (
+            f"Cache non utilisé dans le TTL (fetch appelé {fetch_count[0]} fois)"
+        )
+
+    def test_backoff_blocks_refetch_after_failure(self):
+        """Fetch en échec → fail-close jwks_unavailable, et la fenêtre de backoff
+        bloque tout refetch réseau immédiat (anti-DoS)."""
+        from mcp_vault.auth.jwt_validator import MissionTokenValidator, MissionTokenError
+        from mcp_vault.auth.mission_jwt import JWKSCache
+
+        calls = [0]
+
+        def failing_fetch(url, etag, timeout):
+            calls[0] += 1
+            raise OSError("connexion refusée")
+
+        cache = JWKSCache("http://mock-jwks/x", ttl_seconds=60, fetch=failing_fetch)
+        validator = MissionTokenValidator(
+            jwks_url="http://mock-jwks/x", expected_aud="mcp-vault:test",
+            jwks_cache=cache,
+        )
         priv, pub, _ = _make_es256_keypair()
-        jwks = _make_jwks(pub, kid="real-key")
-        validator = _make_validator(jwks)
-        validator._max_refresh_per_min = 2
+        token = _make_token(priv)
 
-        token = _make_token(priv, kid="ghost-key")
-
-        # Épuiser le rate-limit
-        with patch.object(validator, "_fetch_jwks_from_url", return_value=validator._jwks):
-            for _ in range(3):
-                try:
-                    validator.validate(token)
-                except MissionTokenError:
-                    pass
-
-        # Le 4ème appel doit lever rate_limited (window pas encore expirée)
-        validator._refresh_window_start = time.monotonic()  # reset window récente
-        validator._refresh_count = validator._max_refresh_per_min  # simuler limit atteinte
-
+        # Cache jamais peuplé + fetch KO → fail-close (jamais de clé servie).
         with pytest.raises(MissionTokenError) as exc_info:
-            validator._get_jwks(force_refresh=True)
-        assert exc_info.value.reason == "jwks_refresh_rate_limited"
+            validator.validate(token)
+        assert exc_info.value.reason == "jwks_unavailable"
+        first_calls = calls[0]
+        assert first_calls >= 1
+
+        # Appel immédiat suivant : la fenêtre de backoff interdit le refetch réseau.
+        with pytest.raises(MissionTokenError) as exc_info:
+            validator.validate(token)
+        assert exc_info.value.reason == "jwks_unavailable"
+        assert calls[0] == first_calls, (
+            "Refetch réseau pendant la fenêtre de backoff — anti-DoS cassé"
+        )
 
 
 # ── Tests WrapRegistry extensions ────────────────────────────────────────────

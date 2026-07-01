@@ -2,6 +2,21 @@
 
 ## [Unreleased] — v0.8.0
 
+### PEP mission JWT — durcissement de la porte /mcp (issue #47, PR1)
+
+Second point d'application (PEP) pour les `mission_token` JWT ES256 émis par mcp-mission, **à l'entrée `/mcp`** — complémentaire du PEP existant à la consommation (`secret_consume`, C18 #26/#29). Contrat validé factuellement contre le code émetteur mcp-mission v0.5.0 (le token ne porte **aucune** autorisation vault : `aud`=liste de refs d'instance, `component_id={kind:ref}`, `tenant_id`/`mission_id`/`jti`/`scope` opaque ; **pas** de claims `vaults`/`permissions`).
+
+**Périmètre PR1 (durcissement + authN)** : une identité mission JWT est authentifiée et liée à l'instance, mais n'a **aucun accès vault** (deny-by-default). L'octroi d'un périmètre vault local (MissionBindingStore keyé par `tenant_id`) est livré en PR2.
+
+- Nouveau `mcp_auth_mode` (`bearer` par défaut — **zéro impact** — / `jwt` / `dual-stack`), `mcp_instance_id`, `mcp_component_kind` + `resolved_mission_aud` (source unique d'audience) + `check_mission_pep_config()` **fail-fast au boot** (jwks_url/audience requis en mode ≠ bearer ; refus si `mcp_instance_id`/`mission_token_aud` divergent).
+- **`AuthMiddleware`** = unique lecteur du header et writer du contextvar sur `/mcp`, avec **refus ACTIF** au middleware : `401` (token absent/opaque/JWT invalide), `403` (`aud`/`component_id` ≠ instance, mission inactive), `503` (JWKS indisponible — fail-close). Bootstrap key admin acceptée en break-glass (testée en constant-time **avant** tout dispatch JWT). En `dual-stack`, un JWT invalide **ne retombe jamais** sur le chemin bearer (pas de fallback silencieux). Détection JWT **structurelle** (anti alg-confusion : un compact `alg=none`/`HS256` → 401, jamais bearer).
+- **Cache JWKS unique** du processus (`auth/mission_jwt.py` : backoff exponentiel + jitter, ETag/`If-None-Match`→304, **fail-close** — un cache expiré n'est jamais servi). `MissionTokenValidator` (secret_consume) y délègue désormais sa résolution de clé : plus de second cache/rate-limit divergent.
+- **Autorisation locale deny-by-default** pour `auth_type="mission_jwt"` : `check_access` refuse sans périmètre explicite (jamais d'owner-based) ; `get_listing_filter()` centralise le filtrage de `vault_list` (0 vault visible pour une identité mission non provisionnée) ; `enforce_mission_jwt_tool()` restreint les outils à une allowlist data-plane + utilitaires publics — `system_health`/`system_about` (métadonnées d'infra) et l'inventaire PKI sont **refusés** aux identités mission.
+- **Vérification mission active** en allow-list `{RUNNING, WAITING_HUMAN, PAUSED}` (fail-close : un état inconnu = inactif — corrige l'ancienne deny-list ; `PAUSED` reçoit des tokens re-signés côté mcp-mission).
+- **Endpoint admin** `POST /admin/api/auth/jwks/reload` (admin only) pour propager une révocation de `kid` sans attendre le TTL. L'Admin API reste **bearer/bootstrap-only** : un mission JWT y est refusé (401) sur toute la surface `/admin/api/*`.
+- **Audit** immuable de chaque refus PEP (`decision_id` local + `decision_id` émetteur via `provenance` pour corrélation E2E, `tenant_id`, `mission_id`, `reason_code`) — **jamais** le token ni un secret.
+- **Durcissement fail-close aligné MCP ↔ Admin REST** : `check_access`/`get_listing_filter` (MCP) et `_check_vault_access`/`GET /admin/api/vaults` (Admin REST) typent désormais `allowed_resources` en liste (un token mal formé ne peut plus provoquer un test de sous-chaîne) et refusent une identité incomplète (`client_name` vide) au lieu de lister tous les vaults. Anti-DoS sur le JWKS : throttle des refresh déclenchés par un `kid` inconnu (au plus un fetch réseau par fenêtre, quel que soit le volume).
+
 ### Observabilité AuditStore (issue #61)
 
 `AuditStore.log()` avalait silencieusement toute erreur d'écriture du fichier JSONL (`except Exception: pass`). En cas de panne disque, répertoire absent ou problème de permission, aucune trace n'était produite.

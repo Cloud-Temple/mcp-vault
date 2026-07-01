@@ -52,7 +52,11 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
     perms = token_info.get("permissions", [])
     is_admin = "admin" in perms
     can_write = is_admin or "write" in perms
+    # Typage défensif (cohérent avec auth.context, #47) : allowed_resources non-liste
+    # (token mal formé) → traité comme vide, jamais comme un motif de sous-chaîne.
     allowed_vaults = token_info.get("allowed_resources", [])
+    if not isinstance(allowed_vaults, list):
+        allowed_vaults = []
 
     # --- Routes système (tout token) ---
     if path == "/admin/api/health" and method == "GET":
@@ -75,6 +79,13 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
             return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
         return await _api_audit(send, scope)
 
+    # SÉCURITÉ (issue #47) : reload JWKS = admin only (propagation urgente d'une
+    # révocation de kid sans attendre le TTL du cache).
+    if path == "/admin/api/auth/jwks/reload" and method == "POST":
+        if not is_admin:
+            return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
+        return await _api_jwks_reload(send)
+
     # --- Routes vaults (read = list/detail, write = create/update, admin = delete) ---
     if path == "/admin/api/vaults" and method == "GET":
         policy_err = check_policy("vault_list")
@@ -85,8 +96,13 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
         elif allowed_vaults:
             return await _api_list_vaults(send, allowed_vault_ids=allowed_vaults)
         else:
-            # Owner-based isolation : ne voir que ses propres vaults
+            # Owner-based isolation : ne voir que ses propres vaults.
             client_name = token_info.get("client_name", "")
+            if not client_name:
+                # Identité incomplète : owner_filter="" serait ignoré par list_spaces
+                # (falsy) et listerait TOUT → fail-close (aucun vault).
+                return await _json_response(send, 200,
+                                            {"status": "ok", "vaults": [], "count": 0})
             return await _api_list_vaults(send, owner_filter=client_name)
 
     if path == "/admin/api/vaults" and method == "POST":
@@ -683,6 +699,30 @@ async def _api_logs(send):
     await _json_response(send, 200, {"status": "ok", "count": len(logs), "logs": logs[-50:]})
 
 
+async def _api_jwks_reload(send):
+    """POST /admin/api/auth/jwks/reload — Force le rechargement du JWKS (issue #47).
+
+    Propage une révocation urgente de kid sans attendre le TTL du cache.
+    Admin only (gate en amont dans _handle_admin_routes).
+    """
+    from ..auth.mission_jwt import JWKSUnavailable, get_jwks_cache
+
+    cache = get_jwks_cache()
+    if cache is None:
+        return await _json_response(send, 503, {
+            "status": "error",
+            "message": "JWKS non configuré (MISSION_JWKS_URL vide ou lifecycle non passé)",
+        })
+    try:
+        count = cache.force_reload()
+    except JWKSUnavailable as e:
+        return await _json_response(send, 503, {
+            "status": "error",
+            "message": f"Rechargement JWKS échoué : {e.reason}",
+        })
+    return await _json_response(send, 200, {"status": "ok", "keys": count})
+
+
 async def _api_audit(send, scope):
     """GET /admin/api/audit — Journal d'audit MCP avec filtres."""
     from ..audit import get_audit_store
@@ -945,19 +985,27 @@ def _check_vault_access(token_info: dict, vault_id: str) -> dict | None:
     if "admin" in perms:
         return None
 
-    # Liste explicite de vaults autorisés
+    # Liste explicite de vaults autorisés.
+    # Typage défensif (cohérent avec auth.context.check_access, #47) : un
+    # allowed_resources non-liste (token S3 mal formé) est traité comme vide —
+    # jamais comme un motif (le test d'appartenance sur une str deviendrait un
+    # test de sous-chaîne → accès non prévu).
     allowed = token_info.get("allowed_resources", [])
+    if not isinstance(allowed, list):
+        allowed = []
     if allowed:
         if vault_id not in allowed:
             return {"status": "error", "message": f"Accès refusé à '{vault_id}'"}
         return None
 
-    # Owner-based isolation (allowed_resources vide)
+    # Owner-based isolation (allowed_resources vide).
     client_name = token_info.get("client_name", "")
-    if client_name:
-        from ..vault.spaces import check_vault_owner
-        if not check_vault_owner(vault_id, client_name):
-            return {"status": "error", "message": f"Accès refusé à '{vault_id}' (vous n'en êtes pas le propriétaire)"}
+    if not client_name:
+        # Identité incomplète (ni périmètre, ni propriétaire) → REFUS (fail-close).
+        return {"status": "error", "message": f"Accès refusé à '{vault_id}' (identité incomplète)"}
+    from ..vault.spaces import check_vault_owner
+    if not check_vault_owner(vault_id, client_name):
+        return {"status": "error", "message": f"Accès refusé à '{vault_id}' (vous n'en êtes pas le propriétaire)"}
 
     return None
 

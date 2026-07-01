@@ -17,11 +17,12 @@ Usage :
 
 Sécurité :
     - ES256 uniquement (ECDSA P-256)
-    - Cache JWKS TTL-borné (60s par défaut) + refresh sur kid inconnu
-    - Rate-limit sur refresh (3/min par défaut) — anti-DoS JWKS
+    - Résolution des clés déléguée au JWKSCache partagé (auth/mission_jwt.py) :
+      UN SEUL cache JWKS process-wide (TTL, backoff exponentiel + jitter, ETag/304,
+      fail-close) partagé entre ce validateur (secret_consume) et le PEP /mcp
+      (AuthMiddleware) — issue #47. Plus de cache/rate-limit propre ici.
     - kid absent du JWKS après refresh = token rejeté (révocation implicite)
     - Jamais le token compact dans les messages d'erreur ni les logs
-    - Thread-safe via threading.Lock
 
 Standalone (sans mcp-mission) :
     Quand MISSION_JWKS_URL est vide, MissionTokenValidator n'est pas instancié
@@ -29,14 +30,20 @@ Standalone (sans mcp-mission) :
     hard-reject si ENFORCE=true).
 """
 
+import json
 import logging
-import threading
-import time
 from typing import Optional
 
-import httpx
 import jwt
-from jwt import PyJWKSet
+from jwt.algorithms import ECAlgorithm
+
+from .mission_jwt import (
+    JWKSCache,
+    JWKSUnavailable,
+    MissionTokenInvalid,
+    get_jwks_cache,
+    init_jwks_cache,
+)
 
 logger = logging.getLogger("mcp-vault.jwt-validator")
 
@@ -58,9 +65,10 @@ class MissionTokenError(Exception):
 
 class MissionTokenValidator:
     """
-    Validateur JWT ES256 avec cache JWKS TTL-borné et rate-limit.
+    Validateur JWT ES256 pour le mission_token PARAMÈTRE de secret_consume.
 
-    Thread-safe. Instancier une fois au démarrage (lifecycle.py ou settings).
+    La résolution des clés passe par le JWKSCache partagé (singleton process-wide,
+    injectable pour les tests via `jwks_cache`). Thread-safe (le cache l'est).
     """
 
     def __init__(
@@ -71,6 +79,7 @@ class MissionTokenValidator:
         cache_ttl: int = 60,
         max_refresh_per_min: int = 3,
         leeway_seconds: int = 10,
+        jwks_cache: Optional[JWKSCache] = None,
     ):
         if not jwks_url:
             raise ValueError("jwks_url requis pour MissionTokenValidator")
@@ -78,84 +87,40 @@ class MissionTokenValidator:
         self._expected_iss = expected_iss
         self._expected_aud = expected_aud
         self._cache_ttl = cache_ttl
-        self._max_refresh_per_min = max_refresh_per_min
+        # max_refresh_per_min : conservé pour compatibilité de signature — le
+        # rate-limit fenêtré est remplacé par le backoff exponentiel du JWKSCache.
         self._leeway = leeway_seconds
+        self._jwks_cache = jwks_cache  # None = résolu au singleton à l'usage
 
-        self._jwks: Optional[PyJWKSet] = None
-        self._jwks_fetched_at: float = 0.0
-        self._refresh_count: int = 0
-        self._refresh_window_start: float = 0.0
-        self._lock = threading.Lock()
-
-    def _fetch_jwks_from_url(self) -> PyJWKSet:
-        """
-        Fetch JWKS depuis l'URL avec rate-limit.
-        Appelé uniquement depuis _get_jwks() qui tient le threading.Lock —
-        la fenêtre glissante est donc protégée contre les race conditions.
-        """
-        now = time.monotonic()
-        if now - self._refresh_window_start > 60.0:
-            self._refresh_count = 0
-            self._refresh_window_start = now
-
-        if self._refresh_count >= self._max_refresh_per_min:
-            logger.warning("⚠️ JWKS rate-limit atteint — refresh refusé")
-            raise MissionTokenError("jwks_refresh_rate_limited")
-
-        self._refresh_count += 1
-        try:
-            resp = httpx.get(self._jwks_url, timeout=5.0, follow_redirects=False)
-            resp.raise_for_status()
-            return PyJWKSet.from_dict(resp.json())
-        except MissionTokenError:
-            raise
-        except Exception as e:
-            logger.error(f"❌ Fetch JWKS échoué ({self._jwks_url}) : {type(e).__name__}")
-            raise MissionTokenError("jwks_unavailable")
-
-    def _get_jwks(self, force_refresh: bool = False) -> PyJWKSet:
-        """Retourne le JWKS (cache ou fetch)."""
-        now = time.monotonic()
-        with self._lock:
-            if force_refresh or self._jwks is None or (now - self._jwks_fetched_at) > self._cache_ttl:
-                self._jwks = self._fetch_jwks_from_url()
-                self._jwks_fetched_at = now
-            return self._jwks
-
-    @staticmethod
-    def _find_key_in_jwks(jwks: PyJWKSet, kid: str):
-        """Cherche une clé par kid dans un PyJWKSet (itération sur .keys)."""
-        for key in jwks.keys:
-            if key.key_id == kid:
-                return key
-        return None
+    def _get_cache(self) -> JWKSCache:
+        """Retourne le cache JWKS (injecté, sinon singleton — initialisé au besoin)."""
+        if self._jwks_cache is not None:
+            return self._jwks_cache
+        cache = get_jwks_cache()
+        if cache is None:
+            cache = init_jwks_cache(self._jwks_url, self._cache_ttl)
+        return cache
 
     def _get_signing_key(self, kid: str):
-        """Retourne la clé de signature pour kid, avec refresh si kid inconnu."""
+        """Résout la clé de signature pour kid via le JWKSCache partagé.
+
+        Le cache gère TTL, refresh forcé sur kid inconnu, backoff et fail-close.
+        Mappe les exceptions du cache vers MissionTokenError (codes historiques
+        attendus par secret_consume).
+        """
         try:
-            jwks = self._get_jwks()
-            key = self._find_key_in_jwks(jwks, kid)
-        except MissionTokenError:
-            raise
+            jwk = self._get_cache().get_key(kid)
+        except MissionTokenInvalid:
+            # kid absent après refresh = révoqué ou jamais publié.
+            raise MissionTokenError("kid_unknown_or_revoked")
+        except JWKSUnavailable:
+            raise MissionTokenError("jwks_unavailable")
+
+        try:
+            return ECAlgorithm.from_jwk(json.dumps(jwk))
         except Exception:
-            key = None
-
-        if key is None:
-            # kid inconnu → refresh unique
-            logger.info(f"kid '{kid}' inconnu — refresh JWKS")
-            try:
-                jwks = self._get_jwks(force_refresh=True)
-                key = self._find_key_in_jwks(jwks, kid)
-            except MissionTokenError:
-                raise
-            except Exception:
-                raise MissionTokenError("jwks_unavailable")
-
-            if key is None:
-                # kid toujours absent après refresh = révoqué ou invalide
-                raise MissionTokenError("kid_unknown_or_revoked")
-
-        return key
+            logger.warning("JWK ES256 illisible pour kid")
+            raise MissionTokenError("jwks_unavailable")
 
     def validate(self, token_compact: str) -> dict:
         """
@@ -201,7 +166,7 @@ class MissionTokenValidator:
 
             claims = jwt.decode(
                 token_compact,
-                signing_key.key,
+                signing_key,
                 **decode_kwargs,
             )
         except jwt.ExpiredSignatureError:
@@ -223,8 +188,8 @@ class MissionTokenValidator:
 
 
 # ── Singleton process-wide (P0 — issue #29) ────────────────────────────────────
-# Un seul validateur partagé pour tout le processus : le cache JWKS (TTL 60s)
-# et le rate-limit (3 refreshes/min) sont ainsi effectivement globaux.
+# Un seul validateur partagé pour tout le processus, adossé au JWKSCache singleton
+# (issue #47) : cache JWKS et anti-DoS (backoff) effectivement globaux.
 _validator: Optional["MissionTokenValidator"] = None
 
 
@@ -239,11 +204,15 @@ def init_mission_token_validator(
     Initialise le validateur singleton process-wide.
     Appelé une fois au startup depuis lifecycle.py.
     Retourne None si jwks_url est vide (mode standalone sans mcp-mission).
+
+    Initialise aussi le JWKSCache singleton partagé (issue #47) — le PEP /mcp
+    (AuthMiddleware) et ce validateur utilisent le MÊME cache.
     """
     global _validator
     if not jwks_url:
         _validator = None
         return None
+    init_jwks_cache(jwks_url, cache_ttl)
     _validator = MissionTokenValidator(
         jwks_url=jwks_url,
         expected_aud=expected_aud,
