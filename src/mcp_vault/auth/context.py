@@ -41,8 +41,12 @@ def check_access(resource_id: str) -> Optional[dict]:
     if "admin" in token_info.get("permissions", []):
         return None
 
-    # Liste explicite de vaults autorisés → vérifier l'appartenance
+    # Liste explicite de vaults autorisés → vérifier l'appartenance.
+    # Typage défensif : un allowed_resources non-liste (token mal formé) est
+    # traité comme vide (fail-close), jamais comme un motif (ex. sous-chaîne).
     allowed = token_info.get("allowed_resources", [])
+    if not isinstance(allowed, list):
+        allowed = []
     if allowed:
         if resource_id not in allowed:
             return {
@@ -52,18 +56,138 @@ def check_access(resource_id: str) -> Optional[dict]:
             }
         return None
 
+    # Identité mission JWT sans périmètre explicite → REFUS (issue #47).
+    # Le mission_token ne porte aucune autorisation vault ; le périmètre vient
+    # d'un provisioning local (MissionBindingStore, PR ultérieure). Sans lui,
+    # PAS de fallback owner-based : deny-by-default (anti fail-open).
+    if token_info.get("auth_type") == "mission_jwt":
+        return {
+            "status": "error",
+            "message": f"Accès refusé à '{resource_id}' "
+                       "(aucun périmètre vault provisionné pour cette identité mission)",
+        }
+
     # Liste vide → owner-based isolation
     # Le token n'a accès qu'aux vaults qu'il a créés
     client_name = token_info.get("client_name", "")
-    if client_name:
-        from ..vault.spaces import check_vault_owner
-        if not check_vault_owner(resource_id, client_name):
-            return {
-                "status": "error",
-                "message": f"Accès refusé à '{resource_id}' (vous n'en êtes pas le propriétaire)",
-            }
+    if not client_name:
+        # Identité incomplète (ni périmètre explicite, ni propriétaire) → REFUS
+        # (fail-close : ne jamais autoriser sur une identité inexploitable).
+        return {
+            "status": "error",
+            "message": f"Accès refusé à '{resource_id}' (identité incomplète)",
+        }
+    from ..vault.spaces import check_vault_owner
+    if not check_vault_owner(resource_id, client_name):
+        return {
+            "status": "error",
+            "message": f"Accès refusé à '{resource_id}' (vous n'en êtes pas le propriétaire)",
+        }
 
     return None
+
+
+def get_listing_filter() -> dict:
+    """
+    Projection d'accès pour le LISTING de vaults (vault_list) — source unique.
+
+    Centralise la logique owner-based/allow-list que vault_list réimplémentait en
+    ligne, et applique le deny-by-default mission_jwt (issue #47).
+
+    ATTENTION : `list_spaces(allowed_vault_ids=[])` ignore le filtre (liste vide
+    falsy) — c'est pourquoi le refus est exprimé par visible=False (court-circuit
+    AVANT l'appel à list_spaces), jamais par une liste vide.
+
+    Returns:
+        {"visible": bool, "allowed_vault_ids": list|None, "owner_filter": str|None}
+    """
+    token_info = current_token_info.get()
+
+    if token_info is None:
+        # Pas de token : comportement historique (pas de filtre — les déploiements
+        # sans auth voient tout, cohérent avec vault_list avant #47).
+        return {"visible": True, "allowed_vault_ids": None, "owner_filter": None}
+
+    if "admin" in token_info.get("permissions", []):
+        return {"visible": True, "allowed_vault_ids": None, "owner_filter": None}
+
+    allowed = token_info.get("allowed_resources", [])
+    if not isinstance(allowed, list):
+        allowed = []
+    if allowed:
+        return {"visible": True, "allowed_vault_ids": allowed, "owner_filter": None}
+
+    if token_info.get("auth_type") == "mission_jwt":
+        # Identité mission sans périmètre provisionné → AUCUN vault visible
+        # (jamais owner-based — cohérent avec check_access).
+        return {"visible": False, "allowed_vault_ids": None, "owner_filter": None}
+
+    # Bearer/bootstrap sans liste explicite → owner-based (inchangé), SAUF si
+    # client_name est vide : owner_filter="" serait ignoré par list_spaces (falsy)
+    # et listerait TOUT → fail-close (rien de visible) sur identité incomplète.
+    client_name = token_info.get("client_name", "")
+    if not client_name:
+        return {"visible": False, "allowed_vault_ids": None, "owner_filter": None}
+    return {"visible": True, "allowed_vault_ids": None, "owner_filter": client_name}
+
+
+# ── Périmètre outils des identités mission JWT (issue #47) ──────────────────────
+# Deny-by-default : un mission_jwt ne peut appeler que les outils listés ici.
+# - ALLOWED : data-plane scopé par vault — les gardes fins (check_access sur le
+#   périmètre provisionné, check_write_permission, policies) s'appliquent PAR-DESSUS.
+# - PUBLIC : utilitaires sans donnée ni métadonnée d'infra (enum statique, RNG).
+# NON listés (donc refusés aux mission_jwt) : system_health/system_about (exposent
+# openbao_addr/S3/platform — la liveness reste publique via HTTP /health),
+# pki_* (inventaire PKI), policy_*, token_update, audit_log, secret_wrap/revoke/
+# lookup (admin-gated de toute façon). secret_consume n'appelle pas check_policy :
+# il s'auto-garde par la validation C18 de son paramètre mission_token.
+MISSION_JWT_ALLOWED_TOOLS = frozenset({
+    "vault_create", "vault_list", "vault_info", "vault_update", "vault_delete",
+    "secret_write", "secret_read", "secret_list", "secret_delete",
+    "ssh_ca_setup", "ssh_sign_key", "ssh_ca_public_key",
+    "ssh_ca_list_roles", "ssh_ca_role_info",
+})
+
+MISSION_JWT_PUBLIC_TOOLS = frozenset({
+    "secret_types", "secret_generate_password",
+})
+
+
+def enforce_mission_jwt_tool(tool_name: str) -> Optional[dict]:
+    """
+    Refuse un outil non autorisé aux identités mission JWT (deny-by-default).
+
+    Appelé par check_policy() (couvre tous les outils qui l'utilisent) ET en
+    première ligne des outils sans check (system_health, system_about).
+    Sans effet pour les identités bearer/bootstrap.
+
+    Returns:
+        None si OK, dict {"status": "error", ...} si refusé.
+    """
+    token_info = current_token_info.get()
+    if token_info is None or token_info.get("auth_type") != "mission_jwt":
+        return None
+
+    if tool_name in MISSION_JWT_ALLOWED_TOOLS or tool_name in MISSION_JWT_PUBLIC_TOOLS:
+        return None
+
+    # Audit : refus d'outil à une identité mission (événement de sécurité).
+    client = token_info.get("client_name", "?")
+    try:
+        from ..audit import log_audit
+        log_audit(
+            tool_name, "denied",
+            detail=f"Outil non autorisé pour une identité mission "
+                   f"(mission={token_info.get('mission_id', '?')})",
+            client_name=client,
+        )
+    except Exception:
+        pass
+
+    return {
+        "status": "error",
+        "message": f"Outil '{tool_name}' non autorisé pour une identité mission",
+    }
 
 
 def check_write_permission() -> Optional[dict]:
@@ -130,6 +254,13 @@ def check_policy(tool_name: str) -> Optional[dict]:
     # Admin → toujours autorisé
     if "admin" in token_info.get("permissions", []):
         return None
+
+    # Identité mission JWT → deny-by-default par allowlist d'outils (issue #47).
+    # PLACÉ AVANT le retour permissif "pas de policy_id" : un mission_jwt a
+    # policy_id vide et serait sinon autorisé sur tout outil passant par check_policy.
+    mission_err = enforce_mission_jwt_tool(tool_name)
+    if mission_err:
+        return mission_err
 
     # Pas de policy_id assignée → tout autorisé
     policy_id = token_info.get("policy_id", "")

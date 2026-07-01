@@ -120,15 +120,29 @@ class HealthCheckMiddleware:
 
 class AuthMiddleware:
     """
-    Middleware ASGI d'authentification par Bearer token.
+    Middleware ASGI d'authentification par Bearer token — et PEP mission JWT (issue #47).
 
-    - Extrait le token du header Authorization: Bearer <token>
-    - Valide via bootstrap key ou Token Store S3
-    - Injecte les infos du token dans les contextvars
-    - Les routes publiques passent sans token
+    Unique lecteur du header Authorization et unique writer de current_token_info
+    sur la surface /mcp (l'Admin API /admin/* est une surface d'auth séparée,
+    bearer/bootstrap-only, qui ne dispatch JAMAIS les JWT).
+
+    Modes (settings.mcp_auth_mode) :
+      - "bearer" (défaut)  : comportement historique STRICTEMENT inchangé —
+        bearer opaque validé (bootstrap key / Token Store), token_info ou None
+        injecté, les outils vérifient.
+      - "jwt"        : mission_token JWT ES256 OBLIGATOIRE. Refus ACTIF au
+        middleware : 401 (token absent/opaque/JWT invalide), 403 (token authentique
+        mais aud/component_id ≠ instance, mission inactive), 503 (JWKS indisponible,
+        fail-close). Exception : la bootstrap key admin reste acceptée (break-glass —
+        testée en constant-time AVANT tout dispatch JWT).
+      - "dual-stack" : mode de MIGRATION. Un JWT structurel est validé comme en
+        mode jwt (un JWT invalide → 401, ne retombe JAMAIS sur le chemin bearer) ;
+        un bearer opaque suit le chemin historique.
 
     SÉCURITÉ : seul le header Authorization est accepté.
     L'auth par query string (?token=) a été supprimée (risque de fuite dans les logs).
+    Le token (bearer ou JWT compact) n'apparaît JAMAIS dans les logs, l'audit ni
+    les réponses — seuls des codes de raison sont loggés côté serveur.
     """
 
     PUBLIC_PATHS = {"/health", "/healthz", "/ready", "/favicon.ico"}
@@ -149,10 +163,18 @@ class AuthMiddleware:
 
         # Extraire le Bearer token
         token = self._extract_token(scope)
-        token_info = None
+        settings = get_settings()
 
-        if token:
-            token_info = self._validate_token(token)
+        if settings.mcp_auth_mode == "bearer":
+            # ── Comportement historique (inchangé) ─────────────────────────
+            token_info = self._validate_token(token) if token else None
+        else:
+            # ── PEP mission JWT (modes jwt / dual-stack) ───────────────────
+            token_info, deny = await self._resolve_pep(token, settings)
+            if deny is not None:
+                status, reason, claims_ctx = deny
+                self._audit_pep_deny(reason, claims_ctx)
+                return await self._deny_response(scope, send, status)
 
         # Injecter dans le contextvar (même si None → les outils vérifieront)
         tok = current_token_info.set(token_info)
@@ -160,6 +182,180 @@ class AuthMiddleware:
             await self.app(scope, receive, send)
         finally:
             current_token_info.reset(tok)
+
+    # ── PEP mission JWT (issue #47) ─────────────────────────────────────────
+
+    async def _resolve_pep(self, token, settings):
+        """Résout le token entrant en modes jwt/dual-stack.
+
+        Returns:
+            (token_info, None)                    → injecter et continuer.
+            (None, (status, reason, claims_ctx))  → refus actif au middleware.
+        """
+        from .mission_jwt import looks_like_jwt
+
+        mode = settings.mcp_auth_mode
+
+        # Modes jwt ET dual-stack sont des modes de DURCISSEMENT : une requête /mcp
+        # doit présenter une auth VALIDE. Pas de passthrough anonyme (qui, via
+        # get_listing_filter(None), rendrait tous les vaults visibles).
+        if not token:
+            return None, (401, "missing_token", {})
+
+        # Bootstrap key admin : testée en constant-time AVANT tout dispatch JWT
+        # (break-glass — jamais routée vers la validation JWT).
+        if hmac.compare_digest(token, settings.admin_bootstrap_key):
+            return {
+                "client_name": "admin",
+                "permissions": ["admin", "read", "write"],
+                "allowed_resources": [],
+            }, None
+
+        if looks_like_jwt(token):
+            return await self._validate_mission_jwt(token, settings)
+
+        # Bearer opaque.
+        if mode == "jwt":
+            return None, (401, "opaque_token_not_allowed", {})
+        # dual-stack : chemin bearer historique (Token Store). Un bearer invalide
+        # est refusé ACTIVEMENT (401) — jamais de passthrough silencieux avec None.
+        info = self._validate_token(token)
+        if info is None:
+            return None, (401, "invalid_bearer", {})
+        return info, None
+
+    async def _validate_mission_jwt(self, token, settings):
+        """Valide un mission_token JWT et construit le token_info synthétique.
+
+        PR #47 (durcissement PEP) : l'identité mission est AUTHENTIFIÉE et liée à
+        l'instance, mais n'a AUCUN périmètre vault (allowed_resources=[] +
+        auth_type="mission_jwt" → deny-by-default dans check_access). Le périmètre
+        viendra du MissionBindingStore (PR ultérieure).
+        """
+        from .mission_jwt import (
+            JWKSUnavailable,
+            MissionTokenForbidden,
+            MissionTokenInvalid,
+            check_mission_active,
+            get_jwks_cache,
+            validate_mission_token,
+        )
+
+        jwks_cache = get_jwks_cache()
+        if jwks_cache is None:
+            # Lifecycle non passé / JWKS non initialisé → fail-close.
+            return None, (503, "jwks_not_initialized", {})
+
+        try:
+            claims = validate_mission_token(
+                token,
+                jwks_cache,
+                instance_id=settings.resolved_mission_aud,
+                component_kind=settings.mcp_component_kind,
+                iat_leeway=settings.mission_token_leeway_seconds,
+            )
+        except MissionTokenInvalid as e:
+            return None, (401, e.reason, {})
+        except MissionTokenForbidden as e:
+            # Refus d'un token AUTHENTIFIÉ (signature/exp OK) : l'audit doit tracer
+            # l'identité. e.claims porte les claims vérifiés.
+            fclaims = getattr(e, "claims", {}) or {}
+            forbidden_ctx = {
+                "mission_id": fclaims.get("mission_id", ""),
+                "tenant_id": fclaims.get("tenant_id", ""),
+                "jti": fclaims.get("jti", ""),
+                "issuer_decision_id": self._extract_issuer_decision_id(fclaims),
+            }
+            return None, (403, e.reason, forbidden_ctx)
+        except JWKSUnavailable as e:
+            return None, (503, e.reason, {})
+
+        claims_ctx = {
+            "mission_id": claims.get("mission_id", ""),
+            "tenant_id": claims.get("tenant_id", ""),
+            "jti": claims.get("jti", ""),
+            "issuer_decision_id": self._extract_issuer_decision_id(claims),
+        }
+
+        # Mission active (allow-list {RUNNING, WAITING_HUMAN, PAUSED}, fail-close).
+        if settings.mission_status_url:
+            active, why = await check_mission_active(
+                claims["mission_id"],
+                status_url_template=settings.mission_status_url,
+                cache_ttl=settings.mission_status_cache_ttl,
+            )
+            if not active:
+                status = 503 if why == "service_unavailable" else 403
+                return None, (status, f"mission_inactive:{why}", claims_ctx)
+
+        tenant_id = claims["tenant_id"]
+        return {
+            "auth_type": "mission_jwt",
+            "client_name": f"mission:{tenant_id}",
+            "permissions": ["read"],
+            # PR #47 : aucun périmètre vault — deny garanti par la garde
+            # auth_type=="mission_jwt" de check_access (jamais owner-based).
+            "allowed_resources": [],
+            "policy_id": "",
+            "tenant_id": tenant_id,
+            "mission_id": claims["mission_id"],
+            "jti": claims["jti"],
+        }, None
+
+    @staticmethod
+    def _extract_issuer_decision_id(claims) -> str:
+        """decision_id de l'émetteur : claims["provenance"][i]["decision_id"]."""
+        prov = claims.get("provenance")
+        if isinstance(prov, list):
+            for entry in prov:
+                if isinstance(entry, dict) and entry.get("decision_id"):
+                    return str(entry["decision_id"])
+        return ""
+
+    def _audit_pep_deny(self, reason, claims_ctx):
+        """Audit immuable d'un refus PEP (jamais le token ni un secret).
+
+        decision_id local (uuid4) + decision_id émetteur (provenance) pour la
+        corrélation d'audit E2E avec mcp-mission.
+        """
+        import uuid
+        decision_id = uuid.uuid4().hex
+        detail_parts = [f"decision_id={decision_id}", f"reason={reason}"]
+        for key in ("mission_id", "tenant_id", "jti", "issuer_decision_id"):
+            if claims_ctx.get(key):
+                detail_parts.append(f"{key}={claims_ctx[key]}")
+        client = f"mission:{claims_ctx['tenant_id']}" if claims_ctx.get("tenant_id") else "?"
+        try:
+            from ..audit import log_audit
+            log_audit("mission_pep", "denied", detail=" ".join(detail_parts),
+                      client_name=client)
+        except Exception:
+            pass
+        print(f"🛡️  PEP deny: {' '.join(detail_parts)}", file=sys.stderr)
+
+    @staticmethod
+    async def _deny_response(scope, send, status):
+        """Refus actif : réponse HTTP générique (le motif précis reste côté serveur).
+
+        WebSocket : fermeture 1008 (policy violation) / 1011 (erreur serveur).
+        """
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close",
+                        "code": 1011 if status == 503 else 1008})
+            return
+
+        messages = {401: "invalid_token", 403: "forbidden", 503: "service_unavailable"}
+        body = json.dumps({
+            "status": "error",
+            "message": messages.get(status, "denied"),
+        }).encode()
+        headers = [(b"content-type", b"application/json"),
+                   (b"content-length", str(len(body)).encode())]
+        if status == 401:
+            headers.append((b"www-authenticate", b"Bearer"))
+        await send({"type": "http.response.start", "status": status,
+                    "headers": headers})
+        await send({"type": "http.response.body", "body": body})
 
     def _extract_token(self, scope) -> Optional[str]:
         """Extrait le token depuis le header Authorization uniquement.

@@ -75,6 +75,13 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
             return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
         return await _api_audit(send, scope)
 
+    # SÉCURITÉ (issue #47) : reload JWKS = admin only (propagation urgente d'une
+    # révocation de kid sans attendre le TTL du cache).
+    if path == "/admin/api/auth/jwks/reload" and method == "POST":
+        if not is_admin:
+            return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
+        return await _api_jwks_reload(send)
+
     # --- Routes vaults (read = list/detail, write = create/update, admin = delete) ---
     if path == "/admin/api/vaults" and method == "GET":
         policy_err = check_policy("vault_list")
@@ -681,6 +688,30 @@ async def _api_logs(send):
     """GET /admin/api/logs — Activité récente (ring buffer)."""
     logs = get_activity_log()
     await _json_response(send, 200, {"status": "ok", "count": len(logs), "logs": logs[-50:]})
+
+
+async def _api_jwks_reload(send):
+    """POST /admin/api/auth/jwks/reload — Force le rechargement du JWKS (issue #47).
+
+    Propage une révocation urgente de kid sans attendre le TTL du cache.
+    Admin only (gate en amont dans _handle_admin_routes).
+    """
+    from ..auth.mission_jwt import JWKSUnavailable, get_jwks_cache
+
+    cache = get_jwks_cache()
+    if cache is None:
+        return await _json_response(send, 503, {
+            "status": "error",
+            "message": "JWKS non configuré (MISSION_JWKS_URL vide ou lifecycle non passé)",
+        })
+    try:
+        count = cache.force_reload()
+    except JWKSUnavailable as e:
+        return await _json_response(send, 503, {
+            "status": "error",
+            "message": f"Rechargement JWKS échoué : {e.reason}",
+        })
+    return await _json_response(send, 200, {"status": "ok", "keys": count})
 
 
 async def _api_audit(send, scope):
