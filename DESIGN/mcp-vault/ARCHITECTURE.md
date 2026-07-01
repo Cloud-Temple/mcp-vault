@@ -138,7 +138,7 @@
 | **PkiMiddleware**         | Proxy ACME + distribution CA (`/acme/*`, `/pki/ca/*.pem`) non-auth | ASGI middleware (v0.5.0) |
 | **AdminMiddleware**       | Console admin web + API REST admin               | ASGI middleware (starter-kit) |
 | **HealthCheckMiddleware** | Health check HTTP (/health, /healthz, /ready)    | ASGI middleware               |
-| **AuthMiddleware**        | Auth Bearer Token + vault access + ContextVar    | ASGI middleware (starter-kit) |
+| **AuthMiddleware**        | Auth Bearer Token + **PEP mission JWT** (#47) + vault access + ContextVar | ASGI middleware (starter-kit) |
 | **LoggingMiddleware**     | Logging requêtes + ring buffer mémoire           | ASGI middleware (starter-kit) |
 | **Outils MCP**            | Façade MCP (36 outils)                           | FastMCP (starter-kit)         |
 | **hvac client**           | Client Python vers OpenBao                       | `hvac` library                |
@@ -160,7 +160,7 @@ PkiMiddleware → AdminMiddleware → HealthCheckMiddleware → AuthMiddleware �
 | **PkiMiddleware**         | `/acme/*`, `/pki/ca/*.pem` (non-auth, RFC 8555) | Pas un chemin PKI/ACME |
 | **AdminMiddleware**       | `/admin`, `/admin/static/*`, `/admin/api/*` | Pas un chemin admin        |
 | **HealthCheckMiddleware** | `/health`, `/healthz`, `/ready`             | Pas un chemin health       |
-| **AuthMiddleware**        | Toutes les requêtes MCP                     | Token valide → ContextVar  |
+| **AuthMiddleware**        | Toutes les requêtes MCP (Bearer **ou** PEP mission JWT) | Token valide → ContextVar  |
 | **LoggingMiddleware**     | Toutes les requêtes                         | Log + ring buffer 200 ent. |
 | **FastMCP app**           | MCP Protocol (Streamable HTTP)              | —                          |
 
@@ -198,6 +198,40 @@ l'auth. Ceci permet au WAF/load balancer de vérifier l'état du service :
 authentifié dans un `contextvars.ContextVar` Python, accessible ensuite par
 chaque outil MCP via `check_access()`, `check_write()`, `check_admin()`.
 Ce mécanisme est **request-scoped** (isolé par requête, thread-safe en asyncio).
+
+**AuthMiddleware = PEP mission JWT à la porte `/mcp` (#47, v0.8.0)** — En plus du
+Bearer opaque historique, `AuthMiddleware` est le **second point d'application** du
+`mission_token` JWT ES256 de mcp-mission (le premier étant `secret_consume`/C18, à la
+consommation). Il en est l'**unique lecteur du header** et l'unique writer du
+ContextVar sur `/mcp`. Piloté par `MCP_AUTH_MODE` :
+
+- `bearer` *(défaut)* — comportement historique, **zéro impact** ;
+- `jwt` — `mission_token` JWT ES256 obligatoire (bearer opaque refusé) ;
+- `dual-stack` — JWT valide **ou** bearer opaque valide (migration).
+
+En `jwt`/`dual-stack`, le middleware **refuse activement** (jamais d'injection
+silencieuse de `None`) : `401` (token absent/opaque/JWT invalide), `403` (`aud` ne
+contient pas `MCP_INSTANCE_ID`, `component_id["vault"] ≠ MCP_INSTANCE_ID`, mission
+inactive), `503` (JWKS indisponible — fail-close). Un JWT structurellement invalide
+(`alg=none`/`HS256`) part vers la validation et finit en `401` — **jamais** de fallback
+vers le bearer. La bootstrap key admin reste acceptée (break-glass, constant-time avant
+tout dispatch JWT).
+
+Le **cache JWKS est unique au processus** (`auth/mission_jwt.py` : backoff exponentiel +
+jitter, ETag/304, fail-close, throttle anti-DoS sur `kid` inconnu) et partagé avec
+`secret_consume` (fin de tout second cache divergent). Audience = **source unique**
+`resolved_mission_aud` (= `MCP_INSTANCE_ID`, alias legacy `MISSION_TOKEN_AUD` ; divergence
+→ fail-fast au boot). Vérification mission active en allow-list `{RUNNING, WAITING_HUMAN,
+PAUSED}` (fail-close). Chaque refus est audité (`decision_id` local + `decision_id`
+émetteur via `provenance`) **sans jamais** le token ni un secret.
+
+> **PR1 (v0.8.0, mergée)** : une identité mission valide est **authentifiée et liée à
+> l'instance** mais n'a **aucun accès vault** (deny-by-default — `check_access` refuse une
+> identité `mission_jwt` sans périmètre, jamais owner-based ; outils d'infra `system_*` et
+> inventaire PKI refusés). L'**Admin API** (`/admin/api/*`) reste une surface séparée
+> **bearer/bootstrap-only** : un mission JWT y est refusé (401). L'octroi d'un périmètre
+> vault local (`MissionBindingStore` keyé par `tenant_id`) est livré en **PR2 (#69)**.
+> Endpoint admin `POST /admin/api/auth/jwks/reload` = rechargement forcé du JWKS.
 
 **LoggingMiddleware + Ring Buffer** — Chaque requête HTTP est loguée dans un
 **ring buffer mémoire** (200 entrées par défaut) contenant : méthode, path,
