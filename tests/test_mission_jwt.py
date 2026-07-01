@@ -1401,6 +1401,64 @@ class TestMissionPepConfig:
             object.__setattr__(settings, "mcp_instance_id", saved[3])
 
 
+class TestAdminRestVaultAccessHardening:
+    """Le chemin Admin REST (_check_vault_access + GET /admin/api/vaults) doit être
+    AUSSI fail-close que le chemin MCP (auth.context) — pas de divergence
+    d'enforcement (finding revue indépendante élargie)."""
+
+    def test_check_vault_access_non_list_allowed_treated_empty(self):
+        """allowed_resources=str → jamais un test de sous-chaîne ; owner-based."""
+        from mcp_vault.admin.api import _check_vault_access
+        ti = {"client_name": "cli", "permissions": ["read"],
+              "allowed_resources": "prod"}  # str, pas list
+        import sys
+        mock_spaces = MagicMock()
+        mock_spaces.check_vault_owner.return_value = False
+        with patch.dict(sys.modules, {"mcp_vault.vault.spaces": mock_spaces}):
+            err = _check_vault_access(ti, "prod")  # ne doit PAS matcher "prod" in "prod"
+        assert err is not None, "allowed_resources str traité comme motif (bug substring) !"
+
+    def test_check_vault_access_empty_client_name_fail_close(self):
+        from mcp_vault.admin.api import _check_vault_access
+        ti = {"client_name": "", "permissions": ["read"], "allowed_resources": []}
+        import sys
+        mock_spaces = MagicMock()
+        with patch.dict(sys.modules, {"mcp_vault.vault.spaces": mock_spaces}):
+            err = _check_vault_access(ti, "v1")
+        assert err is not None and err["status"] == "error"
+        assert not mock_spaces.check_vault_owner.called
+
+    def test_check_vault_access_membership_ok(self):
+        from mcp_vault.admin.api import _check_vault_access
+        ti = {"client_name": "cli", "permissions": ["read"],
+              "allowed_resources": ["v1", "v2"]}
+        assert _check_vault_access(ti, "v1") is None
+        assert _check_vault_access(ti, "v3") is not None
+
+    def test_admin_list_vaults_empty_client_name_fail_close(self):
+        """GET /admin/api/vaults avec client_name vide → 0 vault (owner_filter=""
+        aurait listé TOUT)."""
+        from mcp_vault.admin.api import handle_admin_api
+        ti = {"client_name": "", "permissions": ["read"], "allowed_resources": []}
+        scope = {"type": "http", "method": "GET", "path": "/admin/api/vaults",
+                 "headers": [(b"authorization", b"Bearer x")], "query_string": b""}
+        events = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(ev):
+            events.append(ev)
+
+        with patch("mcp_vault.admin.api._get_token_info", return_value=ti):
+            _run(handle_admin_api(scope, receive, send, None))
+        start = next(e for e in events if e["type"] == "http.response.start")
+        body = json.loads(next(e for e in events
+                               if e["type"] == "http.response.body")["body"])
+        assert start["status"] == 200
+        assert body == {"status": "ok", "vaults": [], "count": 0}
+
+
 class TestResolvedAudSingleSourceC18:
     """L'audience du PEP et celle de C18 (secret_consume/wrap/validator) doivent
     provenir de la MÊME source (resolved_mission_aud) — une config mcp_instance_id

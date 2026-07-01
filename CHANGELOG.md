@@ -15,6 +15,7 @@ Second point d'application (PEP) pour les `mission_token` JWT ES256 émis par mc
 - **Vérification mission active** en allow-list `{RUNNING, WAITING_HUMAN, PAUSED}` (fail-close : un état inconnu = inactif — corrige l'ancienne deny-list ; `PAUSED` reçoit des tokens re-signés côté mcp-mission).
 - **Endpoint admin** `POST /admin/api/auth/jwks/reload` (admin only) pour propager une révocation de `kid` sans attendre le TTL. L'Admin API reste **bearer/bootstrap-only** : un mission JWT y est refusé (401) sur toute la surface `/admin/api/*`.
 - **Audit** immuable de chaque refus PEP (`decision_id` local + `decision_id` émetteur via `provenance` pour corrélation E2E, `tenant_id`, `mission_id`, `reason_code`) — **jamais** le token ni un secret.
+- **Durcissement fail-close aligné MCP ↔ Admin REST** : `check_access`/`get_listing_filter` (MCP) et `_check_vault_access`/`GET /admin/api/vaults` (Admin REST) typent désormais `allowed_resources` en liste (un token mal formé ne peut plus provoquer un test de sous-chaîne) et refusent une identité incomplète (`client_name` vide) au lieu de lister tous les vaults. Anti-DoS sur le JWKS : throttle des refresh déclenchés par un `kid` inconnu (au plus un fetch réseau par fenêtre, quel que soit le volume).
 
 ### Observabilité AuditStore (issue #61)
 

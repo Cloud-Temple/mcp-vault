@@ -1356,6 +1356,13 @@ def create_app():
     pep_ok, pep_msg = settings.check_mission_pep_config()
     if not pep_ok:
         raise RuntimeError(f"Config PEP mission JWT invalide — démarrage refusé : {pep_msg}")
+    if settings.mcp_auth_mode != "bearer" and not settings.mission_status_url:
+        # Mode dégradé assumé (aussi signalé ici pour les lancements ASGI directs
+        # via create_app --factory, qui ne passent pas par main()).
+        logger.warning(
+            "⚠️  MISSION_STATUS_URL non configuré : vérification mission active "
+            "DÉSACTIVÉE au PEP /mcp — révocation par expiration du token uniquement."
+        )
 
     from .auth.middleware import AuthMiddleware, LoggingMiddleware, HealthCheckMiddleware
     from .admin.middleware import AdminMiddleware
