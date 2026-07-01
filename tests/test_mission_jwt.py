@@ -283,6 +283,70 @@ class TestJWKSCache:
             cache.get_key("key-v2")
         assert exc_info.value.reason == "unknown_kid"
 
+    def test_unknown_kid_flood_throttled_no_ddos(self):
+        """ANTI-DoS : un flot de kids inconnus ne déclenche PAS un fetch réseau par
+        requête (throttle des refresh unknown-kid). Sinon un attaquant DoS l'endpoint
+        JWKS de mcp-mission via des JWT à kids aléatoires."""
+        _, pub = _make_es256_keypair()
+        calls = [0]
+        clock = [1000.0]
+
+        def fetch(url, etag, timeout):
+            calls[0] += 1
+            return 200, None, json.dumps(_make_jwks(pub, kid="real")).encode()
+
+        cache = JWKSCache("http://mock/x", ttl_seconds=300, fetch=fetch,
+                          time_func=lambda: clock[0])
+        cache.get_key("real")            # 1 fetch (peuple)
+        assert calls[0] == 1
+        # 50 kids inconnus dans la même fenêtre → au plus 1 refresh supplémentaire.
+        for i in range(50):
+            with pytest.raises(MissionTokenInvalid):
+                cache.get_key(f"ghost-{i}")
+        assert calls[0] <= 2, (
+            f"DoS JWKS : {calls[0]} fetchs pour 50 kids inconnus (throttle cassé)")
+
+    def test_unknown_kid_refresh_allowed_after_interval(self):
+        """Après l'intervalle de throttle, un nouveau refresh unknown-kid est permis
+        (propagation d'une vraie rotation de clé)."""
+        _, pub = _make_es256_keypair()
+        calls = [0]
+        clock = [1000.0]
+
+        def fetch(url, etag, timeout):
+            calls[0] += 1
+            return 200, None, json.dumps(_make_jwks(pub, kid="real")).encode()
+
+        cache = JWKSCache("http://mock/x", ttl_seconds=300, fetch=fetch,
+                          time_func=lambda: clock[0])
+        cache.get_key("real")
+        with pytest.raises(MissionTokenInvalid):
+            cache.get_key("ghost")       # refresh unknown-kid #1
+        n = calls[0]
+        clock[0] += 11                    # > _UNKNOWN_KID_MIN_REFRESH_INTERVAL (10s)
+        with pytest.raises(MissionTokenInvalid):
+            cache.get_key("ghost2")      # nouveau refresh autorisé
+        assert calls[0] == n + 1
+
+    def test_force_reload_bypasses_unknown_kid_throttle(self):
+        """L'admin (force_reload) reste le bypass explicite du throttle."""
+        _, pub = _make_es256_keypair()
+        calls = [0]
+        clock = [1000.0]
+
+        def fetch(url, etag, timeout):
+            calls[0] += 1
+            return 200, None, json.dumps(_make_jwks(pub, kid="real")).encode()
+
+        cache = JWKSCache("http://mock/x", ttl_seconds=300, fetch=fetch,
+                          time_func=lambda: clock[0])
+        cache.get_key("real")
+        with pytest.raises(MissionTokenInvalid):
+            cache.get_key("ghost")
+        n = calls[0]
+        cache.force_reload()             # bypass throttle immédiatement
+        assert calls[0] == n + 1
+
     def test_malformed_jwks_does_not_corrupt_cache(self):
         _, pub = _make_es256_keypair()
         clock = [1000.0]
@@ -1335,3 +1399,50 @@ class TestMissionPepConfig:
             object.__setattr__(settings, "mcp_auth_mode", saved[1])
             object.__setattr__(settings, "mission_jwks_url", saved[2])
             object.__setattr__(settings, "mcp_instance_id", saved[3])
+
+
+class TestResolvedAudSingleSourceC18:
+    """L'audience du PEP et celle de C18 (secret_consume/wrap/validator) doivent
+    provenir de la MÊME source (resolved_mission_aud) — une config mcp_instance_id
+    SEUL (mission_token_aud vide) ne doit pas casser le binding C18 (finding Codex)."""
+
+    def test_resolved_aud_with_instance_id_only(self):
+        """Config mcp_instance_id seul → resolved_mission_aud propage l'audience
+        (c'est la valeur passée à init_mission_token_validator / secret_wrap /
+        secret_consume depuis le fix #47)."""
+        from mcp_vault.config import Settings
+        s = Settings(mcp_instance_id="vault-x", mission_token_aud="",
+                     mission_jwks_url="http://m/jwks")
+        assert s.resolved_mission_aud == "vault-x", (
+            "audience résolue vide → binding C18 cassé en config instance_id-only")
+
+    def test_secret_wrap_enrichment_uses_resolved_aud(self):
+        """secret_wrap enrichit expected_aud depuis resolved_mission_aud : une config
+        mcp_instance_id seul donne un binding complet, pas 'misconfigured'."""
+        from mcp_vault import server
+        from mcp_vault.config import Settings
+        fn = getattr(server.secret_wrap, "fn", server.secret_wrap)
+
+        s = Settings(mcp_instance_id="vault-x", mission_token_aud="",
+                     enforce_mission_token_validation=True,
+                     mission_jwks_url="http://m/jwks")
+        captured = {}
+
+        async def fake_wrap(vault_id, secret_path, mission_id, operation_id,
+                            ttl_seconds, tenant_id="", expected_aud=""):
+            captured["expected_aud"] = expected_aud
+            return {"status": "ok", "wrap_token": "x", "accessor": "a",
+                    "ttl_seconds": ttl_seconds}
+
+        import sys
+        mock_wrapping = MagicMock()
+        mock_wrapping.wrap_secret = fake_wrap
+        admin_info = {"client_name": "admin", "permissions": ["admin", "read", "write"],
+                      "allowed_resources": []}
+        with patch.object(server, "settings", s), \
+             _ContextVarGuard(admin_info), \
+             patch.dict(sys.modules, {"mcp_vault.vault.wrapping": mock_wrapping}):
+            result = _run(fn(vault_id="v1", secret_path="web/x",
+                             mission_id="mis_1", operation_id="op_1", ttl_seconds=60))
+        assert result.get("error_type") != "misconfigured", result
+        assert captured.get("expected_aud") == "vault-x"

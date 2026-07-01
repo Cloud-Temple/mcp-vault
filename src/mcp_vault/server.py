@@ -493,12 +493,16 @@ async def secret_wrap(
     # Les wraps créés sans expected_aud auraient un binding mission_id-only.
     if settings.enforce_mission_token_validation and settings.mission_jwks_url:
         if not expected_aud:
-            if settings.mission_token_aud:
-                expected_aud = settings.mission_token_aud
+            # Source unique d'audience (#47) : mcp_instance_id (canonique) ou
+            # mission_token_aud (alias legacy). Cohérence garantie par
+            # check_mission_pep_config au boot.
+            resolved_aud = settings.resolved_mission_aud
+            if resolved_aud:
+                expected_aud = resolved_aud
             else:
                 return {"status": "error", "error_type": "misconfigured",
                         "message": "expected_aud requis en mode ENFORCE=true "
-                                   "(configurer MISSION_TOKEN_AUD)"}
+                                   "(configurer MCP_INSTANCE_ID ou MISSION_TOKEN_AUD)"}
 
     # Vérification d'accès au vault (owner/allowed_resources) + policy path
     access_err = check_access(vault_id)
@@ -676,7 +680,7 @@ async def secret_consume(
     # expected_aud utilise settings.mission_token_aud (validé par PyJWT decode) — pas
     # jwt_claims["aud"] qui peut être une liste non-ordonnée (MOYEN — issue #29).
     tenant_id_from_jwt = jwt_claims.get("tenant_id", "") if jwt_claims else ""
-    expected_aud_from_jwt = settings.mission_token_aud
+    expected_aud_from_jwt = settings.resolved_mission_aud  # source unique (#47)
 
     result = await consume_wrap_secret(
         wrap_token=wrap_token,
@@ -1416,6 +1420,16 @@ def main():
     if settings.mcp_auth_mode != "bearer":
         logger.info(f"🛡️  PEP mission JWT actif (mode={settings.mcp_auth_mode}, "
                     f"aud={settings.resolved_mission_aud})")
+        if not settings.mission_status_url:
+            # Mode dégradé assumé : sans MISSION_STATUS_URL, aucune vérification de
+            # mission active à la porte → la révocation d'une mission close/abort
+            # repose UNIQUEMENT sur l'expiration (exp ≤ 3600s) du mission_token.
+            logger.warning(
+                "⚠️  MISSION_STATUS_URL non configuré : vérification mission active "
+                "DÉSACTIVÉE au PEP /mcp — révocation par expiration du token uniquement "
+                "(exp ≤ 3600s). Configurez MISSION_STATUS_URL pour une révocation quasi "
+                "temps réel des missions closes/abandonnées."
+            )
 
     app = create_app()
 

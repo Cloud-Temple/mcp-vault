@@ -46,6 +46,13 @@ _BACKOFF_BASE_SECONDS = 1.0
 _BACKOFF_MAX_SECONDS = 30.0
 _BACKOFF_JITTER = 0.2  # ±20 %
 
+# Intervalle minimal entre deux refresh JWKS déclenchés par un `kid` INCONNU
+# (anti-DoS : sans ça, un flot de JWT à kids aléatoires provoquerait un fetch
+# réseau par requête). Un refresh réussi ne « désarme » pas le backoff d'échec ;
+# ce throttle est distinct et borne les refresh « kid inconnu » à 1 par fenêtre,
+# quel que soit le volume d'attaque. force_reload() (admin) est le seul bypass.
+_UNKNOWN_KID_MIN_REFRESH_INTERVAL = 10.0
+
 # NB : le mission_token NE PORTE PAS de claim `vaults` ni `permissions` (contrat réel mcp-mission
 # vérifié). L'autorisation vault est LOCALE à mcp-vault (MissionBindingStore, keyé par tenant_id —
 # livré dans une PR ultérieure). Ce module ne fait qu'authentifier + lier à l'instance.
@@ -139,6 +146,8 @@ class JWKSCache:
         # État du backoff.
         self._next_attempt_at: float = 0.0
         self._fail_count: int = 0
+        # Throttle des refresh déclenchés par un kid inconnu (anti-DoS).
+        self._last_unknown_kid_refresh_at: float = 0.0
 
     # -- API publique -----------------------------------------------------------
 
@@ -153,9 +162,15 @@ class JWKSCache:
             self._ensure_fresh_locked()
             key = self._keys_by_kid.get(kid)
             if key is None:
-                # kid absent : rotation très récente ? On tente UN refresh forcé
-                # (hors fenêtre de backoff) avant de conclure à un kid révoqué.
-                if self._fetched_at is not None and self._can_attempt_locked():
+                # kid absent : rotation très récente ? On tente UN refresh forcé,
+                # MAIS throttlé (anti-DoS) : au plus un refresh « kid inconnu » par
+                # _UNKNOWN_KID_MIN_REFRESH_INTERVAL, quel que soit le volume de kids
+                # inconnus reçus. Sinon → rejet immédiat sans fetch réseau.
+                now = self._now()
+                if (self._fetched_at is not None and self._can_attempt_locked()
+                        and (now - self._last_unknown_kid_refresh_at)
+                        >= _UNKNOWN_KID_MIN_REFRESH_INTERVAL):
+                    self._last_unknown_kid_refresh_at = now
                     try:
                         self._refetch_locked(force=True)
                     except JWKSUnavailable:
@@ -182,6 +197,7 @@ class JWKSCache:
         with self._lock:
             self._fail_count = 0
             self._next_attempt_at = 0.0
+            self._last_unknown_kid_refresh_at = 0.0  # admin = bypass du throttle
             self._refetch_locked(force=True)
             return len(self._keys_by_kid)
 
