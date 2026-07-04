@@ -30,6 +30,13 @@ Suite de #47 (PR1). L'identité mission JWT, jusqu'ici authentifiée mais **sans
 - **Granularité tenant-wide (assumée)** : toutes les missions actives d'un tenant partagent le périmètre octroyé. Le grain par mission existe déjà à la consommation (`secret_consume`/C18) ; le grain par mission sur ce chemin direct est une évolution future.
 - **Audit** des mutations d'octroi (create/delete/purge) avec `decision_id` en tête du détail — jamais de secret. Le provisioning agentic (#62) écrira dans ce store (créer un binding tenant→coffres au lieu d'un bearer manuel).
 
+### Correction fail-open `dry_run` — purge des tokens révoqués (dette task_a5346701)
+
+Jumeau de la faille fermée en #69 (purge de bindings). `POST /admin/api/tokens/purge` faisait `dry_run = bool(data.get("dry_run", False))` : une valeur falsy **non booléenne** (`[]`, `0`, `""`, `null`) était coercée en `False` → déclenchant une purge **réelle** (destructive) qu'on croyait simuler.
+
+- `dry_run` est désormais validé **strictement** (`isinstance(..., bool)`) : toute valeur non booléenne → `400`, **aucun appel** au store — alignement exact sur `_api_purge_mission_bindings` (le pattern déjà durci en #69).
+- Tests de non-régression red-team : `dry_run ∈ {[], 0, "", null, "true", "false", 1, 1.0, {}, [1]}` → `400` sans purge (ni audit) ; régression inverse vérifiée (un vrai `True` simule encore, un vrai `False` purge bien).
+
 ### Observabilité AuditStore (issue #61)
 
 `AuditStore.log()` avalait silencieusement toute erreur d'écriture du fichier JSONL (`except Exception: pass`). En cas de panne disque, répertoire absent ou problème de permission, aucune trace n'était produite.

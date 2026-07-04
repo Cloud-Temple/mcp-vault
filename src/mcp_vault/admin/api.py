@@ -556,7 +556,13 @@ async def _api_purge_revoked_tokens(send, body):
             or older_than_days < 0 or older_than_days > 36500):
         return await _json_response(send, 400, {"status": "error",
                 "message": "older_than_days doit être un entier entre 0 et 36500"})
-    dry_run = bool(data.get("dry_run", False))
+    # dry_run booléen STRICT (dette task_a5346701, jumeau de la faille fermée en #69 sur
+    # _api_purge_mission_bindings) : ne PAS coercer — bool([]) / bool(0) == False
+    # transformerait une entrée invalide falsy en purge DESTRUCTIVE réelle (fail-open).
+    dry_run = data.get("dry_run", False)
+    if not isinstance(dry_run, bool):
+        return await _json_response(send, 400, {"status": "error",
+                "message": "dry_run doit être un booléen (true/false)"})
 
     result = store.purge_revoked(older_than_days, dry_run=dry_run)
 
