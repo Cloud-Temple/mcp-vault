@@ -111,13 +111,16 @@ Utilise `pydantic-settings` pour charger la configuration depuis les variables d
 | `VAULT_S3_PREFIX`        | `_storage`                | Préfixe S3 pour le sync     |
 | `VAULT_S3_SYNC_INTERVAL` | `60`                      | Intervalle sync en secondes |
 | `PKI_BASE_URL`           | *(vide)*                  | Override URL base PKI (ACME directory, CDPs). Utile en test Docker : `http://mcp-vault:8030`. Doit être http(s)://. |
+| `MCP_AUTH_MODE`          | `bearer`                  | PEP mission JWT porte /mcp (#47). `bearer` = historique (zéro impact). `jwt` = mission_token obligatoire. `dual-stack` = JWT valide OU bearer (migration). `jwt`/`dual-stack` exigent `MISSION_JWKS_URL` + `MCP_INSTANCE_ID` (fail-fast au boot). |
+| `MCP_INSTANCE_ID`        | *(vide)*                  | Identifiant d'instance de CE vault : doit figurer dans `aud` du mission_token ET valoir `component_id["vault"]`. Source unique d'audience (`resolved_mission_aud`) — remplace `MISSION_TOKEN_AUD` (alias legacy ; divergence des deux = fail-fast boot). |
+| `MCP_COMPONENT_KIND`     | `vault`                   | Clé de `component_id` vérifiée (`component_id[kind] == MCP_INSTANCE_ID`). |
 | `ENFORCE_MISSION_TOKEN_VALIDATION` | `false` | `true` = hard-reject JWT dans secret_consume. `false` = log warning, continue (standalone compatible). |
 | `MISSION_JWKS_URL`       | *(vide)*                  | JWKS public mcp-mission (`/.well-known/jwks.json`). Vide = validation désactivée. |
 | `MISSION_TOKEN_AUD`      | *(vide)*                  | Audience attendue dans le JWT (anti-confused-deputy). Ex : `mcp-vault:prod:v1`. |
 | `MISSION_JWKS_CACHE_TTL` | `60`                      | TTL cache JWKS en secondes. |
 | `MISSION_JWKS_MAX_REFRESH_PER_MIN` | `3`             | Rate-limit refresh JWKS (anti-DoS). |
 | `MISSION_TOKEN_LEEWAY_SECONDS` | `10`                | Tolérance clock skew JWT en secondes. |
-| `MISSION_STATUS_URL`     | *(vide)*                  | Template URL statut mission mcp-mission (`{mission_id}` remplacé). Vide = vérification désactivée. |
+| `MISSION_STATUS_URL`     | *(vide)*                  | Template URL statut mission mcp-mission (`{mission_id}` remplacé). Allow-list d'états actifs `{RUNNING, WAITING_HUMAN, PAUSED}` (fail-close : état inconnu = inactif). Vide = vérification désactivée ; en `MCP_AUTH_MODE=jwt/dual-stack`, mode dégradé signalé par un warning au boot (révocation par expiration du token uniquement). |
 | `MISSION_STATUS_CACHE_TTL` | `5`                     | TTL cache statut mission en secondes (court — fail-close rapide). |
 
 **Variables CLI (NE PAS stocker dans `.env`)** :
