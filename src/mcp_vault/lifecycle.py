@@ -66,6 +66,26 @@ async def vault_startup() -> bool:
     except Exception as e:
         logger.error(f"❌ Policy Store : {e}")
 
+    # ── 1b-bis. Mission Binding Store S3 (octroi périmètre vault mission JWT, #69) ──
+    logger.info("🎟️  Initialisation du Mission Binding Store...")
+    try:
+        from .auth.mission_bindings import (
+            init_mission_binding_store,
+            get_mission_binding_store,
+        )
+        init_mission_binding_store()
+        # Mode dégradé OBSERVABLE : le PEP mission JWT est actif mais aucun octroi
+        # n'est possible → toutes les identités mission seront refusées (deny-all).
+        if settings.mcp_auth_mode != "bearer" and get_mission_binding_store() is None:
+            logger.warning(
+                "⚠️  MCP_AUTH_MODE=%s mais Mission Binding Store non configuré : "
+                "toutes les identités mission JWT seront refusées (deny-all, aucun périmètre "
+                "vault ne peut être octroyé).",
+                settings.mcp_auth_mode,
+            )
+    except Exception as e:
+        logger.error(f"❌ Mission Binding Store : {e}")
+
     # ── 1c. Audit Store ────────────────────────────────────────────
     logger.info("📋 Initialisation de l'Audit Store...")
     try:
