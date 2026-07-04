@@ -37,6 +37,18 @@ Jumeau de la faille fermée en #69 (purge de bindings). `POST /admin/api/tokens/
 - `dry_run` est désormais validé **strictement** (`isinstance(..., bool)`) : toute valeur non booléenne → `400`, **aucun appel** au store — alignement exact sur `_api_purge_mission_bindings` (le pattern déjà durci en #69).
 - Tests de non-régression red-team : `dry_run ∈ {[], 0, "", null, "true", "false", 1, 1.0, {}, [1]}` → `400` sans purge (ni audit) ; régression inverse vérifiée (un vrai `True` simule encore, un vrai `False` purge bien).
 
+### Validation de l'expiration des tokens à la création (issue #65)
+
+La création de token gérait mal `expires_in_days`, des **deux côtés** : le frontend admin (`parseInt(v) || 90`) écrasait un `0` (illimité voulu) en 90 jours — l'UI ne pouvait **pas** créer de token sans expiration ; le backend, lui, ne validait rien — `null`/`-1`/`""` créaient un token **illimité par accident** et `"0"` (string) provoquait un `TypeError` → **HTTP 500**.
+
+Décision : **tokens illimités autorisés mais EXPLICITES**. Contrat unique de `expires_in_days` sur tous les chemins : champ omis → `90` (défaut sûr) ; `0` → jamais expirer (illimité explicite) ; entier `[1, 36500]` → durée en jours ; **tout le reste rejeté** (négatif, hors borne, `bool`, `float`, string, `null`).
+
+- **Source unique** `TokenStore.validate_expires_in_days()` (constante `MAX_EXPIRES_IN_DAYS = 36500`, borne de politique cohérente avec la purge), appelée par le **store** (défense en profondeur) et par la **frontière REST** `POST /admin/api/tokens` (→ `400`, plus jamais de `500`).
+- **Frontend** : module isolé `static/js/expires.js` (`parseExpiresInDays`) — validation stricte sans coercition (`"1.5"`/`"1abc"`/`"0.0"` → erreur UI, **aucun envoi**), `0` honoré. Testé sous Node (`tests/js/expires_contract.test.js`).
+- **CLI** : `--expires` en `IntRange(0, 36500)` (Click) ; **shell** : parse fail-close (`--expires` non entier / négatif / hors borne / manquant → aucune création).
+- ⚠️ **Changement de contrat** : `POST /admin/api/tokens` **rejette désormais** `expires_in_days` envoyé en **string** (ex. `"90"`) ou toute valeur non entière. Un appelant qui envoyait une string doit envoyer un entier JSON.
+- Hors périmètre (documenté) : les tokens **déjà** créés en illimité par accident restent inchangés (repérables via `token list`, colonne « jamais ») ; `token_update` ne gère pas l'expiration (inchangé).
+
 ### Observabilité AuditStore (issue #61)
 
 `AuditStore.log()` avalait silencieusement toute erreur d'écriture du fichier JSONL (`except Exception: pass`). En cas de panne disque, répertoire absent ou problème de permission, aucune trace n'était produite.

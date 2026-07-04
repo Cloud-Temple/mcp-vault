@@ -66,6 +66,29 @@ class TokenStore:
     # hiérarchiques). Utilisée par create() et update(), et référencée par
     # admin/api.py (_api_create_token) pour éviter toute divergence.
     VALID_PERMISSIONS = frozenset({"read", "write", "admin"})
+    # Borne de POLITIQUE de durée de vie (≈ 100 ans), cohérente avec le cap
+    # older_than_days de la purge. Empêche des durées absurdes / abus DoS. Ce n'est
+    # PAS la limite d'overflow technique de timedelta (bien plus haute) : c'est un
+    # plafond métier. Référencée par validate_expires_in_days() et admin/api.py.
+    MAX_EXPIRES_IN_DAYS = 36500
+
+    @staticmethod
+    def validate_expires_in_days(value) -> Optional[str]:
+        """Valide expires_in_days (issue #65). Retourne None si OK, message sinon.
+
+        Source UNIQUE du contrat (partagée par create() et admin/api.py, pour éviter
+        deux validations divergentes) : `0` = jamais expirer (illimité EXPLICITE) ;
+        entier dans [1, MAX_EXPIRES_IN_DAYS] = durée en jours. Tout le reste est REFUSÉ
+        — ni illimité accidentel, ni TypeError silencieuse :
+        - bool est sous-classe d'int → refusé (True/False n'est pas une durée) ;
+        - non-int (string, float, None, list…) → refusé ;
+        - négatif ou > MAX_EXPIRES_IN_DAYS → refusé.
+        """
+        if (isinstance(value, bool) or not isinstance(value, int)
+                or value < 0 or value > TokenStore.MAX_EXPIRES_IN_DAYS):
+            return (f"expires_in_days doit être un entier entre 0 (jamais) "
+                    f"et {TokenStore.MAX_EXPIRES_IN_DAYS}")
+        return None
 
     def __init__(self, settings):
         self.settings = settings
@@ -169,6 +192,13 @@ class TokenStore:
             return {"status": "error", "error_type": "invalid_permissions",
                     "message": f"Permissions invalides: {permissions}. Valides: read, write, admin"}
 
+        # Validation expiration (défense en profondeur, issue #65) : même règle qu'à la
+        # frontière HTTP (source unique validate_expires_in_days). Le store doit être sûr
+        # par lui-même, quel que soit l'appelant.
+        exp_err = self.validate_expires_in_days(expires_in_days)
+        if exp_err:
+            return {"status": "error", "error_type": "invalid_expiration", "message": exp_err}
+
         import secrets
         from datetime import datetime, timezone, timedelta
 
@@ -177,7 +207,7 @@ class TokenStore:
 
         now = datetime.now(timezone.utc)
         expires_at = None
-        if expires_in_days and expires_in_days > 0:
+        if expires_in_days > 0:  # 0 = jamais expirer (illimité EXPLICITE, issue #65)
             expires_at = (now + timedelta(days=expires_in_days)).isoformat()
 
         token_info = {

@@ -568,6 +568,7 @@ async def cmd_token(client, args="", json_output=False):
         perms = ["read", "write"]
         vaults = []
         expires = 90
+        expires_err = False  # issue #65 : fail-close sur --expires invalide (aucun POST)
         email = ""
         policy_id = ""
         i = 2
@@ -578,9 +579,21 @@ async def cmd_token(client, args="", json_output=False):
             elif parts[i] == "--vaults" and i + 1 < len(parts):
                 vaults = [s.strip() for s in parts[i + 1].split(",")]
                 i += 2
-            elif parts[i] == "--expires" and i + 1 < len(parts):
-                expires = int(parts[i + 1])
-                i += 2
+            elif parts[i] == "--expires":
+                # Contrat #65 STRICT (aligné front/API, un seul contrat auditable) : entier
+                # ASCII [0,36500], 0 = jamais. isascii()+isdigit() = [0-9]+ pur → rejette
+                # non-entier, négatif, "+5", chiffres non-ASCII ("٥"), float, valeur manquante.
+                # Fail-close : aucune coercition, aucun POST.
+                if i + 1 >= len(parts):
+                    expires_err = True
+                    i += 1
+                else:
+                    raw = parts[i + 1]
+                    if raw.isascii() and raw.isdigit() and int(raw) <= 36500:
+                        expires = int(raw)
+                    else:
+                        expires_err = True
+                    i += 2
             elif parts[i] == "--email" and i + 1 < len(parts):
                 email = parts[i + 1]
                 i += 2
@@ -589,6 +602,9 @@ async def cmd_token(client, args="", json_output=False):
                 i += 2
             else:
                 i += 1
+        if expires_err:
+            show_error("--expires invalide : entier de jours entre 0 (jamais) et 36500")
+            return
         payload = {
             "client_name": parts[1],
             "permissions": perms,
