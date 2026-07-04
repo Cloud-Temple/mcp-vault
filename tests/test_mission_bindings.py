@@ -861,6 +861,21 @@ class TestMissionBindingAdminApi:
         status, body = _call_admin("/admin/api/mission-bindings", "GET", store="unset")
         assert status == 200 and body["bindings"] == []
 
+    @pytest.mark.parametrize("path,method", [
+        ("/admin/api/mission-bindings", "GET"),
+        ("/admin/api/mission-bindings", "POST"),
+        ("/admin/api/health", "GET"),
+        ("/admin/api/vaults", "GET"),
+    ])
+    def test_mission_jwt_identity_refused_on_admin_api(self, path, method):
+        """Défense en profondeur (#69) : même injectée jusqu'au handler, une identité
+        mission_jwt est refusée (403) sur TOUTE route /admin/api/* — jamais d'auto-octroi."""
+        mission_ti = {"auth_type": "mission_jwt", "client_name": "mission:acme",
+                      "permissions": ["read", "write"], "allowed_resources": ["prod"]}
+        status, _ = _call_admin(path, method, body=b"{}", token_info=mission_ti,
+                                store=_fake_admin_store())
+        assert status == 403
+
     def test_create_audited_with_decision_id(self):
         store = _fake_admin_store()
         with patch("mcp_vault.admin.api.log_audit") as mock_audit:

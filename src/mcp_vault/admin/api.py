@@ -33,6 +33,13 @@ async def handle_admin_api(scope, receive, send, mcp):
     if not token_info:
         return await _json_response(send, 401, {"status": "error", "message": "Valid token required"})
 
+    # Défense en profondeur (#69, reco red team) : l'Admin API est bearer/bootstrap-only.
+    # _get_token_info() ne dispatche JAMAIS un JWT mission — mais on refuse ici explicitement
+    # toute identité mission_jwt sur TOUTE route /admin/api/*, pour que l'invariant tienne même
+    # si un changement futur faisait remonter une telle identité jusqu'ici (belt-and-suspenders).
+    if token_info.get("auth_type") == "mission_jwt":
+        return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
+
     # FIX: Injecter token_info dans le ContextVar pour que les fonctions
     # downstream (create_space, update_space, etc.) puissent résoudre
     # le client_name via get_current_client_name() au lieu de "anonymous".
