@@ -161,7 +161,7 @@ Contrat pour le `CredentialBrokerService` de mcp-mission : livraison de credenti
 > Activer la validation C18 avec `ENFORCE_MISSION_TOKEN_VALIDATION=true`. Par défaut (false) : log warning, continue — zéro impact standalone sans mcp-mission.
 > `tenant_id` et `expected_aud` dans `secret_wrap` alimentent le binding C18 complet côté `secret_consume` *(v0.6.8)*.
 
-### PEP mission JWT — porte `/mcp` *(v0.8.0, #47)*
+### PEP mission JWT — porte `/mcp` *(v0.8.0, #47 + #69)*
 
 Second point d'application (PEP) du `mission_token` JWT ES256 de mcp-mission, **à l'entrée `/mcp`** (le premier étant `secret_consume`/C18, à la consommation). Piloté par `MCP_AUTH_MODE` :
 
@@ -173,7 +173,29 @@ Second point d'application (PEP) du `mission_token` JWT ES256 de mcp-mission, **
 
 En `jwt`/`dual-stack`, le middleware **refuse activement** : `401` (token absent/opaque/JWT invalide), `403` (`aud`/`component_id` ≠ instance, mission inactive), `503` (JWKS indisponible — fail-close). Un JWT invalide ne retombe **jamais** sur le bearer. Le token est vérifié contre le contrat réel mcp-mission (`aud` contient `MCP_INSTANCE_ID`, `component_id["vault"] == MCP_INSTANCE_ID`, `iss`, `exp` leeway 0, `iat` anti-skew). La bootstrap key admin reste acceptée (break-glass).
 
-> **PR1 (v0.8.0)** : une identité mission valide est **authentifiée et liée à l'instance** mais n'a **aucun accès vault** (deny-by-default) ; les outils d'infra (`system_*`, inventaire PKI) lui sont refusés. L'octroi d'un périmètre vault local (via `tenant_id`) arrive en PR2 (#69). L'endpoint admin `POST /admin/api/auth/jwks/reload` force le rechargement du JWKS (révocation urgente de `kid`).
+> Une identité mission valide est **authentifiée et liée à l'instance**, puis mcp-vault (**PDP local**) lui résout un **périmètre vault provisionné localement**. Sans octroi, **aucun accès** (deny-by-default) ; les outils d'infra (`system_*`, inventaire PKI) et l'admin-plane (`vault_create/delete`, `ssh_*`) lui sont refusés. L'endpoint admin `POST /admin/api/auth/jwks/reload` force le rechargement du JWKS (révocation urgente de `kid`).
+
+#### Octroi de périmètre vault — `MissionBindingStore` *(#69)*
+
+Le `mission_token` ne porte **aucune** autorisation vault : l'octroi est **provisionné localement**, indexé par `tenant_id` (claim stable), et stocké un **fichier par instance** sur S3.
+
+- Un octroi (« binding ») = `{tenant_id, allowed_resources:[coffres…], permissions, policy_id?, enabled, expires_at?}`.
+- **Permissions strictes** : `read` ou `read,write` (jamais `write` seul, jamais `admin`). **Data-plane uniquement** : lire/écrire des secrets dans les coffres autorisés — **jamais** créer/détruire un coffre ni gérer une CA SSH.
+- **Fail-close** : binding absent/désactivé/expiré → aucun accès. **Registre indisponible/corrompu → `503`** (refus observable, jamais un deny silencieux ni un écrasement destructeur).
+- **Administration** (bearer/bootstrap admin uniquement — jamais via mission JWT) :
+
+```bash
+# Octroyer un périmètre lecture à un client mission
+mcp-cli mission-binding create acme-corp --vaults prod-app --permissions read
+# Lecture + écriture sur plusieurs coffres
+mcp-cli mission-binding create acme-corp --vaults prod-app,staging --permissions read,write
+mcp-cli mission-binding list
+mcp-cli mission-binding get acme-corp
+mcp-cli mission-binding delete acme-corp
+mcp-cli mission-binding purge --older-than 30 --dry-run   # bindings expirés
+```
+
+> **Granularité tenant** : toutes les missions actives d'un même client (`tenant_id`) partagent le périmètre octroyé. Le grain fin par mission existe déjà à la consommation (`secret_consume`/C18).
 
 ### Audit (1)
 

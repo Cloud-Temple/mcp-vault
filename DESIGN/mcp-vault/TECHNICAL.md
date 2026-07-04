@@ -403,6 +403,52 @@ Même pattern que `token_store.py` : singleton + cache mémoire TTL 5 min + stoc
 - `path_rules` : chaque règle doit avoir `vault_pattern`, permissions ∈ {read, write, admin}
 - Doublon interdit (policy_id unique)
 
+### 3.12b `auth/mission_bindings.py` — Mission Binding Store S3 *(#69, v0.8.0)*
+
+Octroi de périmètre vault local pour les identités mission JWT. mcp-vault = **PDP** : le
+`mission_token` ne portant aucune autz vault, l'autorisation est provisionnée ici, indexée par
+`tenant_id`. Même pattern que PolicyStore/TokenStore (singleton + cache TTL 5 min), mais **un
+fichier S3 par instance**.
+
+**Stockage** : `_system/mission_bindings/{encoded_instance_id}.json` (`encoded` = slug + hash court
+de `resolved_mission_aud`). Le fichier-par-instance réduit le last-write-wins cross-instance ;
+`instance_id` est aussi stocké dans chaque entrée et **filtré à la lecture** (anti-fuite cross-instance).
+
+**Singleton** : `init_mission_binding_store()` (lifecycle, après Policy Store) — actif si S3 configuré
+ET `resolved_mission_aud` non vide ; `get_mission_binding_store()` (getter). Warning au boot si
+`MCP_AUTH_MODE ≠ bearer` sans store (PEP actif mais aucun octroi possible → deny-all).
+
+**Modèle de données** :
+
+```python
+{
+    "instance_id": str,           # == resolved_mission_aud (défense en profondeur)
+    "tenant_id": str,             # clé logique + id REST ; URL-safe ; 'purge' réservé
+    "policy_id": str,             # optionnel ; si non vide, doit exister dans PolicyStore
+    "allowed_resources": [str],   # vrais vault_id (regex), non vides, dédupliqués, pas de '*'
+    "permissions": ["read"] | ["read","write"],  # 'write' seul / [] / 'admin' REFUSÉS
+    "enabled": bool,
+    "expires_at": str | None,     # ISO 8601 ; dépassé/corrompu → deny (fail-close)
+    "created_at": str, "created_by": str,
+}
+```
+
+**État observable (fail-close fort)** : `available` / `last_error`. `NoSuchKey`/404 → store vide
+writable (nominal). Erreur réseau/403/timeout/**JSON corrompu** → état **invalid** : `resolve()`
+lève `MissionBindingStoreUnavailable` (→ `503` au PEP), les mutations sont refusées et **aucune
+écriture n'est tentée** (anti-écrasement destructeur). Re-tentative accélérée (10 s) hors TTL ;
+`force_reload()` disponible.
+
+**API** :
+- `resolve(tenant_id)` → binding actif (enabled, non expiré, bonne instance) ou `None` ; lève si indispo. **Utilisé par le PEP**.
+- `get(tenant_id)` / `list_all()` → vue admin (montre enabled/expired) ; lèvent si indispo.
+- `create(...)` / `delete(tenant_id)` / `purge(older_than_days, dry_run)` → rollback mémoire si `_save` échoue ; `purge` = bindings expirés au-delà de la rétention (fail-close date corrompue).
+
+**Endpoints admin** (bearer/bootstrap-only) : `GET/POST /admin/api/mission-bindings`,
+`GET/DELETE /admin/api/mission-bindings/{tenant_id}`, `POST /admin/api/mission-bindings/purge`
+(route `/purge` déclarée avant le segment variable). Audit des mutations avec `decision_id` en tête.
+CLI/shell : groupe `mission-binding` (create/list/get/delete/purge).
+
 ### 3.13 `openbao/` — OpenBao Process Manager
 
 | Module         | Rôle                                                                         |

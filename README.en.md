@@ -161,7 +161,7 @@ Contract for the mcp-mission `CredentialBrokerService`: single-use credential de
 > Enable C18 validation with `ENFORCE_MISSION_TOKEN_VALIDATION=true`. Default (false): log warning, continue — zero impact in standalone mode without mcp-mission.
 > `tenant_id` and `expected_aud` in `secret_wrap` feed the full C18 binding on the `secret_consume` side *(v0.6.8)*.
 
-### Mission JWT PEP — `/mcp` front door *(v0.8.0, #47)*
+### Mission JWT PEP — `/mcp` front door *(v0.8.0, #47 + #69)*
 
 Second enforcement point (PEP) for the mcp-mission `mission_token` (ES256 JWT), **at the `/mcp` front door** (the first one being `secret_consume`/C18, at consumption). Driven by `MCP_AUTH_MODE`:
 
@@ -173,7 +173,27 @@ Second enforcement point (PEP) for the mcp-mission `mission_token` (ES256 JWT), 
 
 In `jwt`/`dual-stack`, the middleware **actively rejects**: `401` (missing/opaque/invalid JWT), `403` (`aud`/`component_id` ≠ instance, inactive mission), `503` (JWKS unavailable — fail-close). An invalid JWT **never** falls back to the bearer path. The token is checked against the real mcp-mission contract (`aud` contains `MCP_INSTANCE_ID`, `component_id["vault"] == MCP_INSTANCE_ID`, `iss`, `exp` leeway 0, `iat` anti-skew). The admin bootstrap key remains accepted (break-glass).
 
-> **PR1 (v0.8.0)**: a valid mission identity is **authenticated and instance-bound** but has **no vault access** (deny-by-default); infra tools (`system_*`, PKI inventory) are denied to it. Local vault-scope grant (via `tenant_id`) comes in PR2 (#69). The admin endpoint `POST /admin/api/auth/jwks/reload` forces a JWKS reload (urgent `kid` revocation).
+> A valid mission identity is **authenticated and instance-bound**, then mcp-vault (**local PDP**) resolves a **locally-provisioned vault scope** for it. Without a grant, **no access** (deny-by-default); infra tools (`system_*`, PKI inventory) and the admin plane (`vault_create/delete`, `ssh_*`) are denied to it. The admin endpoint `POST /admin/api/auth/jwks/reload` forces a JWKS reload (urgent `kid` revocation).
+
+#### Vault-scope grant — `MissionBindingStore` *(#69)*
+
+The `mission_token` carries **no** vault authorization: the grant is **provisioned locally**, keyed by `tenant_id` (stable claim), and stored one **file per instance** on S3.
+
+- A grant ("binding") = `{tenant_id, allowed_resources:[vaults…], permissions, policy_id?, enabled, expires_at?}`.
+- **Strict permissions**: `read` or `read,write` (never `write` alone, never `admin`). **Data-plane only**: read/write secrets in the allowed vaults — **never** create/destroy a vault nor manage an SSH CA.
+- **Fail-close**: missing/disabled/expired binding → no access. **Store unavailable/corrupt → `503`** (observable denial, never a silent deny nor a destructive overwrite).
+- **Administration** (bearer/bootstrap admin only — never via mission JWT):
+
+```bash
+mcp-cli mission-binding create acme-corp --vaults prod-app --permissions read
+mcp-cli mission-binding create acme-corp --vaults prod-app,staging --permissions read,write
+mcp-cli mission-binding list
+mcp-cli mission-binding get acme-corp
+mcp-cli mission-binding delete acme-corp
+mcp-cli mission-binding purge --older-than 30 --dry-run   # expired bindings
+```
+
+> **Tenant granularity**: all active missions of the same client (`tenant_id`) share the granted scope. Per-mission granularity already exists at consumption time (`secret_consume`/C18).
 
 ### Audit (1)
 

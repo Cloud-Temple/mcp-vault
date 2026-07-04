@@ -138,7 +138,7 @@
 | **PkiMiddleware**         | Proxy ACME + distribution CA (`/acme/*`, `/pki/ca/*.pem`) non-auth | ASGI middleware (v0.5.0) |
 | **AdminMiddleware**       | Console admin web + API REST admin               | ASGI middleware (starter-kit) |
 | **HealthCheckMiddleware** | Health check HTTP (/health, /healthz, /ready)    | ASGI middleware               |
-| **AuthMiddleware**        | Auth Bearer Token + **PEP mission JWT** (#47) + vault access + ContextVar | ASGI middleware (starter-kit) |
+| **AuthMiddleware**        | Auth Bearer Token + **PEP mission JWT** (#47) + **octroi périmètre vault** (MissionBindingStore, #69) + ContextVar | ASGI middleware (starter-kit) |
 | **LoggingMiddleware**     | Logging requêtes + ring buffer mémoire           | ASGI middleware (starter-kit) |
 | **Outils MCP**            | Façade MCP (36 outils)                           | FastMCP (starter-kit)         |
 | **hvac client**           | Client Python vers OpenBao                       | `hvac` library                |
@@ -225,13 +225,38 @@ jitter, ETag/304, fail-close, throttle anti-DoS sur `kid` inconnu) et partagé a
 PAUSED}` (fail-close). Chaque refus est audité (`decision_id` local + `decision_id`
 émetteur via `provenance`) **sans jamais** le token ni un secret.
 
-> **PR1 (v0.8.0, mergée)** : une identité mission valide est **authentifiée et liée à
-> l'instance** mais n'a **aucun accès vault** (deny-by-default — `check_access` refuse une
-> identité `mission_jwt` sans périmètre, jamais owner-based ; outils d'infra `system_*` et
-> inventaire PKI refusés). L'**Admin API** (`/admin/api/*`) reste une surface séparée
-> **bearer/bootstrap-only** : un mission JWT y est refusé (401). L'octroi d'un périmètre
-> vault local (`MissionBindingStore` keyé par `tenant_id`) est livré en **PR2 (#69)**.
+> Une identité mission valide est **authentifiée et liée à l'instance**, puis mcp-vault
+> (**PDP local**) lui résout un périmètre vault provisionné localement (voir ci-dessous).
+> Sans octroi → **aucun accès** (deny-by-default — `check_access` refuse une identité
+> `mission_jwt` sans périmètre, jamais owner-based). L'**Admin API** (`/admin/api/*`) reste
+> une surface séparée **bearer/bootstrap-only** : un mission JWT y est refusé (401).
 > Endpoint admin `POST /admin/api/auth/jwks/reload` = rechargement forcé du JWKS.
+
+**MissionBindingStore = octroi de périmètre vault local (#69, v0.8.0)** — Le `mission_token`
+ne porte **aucune** autorisation vault ; mcp-vault est le **PDP** qui provisionne et applique
+l'autorisation localement, indexée par `tenant_id`. `AuthMiddleware._validate_mission_jwt`, après
+validation JWT + mission active, appelle `MissionBindingStore.resolve(tenant_id)` et injecte
+`allowed_resources`/`permissions`/`policy_id` dans le `token_info` — sinon deny-all préservé.
+
+- **Stockage** : un **fichier S3 par instance** (`_system/mission_bindings/{encoded_instance_id}.json`),
+  cache TTL 5 min, calqué sur PolicyStore/TokenStore. Le fichier-par-instance réduit le
+  last-write-wins cross-instance (bucket partagé) ; `instance_id` est filtré à la lecture
+  (défense en profondeur). Révocation instantanée inter-instance (CAS/ETag) = hors périmètre (#51).
+- **Contrat d'octroi** : `permissions ∈ {['read'], ['read','write']}` (jamais `write` seul, `[]`
+  ni `admin`) ; `allowed_resources` = vrais `vault_id` non vides/dédupliqués/sans `*` ; `policy_id`
+  optionnel à intégrité référentielle. **Data-plane strict** : l'allow-list d'outils mission exclut
+  l'admin-plane (`vault_create/update/delete`, `ssh_*`) — une mission ne fait jamais d'administration.
+- **Modèle de menace / fail-close** : (1) clé de résolution = `tenant_id` **cryptographiquement
+  validé** (anti fail-open par confusion de clé) ; (2) binding absent/désactivé/expiré → deny-all ;
+  (3) **store configuré mais indisponible/corrompu → `503 binding_store_unavailable`** (état
+  `available/invalid` explicite, refus **observable** audité, jamais un deny silencieux masquant une
+  panne du PDP ; **aucune écriture** tant que l'état est invalide → pas d'écrasement destructeur d'un
+  fichier corrompu) ; (4) cross-tenant impossible : un binding tenant A n'ouvre rien pour tenant B.
+- **Granularité tenant-wide (assumée)** : toutes les missions actives d'un `tenant_id` partagent le
+  périmètre. Fenêtre de propagation d'une révocation = TTL cache (≤ 5 min) inter-instance. Grain
+  par mission = déjà présent à la consommation (`secret_consume`/C18), évolution future sur ce chemin.
+- **Administration** : `GET/POST/DELETE /admin/api/mission-bindings[/{tenant_id}]` + `.../purge`,
+  **bearer/bootstrap-only** (jamais via mission JWT), parité CLI/shell, audit `decision_id` en tête.
 
 **LoggingMiddleware + Ring Buffer** — Chaque requête HTTP est loguée dans un
 **ring buffer mémoire** (200 entrées par défaut) contenant : méthode, path,
