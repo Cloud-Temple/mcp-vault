@@ -834,6 +834,21 @@ class TestMissionBindingAdminApi:
         assert status == 400
         store.purge.assert_not_called()
 
+    @pytest.mark.parametrize("bad_body", [
+        b'{"dry_run": []}',       # falsy non-bool → bool([]) == False → purge réelle (fail-open)
+        b'{"dry_run": 0}',        # falsy non-bool
+        b'{"dry_run": "false"}',  # truthy string
+        b'{"dry_run": 1}',
+    ])
+    def test_purge_non_bool_dry_run_400_no_purge(self, bad_body):
+        """Red team #69 : un dry_run non booléen NE doit PAS être coercé (sinon une entrée
+        invalide falsy déclenche une purge DESTRUCTIVE). Rejet 400, store.purge jamais appelé."""
+        store = _fake_admin_store()
+        status, _ = _call_admin("/admin/api/mission-bindings/purge", "POST",
+                                body=bad_body, store=store)
+        assert status == 400
+        store.purge.assert_not_called()
+
     def test_purge_storage_unavailable_503(self):
         store = _fake_admin_store()
         store.purge.return_value = {"status": "error", "error_type": "storage_unavailable",
