@@ -568,6 +568,7 @@ async def cmd_token(client, args="", json_output=False):
         perms = ["read", "write"]
         vaults = []
         expires = 90
+        expires_err = False  # issue #65 : fail-close sur --expires invalide (aucun POST)
         email = ""
         policy_id = ""
         i = 2
@@ -578,9 +579,20 @@ async def cmd_token(client, args="", json_output=False):
             elif parts[i] == "--vaults" and i + 1 < len(parts):
                 vaults = [s.strip() for s in parts[i + 1].split(",")]
                 i += 2
-            elif parts[i] == "--expires" and i + 1 < len(parts):
-                expires = int(parts[i + 1])
-                i += 2
+            elif parts[i] == "--expires":
+                # Contrat #65 : 0 = jamais, sinon entier [1,36500]. Non-entier / négatif /
+                # hors borne / valeur manquante → fail-close (pas de coercition silencieuse).
+                if i + 1 >= len(parts):
+                    expires_err = True
+                    i += 1
+                else:
+                    try:
+                        expires = int(parts[i + 1])
+                    except ValueError:
+                        expires = None
+                    if expires is None or expires < 0 or expires > 36500:
+                        expires_err = True
+                    i += 2
             elif parts[i] == "--email" and i + 1 < len(parts):
                 email = parts[i + 1]
                 i += 2
@@ -589,6 +601,9 @@ async def cmd_token(client, args="", json_output=False):
                 i += 2
             else:
                 i += 1
+        if expires_err:
+            show_error("--expires invalide : entier de jours entre 0 (jamais) et 36500")
+            return
         payload = {
             "client_name": parts[1],
             "permissions": perms,

@@ -44,6 +44,27 @@ def test_token():
     check_contains("Option --expires", r.output, "--expires")
     check_contains("Option --policy", r.output, "--policy")
 
+    # ── token create --expires : contrat expiration #65 (IntRange 0..36500) ────
+    section("token create --expires — validation IntRange (issue #65)")
+    # Invalides rejetés par Click AVANT tout POST (exit != 0) : négatif, hors borne,
+    # non-entier. Empêche l'illimité accidentel via valeur négative et le crash.
+    for bad in ["36501", "abc", "1.5"]:
+        r = run_cli(["token", "create", "agent-x", "--expires", bad])
+        check(f"--expires {bad} rejeté (exit != 0)", r.exit_code != 0)
+    # 0 = jamais expirer (illimité EXPLICITE) : accepté et transmis tel quel au POST.
+    mock_resp_e = MagicMock()
+    mock_resp_e.json.return_value = {"status": "created", "hash": "abc123def456",
+                                     "expires_at": None, "client_name": "agent-x"}
+    mock_http_e = AsyncMock()
+    mock_http_e.post = AsyncMock(return_value=mock_resp_e)
+    mock_http_e.__aenter__ = AsyncMock(return_value=mock_http_e)
+    mock_http_e.__aexit__ = AsyncMock(return_value=None)
+    with patch("httpx.AsyncClient", return_value=mock_http_e):
+        r = run_cli(["token", "create", "agent-x", "--expires", "0", "--permissions", "read"])
+    check_value("token create --expires 0 exit", r.exit_code, 0)
+    call_json_e = mock_http_e.post.call_args[1].get("json", {}) if mock_http_e.post.call_args else {}
+    check_value("expires_in_days=0 transmis au POST", call_json_e.get("expires_in_days"), 0)
+
     # ── token list ────────────────────────────────────────────────────────────
     section("token list — aide et options")
     r = run_cli(["token", "list", "--help"])

@@ -1006,7 +1006,8 @@ def token_group(ctx):
 @click.option("--permissions", "-p", default="read,write", help="Permissions (virgule: read,write,admin)")
 @click.option("--vaults", "-s", default="", help="Vaults autorisés (virgule, vide = owner-based)")
 @click.option("--policy", default="", help="Policy ID à assigner (contrôle outils + chemins)")
-@click.option("--expires", "-e", default=90, type=int, help="Expiration en jours (0=jamais)")
+@click.option("--expires", "-e", default=90, type=click.IntRange(0, 36500),
+              help="Expiration en jours (0=jamais, max 36500)")
 @click.option("--email", default="", help="Email du propriétaire")
 @click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
 @click.pass_context

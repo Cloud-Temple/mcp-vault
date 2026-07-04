@@ -453,6 +453,14 @@ async def _api_create_token(send, body):
     if not client_name:
         return await _json_response(send, 400, {"status": "error", "message": "client_name requis"})
 
+    # Validation expiration (issue #65) — source unique partagée avec le store. 0 = jamais
+    # expirer (illimité EXPLICITE) ; tout invalide (null/négatif/string/float/bool/hors borne)
+    # → 400, jamais d'illimité accidentel ni de TypeError 500. Double couche API + store
+    # (même posture que la validation des permissions).
+    exp_err = TokenStore.validate_expires_in_days(expires_in_days)
+    if exp_err:
+        return await _json_response(send, 400, {"status": "error", "message": exp_err})
+
     # Valider que la policy existe (cohérent avec l'outil MCP token_update)
     if policy_id:
         from ..auth.policies import get_policy_store

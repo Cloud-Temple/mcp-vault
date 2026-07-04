@@ -91,12 +91,21 @@ async function doCreateToken() {
 
     const policyId = document.getElementById('ctPolicy')?.value || '';
 
+    // Expiration (issue #65) : contrat STRICT via parseExpiresInDays (expires.js).
+    // Vide → 90 ; "0" → jamais ; sinon entier [1,36500]. Toute saisie invalide (float,
+    // texte, négatif, hors borne) → null → on BLOQUE l'envoi (fail-close), on ne coerce pas.
+    const expiresDays = parseExpiresInDays(document.getElementById('ctExpires').value);
+    if (expiresDays === null) {
+        alert('Expiration invalide : saisir un entier de jours entre 0 (jamais) et ' + EXPIRES_MAX_DAYS + '.');
+        return;
+    }
+
     const body = {
         client_name: document.getElementById('ctName').value.trim(),
         permissions: perms,
         allowed_resources: vList,
         email: document.getElementById('ctEmail').value.trim(),
-        expires_in_days: parseInt(document.getElementById('ctExpires').value) || 90,
+        expires_in_days: expiresDays,
     };
 
     if (policyId) {
