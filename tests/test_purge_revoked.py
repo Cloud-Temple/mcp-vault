@@ -210,6 +210,50 @@ async def test_api_purge_older_than_invalide_400(bad):
     store.purge_revoked.assert_not_called()  # rejet avant tout appel store
 
 
+# ── REST : dry_run booléen STRICT (régression fail-open task_a5346701) ────────
+# Jumeau de la faille fermée en #69 sur _api_purge_mission_bindings. Avant le fix,
+# `dry_run = bool(data.get("dry_run", False))` coerçait toute valeur falsy non booléenne
+# ([], 0, "", None) en dry_run=False → purge DESTRUCTIVE réelle qu'on croyait simuler.
+
+@pytest.mark.parametrize("bad", [[], 0, "", None, "true", "false", 1, 1.0, {}, [1]])
+async def test_api_purge_dry_run_non_bool_400_sans_purge(bad):
+    """Un dry_run non booléen est REJETÉ (400) AVANT tout appel store — jamais coercé
+    en purge réelle. Couvre en particulier les falsy ([], 0, "", None) qui étaient le
+    vecteur exact du fail-open (bool([]) == bool(0) == False)."""
+    send = AsyncMock()
+    store = MagicMock()
+    with patch.object(api, "get_token_store", return_value=store), \
+            patch.object(api, "log_audit") as audit:
+        await api._api_purge_revoked_tokens(send, json.dumps({"dry_run": bad}))
+    assert 400 in _asgi_statuses(send)
+    store.purge_revoked.assert_not_called()  # aucune purge, même en dry_run "apparent"
+    audit.assert_not_called()
+
+
+async def test_api_purge_dry_run_true_reste_simulation():
+    """Régression inverse : un vrai True continue de SIMULER (purge_revoked dry_run=True)."""
+    send = AsyncMock()
+    store = MagicMock()
+    store.purge_revoked.return_value = {"status": "ok", "dry_run": True, "count": 0,
+                                        "older_than_days": 30, "candidates": []}
+    with patch.object(api, "get_token_store", return_value=store), \
+            patch.object(api, "log_audit"):
+        await api._api_purge_revoked_tokens(send, json.dumps({"dry_run": True}))
+    store.purge_revoked.assert_called_once_with(30, dry_run=True)
+
+
+async def test_api_purge_dry_run_false_execute_la_purge():
+    """Un vrai False (comportement destructif volontaire) déclenche bien la purge effective."""
+    send = AsyncMock()
+    store = MagicMock()
+    store.purge_revoked.return_value = {"status": "ok", "dry_run": False, "count": 0,
+                                        "older_than_days": 30, "purged": []}
+    with patch.object(api, "get_token_store", return_value=store), \
+            patch.object(api, "log_audit"):
+        await api._api_purge_revoked_tokens(send, json.dumps({"dry_run": False}))
+    store.purge_revoked.assert_called_once_with(30, dry_run=False)
+
+
 async def test_api_purge_storage_unavailable_503_et_audit_error():
     send = AsyncMock()
     store = MagicMock()
