@@ -779,22 +779,34 @@ async def cmd_mission_binding(client, args="", json_output=False):
         except Exception as e:
             result = {"status": "error", "message": str(e)}
     elif op == "purge":
-        older, dry, yes = 30, "--dry-run" in parts, "--yes" in parts
+        older, older_err, dry, yes = 30, False, "--dry-run" in parts, "--yes" in parts
         i = 1
         while i < len(parts):
-            if parts[i] == "--older-than" and i + 1 < len(parts):
+            if parts[i] == "--older-than":
+                # Fail-close : valeur absente ou non entière → refus, AUCUNE purge (cohérent
+                # avec token purge-revoked ; ne pas retomber silencieusement sur 30 jours).
+                if i + 1 >= len(parts):
+                    older_err = True
+                    break
                 try:
                     older = int(parts[i + 1])
                 except ValueError:
-                    older = 30
+                    older_err = True
+                    break
                 i += 2
             else:
                 i += 1
+        if older_err:
+            show_error("--older-than attend un entier (ex: mission-binding purge --older-than 30 --yes)")
+            return
         try:
             async with httpx.AsyncClient(timeout=10) as http:
                 preview = (await http.post(f"{base}/admin/api/mission-bindings/purge", headers=headers,
                            json={"older_than_days": older, "dry_run": True})).json()
-                if dry or preview.get("status") != "ok" or preview.get("count", 0) == 0:
+                if not isinstance(preview, dict) or preview.get("status") != "ok":
+                    # Fail-close : un dry-run en échec n'autorise JAMAIS la purge effective.
+                    result = preview if isinstance(preview, dict) else {"status": "error", "message": "réponse invalide"}
+                elif dry or preview.get("count", 0) == 0:
                     result = preview
                 elif not yes:
                     show_warning(f"{preview.get('count')} binding(s) expiré(s) seraient purgés. "
