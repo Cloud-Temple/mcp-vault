@@ -786,3 +786,66 @@ def show_pki_result(result: dict):
         return
 
     show_json(result)
+
+
+def show_mission_binding_result(result: dict):
+    """Affichage des résultats mission-binding (#69) : create/get/list/delete/purge."""
+    status = result.get("status", "?")
+
+    if status == "error":
+        show_error(result.get("message", "Erreur"))
+        return
+
+    # --- LIST ---
+    bindings = result.get("bindings")
+    if bindings is not None:
+        console.print(f"\n✅ [bold]{len(bindings)} binding(s) mission[/bold]")
+        if bindings:
+            table = Table(show_header=True)
+            table.add_column("Tenant", style="cyan bold", min_width=12)
+            table.add_column("Coffres", style="white")
+            table.add_column("Permissions", style="green")
+            table.add_column("Policy", style="yellow")
+            table.add_column("Statut")
+            for b in bindings:
+                vaults = ", ".join(b.get("allowed_resources", []))
+                perms = ", ".join(b.get("permissions", []))
+                policy = b.get("policy_id", "") or ""
+                if not b.get("enabled", False):
+                    st = "[red]désactivé[/red]"
+                elif b.get("expired"):
+                    st = "[yellow]expiré[/yellow]"
+                else:
+                    exp = b.get("expires_at") or "jamais"
+                    st = f"[green]actif[/green] → {exp[:10] if exp != 'jamais' else exp}"
+                table.add_row(b.get("tenant_id", "?"), vaults, perms, policy, st)
+            console.print(table)
+        return
+
+    # --- PURGE (dry-run ou réel) ---
+    if "purged" in result or "candidates" in result:
+        n = result.get("count", 0)
+        retention = result.get("older_than_days", "?")
+        if result.get("dry_run"):
+            console.print(f"\n🔎 [bold]{n} binding(s) expiré(s)[/bold] seraient purgés (rétention {retention} j)")
+        else:
+            console.print(f"\n🗑️  [bold]{n} binding(s) expiré(s) purgé(s)[/bold]")
+        return
+
+    # --- DELETE ---
+    if status == "deleted":
+        console.print(f"\n✅ Binding du tenant '[cyan]{result.get('tenant_id', '?')}[/cyan]' supprimé.")
+        return
+
+    # --- CREATE / GET (détail d'un binding) ---
+    if result.get("tenant_id"):
+        title = "Binding créé" if status == "created" else "Binding"
+        console.print(f"\n✅ [bold]{title} — tenant '{result.get('tenant_id')}'[/bold]")
+        console.print(f"  Coffres     : [cyan]{', '.join(result.get('allowed_resources', []))}[/cyan]")
+        console.print(f"  Permissions : [green]{', '.join(result.get('permissions', []))}[/green]")
+        console.print(f"  Policy      : [yellow]{result.get('policy_id', '') or '(aucune)'}[/yellow]")
+        console.print(f"  Activé      : {result.get('enabled', True)}")
+        console.print(f"  Expire      : {result.get('expires_at') or 'jamais'}")
+        return
+
+    show_json(result)
