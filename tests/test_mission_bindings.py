@@ -280,6 +280,16 @@ class TestCreate:
         assert r["status"] == "error" and r["error_type"] == "storage_unavailable"
         assert "acme" not in store._bindings          # rollback effectif
 
+    @pytest.mark.parametrize("bad_enabled", ["false", "0", 0, 1, None, "true"])
+    def test_reject_non_bool_enabled(self, bad_enabled):
+        """bool('false') == True : un `enabled` non booléen doit être REFUSÉ, jamais coercé
+        (sinon un octroi qu'on croit désactivé serait actif)."""
+        store = _make_store()
+        r = store.create(**_valid_binding_args(enabled=bad_enabled))
+        assert r["status"] == "error"
+        assert "acme" not in store._bindings
+        store._save.assert_not_called()
+
 
 # =============================================================================
 # resolve — runtime PEP (fail-close)
@@ -481,6 +491,23 @@ class TestLoadState:
     def test_load_access_denied_is_unavailable(self):
         store = _make_store(offline=False)
         self._load_from(store, exc=_client_error("AccessDenied", 403))
+        assert store.available is False
+
+    def test_load_nosuchbucket_is_unavailable_not_empty(self):
+        """BLOQUANT (round 2) : NoSuchBucket (bucket supprimé/cassé) = panne, PAS fichier absent.
+        Seul NoSuchKey est l'absence nominale ; NoSuchBucket → 503 + cache conservé."""
+        store = _make_store(offline=False)
+        store._bindings = {"acme": _rec()}
+        self._load_from(store, exc=_client_error("NoSuchBucket", 404))
+        assert store.available is False  # PAS empty-available
+        assert "acme" in store._bindings  # cache conservé
+        with pytest.raises(MissionBindingStoreUnavailable):
+            store.resolve("acme")
+
+    def test_load_generic_404_is_unavailable(self):
+        """Un 404 générique sans Code=NoSuchKey (endpoint cassé) → indisponible, pas absent."""
+        store = _make_store(offline=False)
+        self._load_from(store, exc=_client_error("", 404))
         assert store.available is False
 
     def test_load_corrupt_json_is_unavailable_and_preserves_cache(self):

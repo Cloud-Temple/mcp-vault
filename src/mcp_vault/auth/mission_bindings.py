@@ -291,12 +291,15 @@ class MissionBindingStore:
 
     @staticmethod
     def _is_missing_key_error(e: Exception) -> bool:
-        """True SEULEMENT pour un objet absent (NoSuchKey / HTTP 404), via l'API botocore.
+        """True UNIQUEMENT pour l'absence nominale de l'OBJET binding (`NoSuchKey`), via botocore.
 
-        Revue Codex #69 (BLOQUANT-2) : ne PAS se fier à une sous-chaîne "404"/"NoSuchKey" dans
-        str(e) (un message réseau, un port 4040 ou un request-id contenant '404' ferait passer
-        une panne pour un fichier absent → deny silencieux). Toute erreur non identifiée comme
-        objet-absent est traitée comme indisponibilité (fail-close).
+        Revue Codex #69 (BLOQUANT-2) : (1) ne PAS se fier à une sous-chaîne "404"/"NoSuchKey" dans
+        str(e) — un port 4040 ou un request-id contenant '404' ferait passer une panne pour un
+        fichier absent. (2) Ne PAS accepter `NoSuchBucket` ni un `404` générique : un bucket
+        supprimé/inaccessible ou un endpoint cassé est une VRAIE panne, pas l'absence du fichier
+        binding — le traiter en absence viderait le cache et masquerait la panne (deny silencieux).
+        Seul `Error.Code == "NoSuchKey"` = premier démarrage légitime (0 binding). Tout le reste →
+        indisponibilité (fail-close).
         """
         try:
             from botocore.exceptions import ClientError
@@ -305,9 +308,7 @@ class MissionBindingStore:
         if not isinstance(e, ClientError):
             return False
         resp = getattr(e, "response", {}) or {}
-        code = resp.get("Error", {}).get("Code", "")
-        status = resp.get("ResponseMetadata", {}).get("HTTPStatusCode")
-        return code in ("NoSuchKey", "NoSuchBucket", "404") or status == 404
+        return resp.get("Error", {}).get("Code", "") == "NoSuchKey"
 
     def _mark_invalid(self, msg: str):
         """Passe le store en état INDISPONIBLE observable (sans écraser le cache mémoire)."""
@@ -476,6 +477,11 @@ class MissionBindingStore:
         if not ok:
             return {"status": "error", "message": msg}
 
+        # `enabled` : booléen STRICT (revue Codex #69). Ne JAMAIS coercer — `bool("false")` vaut
+        # True, ce qui activerait un octroi qu'un admin croit créer désactivé.
+        if not isinstance(enabled, bool):
+            return {"status": "error", "message": "enabled doit être un booléen (true/false)"}
+
         if tenant_id in self._bindings:
             return {"status": "error", "message": f"Binding pour tenant '{tenant_id}' existe déjà"}
 
@@ -511,7 +517,7 @@ class MissionBindingStore:
             "policy_id": policy_id or "",
             "allowed_resources": resources,
             "permissions": norm_perms,
-            "enabled": bool(enabled),
+            "enabled": enabled,
             "expires_at": expires_at,
             "created_at": now,
             "created_by": created_by,

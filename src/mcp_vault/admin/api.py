@@ -930,7 +930,9 @@ async def _api_create_mission_binding(send, body):
         permissions=data.get("permissions", []),
         policy_id=data.get("policy_id", "") or "",
         expires_at=data.get("expires_at"),
-        enabled=bool(data.get("enabled", True)),
+        # enabled : passé brut (défaut True si absent) — le store exige un booléen STRICT et
+        # renvoie 400 si non-bool. Ne PAS coercer ici (bool("false") == True).
+        enabled=data.get("enabled", True),
         created_by=get_current_client_name(),
     )
     if result.get("status") == "created":
