@@ -210,6 +210,45 @@ def _is_expired(binding: dict) -> bool:
         return True  # fail-close : date corrompue = expiré
 
 
+def validate_binding_record(binding) -> tuple[bool, str]:
+    """Valide une entrée binding TELLE QUE LUE depuis S3 (défense en profondeur au chargement).
+
+    CRITIQUE (revue Codex #69, BLOQUANT-1) : les mêmes invariants stricts que create() doivent
+    tenir sur l'état persistant — un fichier forgé/corrompu/legacy avec `permissions=["admin"]`
+    ou `["write"]` seul ne doit JAMAIS être servi (sinon élévation de privilège : check_access
+    donne l'accès total sur `admin`, et check_policy court-circuite le plafond d'outils).
+
+    N.B. : le FORMAT de policy_id est validé ici, pas son existence (déjà vérifiée à create() ;
+    une policy supprimée après coup est de toute façon fail-close via check_policy).
+
+    Returns:
+        (True, "") si l'entrée est conforme, (False, message) sinon.
+    """
+    if not isinstance(binding, dict):
+        return False, "entrée non-dict"
+    ok, msg = validate_tenant_id(binding.get("tenant_id"))
+    if not ok:
+        return False, f"tenant_id: {msg}"
+    if normalize_permissions(binding.get("permissions")) is None:
+        return False, f"permissions non conformes: {binding.get('permissions')!r}"
+    res, rmsg = validate_allowed_resources(binding.get("allowed_resources"))
+    if res is None:
+        return False, f"allowed_resources: {rmsg}"
+    if not isinstance(binding.get("enabled"), bool):
+        return False, "enabled non booléen"
+    exp = binding.get("expires_at")
+    if exp is not None:
+        if not isinstance(exp, str):
+            return False, "expires_at non-str"
+        try:
+            datetime.fromisoformat(exp)
+        except (ValueError, TypeError):
+            return False, "expires_at non parseable"
+    if not isinstance(binding.get("policy_id", ""), str):
+        return False, "policy_id non-str"
+    return True, ""
+
+
 # =============================================================================
 # MissionBindingStore — Stockage S3 par instance + cache mémoire TTL
 # =============================================================================
@@ -250,52 +289,90 @@ class MissionBindingStore:
         from ..s3_client import get_s3_data_client
         return get_s3_data_client()
 
-    def load(self):
-        """Charge les bindings depuis S3.
+    @staticmethod
+    def _is_missing_key_error(e: Exception) -> bool:
+        """True SEULEMENT pour un objet absent (NoSuchKey / HTTP 404), via l'API botocore.
 
-        - Succès              → parse, state=available.
-        - NoSuchKey / 404     → store VIDE mais writable (available) — nominal (0 binding).
-        - Réseau/403/timeout  → state=INVALID, cache conservé, PAS d'écrasement, log ERROR.
-        - JSON corrompu       → state=INVALID (idem) — protège contre un overwrite destructeur.
+        Revue Codex #69 (BLOQUANT-2) : ne PAS se fier à une sous-chaîne "404"/"NoSuchKey" dans
+        str(e) (un message réseau, un port 4040 ou un request-id contenant '404' ferait passer
+        une panne pour un fichier absent → deny silencieux). Toute erreur non identifiée comme
+        objet-absent est traitée comme indisponibilité (fail-close).
+        """
+        try:
+            from botocore.exceptions import ClientError
+        except ImportError:
+            return False  # sans botocore, toute erreur = indisponible (fail-close)
+        if not isinstance(e, ClientError):
+            return False
+        resp = getattr(e, "response", {}) or {}
+        code = resp.get("Error", {}).get("Code", "")
+        status = resp.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        return code in ("NoSuchKey", "NoSuchBucket", "404") or status == 404
+
+    def _mark_invalid(self, msg: str):
+        """Passe le store en état INDISPONIBLE observable (sans écraser le cache mémoire)."""
+        self._available = False
+        self._last_error = msg
+        self._cache_time = time.time()  # throttle la re-tentative (_maybe_refresh)
+        logger.error(
+            "Mission Binding Store INVALIDE key=%s : %s — runtime 503 + mutations refusées "
+            "jusqu'à rétablissement", self.s3_key, msg,
+        )
+
+    def load(self):
+        """Charge les bindings depuis S3 avec validation atomique (défense en profondeur).
+
+        - Objet absent (NoSuchKey/404) → store VIDE mais writable (available) — nominal.
+        - Réseau/403/timeout           → INVALID (503), cache conservé, PAS d'écrasement.
+        - JSON corrompu / schéma cassé → INVALID.
+        - UNE entrée de cette instance non conforme (permissions/allowed_resources/tenant_id/
+          doublon/…) → INVALID : on ne sert JAMAIS un binding qui n'a pas passé les validations
+          strictes (anti élévation de privilège via fichier forgé, Codex BLOQUANT-1).
         """
         try:
             s3 = self._get_s3_data()
             resp = s3.get_object(Bucket=self.settings.s3_bucket_name, Key=self.s3_key)
             raw = resp["Body"].read().decode()
         except Exception as e:
-            if "NoSuchKey" in str(e) or "404" in str(e):
+            if self._is_missing_key_error(e):
                 self._bindings = {}
                 self._cache_time = time.time()
                 self._available = True
                 self._last_error = ""
                 return
-            # Erreur d'accès (réseau/permission/timeout) : fail-close observable.
-            self._available = False
-            self._last_error = f"S3 GET: {type(e).__name__}"
-            self._cache_time = time.time()  # throttle la re-tentative (_maybe_refresh)
-            logger.error(
-                "Mission Binding Store S3 GET FAILED (%s) key=%s — état INVALIDE, "
-                "runtime 503 + mutations refusées jusqu'à rétablissement",
-                type(e).__name__, self.s3_key,
-            )
+            self._mark_invalid(f"S3 GET: {type(e).__name__}")
             return
 
         try:
             data = json.loads(raw)
-            bindings = {b["tenant_id"]: b for b in data.get("bindings", [])}
-        except (ValueError, KeyError, TypeError) as e:
-            # JSON corrompu ou schéma cassé : NE PAS écraser, NE PAS vider silencieusement.
-            self._available = False
-            self._last_error = f"JSON invalide: {type(e).__name__}"
-            self._cache_time = time.time()
-            logger.error(
-                "Mission Binding Store S3 fichier CORROMPU key=%s (%s) — état INVALIDE, "
-                "aucune écriture ne sera tentée (anti-écrasement)",
-                self.s3_key, type(e).__name__,
-            )
+        except ValueError:
+            self._mark_invalid("JSON invalide")
             return
 
-        self._bindings = bindings
+        if not isinstance(data, dict) or not isinstance(data.get("bindings", []), list):
+            self._mark_invalid("schéma top-level invalide (attendu {'bindings': [...]})")
+            return
+
+        validated: dict = {}
+        for b in data.get("bindings", []):
+            if not isinstance(b, dict):
+                self._mark_invalid("entrée binding non-dict")
+                return
+            # Fichier par instance : ignorer (sans invalider) une entrée d'une autre instance ;
+            # elle n'est de toute façon jamais servie (filtre instance_id).
+            if b.get("instance_id") != self.instance_id:
+                continue
+            ok, why = validate_binding_record(b)
+            if not ok:
+                self._mark_invalid(f"binding tenant={b.get('tenant_id')!r} non conforme: {why}")
+                return
+            tid = b["tenant_id"]
+            if tid in validated:
+                self._mark_invalid(f"tenant_id dupliqué: {tid!r}")
+                return
+            validated[tid] = b
+
+        self._bindings = validated
         self._cache_time = time.time()
         self._available = True
         self._last_error = ""
@@ -327,10 +404,17 @@ class MissionBindingStore:
             )
             return True
         except Exception as e:
+            # Revue Codex #69 (BLOQUANT-2) : un PUT échoué prouve que S3 est indisponible →
+            # basculer en état INVALID (cohérent avec l'invariant "panne S3 observable").
+            # resolve() lèvera 503 au lieu de servir un cache pendant que S3 est inaccessible ;
+            # le prochain load() (re-tentative 10s) rétablira l'état si S3 revient.
             logger.error(
-                "Mission Binding Store S3 save FAILED: %s — état mémoire non persisté",
-                type(e).__name__,
+                "Mission Binding Store S3 save FAILED: %s — état mémoire non persisté, "
+                "store marqué INDISPONIBLE", type(e).__name__,
             )
+            self._available = False
+            self._last_error = f"S3 PUT: {type(e).__name__}"
+            self._cache_time = time.time()
             return False
 
     def _maybe_refresh(self):

@@ -84,6 +84,28 @@ def _fake_s3(get_return: bytes = None, get_exc: Exception = None, put_ok: bool =
     return client
 
 
+def _client_error(code="NoSuchKey", status=404):
+    """Fabrique un vrai botocore ClientError (la détection ne se fie plus à str(e))."""
+    from botocore.exceptions import ClientError
+    return ClientError(
+        {"Error": {"Code": code}, "ResponseMetadata": {"HTTPStatusCode": status}},
+        "GetObject",
+    )
+
+
+def _file_bytes(bindings, instance_id=INSTANCE):
+    """Sérialise un fichier de bindings S3 (pour tester load())."""
+    return json.dumps({"instance_id": instance_id, "bindings": bindings}).encode()
+
+
+def _rec(**over):
+    """Enregistrement binding conforme (surchargeable pour forger des cas invalides)."""
+    r = {"instance_id": INSTANCE, "tenant_id": "acme", "allowed_resources": ["prod"],
+         "permissions": ["read"], "enabled": True, "expires_at": None}
+    r.update(over)
+    return r
+
+
 def _valid_binding_args(**over):
     args = dict(tenant_id="acme", allowed_resources=["prod"], permissions=["read"])
     args.update(over)
@@ -426,42 +448,45 @@ class TestPurge:
 # =============================================================================
 
 class TestLoadState:
+    def _load_from(self, store, body=None, exc=None):
+        store._get_s3_data = MagicMock(return_value=_fake_s3(get_return=body, get_exc=exc))
+        store.load()
+
     def test_load_valid(self):
         store = _make_store(offline=False)
-        body = b'{"instance_id":"' + INSTANCE.encode() + b'","bindings":[' \
-               b'{"instance_id":"' + INSTANCE.encode() + b'","tenant_id":"acme",' \
-               b'"allowed_resources":["prod"],"permissions":["read"],"enabled":true,' \
-               b'"expires_at":null}]}'
-        store._get_s3_data = MagicMock(return_value=_fake_s3(get_return=body))
-        store.load()
-        assert store.available is True
-        assert "acme" in store._bindings
+        self._load_from(store, body=_file_bytes([_rec()]))
+        assert store.available is True and "acme" in store._bindings
 
     def test_load_nosuchkey_is_empty_available(self):
         store = _make_store(offline=False)
-        exc = Exception("An error occurred (NoSuchKey) when calling GetObject")
-        store._get_s3_data = MagicMock(return_value=_fake_s3(get_exc=exc))
-        store.load()
+        self._load_from(store, exc=_client_error("NoSuchKey", 404))
         assert store.available is True and store._bindings == {}
 
     def test_load_network_error_is_unavailable_and_preserves_cache(self):
         store = _make_store(offline=False)
-        store._bindings = {"acme": {"instance_id": INSTANCE, "tenant_id": "acme",
-                                    "allowed_resources": ["prod"], "permissions": ["read"],
-                                    "enabled": True, "expires_at": None}}
-        exc = Exception("EndpointConnectionError: could not connect")
-        store._get_s3_data = MagicMock(return_value=_fake_s3(get_exc=exc))
-        store.load()
+        store._bindings = {"acme": _rec()}
+        self._load_from(store, exc=Exception("EndpointConnectionError: could not connect"))
         assert store.available is False and store.last_error
         assert "acme" in store._bindings  # cache conservé, PAS écrasé par du vide
 
+    def test_load_404_substring_in_network_error_is_unavailable(self):
+        """BLOQUANT-2 : une panne dont le message contient '404' (ex port 4040) NE doit PAS
+        être prise pour un fichier absent (sinon deny silencieux au lieu de 503)."""
+        store = _make_store(offline=False)
+        store._bindings = {"acme": _rec()}
+        self._load_from(store, exc=Exception("Could not connect to endpoint host:4040"))
+        assert store.available is False  # unavailable, PAS empty-available
+        assert "acme" in store._bindings
+
+    def test_load_access_denied_is_unavailable(self):
+        store = _make_store(offline=False)
+        self._load_from(store, exc=_client_error("AccessDenied", 403))
+        assert store.available is False
+
     def test_load_corrupt_json_is_unavailable_and_preserves_cache(self):
         store = _make_store(offline=False)
-        store._bindings = {"acme": {"instance_id": INSTANCE, "tenant_id": "acme",
-                                    "allowed_resources": ["prod"], "permissions": ["read"],
-                                    "enabled": True, "expires_at": None}}
-        store._get_s3_data = MagicMock(return_value=_fake_s3(get_return=b"{ this is not json"))
-        store.load()
+        store._bindings = {"acme": _rec()}
+        self._load_from(store, body=b"{ this is not json")
         assert store.available is False
         assert "acme" in store._bindings  # anti-écrasement destructeur
 
@@ -475,6 +500,112 @@ class TestLoadState:
         store.load = MagicMock(side_effect=lambda: load_calls.__setitem__("n", load_calls["n"] + 1))
         store._maybe_refresh()
         assert load_calls["n"] == 1  # a retenté bien avant 300s
+
+
+class TestLoadValidation:
+    """BLOQUANT-1 : les invariants stricts de create() DOIVENT tenir au chargement S3.
+
+    Un fichier syntaxiquement valide mais sémantiquement interdit ne doit JAMAIS être servi —
+    sinon élévation de privilège (permissions=['admin'] → accès total + bypass plafond outil ;
+    ['write'] seul → lecture possible sans 'read')."""
+
+    def _load(self, bindings, instance_id=INSTANCE):
+        store = _make_store(offline=False)
+        store._get_s3_data = MagicMock(return_value=_fake_s3(get_return=_file_bytes(bindings, instance_id)))
+        store.load()
+        return store
+
+    def test_admin_permissions_in_file_rejected(self):
+        store = self._load([_rec(permissions=["admin"])])
+        assert store.available is False
+        with pytest.raises(MissionBindingStoreUnavailable):
+            store.resolve("acme")  # jamais servi → pas d'élévation
+
+    def test_read_admin_in_file_rejected(self):
+        store = self._load([_rec(permissions=["read", "admin"])])
+        assert store.available is False
+
+    def test_write_only_in_file_rejected(self):
+        store = self._load([_rec(permissions=["write"])])
+        assert store.available is False  # sinon lecture sans 'read'
+
+    def test_empty_permissions_in_file_rejected(self):
+        store = self._load([_rec(permissions=[])])
+        assert store.available is False
+
+    def test_wildcard_resource_in_file_rejected(self):
+        store = self._load([_rec(allowed_resources=["*"])])
+        assert store.available is False
+
+    def test_empty_resources_in_file_rejected(self):
+        store = self._load([_rec(allowed_resources=[])])
+        assert store.available is False
+
+    def test_reserved_tenant_in_file_rejected(self):
+        store = self._load([_rec(tenant_id="purge")])
+        assert store.available is False
+
+    def test_duplicate_tenant_in_file_rejected(self):
+        store = self._load([_rec(tenant_id="acme"), _rec(tenant_id="acme", allowed_resources=["x"])])
+        assert store.available is False
+
+    def test_non_bool_enabled_rejected(self):
+        store = self._load([_rec(enabled="yes")])
+        assert store.available is False
+
+    def test_corrupt_expires_at_rejected(self):
+        store = self._load([_rec(expires_at="garbage")])
+        assert store.available is False
+
+    def test_bad_toplevel_schema_list_rejected(self):
+        store = _make_store(offline=False)
+        store._get_s3_data = MagicMock(return_value=_fake_s3(get_return=b'[]'))
+        store.load()
+        assert store.available is False  # pas de crash, fail-close
+
+    def test_bad_toplevel_bindings_not_list(self):
+        store = _make_store(offline=False)
+        store._get_s3_data = MagicMock(return_value=_fake_s3(get_return=b'{"bindings": {"acme": {}}}'))
+        store.load()
+        assert store.available is False
+
+    def test_foreign_instance_entry_ignored_not_invalid(self):
+        """Une entrée d'une AUTRE instance est ignorée (jamais servie), sans invalider le store."""
+        store = self._load([
+            _rec(tenant_id="acme"),
+            {"instance_id": "mcp-vault:OTHER:v1", "tenant_id": "evil",
+             "allowed_resources": ["x"], "permissions": ["admin"], "enabled": True, "expires_at": None},
+        ])
+        assert store.available is True
+        assert store.resolve("acme") is not None
+        assert store.resolve("evil") is None  # jamais servie
+
+    def test_valid_file_loads(self):
+        store = self._load([_rec(permissions=["read", "write"]), _rec(tenant_id="beta")])
+        assert store.available is True
+        assert store.resolve("acme")["permissions"] == ["read", "write"]
+        assert store.resolve("beta") is not None
+
+
+class TestSaveFailureMarksUnavailable:
+    """BLOQUANT-2 : un PUT échoué bascule le store en INDISPONIBLE (plus de résolution silencieuse)."""
+
+    def _store_put_fails(self):
+        store = _make_store(offline=False)
+        # get_object renvoie un fichier vide valide (load initial OK), put_object échoue.
+        store._get_s3_data = MagicMock(return_value=_fake_s3(get_return=_file_bytes([]), put_ok=False))
+        store.load()
+        assert store.available is True
+        return store
+
+    def test_create_put_failure_marks_unavailable(self):
+        store = self._store_put_fails()
+        r = store.create(**_valid_binding_args())
+        assert r["error_type"] == "storage_unavailable"
+        assert store.available is False           # plus de résolution silencieuse
+        assert "acme" not in store._bindings      # rollback mémoire
+        with pytest.raises(MissionBindingStoreUnavailable):
+            store.resolve("acme")
 
 
 # =============================================================================
