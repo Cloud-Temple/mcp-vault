@@ -52,6 +52,8 @@ import traceback
 from pathlib import Path
 from datetime import datetime
 
+import pytest
+
 import boto3
 from botocore.config import Config
 
@@ -103,6 +105,40 @@ def record(test_name: str, passed: bool, detail: str = "", skipped: bool = False
     RESULTS.append({"test": test_name, "status": status, "detail": detail})
     emoji = {"PASS": "✅", "FAIL": "❌", "SKIP": "⏭️"}[status]
     print(f"  {emoji} {test_name}" + (f" — {detail}" if detail else ""))
+
+
+# Opt-in EXPLICITE des tests e2e sous pytest (issue #64). « Un service semble répondre » ne
+# suffit PAS : un serveur tiers ou obsolète peut écouter sur le port avec d'AUTRES credentials
+# (constaté : un mcp-vault v0.4.9 en Docker répond mais rejette l'admin du test → faux échecs).
+# L'exécution e2e est donc explicite : le harnais complet (Docker via scripts/test_service.py,
+# ou une CI e2e dédiée) pose MCP_VAULT_E2E=1 ; sinon, sous pytest unitaire, on SKIPPE.
+_E2E_ENABLED = os.getenv("MCP_VAULT_E2E", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+@pytest.fixture(autouse=True)
+def _service_test_guard(request):
+    """Deux garanties sous pytest (issue #64) — le runner standalone `python tests/test_service.py`
+    n'utilise PAS les fixtures, donc son comportement est inchangé :
+
+    1. **Honnêteté e2e** : un test marqué `needs_server`/`needs_s3` SKIPPE hors harnais e2e
+       (MCP_VAULT_E2E non posé), au lieu de passer en complaisance (avant) ou d'échouer
+       spurieusement contre un service tiers.
+    2. **Anti-complaisance** : `record(..., False)` faisait juste +1 à un compteur qui ne
+       servait qu'au résumé standalone → invisible pour pytest. On remet les compteurs à zéro
+       avant chaque test et on assert `FAIL == 0` après : toute assertion record() fausse fait
+       désormais réellement échouer le test pytest.
+    """
+    if not _E2E_ENABLED and (request.node.get_closest_marker("needs_server")
+                             or request.node.get_closest_marker("needs_s3")):
+        pytest.skip("test e2e — poser MCP_VAULT_E2E=1 avec le harnais complet "
+                    "(serveur + S3 configurés, cf. scripts/test_service.py)")
+
+    global PASS, FAIL, SKIP, RESULTS
+    PASS, FAIL, SKIP, RESULTS = 0, 0, 0, []
+    yield
+    if FAIL:
+        échecs = "; ".join(r["test"] for r in RESULTS if r["status"] == "FAIL")
+        pytest.fail(f"{FAIL} assertion(s) record() en échec : {échecs}")
 
 
 def get_s3_data():
@@ -231,6 +267,7 @@ async def test_01_connectivity():
 # TEST 2 — Authentification
 # =============================================================================
 
+@pytest.mark.needs_server
 async def test_02_auth():
     """Authentification Bearer token."""
     print("\n🔐 TEST 2 — Authentification")
@@ -278,6 +315,7 @@ async def test_02_auth():
 # TEST 3 — S3 Dell ECS (config hybride SigV2/SigV4)
 # =============================================================================
 
+@pytest.mark.needs_s3
 async def test_03_s3():
     """S3 Dell ECS — opérations CRUD réelles."""
     print("\n☁️ TEST 3 — S3 Dell ECS (hybride SigV2/SigV4)")
@@ -384,6 +422,7 @@ async def test_03_s3():
 # TEST 4 — Token Store S3
 # =============================================================================
 
+@pytest.mark.needs_s3
 async def test_04_token_store():
     """Token Store — CRUD tokens persistés sur S3."""
     print("\n🔑 TEST 4 — Token Store S3")
@@ -469,6 +508,7 @@ async def test_04_token_store():
 # TEST 5 — Tar.gz Sync (simule le sync vault file backend)
 # =============================================================================
 
+@pytest.mark.needs_s3
 async def test_05_tar_sync():
     """Tar.gz roundtrip — upload/download/extract du file backend."""
     print("\n📦 TEST 5 — Tar.gz Sync (file backend ↔ S3)")
@@ -569,7 +609,7 @@ async def test_06_permissions():
     tok = current_token_info.set({
         "client_name": "super-admin",
         "permissions": ["admin", "read", "write"],
-        "space_ids": [],
+        "allowed_resources": [],
     })
     try:
         # Admin peut accéder à n'importe quel space
@@ -599,7 +639,7 @@ async def test_06_permissions():
     tok = current_token_info.set({
         "client_name": "reader-agent",
         "permissions": ["read"],
-        "space_ids": ["prod-secrets", "staging-secrets"],
+        "allowed_resources": ["prod-secrets", "staging-secrets"],
     })
     try:
         # Accès aux spaces autorisés → OK
@@ -637,7 +677,7 @@ async def test_06_permissions():
     tok = current_token_info.set({
         "client_name": "writer-agent",
         "permissions": ["read", "write"],
-        "space_ids": ["my-vault"],
+        "allowed_resources": ["my-vault"],
     })
     try:
         # Accès au space autorisé → OK
@@ -662,18 +702,29 @@ async def test_06_permissions():
     finally:
         current_token_info.reset(tok)
 
-    # ── 6e. TOKEN AVEC SPACES VIDES (= accès à tous les spaces) ──
+    # ── 6e. TOKEN NON-ADMIN, allowed_resources VIDE → owner-based isolation ──
+    # Contrat DURCI (#47/#69) : un allowed_resources vide ne signifie PLUS « tous les
+    # spaces » (ancienne sémantique supprimée). Un token non-admin sans périmètre explicite
+    # est isolé à SES propres vaults (owner-based via check_vault_owner). On patche ce seam
+    # applicatif pour tester la délégation de façon déterministe, sans dépendre d'OpenBao/hvac.
+    from unittest.mock import patch as _patch
 
     tok = current_token_info.set({
-        "client_name": "all-access-agent",
+        "client_name": "owner-agent",
         "permissions": ["read", "write"],
-        "space_ids": [],  # vide = tous les spaces
+        "allowed_resources": [],
     })
     try:
-        for space in ["any-space", "prod", "dev", "staging", "secret-zone"]:
-            result = check_access(space)
-            ok = result is None
-            record(f"All-spaces → access '{space}' OK", ok)
+        with _patch("mcp_vault.vault.spaces.check_vault_owner",
+                    side_effect=lambda vault_id, client: vault_id == "owned-by-me"):
+            # Vault possédé → OK
+            result = check_access("owned-by-me")
+            record("Owner-based → accès à son propre vault OK", result is None, f"result={result}")
+            # Vault d'un autre → REFUSÉ (plus de « vide = tous les spaces »)
+            result = check_access("someone-elses-vault")
+            ok = result is not None and "propriétaire" in result.get("message", "").lower()
+            record("Owner-based → vault d'un autre REFUSÉ", ok,
+                   result.get("message", "")[:60] if result else "None")
     finally:
         current_token_info.reset(tok)
 
@@ -682,7 +733,7 @@ async def test_06_permissions():
     tok = current_token_info.set({
         "client_name": "pure-admin",
         "permissions": ["admin"],
-        "space_ids": [],
+        "allowed_resources": [],
     })
     try:
         # Admin implicite → accès total
@@ -702,20 +753,24 @@ async def test_06_permissions():
     finally:
         current_token_info.reset(tok)
 
-    # ── 6g. TOKEN AVEC PERMISSIONS VIDES ──
-
+    # ── 6g. TOKEN SANS PERMISSION, allowed_resources vide → owner-based aussi ──
+    # L'absence de read/write bloque l'ÉCRITURE, mais check_access reste owner-based :
+    # allowed_resources vide + non-admin → propriété requise (l'ancien « accès libre aux
+    # spaces non restreints » n'existe plus).
     tok = current_token_info.set({
         "client_name": "no-perms",
         "permissions": [],
-        "space_ids": [],
+        "allowed_resources": [],
     })
     try:
-        # Accès aux spaces → OK (pas de restriction sur space_ids)
-        result = check_access("any-space")
-        ok = result is None
-        record("No-perms → check_access OK (spaces non restreints)", ok)
+        with _patch("mcp_vault.vault.spaces.check_vault_owner",
+                    side_effect=lambda vault_id, client: vault_id == "no-perms-own"):
+            result = check_access("no-perms-own")
+            record("No-perms → accès à son propre vault OK", result is None)
+            result = check_access("foreign-vault")
+            record("No-perms → vault d'un autre REFUSÉ", result is not None)
 
-        # Write → REFUSÉ
+        # Write → REFUSÉ (inchangé : pas de permission write)
         result = check_write_permission()
         ok = result is not None
         record("No-perms → check_write REFUSÉ", ok)
@@ -733,7 +788,7 @@ async def test_06_permissions():
     tok = current_token_info.set({
         "client_name": "single-space",
         "permissions": ["read"],
-        "space_ids": ["only-this-one"],
+        "allowed_resources": ["only-this-one"],
     })
     try:
         result = check_access("only-this-one")
@@ -832,15 +887,20 @@ async def test_06_types():
     except Exception as e:
         record("Enrichissement données", False, str(e))
 
-    # 6i. Générateur mot de passe — défaut (24 chars)
+    # 6i. Générateur mot de passe — défaut (24 chars). Vérif NON-FLAKY (issue #64) :
+    # generate_password est un tirage UNIFORME (secrets.choice par position) — il ne garantit
+    # PAS ≥1 de chaque classe DANS un mot de passe donné. L'ancien test exigeait upper+lower+
+    # digit par mot de passe → flaky (~1/12 : un tirage de 24 sans chiffre). On vérifie donc la
+    # longueur par mot de passe, et la présence des classes sur un LOT (déterministe : l'absence
+    # d'une classe sur ~480 caractères est statistiquement impossible).
     try:
-        pwd = generate_password()
-        ok = len(pwd) == 24
-        has_upper = any(c.isupper() for c in pwd)
-        has_lower = any(c.islower() for c in pwd)
-        has_digit = any(c.isdigit() for c in pwd)
-        record("Password 24 chars", ok and has_upper and has_lower and has_digit,
-               f"len={len(pwd)}, upper={has_upper}, lower={has_lower}, digit={has_digit}")
+        pwds = [generate_password() for _ in range(20)]
+        ok_len = all(len(p) == 24 for p in pwds)
+        blob = "".join(pwds)
+        ok_classes = (any(c.isupper() for c in blob) and any(c.islower() for c in blob)
+                      and any(c.isdigit() for c in blob))
+        record("Password 24 chars (longueur + classes sur lot)", ok_len and ok_classes,
+               f"n=20, len_ok={ok_len}, classes_ok={ok_classes}")
     except Exception as e:
         record("Password 24 chars", False, str(e))
 
@@ -890,6 +950,7 @@ async def test_06_types():
 # TEST 7 — Console Admin
 # =============================================================================
 
+@pytest.mark.needs_server
 async def test_06_admin():
     """Console admin — HTML, API, sécurité."""
     print("\n🛠️ TEST 6 — Console Admin (/admin)")

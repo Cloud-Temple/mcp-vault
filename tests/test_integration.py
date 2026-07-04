@@ -430,7 +430,7 @@ class TestAuthContext:
         tok = current_token_info.set({
             "client_name": "admin",
             "permissions": ["admin", "read", "write"],
-            "space_ids": [],
+            "allowed_resources": [],
         })
         try:
             result = check_access("any-space")
@@ -445,7 +445,7 @@ class TestAuthContext:
         tok = current_token_info.set({
             "client_name": "agent-1",
             "permissions": ["read"],
-            "space_ids": ["space-a", "space-b"],
+            "allowed_resources": ["space-a", "space-b"],
         })
         try:
             assert check_access("space-a") is None
