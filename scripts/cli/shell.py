@@ -17,7 +17,7 @@ from .display import (
     show_types_result, show_password_result,
     show_ssh_result, show_token_result,
     show_policy_result, show_audit_result, show_pki_result,
-    show_wrap_result,
+    show_wrap_result, show_mission_binding_result,
 )
 
 
@@ -33,6 +33,7 @@ SHELL_COMMANDS = {
     "ssh":        "ssh <op> <vault> [args] — setup, sign, ca-key, roles, role-info",
     "policy":     "policy <op> [args] — create, list, get, delete",
     "token":      "token <op> [args] — create, list, update, revoke, purge-revoked",
+    "mission-binding": "mission-binding <op> [args] — create, list, get, delete, purge",
     "audit":      "audit [options] — journal d'audit complet",
     "logs":       "logs — activité HTTP récente du serveur (ring buffer admin)",
     "pki":        "pki <op> [args] — setup, ca-key, roles, role-info, certs, issue, revoke, rotate",
@@ -710,6 +711,119 @@ async def cmd_token(client, args="", json_output=False):
         show_token_result(result)
 
 
+MISSION_BINDING_OPS = ("create", "list", "get", "delete", "purge")
+
+
+async def cmd_mission_binding(client, args="", json_output=False):
+    parts = args.strip().split()
+    if not parts or parts[0] not in MISSION_BINDING_OPS:
+        show_warning("Usage: mission-binding <op> [args]")
+        show_warning("  mission-binding list")
+        show_warning("  mission-binding get <tenant>")
+        show_warning("  mission-binding create <tenant> --vaults prod[,staging] "
+                     "--permissions read[,write] [--policy P] [--expires-at ISO] [--disabled]")
+        show_warning("  mission-binding delete <tenant>")
+        show_warning("  mission-binding purge [--older-than 30] [--dry-run] [--yes]")
+        return
+
+    op = parts[0]
+    import httpx
+    base = client.base_url
+    headers = {"Authorization": f"Bearer {client.token}"}
+    result = None
+
+    if op == "list":
+        try:
+            async with httpx.AsyncClient(timeout=10) as http:
+                result = (await http.get(f"{base}/admin/api/mission-bindings", headers=headers)).json()
+        except Exception as e:
+            result = {"status": "error", "message": str(e)}
+    elif op == "get" and len(parts) >= 2:
+        try:
+            async with httpx.AsyncClient(timeout=10) as http:
+                result = (await http.get(f"{base}/admin/api/mission-bindings/{parts[1]}", headers=headers)).json()
+        except Exception as e:
+            result = {"status": "error", "message": str(e)}
+    elif op == "delete" and len(parts) >= 2:
+        try:
+            async with httpx.AsyncClient(timeout=10) as http:
+                result = (await http.delete(f"{base}/admin/api/mission-bindings/{parts[1]}", headers=headers)).json()
+        except Exception as e:
+            result = {"status": "error", "message": str(e)}
+    elif op == "create" and len(parts) >= 2:
+        vaults, perms, policy_id, expires_at, enabled = [], ["read"], "", "", True
+        i = 2
+        while i < len(parts):
+            if parts[i] == "--vaults" and i + 1 < len(parts):
+                vaults = [v.strip() for v in parts[i + 1].split(",") if v.strip()]; i += 2
+            elif parts[i] == "--permissions" and i + 1 < len(parts):
+                perms = [p.strip() for p in parts[i + 1].split(",") if p.strip()]; i += 2
+            elif parts[i] == "--policy" and i + 1 < len(parts):
+                policy_id = parts[i + 1]; i += 2
+            elif parts[i] == "--expires-at" and i + 1 < len(parts):
+                expires_at = parts[i + 1]; i += 2
+            elif parts[i] == "--disabled":
+                enabled = False; i += 1
+            else:
+                i += 1
+        payload = {"tenant_id": parts[1], "allowed_resources": vaults,
+                   "permissions": perms, "enabled": enabled}
+        if policy_id:
+            payload["policy_id"] = policy_id
+        if expires_at:
+            payload["expires_at"] = expires_at
+        try:
+            async with httpx.AsyncClient(timeout=10) as http:
+                result = (await http.post(f"{base}/admin/api/mission-bindings",
+                          headers=headers, json=payload)).json()
+        except Exception as e:
+            result = {"status": "error", "message": str(e)}
+    elif op == "purge":
+        older, older_err, dry, yes = 30, False, "--dry-run" in parts, "--yes" in parts
+        i = 1
+        while i < len(parts):
+            if parts[i] == "--older-than":
+                # Fail-close : valeur absente ou non entière → refus, AUCUNE purge (cohérent
+                # avec token purge-revoked ; ne pas retomber silencieusement sur 30 jours).
+                if i + 1 >= len(parts):
+                    older_err = True
+                    break
+                try:
+                    older = int(parts[i + 1])
+                except ValueError:
+                    older_err = True
+                    break
+                i += 2
+            else:
+                i += 1
+        if older_err:
+            show_error("--older-than attend un entier (ex: mission-binding purge --older-than 30 --yes)")
+            return
+        try:
+            async with httpx.AsyncClient(timeout=10) as http:
+                preview = (await http.post(f"{base}/admin/api/mission-bindings/purge", headers=headers,
+                           json={"older_than_days": older, "dry_run": True})).json()
+                if not isinstance(preview, dict) or preview.get("status") != "ok":
+                    # Fail-close : un dry-run en échec n'autorise JAMAIS la purge effective.
+                    result = preview if isinstance(preview, dict) else {"status": "error", "message": "réponse invalide"}
+                elif dry or preview.get("count", 0) == 0:
+                    result = preview
+                elif not yes:
+                    show_warning(f"{preview.get('count')} binding(s) expiré(s) seraient purgés. "
+                                 "Ajoutez --yes pour confirmer (irréversible).")
+                    result = preview
+                else:
+                    result = (await http.post(f"{base}/admin/api/mission-bindings/purge", headers=headers,
+                              json={"older_than_days": older, "dry_run": False})).json()
+        except Exception as e:
+            result = {"status": "error", "message": str(e)}
+    else:
+        show_warning("Argument manquant. Tapez 'mission-binding' pour l'aide.")
+        return
+
+    show_json(result) if json_output else show_mission_binding_result(result)
+
+
 async def cmd_logs(client, args="", json_output=False):
     """Activité HTTP récente du serveur (ring buffer admin) — distincte du journal d'audit."""
     import httpx
@@ -821,6 +935,8 @@ async def run_shell(url: str, token: str):
                 await cmd_policy(client, args, json_output)
             elif command == "token":
                 await cmd_token(client, args, json_output)
+            elif command == "mission-binding":
+                await cmd_mission_binding(client, args, json_output)
             elif command == "audit":
                 await cmd_audit(client, args, json_output)
             elif command == "logs":

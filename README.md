@@ -161,6 +161,42 @@ Contrat pour le `CredentialBrokerService` de mcp-mission : livraison de credenti
 > Activer la validation C18 avec `ENFORCE_MISSION_TOKEN_VALIDATION=true`. Par défaut (false) : log warning, continue — zéro impact standalone sans mcp-mission.
 > `tenant_id` et `expected_aud` dans `secret_wrap` alimentent le binding C18 complet côté `secret_consume` *(v0.6.8)*.
 
+### PEP mission JWT — porte `/mcp` *(v0.8.0, #47 + #69)*
+
+Second point d'application (PEP) du `mission_token` JWT ES256 de mcp-mission, **à l'entrée `/mcp`** (le premier étant `secret_consume`/C18, à la consommation). Piloté par `MCP_AUTH_MODE` :
+
+| Mode | Comportement `/mcp` |
+| --- | --- |
+| `bearer` *(défaut)* | Bearer opaque uniquement — comportement historique, **zéro impact**. |
+| `jwt` | `mission_token` JWT ES256 **obligatoire** (bearer opaque refusé). |
+| `dual-stack` | JWT valide **OU** bearer opaque valide (migration). |
+
+En `jwt`/`dual-stack`, le middleware **refuse activement** : `401` (token absent/opaque/JWT invalide), `403` (`aud`/`component_id` ≠ instance, mission inactive), `503` (JWKS indisponible — fail-close). Un JWT invalide ne retombe **jamais** sur le bearer. Le token est vérifié contre le contrat réel mcp-mission (`aud` contient `MCP_INSTANCE_ID`, `component_id["vault"] == MCP_INSTANCE_ID`, `iss`, `exp` leeway 0, `iat` anti-skew). La bootstrap key admin reste acceptée (break-glass).
+
+> Une identité mission valide est **authentifiée et liée à l'instance**, puis mcp-vault (**PDP local**) lui résout un **périmètre vault provisionné localement**. Sans octroi, **aucun accès** (deny-by-default) ; les outils d'infra (`system_*`, inventaire PKI) et l'admin-plane (`vault_create/delete`, `ssh_*`) lui sont refusés. L'endpoint admin `POST /admin/api/auth/jwks/reload` force le rechargement du JWKS (révocation urgente de `kid`).
+
+#### Octroi de périmètre vault — `MissionBindingStore` *(#69)*
+
+Le `mission_token` ne porte **aucune** autorisation vault : l'octroi est **provisionné localement**, indexé par `tenant_id` (claim stable), et stocké un **fichier par instance** sur S3.
+
+- Un octroi (« binding ») = `{tenant_id, allowed_resources:[coffres…], permissions, policy_id?, enabled, expires_at?}`.
+- **Permissions strictes** : `read` ou `read,write` (jamais `write` seul, jamais `admin`). **Data-plane uniquement** : lire/écrire des secrets dans les coffres autorisés — **jamais** créer/détruire un coffre ni gérer une CA SSH.
+- **Fail-close** : binding absent/désactivé/expiré → aucun accès. **Registre indisponible/corrompu → `503`** (refus observable, jamais un deny silencieux ni un écrasement destructeur).
+- **Administration** (bearer/bootstrap admin uniquement — jamais via mission JWT) :
+
+```bash
+# Octroyer un périmètre lecture à un client mission
+mcp-cli mission-binding create acme-corp --vaults prod-app --permissions read
+# Lecture + écriture sur plusieurs coffres
+mcp-cli mission-binding create acme-corp --vaults prod-app,staging --permissions read,write
+mcp-cli mission-binding list
+mcp-cli mission-binding get acme-corp
+mcp-cli mission-binding delete acme-corp
+mcp-cli mission-binding purge --older-than 30 --dry-run   # bindings expirés
+```
+
+> **Granularité tenant** : toutes les missions actives d'un même client (`tenant_id`) partagent le périmètre octroyé. Le grain fin par mission existe déjà à la consommation (`secret_consume`/C18).
+
 ### Audit (1)
 
 | Outil                                                                      | Perm  | Description                                                             |
@@ -287,6 +323,7 @@ Copier `.env.example` → `.env` et adapter. Les variables sont groupées par do
 | **Storage sync** | `VAULT_S3_PREFIX`, `VAULT_S3_SYNC_INTERVAL` | Non |
 | **PKI** *(v0.5.x)* | `PKI_BASE_URL` | Non — override URL ACME en test Docker |
 | **Mission JWT** *(v0.6.0)* | `ENFORCE_MISSION_TOKEN_VALIDATION`, `MISSION_JWKS_URL`, `MISSION_TOKEN_AUD`, `MISSION_JWKS_CACHE_TTL`, `MISSION_STATUS_URL` | Non — standalone sans mcp-mission |
+| **PEP mission JWT** *(v0.8.0)* | `MCP_AUTH_MODE` (`bearer`/`jwt`/`dual-stack`), `MCP_INSTANCE_ID`, `MCP_COMPONENT_KIND` | Non — défaut `bearer` = zéro impact. `jwt`/`dual-stack` exigent `MISSION_JWKS_URL` + `MCP_INSTANCE_ID` |
 | **CLI tokens** | `VAULT_WRAP_TOKEN`, `VAULT_MISSION_TOKEN` | Non — exporter avant la commande, jamais dans `.env` |
 
 > **Tokens sensibles CLI** : `VAULT_WRAP_TOKEN` et `VAULT_MISSION_TOKEN` ne doivent PAS être stockés dans `.env` — ils changent à chaque opération. Passer via `export` ou inline :

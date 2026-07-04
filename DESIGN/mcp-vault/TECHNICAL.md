@@ -111,13 +111,16 @@ Utilise `pydantic-settings` pour charger la configuration depuis les variables d
 | `VAULT_S3_PREFIX`        | `_storage`                | Préfixe S3 pour le sync     |
 | `VAULT_S3_SYNC_INTERVAL` | `60`                      | Intervalle sync en secondes |
 | `PKI_BASE_URL`           | *(vide)*                  | Override URL base PKI (ACME directory, CDPs). Utile en test Docker : `http://mcp-vault:8030`. Doit être http(s)://. |
+| `MCP_AUTH_MODE`          | `bearer`                  | PEP mission JWT porte /mcp (#47). `bearer` = historique (zéro impact). `jwt` = mission_token obligatoire. `dual-stack` = JWT valide OU bearer (migration). `jwt`/`dual-stack` exigent `MISSION_JWKS_URL` + `MCP_INSTANCE_ID` (fail-fast au boot). |
+| `MCP_INSTANCE_ID`        | *(vide)*                  | Identifiant d'instance de CE vault : doit figurer dans `aud` du mission_token ET valoir `component_id["vault"]`. Source unique d'audience (`resolved_mission_aud`) — remplace `MISSION_TOKEN_AUD` (alias legacy ; divergence des deux = fail-fast boot). |
+| `MCP_COMPONENT_KIND`     | `vault`                   | Clé de `component_id` vérifiée (`component_id[kind] == MCP_INSTANCE_ID`). |
 | `ENFORCE_MISSION_TOKEN_VALIDATION` | `false` | `true` = hard-reject JWT dans secret_consume. `false` = log warning, continue (standalone compatible). |
 | `MISSION_JWKS_URL`       | *(vide)*                  | JWKS public mcp-mission (`/.well-known/jwks.json`). Vide = validation désactivée. |
 | `MISSION_TOKEN_AUD`      | *(vide)*                  | Audience attendue dans le JWT (anti-confused-deputy). Ex : `mcp-vault:prod:v1`. |
 | `MISSION_JWKS_CACHE_TTL` | `60`                      | TTL cache JWKS en secondes. |
 | `MISSION_JWKS_MAX_REFRESH_PER_MIN` | `3`             | Rate-limit refresh JWKS (anti-DoS). |
 | `MISSION_TOKEN_LEEWAY_SECONDS` | `10`                | Tolérance clock skew JWT en secondes. |
-| `MISSION_STATUS_URL`     | *(vide)*                  | Template URL statut mission mcp-mission (`{mission_id}` remplacé). Vide = vérification désactivée. |
+| `MISSION_STATUS_URL`     | *(vide)*                  | Template URL statut mission mcp-mission (`{mission_id}` remplacé). Allow-list d'états actifs `{RUNNING, WAITING_HUMAN, PAUSED}` (fail-close : état inconnu = inactif). Vide = vérification désactivée ; en `MCP_AUTH_MODE=jwt/dual-stack`, mode dégradé signalé par un warning au boot (révocation par expiration du token uniquement). |
 | `MISSION_STATUS_CACHE_TTL` | `5`                     | TTL cache statut mission en secondes (court — fail-close rapide). |
 
 **Variables CLI (NE PAS stocker dans `.env`)** :
@@ -399,6 +402,52 @@ Même pattern que `token_store.py` : singleton + cache mémoire TTL 5 min + stoc
 - `policy_id` : alphanum + tirets + underscores, max 64 chars
 - `path_rules` : chaque règle doit avoir `vault_pattern`, permissions ∈ {read, write, admin}
 - Doublon interdit (policy_id unique)
+
+### 3.12b `auth/mission_bindings.py` — Mission Binding Store S3 *(#69, v0.8.0)*
+
+Octroi de périmètre vault local pour les identités mission JWT. mcp-vault = **PDP** : le
+`mission_token` ne portant aucune autz vault, l'autorisation est provisionnée ici, indexée par
+`tenant_id`. Même pattern que PolicyStore/TokenStore (singleton + cache TTL 5 min), mais **un
+fichier S3 par instance**.
+
+**Stockage** : `_system/mission_bindings/{encoded_instance_id}.json` (`encoded` = slug + hash court
+de `resolved_mission_aud`). Le fichier-par-instance réduit le last-write-wins cross-instance ;
+`instance_id` est aussi stocké dans chaque entrée et **filtré à la lecture** (anti-fuite cross-instance).
+
+**Singleton** : `init_mission_binding_store()` (lifecycle, après Policy Store) — actif si S3 configuré
+ET `resolved_mission_aud` non vide ; `get_mission_binding_store()` (getter). Warning au boot si
+`MCP_AUTH_MODE ≠ bearer` sans store (PEP actif mais aucun octroi possible → deny-all).
+
+**Modèle de données** :
+
+```python
+{
+    "instance_id": str,           # == resolved_mission_aud (défense en profondeur)
+    "tenant_id": str,             # clé logique + id REST ; URL-safe ; 'purge' réservé
+    "policy_id": str,             # optionnel ; si non vide, doit exister dans PolicyStore
+    "allowed_resources": [str],   # vrais vault_id (regex), non vides, dédupliqués, pas de '*'
+    "permissions": ["read"] | ["read","write"],  # 'write' seul / [] / 'admin' REFUSÉS
+    "enabled": bool,
+    "expires_at": str | None,     # ISO 8601 ; dépassé/corrompu → deny (fail-close)
+    "created_at": str, "created_by": str,
+}
+```
+
+**État observable (fail-close fort)** : `available` / `last_error`. `NoSuchKey`/404 → store vide
+writable (nominal). Erreur réseau/403/timeout/**JSON corrompu** → état **invalid** : `resolve()`
+lève `MissionBindingStoreUnavailable` (→ `503` au PEP), les mutations sont refusées et **aucune
+écriture n'est tentée** (anti-écrasement destructeur). Re-tentative accélérée (10 s) hors TTL ;
+`force_reload()` disponible.
+
+**API** :
+- `resolve(tenant_id)` → binding actif (enabled, non expiré, bonne instance) ou `None` ; lève si indispo. **Utilisé par le PEP**.
+- `get(tenant_id)` / `list_all()` → vue admin (montre enabled/expired) ; lèvent si indispo.
+- `create(...)` / `delete(tenant_id)` / `purge(older_than_days, dry_run)` → rollback mémoire si `_save` échoue ; `purge` = bindings expirés au-delà de la rétention (fail-close date corrompue).
+
+**Endpoints admin** (bearer/bootstrap-only) : `GET/POST /admin/api/mission-bindings`,
+`GET/DELETE /admin/api/mission-bindings/{tenant_id}`, `POST /admin/api/mission-bindings/purge`
+(route `/purge` déclarée avant le segment variable). Audit des mutations avec `decision_id` en tête.
+CLI/shell : groupe `mission-binding` (create/list/get/delete/purge).
 
 ### 3.13 `openbao/` — OpenBao Process Manager
 

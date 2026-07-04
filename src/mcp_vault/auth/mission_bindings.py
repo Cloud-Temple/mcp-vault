@@ -1,0 +1,652 @@
+# -*- coding: utf-8 -*-
+"""
+Mission Binding Store — octroi de périmètre vault local pour les identités mission JWT.
+
+Contexte (issue #47 / #69 — PR2) :
+    Le mission_token émis par mcp-mission ne porte AUCUNE autorisation vault (ni `vaults`
+    ni `permissions`). mcp-vault joue le rôle de PDP local : l'autorisation fine est
+    provisionnée ICI, indexée par `tenant_id` (claim stable, immuable au refresh).
+
+    Un « binding » associe à un tenant, pour CETTE instance Vault, un périmètre :
+    liste de coffres autorisés + niveau de permission (lecture, ou lecture+écriture) +
+    éventuellement une policy fine (path/tool) référencée dans le PolicyStore.
+
+Modèle de sécurité (deny-by-default) :
+    - Aucun binding pour un tenant  → aucun accès (la garde mission_jwt de context.py refuse).
+    - Binding désactivé / expiré     → aucun accès (fail-close).
+    - Store indisponible / corrompu  → refus OBSERVABLE (503), JAMAIS un deny silencieux,
+      et AUCUNE écriture (pas d'écrasement destructeur d'un fichier corrompu).
+
+Topologie multi-instance (reco Codex #69) :
+    Un fichier S3 PAR INSTANCE : `_system/mission_bindings/{encoded_instance_id}.json`.
+    Réduit fortement le last-write-wins cross-instance vs un fichier unique partagé.
+    `instance_id` est également conservé dans chaque entrée (défense en profondeur) et
+    filtré à la lecture. La révocation instantanée inter-instance (CAS/ETag) reste #51.
+
+Pattern calqué sur PolicyStore/TokenStore (singleton + cache TTL + rollback sur _save).
+"""
+
+import copy
+import hashlib
+import json
+import logging
+import re
+import sys
+import time
+from datetime import datetime, timezone, timedelta
+from typing import Optional
+
+logger = logging.getLogger("mcp-vault.mission-binding-store")
+
+from ..config import get_settings
+
+# Regex de validation d'un vault_id — DOIT rester synchronisée avec
+# vault.spaces._VAULT_ID_PATTERN. Dupliquée ici volontairement pour éviter d'importer
+# vault.spaces (qui charge hvac via openbao.manager, indisponible hors Docker → casserait
+# les tests unitaires). Alphanumérique + tirets/underscores, 1-64 caractères.
+_VAULT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+
+# Format défensif d'un tenant_id utilisé comme identité REST/CLI et clé de binding.
+# Le contrat mcp-mission garantit seulement « str non vide » ; on impose ici un format
+# URL-safe (pas de '/', espace, '%') pour que les routes /admin/api/mission-bindings/{id}
+# ne soient jamais ambiguës. On autorise ':' (les client_id peuvent en contenir).
+_TENANT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$")
+
+# Segments de route réservés : un tenant_id ne doit jamais les usurper.
+_RESERVED_TENANT_IDS = frozenset({"purge"})
+
+# Nombre maximal de coffres dans un même binding (garde-fou anti-abus / anti-payload géant).
+_MAX_ALLOWED_RESOURCES = 100
+
+# Intervalle minimal de re-tentative de chargement après un échec (store indisponible).
+# Évite de marteler S3 à chaque requête tout en récupérant vite dès qu'il revient.
+_RETRY_AFTER_ERROR_SECONDS = 10.0
+
+
+class MissionBindingStoreUnavailable(Exception):
+    """Levée par resolve() quand le store est configuré mais indisponible/corrompu.
+
+    Le PEP (AuthMiddleware) doit la mapper en 503 `binding_store_unavailable` — surtout
+    PAS en deny silencieux (qui masquerait une panne du PDP local).
+    """
+
+
+# =============================================================================
+# Mission Binding Store singleton
+# =============================================================================
+
+_mission_binding_store = None
+
+
+def get_mission_binding_store() -> Optional["MissionBindingStore"]:
+    """Retourne le Mission Binding Store (None si non configuré)."""
+    return _mission_binding_store
+
+
+def init_mission_binding_store():
+    """Initialise le Mission Binding Store au démarrage.
+
+    Conditions d'activation : S3 configuré ET une identité d'instance (resolved_mission_aud)
+    connue — sans quoi un octroi de périmètre mission n'a pas de sens (mode bearer pur).
+    """
+    global _mission_binding_store
+    settings = get_settings()
+
+    if not (settings.s3_endpoint_url and settings.s3_bucket_name):
+        print("🎟️  Mission Binding Store S3 non configuré", file=sys.stderr)
+        return
+
+    if not settings.resolved_mission_aud:
+        # PEP mission JWT inactif (mode bearer sans instance_id) : aucun binding utile.
+        print(
+            "🎟️  Mission Binding Store inactif (MCP_INSTANCE_ID/MISSION_TOKEN_AUD absent)",
+            file=sys.stderr,
+        )
+        return
+
+    _mission_binding_store = MissionBindingStore(settings)
+    _mission_binding_store.load()
+    if _mission_binding_store.available:
+        print(
+            f"🎟️  Mission Binding Store S3 initialisé "
+            f"({_mission_binding_store.count()} binding(s) actif(s), instance="
+            f"{_mission_binding_store.instance_id})",
+            file=sys.stderr,
+        )
+    else:
+        # Fail-close observable : le store existe mais son état est invalide au boot.
+        # Le runtime renverra 503 ; les mutations seront refusées ; aucun overwrite.
+        print(
+            f"⚠️  Mission Binding Store S3 INDISPONIBLE au démarrage : "
+            f"{_mission_binding_store.last_error} — les missions seront refusées (503) "
+            f"jusqu'à rétablissement",
+            file=sys.stderr,
+        )
+
+
+# =============================================================================
+# Helpers de validation (module-level, testables isolément)
+# =============================================================================
+
+def _encode_instance_id(instance_id: str) -> str:
+    """Dérive un nom de fichier S3 sûr et unique pour une instance.
+
+    slug lisible (débuggable) + suffixe hash court (anti-collision après normalisation).
+    """
+    slug = re.sub(r"[^A-Za-z0-9._-]", "_", instance_id)[:48]
+    digest = hashlib.sha256(instance_id.encode()).hexdigest()[:8]
+    return f"{slug}.{digest}"
+
+
+def normalize_permissions(permissions) -> Optional[list]:
+    """Valide et normalise les permissions d'un binding (contrat STRICT).
+
+    Il n'existe pas de `check_read_permission` : la lecture est induite par l'appartenance
+    au périmètre (check_access). On garantit donc que `read` est TOUJOURS présent, sinon un
+    binding « write-only » ou vide octroierait la lecture par surprise. `write` est un droit
+    SUPPLÉMENTAIRE, réellement vérifié par check_write_permission. `admin` est INTERDIT
+    (une mission ne fait jamais d'administration — arbitrage produit #69).
+
+    Returns:
+        ["read"] ou ["read", "write"] (normalisé, trié), ou None si invalide.
+    """
+    if not isinstance(permissions, list) or not permissions:
+        return None
+    if not all(isinstance(p, str) for p in permissions):
+        return None
+    perms = set(permissions)
+    if perms == {"read"}:
+        return ["read"]
+    if perms == {"read", "write"}:
+        return ["read", "write"]
+    return None  # rejette [], ["write"], ["admin"], ["read","admin"], toute valeur inconnue
+
+
+def validate_allowed_resources(allowed_resources) -> tuple[Optional[list], str]:
+    """Valide la liste des coffres d'un binding.
+
+    Exige : liste non vide ; chaque élément str au format vault_id (regex) ; pas de doublon ;
+    pas de valeur passe-partout (`*` est de toute façon exclu par la regex) ; taille bornée.
+
+    Returns:
+        (liste_validée, "") si OK, (None, message) sinon.
+    """
+    if not isinstance(allowed_resources, list) or not allowed_resources:
+        return None, "allowed_resources doit être une liste non vide"
+    if len(allowed_resources) > _MAX_ALLOWED_RESOURCES:
+        return None, f"allowed_resources trop long (max {_MAX_ALLOWED_RESOURCES})"
+    seen = set()
+    for vid in allowed_resources:
+        if not isinstance(vid, str) or not _VAULT_ID_PATTERN.match(vid):
+            return None, f"vault_id invalide dans allowed_resources : {vid!r}"
+        if vid in seen:
+            return None, f"vault_id dupliqué dans allowed_resources : {vid!r}"
+        seen.add(vid)
+    return list(allowed_resources), ""
+
+
+def validate_tenant_id(tenant_id) -> tuple[bool, str]:
+    """Valide le format défensif d'un tenant_id (identité REST/CLI + clé de binding)."""
+    if not isinstance(tenant_id, str) or not tenant_id:
+        return False, "tenant_id requis (chaîne non vide)"
+    if tenant_id in _RESERVED_TENANT_IDS:
+        return False, f"tenant_id réservé : {tenant_id!r}"
+    if not _TENANT_ID_PATTERN.match(tenant_id):
+        return False, (
+            f"tenant_id invalide : {tenant_id!r} — format URL-safe attendu "
+            "(alphanum, '.', '_', ':', '-', 1-128 caractères)"
+        )
+    return True, ""
+
+
+def _is_expired(binding: dict) -> bool:
+    """True si le binding est expiré. Fail-close : date corrompue = expiré."""
+    expires_at = binding.get("expires_at")
+    if not expires_at:
+        return False
+    try:
+        return datetime.now(timezone.utc) > datetime.fromisoformat(expires_at)
+    except (ValueError, TypeError):
+        return True  # fail-close : date corrompue = expiré
+
+
+def validate_binding_record(binding) -> tuple[bool, str]:
+    """Valide une entrée binding TELLE QUE LUE depuis S3 (défense en profondeur au chargement).
+
+    CRITIQUE (revue Codex #69, BLOQUANT-1) : les mêmes invariants stricts que create() doivent
+    tenir sur l'état persistant — un fichier forgé/corrompu/legacy avec `permissions=["admin"]`
+    ou `["write"]` seul ne doit JAMAIS être servi (sinon élévation de privilège : check_access
+    donne l'accès total sur `admin`, et check_policy court-circuite le plafond d'outils).
+
+    N.B. : le FORMAT de policy_id est validé ici, pas son existence (déjà vérifiée à create() ;
+    une policy supprimée après coup est de toute façon fail-close via check_policy).
+
+    Returns:
+        (True, "") si l'entrée est conforme, (False, message) sinon.
+    """
+    if not isinstance(binding, dict):
+        return False, "entrée non-dict"
+    ok, msg = validate_tenant_id(binding.get("tenant_id"))
+    if not ok:
+        return False, f"tenant_id: {msg}"
+    if normalize_permissions(binding.get("permissions")) is None:
+        return False, f"permissions non conformes: {binding.get('permissions')!r}"
+    res, rmsg = validate_allowed_resources(binding.get("allowed_resources"))
+    if res is None:
+        return False, f"allowed_resources: {rmsg}"
+    if not isinstance(binding.get("enabled"), bool):
+        return False, "enabled non booléen"
+    exp = binding.get("expires_at")
+    if exp is not None:
+        if not isinstance(exp, str):
+            return False, "expires_at non-str"
+        try:
+            datetime.fromisoformat(exp)
+        except (ValueError, TypeError):
+            return False, "expires_at non parseable"
+    if not isinstance(binding.get("policy_id", ""), str):
+        return False, "policy_id non-str"
+    return True, ""
+
+
+# =============================================================================
+# MissionBindingStore — Stockage S3 par instance + cache mémoire TTL
+# =============================================================================
+
+class MissionBindingStore:
+    """Octroi de périmètre vault local pour les identités mission JWT (un fichier par instance).
+
+    - Stockage S3 : _system/mission_bindings/{encoded_instance_id}.json
+    - Cache mémoire TTL 5 min (re-tentative accélérée à 10s si indisponible)
+    - État observable : available / last_error (BLOQUANT-2 revue #69)
+    - CRUD : create / get / list_all / delete / purge (+ resolve pour le PEP)
+    """
+
+    CACHE_TTL = 300  # 5 minutes
+    S3_KEY_PREFIX = "_system/mission_bindings/"
+
+    def __init__(self, settings):
+        self.settings = settings
+        # Identité canonique de l'instance = source unique d'audience (#47).
+        self.instance_id = settings.resolved_mission_aud
+        self.s3_key = f"{self.S3_KEY_PREFIX}{_encode_instance_id(self.instance_id)}.json"
+        self._bindings: dict = {}  # tenant_id → binding
+        self._cache_time: float = 0.0
+        self._available: bool = True
+        self._last_error: str = ""
+
+    # ── État observable ───────────────────────────────────────────────
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    @property
+    def last_error(self) -> str:
+        return self._last_error
+
+    def _get_s3_data(self):
+        """Client S3 SigV2 pour PUT/GET/DELETE (données)."""
+        from ..s3_client import get_s3_data_client
+        return get_s3_data_client()
+
+    @staticmethod
+    def _is_missing_key_error(e: Exception) -> bool:
+        """True UNIQUEMENT pour l'absence nominale de l'OBJET binding (`NoSuchKey`), via botocore.
+
+        Revue Codex #69 (BLOQUANT-2) : (1) ne PAS se fier à une sous-chaîne "404"/"NoSuchKey" dans
+        str(e) — un port 4040 ou un request-id contenant '404' ferait passer une panne pour un
+        fichier absent. (2) Ne PAS accepter `NoSuchBucket` ni un `404` générique : un bucket
+        supprimé/inaccessible ou un endpoint cassé est une VRAIE panne, pas l'absence du fichier
+        binding — le traiter en absence viderait le cache et masquerait la panne (deny silencieux).
+        Seul `Error.Code == "NoSuchKey"` = premier démarrage légitime (0 binding). Tout le reste →
+        indisponibilité (fail-close).
+        """
+        try:
+            from botocore.exceptions import ClientError
+        except ImportError:
+            return False  # sans botocore, toute erreur = indisponible (fail-close)
+        if not isinstance(e, ClientError):
+            return False
+        resp = getattr(e, "response", {}) or {}
+        return resp.get("Error", {}).get("Code", "") == "NoSuchKey"
+
+    def _mark_invalid(self, msg: str):
+        """Passe le store en état INDISPONIBLE observable (sans écraser le cache mémoire)."""
+        self._available = False
+        self._last_error = msg
+        self._cache_time = time.time()  # throttle la re-tentative (_maybe_refresh)
+        logger.error(
+            "Mission Binding Store INVALIDE key=%s : %s — runtime 503 + mutations refusées "
+            "jusqu'à rétablissement", self.s3_key, msg,
+        )
+
+    def load(self):
+        """Charge les bindings depuis S3 avec validation atomique (défense en profondeur).
+
+        - Objet absent (NoSuchKey/404) → store VIDE mais writable (available) — nominal.
+        - Réseau/403/timeout           → INVALID (503), cache conservé, PAS d'écrasement.
+        - JSON corrompu / schéma cassé → INVALID.
+        - UNE entrée de cette instance non conforme (permissions/allowed_resources/tenant_id/
+          doublon/…) → INVALID : on ne sert JAMAIS un binding qui n'a pas passé les validations
+          strictes (anti élévation de privilège via fichier forgé, Codex BLOQUANT-1).
+        """
+        try:
+            s3 = self._get_s3_data()
+            resp = s3.get_object(Bucket=self.settings.s3_bucket_name, Key=self.s3_key)
+            raw = resp["Body"].read().decode()
+        except Exception as e:
+            if self._is_missing_key_error(e):
+                self._bindings = {}
+                self._cache_time = time.time()
+                self._available = True
+                self._last_error = ""
+                return
+            self._mark_invalid(f"S3 GET: {type(e).__name__}")
+            return
+
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            self._mark_invalid("JSON invalide")
+            return
+
+        if not isinstance(data, dict) or not isinstance(data.get("bindings", []), list):
+            self._mark_invalid("schéma top-level invalide (attendu {'bindings': [...]})")
+            return
+
+        validated: dict = {}
+        for b in data.get("bindings", []):
+            if not isinstance(b, dict):
+                self._mark_invalid("entrée binding non-dict")
+                return
+            # Fichier par instance : ignorer (sans invalider) une entrée d'une autre instance ;
+            # elle n'est de toute façon jamais servie (filtre instance_id).
+            if b.get("instance_id") != self.instance_id:
+                continue
+            ok, why = validate_binding_record(b)
+            if not ok:
+                self._mark_invalid(f"binding tenant={b.get('tenant_id')!r} non conforme: {why}")
+                return
+            tid = b["tenant_id"]
+            if tid in validated:
+                self._mark_invalid(f"tenant_id dupliqué: {tid!r}")
+                return
+            validated[tid] = b
+
+        self._bindings = validated
+        self._cache_time = time.time()
+        self._available = True
+        self._last_error = ""
+
+    def force_reload(self):
+        """Force un rechargement immédiat (ignore le TTL). Utile après mutation / reload admin."""
+        self._cache_time = 0.0
+        self.load()
+
+    def _save(self) -> bool:
+        """Sauvegarde les bindings sur S3 (PUT = SigV2). Retourne True/False.
+
+        Les appelants DOIVENT rollback l'état mémoire si False.
+        LIMITATION V1 — last-write-wins intra-instance (issue #13/#51) : pas d'ETag/CAS.
+        Le fichier par instance élimine le clobbering cross-instance ; deux writers sur la
+        MÊME instance restent en last-write-wins (rare, single-process en pratique).
+        """
+        try:
+            s3 = self._get_s3_data()
+            data = json.dumps(
+                {"instance_id": self.instance_id, "bindings": list(self._bindings.values())},
+                indent=2, default=str,
+            )
+            s3.put_object(
+                Bucket=self.settings.s3_bucket_name,
+                Key=self.s3_key,
+                Body=data.encode(),
+                ContentType="application/json",
+            )
+            return True
+        except Exception as e:
+            # Revue Codex #69 (BLOQUANT-2) : un PUT échoué prouve que S3 est indisponible →
+            # basculer en état INVALID (cohérent avec l'invariant "panne S3 observable").
+            # resolve() lèvera 503 au lieu de servir un cache pendant que S3 est inaccessible ;
+            # le prochain load() (re-tentative 10s) rétablira l'état si S3 revient.
+            logger.error(
+                "Mission Binding Store S3 save FAILED: %s — état mémoire non persisté, "
+                "store marqué INDISPONIBLE", type(e).__name__,
+            )
+            self._available = False
+            self._last_error = f"S3 PUT: {type(e).__name__}"
+            self._cache_time = time.time()
+            return False
+
+    def _maybe_refresh(self):
+        """Rafraîchit le cache si le TTL est dépassé (ou plus vite si état invalide)."""
+        elapsed = time.time() - self._cache_time
+        if self._available:
+            if elapsed > self.CACHE_TTL:
+                self.load()
+        else:
+            if elapsed > _RETRY_AFTER_ERROR_SECONDS:
+                self.load()
+
+    def _ensure_available(self):
+        """Rafraîchit puis lève si le store est indisponible (pour resolve/mutations)."""
+        self._maybe_refresh()
+        if not self._available:
+            raise MissionBindingStoreUnavailable(self._last_error or "store indisponible")
+
+    # ── Résolution runtime (PEP) ──────────────────────────────────────
+    def resolve(self, tenant_id: str) -> Optional[dict]:
+        """Résout le binding actif d'un tenant pour le PEP.
+
+        Returns:
+            Le binding (dict) si présent, activé, non expiré et de CETTE instance.
+            None si aucun binding applicable (→ deny-all côté PEP).
+        Raises:
+            MissionBindingStoreUnavailable si le store est configuré mais indisponible (→ 503).
+        """
+        self._ensure_available()
+        binding = self._bindings.get(tenant_id)
+        if binding is None:
+            return None
+        # Défense en profondeur : ignorer une entrée d'une autre instance (bucket partagé).
+        if binding.get("instance_id") != self.instance_id:
+            return None
+        if not binding.get("enabled", False):
+            return None
+        if _is_expired(binding):
+            return None
+        return binding
+
+    # ── CRUD (administration) ─────────────────────────────────────────
+    def create(self, tenant_id: str, allowed_resources: list, permissions: list,
+               policy_id: str = "", expires_at: Optional[str] = None,
+               enabled: bool = True, created_by: str = "admin") -> dict:
+        """Crée un binding tenant→périmètre pour cette instance.
+
+        Validation défense-en-profondeur (indépendante du point d'entrée HTTP) :
+        tenant_id format + non réservé + unicité ; permissions ∈ {read | read,write} ;
+        allowed_resources = vrais vault_id non vides/dédupliqués ; policy_id référencé existant.
+        """
+        # Store indisponible → aucune écriture (pas d'écrasement).
+        self._maybe_refresh()
+        if not self._available:
+            return {"status": "error", "error_type": "storage_unavailable",
+                    "message": f"Mission Binding Store indisponible ({self._last_error})"}
+
+        ok, msg = validate_tenant_id(tenant_id)
+        if not ok:
+            return {"status": "error", "message": msg}
+
+        # `enabled` : booléen STRICT (revue Codex #69). Ne JAMAIS coercer — `bool("false")` vaut
+        # True, ce qui activerait un octroi qu'un admin croit créer désactivé.
+        if not isinstance(enabled, bool):
+            return {"status": "error", "message": "enabled doit être un booléen (true/false)"}
+
+        if tenant_id in self._bindings:
+            return {"status": "error", "message": f"Binding pour tenant '{tenant_id}' existe déjà"}
+
+        norm_perms = normalize_permissions(permissions)
+        if norm_perms is None:
+            return {"status": "error", "error_type": "invalid_permissions",
+                    "message": "permissions doit valoir exactement ['read'] ou ['read','write'] "
+                               "('write' seul, [], et 'admin' sont refusés)"}
+
+        resources, res_msg = validate_allowed_resources(allowed_resources)
+        if resources is None:
+            return {"status": "error", "message": res_msg}
+
+        if policy_id:
+            from .policies import get_policy_store
+            ps = get_policy_store()
+            if ps is None:
+                return {"status": "error", "message": "policy_id référencé mais Policy Store non configuré"}
+            if ps.get(policy_id) is None:
+                return {"status": "error", "message": f"policy_id '{policy_id}' inexistant"}
+
+        # expires_at : si fourni, doit être une date ISO parseable (fail-fast à la création).
+        if expires_at is not None:
+            try:
+                datetime.fromisoformat(expires_at)
+            except (ValueError, TypeError):
+                return {"status": "error", "message": f"expires_at invalide (ISO 8601 attendu) : {expires_at!r}"}
+
+        now = datetime.now(timezone.utc).isoformat()
+        binding = {
+            "instance_id": self.instance_id,
+            "tenant_id": tenant_id,
+            "policy_id": policy_id or "",
+            "allowed_resources": resources,
+            "permissions": norm_perms,
+            "enabled": enabled,
+            "expires_at": expires_at,
+            "created_at": now,
+            "created_by": created_by,
+        }
+
+        self._bindings[tenant_id] = binding
+        if not self._save():
+            del self._bindings[tenant_id]  # rollback mémoire
+            return {"status": "error", "error_type": "storage_unavailable",
+                    "message": "Impossible de créer le binding (S3 indisponible)"}
+
+        return {"status": "created", **binding}
+
+    def get(self, tenant_id: str) -> Optional[dict]:
+        """Récupère l'entrée brute d'un binding (vue admin : montre enabled/expired tel quel).
+
+        Raises:
+            MissionBindingStoreUnavailable si le store est indisponible.
+        """
+        self._ensure_available()
+        binding = self._bindings.get(tenant_id)
+        if binding is None or binding.get("instance_id") != self.instance_id:
+            return None
+        return {**binding, "expired": _is_expired(binding)}
+
+    def list_all(self) -> list:
+        """Liste tous les bindings de cette instance (vue admin, avec état calculé).
+
+        Raises:
+            MissionBindingStoreUnavailable si le store est indisponible.
+        """
+        self._ensure_available()
+        return [
+            {
+                "tenant_id": b["tenant_id"],
+                "allowed_resources": b.get("allowed_resources", []),
+                "permissions": b.get("permissions", []),
+                "policy_id": b.get("policy_id", ""),
+                "enabled": b.get("enabled", False),
+                "expires_at": b.get("expires_at"),
+                "expired": _is_expired(b),
+                "created_at": b.get("created_at", ""),
+                "created_by": b.get("created_by", ""),
+            }
+            for b in self._bindings.values()
+            if b.get("instance_id") == self.instance_id
+        ]
+
+    def delete(self, tenant_id: str):
+        """Supprime un binding.
+
+        Retourne : True (supprimé) | False (introuvable) | "storage_error" (S3 KO, rollback)
+                   | "storage_unavailable" (store invalide, aucune écriture tentée).
+        """
+        self._maybe_refresh()
+        if not self._available:
+            return "storage_unavailable"
+        if tenant_id not in self._bindings:
+            return False
+        backup = self._bindings.pop(tenant_id)
+        if not self._save():
+            self._bindings[tenant_id] = backup  # rollback
+            logger.error("Suppression binding '%s' non persistée — S3 indisponible", tenant_id)
+            return "storage_error"
+        return True
+
+    def purge(self, older_than_days: int = 30, dry_run: bool = False) -> dict:
+        """Purge les bindings EXPIRÉS depuis plus de `older_than_days` jours.
+
+        Fail-close : un binding sans `expires_at` parseable n'est jamais purgé (on ne
+        détruit pas ce qu'on ne sait pas dater). Les bindings actifs ou seulement
+        désactivés (non datés) ne sont pas purgés — un admin les supprime via delete().
+        """
+        self._maybe_refresh()
+        if not self._available:
+            return {"status": "error", "error_type": "storage_unavailable",
+                    "message": f"Mission Binding Store indisponible ({self._last_error})"}
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max(0, older_than_days))
+        candidates = []
+        for tid, b in self._bindings.items():
+            expires_at = b.get("expires_at")
+            if not expires_at:
+                continue  # jamais expirant → non purgeable
+            try:
+                exp_dt = datetime.fromisoformat(expires_at)
+            except (ValueError, TypeError):
+                continue  # fail-close : date corrompue → non purgé
+            if exp_dt.tzinfo is None:
+                continue  # date non comparable (naïve) → fail-close
+            if exp_dt > cutoff:
+                continue  # pas encore au-delà de la rétention
+            candidates.append((tid, b))
+
+        summary = [
+            {"tenant_id": tid, "expires_at": b.get("expires_at", "")}
+            for tid, b in candidates
+        ]
+
+        if dry_run:
+            return {"status": "ok", "dry_run": True, "count": len(summary),
+                    "older_than_days": older_than_days, "candidates": summary,
+                    "message": f"{len(summary)} binding(s) expiré(s) seraient purgés "
+                               f"(rétention {older_than_days} j)"}
+
+        if not candidates:
+            return {"status": "ok", "dry_run": False, "count": 0,
+                    "older_than_days": older_than_days, "purged": [],
+                    "message": "Aucun binding expiré à purger (rétention respectée)"}
+
+        removed = {tid: copy.deepcopy(self._bindings[tid]) for tid, _ in candidates}
+        for tid in removed:
+            del self._bindings[tid]
+
+        if not self._save():
+            self._bindings.update(removed)  # rollback
+            logger.error("Purge de %d binding(s) expiré(s) non persistée — S3 indisponible", len(removed))
+            return {"status": "error", "error_type": "storage_unavailable", "dry_run": False,
+                    "count": 0, "older_than_days": older_than_days,
+                    "message": "Purge non persistée — S3 indisponible"}
+
+        return {"status": "ok", "dry_run": False, "count": len(summary),
+                "older_than_days": older_than_days, "purged": summary,
+                "message": f"{len(summary)} binding(s) expiré(s) purgé(s)"}
+
+    def count(self) -> int:
+        """Nombre de bindings actifs (activés et non expirés) de cette instance."""
+        return sum(
+            1 for b in self._bindings.values()
+            if b.get("instance_id") == self.instance_id
+            and b.get("enabled", False) and not _is_expired(b)
+        )

@@ -21,7 +21,7 @@ from .display import (
     show_types_result, show_password_result,
     show_ssh_result, show_token_result,
     show_policy_result, show_audit_result, show_pki_result,
-    show_wrap_result,
+    show_wrap_result, show_mission_binding_result,
 )
 
 
@@ -1189,6 +1189,180 @@ def token_purge_revoked_cmd(ctx, older_than, dry_run, yes, output_json):
         except Exception as e:
             result = {"status": "error", "message": str(e)}
         show_json(result) if output_json else show_token_result(result)
+    asyncio.run(_run())
+
+
+# =============================================================================
+# Mission Bindings (octroi périmètre vault mission JWT, #69) — groupe admin
+# =============================================================================
+
+@cli.group("mission-binding")
+@click.pass_context
+def mission_binding_group(ctx):
+    """🎟️  Octroi de périmètre vault aux identités mission JWT (admin).
+
+    \b
+    Sous-commandes : create, list, get, delete, purge.
+
+    \b
+    Un binding associe à un tenant (client mission) un périmètre local sur CETTE
+    instance : coffres autorisés + permissions (read | read,write). Sans binding,
+    une mission n'a AUCUN accès (deny-by-default). Data-plane strict : une mission
+    ne peut jamais créer/détruire un coffre ni gérer une CA SSH.
+    """
+    pass
+
+
+@mission_binding_group.command("create")
+@click.argument("tenant_id")
+@click.option("--vaults", "-s", required=True, help="Coffres autorisés (virgule) — requis, non vide")
+@click.option("--permissions", "-p", default="read", help="read | read,write ('write' seul refusé)")
+@click.option("--policy", default="", help="Policy ID optionnelle (durcissement path/tool)")
+@click.option("--expires-at", default="", help="Expiration ISO 8601 (vide = jamais)")
+@click.option("--disabled", is_flag=True, help="Créer le binding désactivé")
+@click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
+@click.pass_context
+def mission_binding_create_cmd(ctx, tenant_id, vaults, permissions, policy, expires_at, disabled, output_json):
+    """Octroyer un périmètre vault à un tenant mission.
+
+    \b
+    Exemples :
+      mission-binding create acme-corp --vaults prod-app --permissions read
+      mission-binding create acme-corp --vaults prod-app,staging --permissions read,write
+      mission-binding create acme-corp --vaults prod-app --policy readonly --expires-at 2026-12-31T00:00:00+00:00
+    """
+    async def _run():
+        import httpx
+        perms = [p.strip() for p in permissions.split(",") if p.strip()]
+        vault_ids = [v.strip() for v in vaults.split(",") if v.strip()]
+        payload = {
+            "tenant_id": tenant_id,
+            "allowed_resources": vault_ids,
+            "permissions": perms,
+            "enabled": not disabled,
+        }
+        if policy:
+            payload["policy_id"] = policy
+        if expires_at:
+            payload["expires_at"] = expires_at
+        try:
+            async with httpx.AsyncClient(timeout=10) as http:
+                resp = await http.post(
+                    f"{ctx.obj['url']}/admin/api/mission-bindings",
+                    headers={"Authorization": f"Bearer {ctx.obj['token']}"},
+                    json=payload,
+                )
+                result = resp.json()
+        except Exception as e:
+            result = {"status": "error", "message": str(e)}
+        show_json(result) if output_json else show_mission_binding_result(result)
+    asyncio.run(_run())
+
+
+@mission_binding_group.command("list")
+@click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
+@click.pass_context
+def mission_binding_list_cmd(ctx, output_json):
+    """Lister les bindings de cette instance."""
+    async def _run():
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=10) as http:
+                resp = await http.get(
+                    f"{ctx.obj['url']}/admin/api/mission-bindings",
+                    headers={"Authorization": f"Bearer {ctx.obj['token']}"},
+                )
+                result = resp.json()
+        except Exception as e:
+            result = {"status": "error", "message": str(e)}
+        show_json(result) if output_json else show_mission_binding_result(result)
+    asyncio.run(_run())
+
+
+@mission_binding_group.command("get")
+@click.argument("tenant_id")
+@click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
+@click.pass_context
+def mission_binding_get_cmd(ctx, tenant_id, output_json):
+    """Afficher le binding d'un tenant."""
+    async def _run():
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=10) as http:
+                resp = await http.get(
+                    f"{ctx.obj['url']}/admin/api/mission-bindings/{tenant_id}",
+                    headers={"Authorization": f"Bearer {ctx.obj['token']}"},
+                )
+                result = resp.json()
+        except Exception as e:
+            result = {"status": "error", "message": str(e)}
+        show_json(result) if output_json else show_mission_binding_result(result)
+    asyncio.run(_run())
+
+
+@mission_binding_group.command("delete")
+@click.argument("tenant_id")
+@click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
+@click.pass_context
+def mission_binding_delete_cmd(ctx, tenant_id, output_json):
+    """Révoquer l'octroi d'un tenant."""
+    async def _run():
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=10) as http:
+                resp = await http.delete(
+                    f"{ctx.obj['url']}/admin/api/mission-bindings/{tenant_id}",
+                    headers={"Authorization": f"Bearer {ctx.obj['token']}"},
+                )
+                result = resp.json()
+        except Exception as e:
+            result = {"status": "error", "message": str(e)}
+        show_json(result) if output_json else show_mission_binding_result(result)
+    asyncio.run(_run())
+
+
+@mission_binding_group.command("purge")
+@click.option("--older-than", type=int, default=30, show_default=True,
+              help="Ne purger que les bindings expirés depuis plus de N jours")
+@click.option("--dry-run", is_flag=True, help="Lister les candidats sans rien supprimer")
+@click.option("--yes", "-y", is_flag=True, help="Confirmer la purge sans prompt")
+@click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
+@click.pass_context
+def mission_binding_purge_cmd(ctx, older_than, dry_run, yes, output_json):
+    """Purger définitivement les bindings expirés depuis plus de N jours (irréversible)."""
+    async def _run():
+        import httpx
+        base = ctx.obj["url"]
+        headers = {"Authorization": f"Bearer {ctx.obj['token']}"}
+        # Dry-run préalable pour le décompte
+        try:
+            async with httpx.AsyncClient(timeout=10) as http:
+                preview = (await http.post(f"{base}/admin/api/mission-bindings/purge", headers=headers,
+                           json={"older_than_days": older_than, "dry_run": True})).json()
+        except Exception as e:
+            preview = {"status": "error", "message": str(e)}
+        if preview.get("status") != "ok":
+            return show_json(preview) if output_json else show_mission_binding_result(preview)
+
+        n = preview.get("count", 0)
+        if dry_run:
+            return show_json(preview) if output_json else show_mission_binding_result(preview)
+        if n == 0:
+            if output_json:
+                show_json(preview)
+            else:
+                click.echo(f"Aucun binding expiré depuis plus de {older_than} jours à purger.")
+            return
+        if not yes:
+            click.confirm(f"Purger DÉFINITIVEMENT {n} binding(s) expiré(s) depuis >{older_than}j ? Irréversible.",
+                          abort=True)
+        try:
+            async with httpx.AsyncClient(timeout=10) as http:
+                result = (await http.post(f"{base}/admin/api/mission-bindings/purge", headers=headers,
+                          json={"older_than_days": older_than, "dry_run": False})).json()
+        except Exception as e:
+            result = {"status": "error", "message": str(e)}
+        show_json(result) if output_json else show_mission_binding_result(result)
     asyncio.run(_run())
 
 

@@ -56,10 +56,12 @@ def check_access(resource_id: str) -> Optional[dict]:
             }
         return None
 
-    # Identité mission JWT sans périmètre explicite → REFUS (issue #47).
-    # Le mission_token ne porte aucune autorisation vault ; le périmètre vient
-    # d'un provisioning local (MissionBindingStore, PR ultérieure). Sans lui,
-    # PAS de fallback owner-based : deny-by-default (anti fail-open).
+    # Identité mission JWT sans périmètre explicite → REFUS (issues #47/#69).
+    # Le mission_token ne porte aucune autorisation vault ; le périmètre est
+    # provisionné localement (MissionBindingStore, #69) et injecté dans
+    # allowed_resources ci-dessus. Quand il est vide (binding absent/désactivé/
+    # expiré, ou store indisponible → 503 en amont), cette garde reste le filet
+    # fail-close : PAS de fallback owner-based (anti fail-open).
     if token_info.get("auth_type") == "mission_jwt":
         return {
             "status": "error",
@@ -131,21 +133,25 @@ def get_listing_filter() -> dict:
     return {"visible": True, "allowed_vault_ids": None, "owner_filter": client_name}
 
 
-# ── Périmètre outils des identités mission JWT (issue #47) ──────────────────────
+# ── Périmètre outils des identités mission JWT (issues #47 / #69) ───────────────
 # Deny-by-default : un mission_jwt ne peut appeler que les outils listés ici.
-# - ALLOWED : data-plane scopé par vault — les gardes fins (check_access sur le
-#   périmètre provisionné, check_write_permission, policies) s'appliquent PAR-DESSUS.
+# DATA-PLANE STRICT (arbitrage produit #69, revue Codex BLOQUANT-3) : une mission
+# lit/écrit des SECRETS dans ses coffres autorisés — rien de plus. L'admin-plane
+# (vault_create/update/delete, ssh_* : créer/détruire des coffres, gérer des autorités
+# SSH) reste RÉSERVÉ aux bearers admin : une mission ne se voit JAMAIS déléguer de
+# surface d'administration, même avec le droit d'écriture.
+# - Cette allow-list est un PLAFOND DUR : un binding ne peut PAS l'élargir. Les gardes
+#   fins (check_access sur le périmètre provisionné, check_write_permission, policies)
+#   s'appliquent PAR-DESSUS. secret_write/secret_delete exigent le droit "write".
 # - PUBLIC : utilitaires sans donnée ni métadonnée d'infra (enum statique, RNG).
-# NON listés (donc refusés aux mission_jwt) : system_health/system_about (exposent
-# openbao_addr/S3/platform — la liveness reste publique via HTTP /health),
-# pki_* (inventaire PKI), policy_*, token_update, audit_log, secret_wrap/revoke/
-# lookup (admin-gated de toute façon). secret_consume n'appelle pas check_policy :
+# NON listés (donc refusés aux mission_jwt) : vault_create/update/delete + ssh_*
+# (admin-plane), system_health/system_about (exposent openbao_addr/S3/platform — la
+# liveness reste publique via HTTP /health), pki_*, policy_*, token_update, audit_log,
+# secret_wrap/revoke/lookup (admin-gated). secret_consume n'appelle pas check_policy :
 # il s'auto-garde par la validation C18 de son paramètre mission_token.
 MISSION_JWT_ALLOWED_TOOLS = frozenset({
-    "vault_create", "vault_list", "vault_info", "vault_update", "vault_delete",
-    "secret_write", "secret_read", "secret_list", "secret_delete",
-    "ssh_ca_setup", "ssh_sign_key", "ssh_ca_public_key",
-    "ssh_ca_list_roles", "ssh_ca_role_info",
+    "vault_list", "vault_info",
+    "secret_read", "secret_list", "secret_write", "secret_delete",
 })
 
 MISSION_JWT_PUBLIC_TOOLS = frozenset({

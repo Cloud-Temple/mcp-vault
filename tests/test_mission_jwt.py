@@ -810,7 +810,7 @@ class TestAuthMiddlewareJwtMode:
         info = h.captured["token_info"]
         assert info["auth_type"] == "mission_jwt"
         assert info["client_name"] == f"mission:{TENANT_ID}"
-        assert info["allowed_resources"] == []      # PR1 : aucun périmètre vault
+        assert info["allowed_resources"] == []      # aucun binding store configuré → deny-all (#69)
         assert info["policy_id"] == ""
         assert "admin" not in info["permissions"]
         assert info["tenant_id"] == TENANT_ID
@@ -921,6 +921,99 @@ class TestAuthMiddlewareJwtMode:
         detail = mock_audit.call_args.kwargs.get("detail", "")
         assert "reason=component_id_mismatch" in detail
         assert f"tenant_id={TENANT_ID}" in detail
+
+
+class TestAuthMiddlewareMissionBinding:
+    """#69 : résolution du périmètre vault via le MissionBindingStore à la porte /mcp."""
+
+    def _setup(self, status_url=""):
+        priv, pub = _make_es256_keypair()
+        cache = _static_cache(_make_jwks(pub))
+        h = _MiddlewareHarness(_pep_settings(mode="jwt", status_url=status_url),
+                               jwks_cache=cache)
+        return priv, h
+
+    def _store(self, resolve_return=None, resolve_exc=None):
+        from unittest.mock import MagicMock
+        store = MagicMock()
+        if resolve_exc is not None:
+            store.resolve.side_effect = resolve_exc
+        else:
+            store.resolve.return_value = resolve_return
+        return store
+
+    def test_binding_grants_real_scope(self):
+        priv, h = self._setup()
+        store = self._store(resolve_return={
+            "instance_id": INSTANCE_ID, "tenant_id": TENANT_ID, "policy_id": "pol1",
+            "allowed_resources": ["prod", "staging"], "permissions": ["read", "write"],
+            "enabled": True, "expires_at": None,
+        })
+        with patch("mcp_vault.auth.mission_bindings.get_mission_binding_store",
+                   return_value=store):
+            events = h.call(token=_make_mission_token(priv))
+        assert h.status_of(events) == 200
+        info = h.captured["token_info"]
+        assert info["allowed_resources"] == ["prod", "staging"]
+        assert info["permissions"] == ["read", "write"]
+        assert info["policy_id"] == "pol1"
+        # La clé de lookup DOIT être le tenant_id cryptographiquement validé (anti fail-open).
+        store.resolve.assert_called_once_with(TENANT_ID)
+
+    def test_read_only_binding(self):
+        priv, h = self._setup()
+        store = self._store(resolve_return={
+            "instance_id": INSTANCE_ID, "tenant_id": TENANT_ID, "policy_id": "",
+            "allowed_resources": ["prod"], "permissions": ["read"],
+            "enabled": True, "expires_at": None,
+        })
+        with patch("mcp_vault.auth.mission_bindings.get_mission_binding_store",
+                   return_value=store):
+            events = h.call(token=_make_mission_token(priv))
+        info = h.captured["token_info"]
+        assert info["permissions"] == ["read"]
+        assert "write" not in info["permissions"]
+
+    def test_no_binding_denies_all(self):
+        priv, h = self._setup()
+        store = self._store(resolve_return=None)  # aucun binding pour ce tenant
+        with patch("mcp_vault.auth.mission_bindings.get_mission_binding_store",
+                   return_value=store):
+            events = h.call(token=_make_mission_token(priv))
+        assert h.status_of(events) == 200
+        info = h.captured["token_info"]
+        assert info["allowed_resources"] == [] and info["policy_id"] == ""
+
+    def test_store_unavailable_503(self):
+        from mcp_vault.auth.mission_bindings import MissionBindingStoreUnavailable
+        priv, h = self._setup()
+        store = self._store(resolve_exc=MissionBindingStoreUnavailable("S3 down"))
+        with patch("mcp_vault.auth.mission_bindings.get_mission_binding_store",
+                   return_value=store):
+            events = h.call(token=_make_mission_token(priv))
+        assert h.status_of(events) == 503
+        assert "token_info" not in h.captured, "l'app ne doit PAS être atteinte"
+
+    def test_store_unavailable_is_audited(self):
+        from mcp_vault.auth.mission_bindings import MissionBindingStoreUnavailable
+        priv, h = self._setup()
+        store = self._store(resolve_exc=MissionBindingStoreUnavailable("S3 down"))
+        with patch("mcp_vault.auth.mission_bindings.get_mission_binding_store",
+                   return_value=store), \
+             patch("mcp_vault.audit.log_audit") as mock_audit:
+            h.call(token=_make_mission_token(priv))
+        assert mock_audit.called
+        detail = mock_audit.call_args.kwargs.get("detail", "")
+        assert "reason=binding_store_unavailable" in detail
+        assert f"tenant_id={TENANT_ID}" in detail  # identité tracée, jamais le token
+
+    def test_no_store_configured_denies_all(self):
+        priv, h = self._setup()
+        with patch("mcp_vault.auth.mission_bindings.get_mission_binding_store",
+                   return_value=None):
+            events = h.call(token=_make_mission_token(priv))
+        assert h.status_of(events) == 200
+        assert h.captured["token_info"]["allowed_resources"] == []
 
 
 class TestAuthMiddlewareDualStack:
@@ -1161,16 +1254,21 @@ class TestEnforceMissionJwtTool:
 
     @pytest.mark.parametrize("tool", ["pki_ca_list_roles", "pki_ca_public_key",
                                       "pki_list_certs", "system_health",
-                                      "system_about", "audit_log"])
+                                      "system_about", "audit_log",
+                                      # #69 data-plane strict : l'admin-plane est
+                                      # désormais REFUSÉ aux missions (BLOQUANT-3 Codex).
+                                      "vault_create", "vault_update", "vault_delete",
+                                      "ssh_ca_setup", "ssh_sign_key", "ssh_ca_public_key",
+                                      "ssh_ca_list_roles", "ssh_ca_role_info"])
     def test_mission_jwt_denied_outside_allowlist(self, tool):
         from mcp_vault.auth.context import enforce_mission_jwt_tool
         with _ContextVarGuard(_mission_token_info()):
             err = enforce_mission_jwt_tool(tool)
         assert err is not None and err["status"] == "error"
 
-    @pytest.mark.parametrize("tool", ["vault_list", "secret_read", "secret_write",
-                                      "ssh_sign_key", "secret_types",
-                                      "secret_generate_password"])
+    @pytest.mark.parametrize("tool", ["vault_list", "vault_info", "secret_read",
+                                      "secret_list", "secret_write", "secret_delete",
+                                      "secret_types", "secret_generate_password"])
     def test_mission_jwt_allowed_tools(self, tool):
         from mcp_vault.auth.context import enforce_mission_jwt_tool
         with _ContextVarGuard(_mission_token_info()):
@@ -1300,7 +1398,10 @@ class TestAdminJwksReload:
         for path, method in [("/admin/api/vaults", "GET"),
                              ("/admin/api/whoami", "GET"),
                              ("/admin/api/health", "GET"),
-                             ("/admin/api/auth/jwks/reload", "POST")]:
+                             ("/admin/api/auth/jwks/reload", "POST"),
+                             # #69 : une mission ne peut JAMAIS s'auto-octroyer un périmètre.
+                             ("/admin/api/mission-bindings", "GET"),
+                             ("/admin/api/mission-bindings", "POST")]:
             scope = {"type": "http", "method": method, "path": path,
                      "headers": [(b"authorization", b"Bearer " + token.encode())],
                      "query_string": b""}
