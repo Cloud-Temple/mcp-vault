@@ -227,10 +227,11 @@ class AuthMiddleware:
     async def _validate_mission_jwt(self, token, settings):
         """Valide un mission_token JWT et construit le token_info synthétique.
 
-        PR #47 (durcissement PEP) : l'identité mission est AUTHENTIFIÉE et liée à
-        l'instance, mais n'a AUCUN périmètre vault (allowed_resources=[] +
-        auth_type="mission_jwt" → deny-by-default dans check_access). Le périmètre
-        viendra du MissionBindingStore (PR ultérieure).
+        Le mission_token ne porte AUCUNE autz vault : mcp-vault (PDP local) authentifie
+        l'identité + la lie à l'instance (PR #47), puis résout le périmètre provisionné
+        pour ce tenant dans le MissionBindingStore (#69). Absent/désactivé/expiré →
+        allowed_resources=[] + auth_type="mission_jwt" → deny-by-default (check_access,
+        jamais owner-based). Store configuré mais indisponible → 503 (jamais deny silencieux).
         """
         from .mission_jwt import (
             JWKSUnavailable,
@@ -289,14 +290,35 @@ class AuthMiddleware:
                 return None, (status, f"mission_inactive:{why}", claims_ctx)
 
         tenant_id = claims["tenant_id"]
+
+        # ── Résolution du périmètre vault local (MissionBindingStore, #69) ──────
+        # deny-all par défaut : sans binding, allowed_resources=[] → check_access refuse.
+        allowed_resources: list = []
+        permissions: list = ["read"]
+        policy_id: str = ""
+        from .mission_bindings import (
+            MissionBindingStoreUnavailable,
+            get_mission_binding_store,
+        )
+        binding_store = get_mission_binding_store()
+        if binding_store is not None:
+            try:
+                binding = binding_store.resolve(tenant_id)
+            except MissionBindingStoreUnavailable:
+                # Store configuré mais indisponible/corrompu → refus OBSERVABLE (audité
+                # via _audit_pep_deny), jamais un deny silencieux masquant la panne du PDP.
+                return None, (503, "binding_store_unavailable", claims_ctx)
+            if binding is not None:
+                allowed_resources = list(binding.get("allowed_resources", []))
+                permissions = list(binding.get("permissions", ["read"]))
+                policy_id = binding.get("policy_id", "") or ""
+
         return {
             "auth_type": "mission_jwt",
             "client_name": f"mission:{tenant_id}",
-            "permissions": ["read"],
-            # PR #47 : aucun périmètre vault — deny garanti par la garde
-            # auth_type=="mission_jwt" de check_access (jamais owner-based).
-            "allowed_resources": [],
-            "policy_id": "",
+            "permissions": permissions,
+            "allowed_resources": allowed_resources,
+            "policy_id": policy_id,
             "tenant_id": tenant_id,
             "mission_id": claims["mission_id"],
             "jti": claims["jti"],
