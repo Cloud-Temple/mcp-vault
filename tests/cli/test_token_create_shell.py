@@ -83,6 +83,16 @@ def test_shell_create_expires_valeur_manquante_ne_poste_rien():
     assert fake.posts == []
 
 
+def test_shell_create_expires_signe_plus_ne_poste_rien():
+    fake = _run("create c --expires +5", queue=[])  # signe explicite → rejeté (contrat strict)
+    assert fake.posts == []
+
+
+def test_shell_create_expires_chiffre_non_ascii_ne_poste_rien():
+    fake = _run("create c --expires ٥", queue=[])  # ٥ = chiffre arabe (isdigit mais non-ASCII)
+    assert fake.posts == []
+
+
 def test_shell_create_expires_zero_illimite_poste():
     fake = _run("create c --expires 0", queue=[_CREATED])
     assert len(fake.posts) == 1

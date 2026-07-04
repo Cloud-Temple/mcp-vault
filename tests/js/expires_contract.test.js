@@ -27,6 +27,8 @@ const cases = [
     ['0.0', null],       // float rejeté (parseInt eût donné 0)
     ['1abc', null],      // garbage rejeté (parseInt eût donné 1)
     ['-1', null],        // négatif rejeté
+    ['+5', null],        // signe explicite rejeté (contrat [0-9]+ strict)
+    ['٥', null],    // ٥ = chiffre arabe (non-ASCII) rejeté
     ['36501', null],     // hors borne
     ['abc', null],       // texte rejeté
     ['1e3', null],       // notation exponentielle rejetée

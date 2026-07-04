@@ -580,17 +580,18 @@ async def cmd_token(client, args="", json_output=False):
                 vaults = [s.strip() for s in parts[i + 1].split(",")]
                 i += 2
             elif parts[i] == "--expires":
-                # Contrat #65 : 0 = jamais, sinon entier [1,36500]. Non-entier / négatif /
-                # hors borne / valeur manquante → fail-close (pas de coercition silencieuse).
+                # Contrat #65 STRICT (aligné front/API, un seul contrat auditable) : entier
+                # ASCII [0,36500], 0 = jamais. isascii()+isdigit() = [0-9]+ pur → rejette
+                # non-entier, négatif, "+5", chiffres non-ASCII ("٥"), float, valeur manquante.
+                # Fail-close : aucune coercition, aucun POST.
                 if i + 1 >= len(parts):
                     expires_err = True
                     i += 1
                 else:
-                    try:
-                        expires = int(parts[i + 1])
-                    except ValueError:
-                        expires = None
-                    if expires is None or expires < 0 or expires > 36500:
+                    raw = parts[i + 1]
+                    if raw.isascii() and raw.isdigit() and int(raw) <= 36500:
+                        expires = int(raw)
+                    else:
                         expires_err = True
                     i += 2
             elif parts[i] == "--email" and i + 1 < len(parts):

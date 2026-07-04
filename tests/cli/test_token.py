@@ -48,7 +48,9 @@ def test_token():
     section("token create --expires — validation IntRange (issue #65)")
     # Invalides rejetés par Click AVANT tout POST (exit != 0) : négatif, hors borne,
     # non-entier. Empêche l'illimité accidentel via valeur négative et le crash.
-    for bad in ["36501", "abc", "1.5"]:
+    # Contrat STRICT [0-9]+ : négatif, hors borne, non-entier, signe explicite (+5) et
+    # chiffre non-ASCII (٥) sont tous rejetés — aligné sur le front (pas de coercition).
+    for bad in ["-1", "36501", "abc", "1.5", "+5", "٥"]:
         r = run_cli(["token", "create", "agent-x", "--expires", bad])
         check(f"--expires {bad} rejeté (exit != 0)", r.exit_code != 0)
     # 0 = jamais expirer (illimité EXPLICITE) : accepté et transmis tel quel au POST.

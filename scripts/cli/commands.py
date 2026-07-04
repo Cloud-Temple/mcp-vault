@@ -1001,12 +1001,33 @@ def token_group(ctx):
     pass
 
 
+class _ExpiresDaysType(click.ParamType):
+    """Contrat #65 STRICT (aligné front/API, un seul contrat auditable) : entier ASCII
+    [0, 36500], 0 = jamais. isascii()+isdigit() = [0-9]+ pur → rejette non-entier, négatif,
+    '+5', chiffres non-ASCII ('٥'), float. Pas de coercition (contrairement à IntRange/int())."""
+    name = "days"
+
+    def convert(self, value, param, ctx):
+        if isinstance(value, int) and not isinstance(value, bool):
+            n = value  # valeur par défaut (90) déjà entière
+        elif isinstance(value, str) and value.isascii() and value.isdigit():
+            n = int(value)
+        else:
+            self.fail(f"{value!r} : entier de jours attendu (0=jamais, sans signe ni décimale)", param, ctx)
+        if n > 36500:
+            self.fail(f"{value!r} : hors borne (max 36500)", param, ctx)
+        return n
+
+
+_EXPIRES_DAYS = _ExpiresDaysType()
+
+
 @token_group.command("create")
 @click.argument("name")
 @click.option("--permissions", "-p", default="read,write", help="Permissions (virgule: read,write,admin)")
 @click.option("--vaults", "-s", default="", help="Vaults autorisés (virgule, vide = owner-based)")
 @click.option("--policy", default="", help="Policy ID à assigner (contrôle outils + chemins)")
-@click.option("--expires", "-e", default=90, type=click.IntRange(0, 36500),
+@click.option("--expires", "-e", default=90, type=_EXPIRES_DAYS,
               help="Expiration en jours (0=jamais, max 36500)")
 @click.option("--email", default="", help="Email du propriétaire")
 @click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
