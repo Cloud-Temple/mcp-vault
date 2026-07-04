@@ -301,6 +301,41 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
         name = path.split("/")[-1]
         return await _api_revoke_token(send, name)
 
+    # --- Routes mission-bindings (octroi périmètre vault mission JWT, admin only, #69) ---
+    # Surface d'administration séparée : bearer/bootstrap admin uniquement. Une identité
+    # mission_jwt ne peut JAMAIS l'atteindre (elle n'a pas la permission "admin").
+    if path == "/admin/api/mission-bindings" and method == "GET":
+        if not is_admin:
+            return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
+        return await _api_list_mission_bindings(send)
+
+    if path == "/admin/api/mission-bindings" and method == "POST":
+        if not is_admin:
+            return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
+        body = await _read_body(receive)
+        return await _api_create_mission_binding(send, body)
+
+    # /purge AVANT le segment variable /{tenant_id} (sinon 'purge' serait pris pour un id).
+    if path == "/admin/api/mission-bindings/purge" and method == "POST":
+        if not is_admin:
+            return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
+        body = await _read_body(receive)
+        return await _api_purge_mission_bindings(send, body)
+
+    if path.startswith("/admin/api/mission-bindings/") and method == "GET":
+        tenant_id = path[len("/admin/api/mission-bindings/"):]
+        if tenant_id and "/" not in tenant_id:
+            if not is_admin:
+                return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
+            return await _api_get_mission_binding(send, tenant_id)
+
+    if path.startswith("/admin/api/mission-bindings/") and method == "DELETE":
+        tenant_id = path[len("/admin/api/mission-bindings/"):]
+        if tenant_id and "/" not in tenant_id:
+            if not is_admin:
+                return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
+            return await _api_delete_mission_binding(send, tenant_id)
+
     # --- PKI Certificate Authority ---
     if path == "/admin/api/pki/status" and method == "GET":
         return await _api_pki_status(send)
@@ -840,6 +875,163 @@ async def _api_delete_policy(send, policy_id):
         await _json_response(send, 503, {"status": "error", "message": "Suppression non persistée (S3 indisponible)"})
     else:
         await _json_response(send, 404, {"status": "error", "message": f"Policy '{policy_id}' non trouvée"})
+
+
+# =============================================================================
+# Endpoints — Mission Bindings (octroi périmètre vault mission JWT, #69)
+# =============================================================================
+
+def _binding_decision_id() -> str:
+    """decision_id local (uuid4) pour tracer une mutation d'octroi dans l'audit."""
+    import uuid
+    return uuid.uuid4().hex
+
+
+async def _api_list_mission_bindings(send):
+    """GET /admin/api/mission-bindings — Liste des bindings de cette instance."""
+    from ..auth.mission_bindings import (
+        MissionBindingStoreUnavailable,
+        get_mission_binding_store,
+    )
+    store = get_mission_binding_store()
+    if not store:
+        return await _json_response(send, 200, {"status": "ok", "bindings": [],
+                                                "message": "Mission Binding Store non configuré"})
+    try:
+        bindings = store.list_all()
+    except MissionBindingStoreUnavailable as e:
+        return await _json_response(send, 503, {"status": "error",
+                "message": f"Mission Binding Store indisponible ({e})"})
+    await _json_response(send, 200, {"status": "ok", "bindings": bindings, "count": len(bindings)})
+
+
+async def _api_create_mission_binding(send, body):
+    """POST /admin/api/mission-bindings — Créer/octroyer un périmètre à un tenant.
+
+    Body JSON : {tenant_id, allowed_resources:[...], permissions:['read'|'read','write'],
+                 policy_id?, expires_at?, enabled?}. Réservé admin. Le store valide en
+    profondeur (permissions strictes, vault_id, unicité, intégrité policy_id)."""
+    from ..auth.context import get_current_client_name
+    from ..auth.mission_bindings import get_mission_binding_store
+    store = get_mission_binding_store()
+    if not store:
+        return await _json_response(send, 400, {"status": "error",
+                "message": "Mission Binding Store non configuré"})
+
+    try:
+        data = json.loads(body) if body else {}
+    except (json.JSONDecodeError, ValueError):
+        return await _json_response(send, 400, {"status": "error", "message": "JSON invalide"})
+
+    # tenant_id passé tel quel : le store valide le format (non-str compris) et refuse proprement.
+    result = store.create(
+        tenant_id=data.get("tenant_id", ""),
+        allowed_resources=data.get("allowed_resources", []),
+        permissions=data.get("permissions", []),
+        policy_id=data.get("policy_id", "") or "",
+        expires_at=data.get("expires_at"),
+        enabled=bool(data.get("enabled", True)),
+        created_by=get_current_client_name(),
+    )
+    if result.get("status") == "created":
+        did = _binding_decision_id()
+        log_audit("mission_binding_create", "created",
+                  detail=f"decision_id={did} tenant={result.get('tenant_id')} "
+                         f"vaults={len(result.get('allowed_resources', []))} "
+                         f"permissions={','.join(result.get('permissions', []))} "
+                         f"policy_id={result.get('policy_id', '')}")
+        return await _json_response(send, 201, result)
+    if result.get("error_type") == "storage_unavailable":
+        return await _json_response(send, 503, result)
+    return await _json_response(send, 400, result)
+
+
+async def _api_get_mission_binding(send, tenant_id):
+    """GET /admin/api/mission-bindings/{tenant_id} — Détail d'un binding."""
+    from ..auth.mission_bindings import (
+        MissionBindingStoreUnavailable,
+        get_mission_binding_store,
+    )
+    store = get_mission_binding_store()
+    if not store:
+        return await _json_response(send, 400, {"status": "error",
+                "message": "Mission Binding Store non configuré"})
+    try:
+        binding = store.get(tenant_id)
+    except MissionBindingStoreUnavailable as e:
+        return await _json_response(send, 503, {"status": "error",
+                "message": f"Mission Binding Store indisponible ({e})"})
+    if not binding:
+        return await _json_response(send, 404, {"status": "error",
+                "message": f"Binding pour tenant '{tenant_id}' non trouvé"})
+    await _json_response(send, 200, {"status": "ok", **binding})
+
+
+async def _api_delete_mission_binding(send, tenant_id):
+    """DELETE /admin/api/mission-bindings/{tenant_id} — Révoquer un octroi."""
+    from ..auth.mission_bindings import get_mission_binding_store
+    store = get_mission_binding_store()
+    if not store:
+        return await _json_response(send, 400, {"status": "error",
+                "message": "Mission Binding Store non configuré"})
+    result = store.delete(tenant_id)
+    if result is True:
+        did = _binding_decision_id()
+        log_audit("mission_binding_delete", "deleted",
+                  detail=f"decision_id={did} tenant={tenant_id}")
+        return await _json_response(send, 200, {"status": "deleted", "tenant_id": tenant_id})
+    if result == "storage_error":
+        log_audit("mission_binding_delete", "error",
+                  detail=f"tenant={tenant_id} NON PERSISTÉE (S3 indisponible)")
+        return await _json_response(send, 503, {"status": "error",
+                "message": "Suppression non persistée (S3 indisponible)"})
+    if result == "storage_unavailable":
+        return await _json_response(send, 503, {"status": "error",
+                "message": "Mission Binding Store indisponible — suppression non tentée"})
+    return await _json_response(send, 404, {"status": "error",
+            "message": f"Binding pour tenant '{tenant_id}' non trouvé"})
+
+
+async def _api_purge_mission_bindings(send, body):
+    """POST /admin/api/mission-bindings/purge — Purger les bindings expirés (rétention).
+
+    Body JSON optionnel : {"older_than_days": int (défaut 30), "dry_run": bool}. Réservé admin.
+    Chaque binding réellement purgé est audité (trace persistante indépendante du fichier)."""
+    from ..auth.mission_bindings import get_mission_binding_store
+    store = get_mission_binding_store()
+    if not store:
+        return await _json_response(send, 400, {"status": "error",
+                "message": "Mission Binding Store non configuré"})
+    try:
+        data = json.loads(body) if body else {}
+    except (json.JSONDecodeError, ValueError):
+        return await _json_response(send, 400, {"status": "error", "message": "JSON invalide"})
+
+    older_than_days = data.get("older_than_days", 30)
+    if (isinstance(older_than_days, bool) or not isinstance(older_than_days, int)
+            or older_than_days < 0 or older_than_days > 36500):
+        return await _json_response(send, 400, {"status": "error",
+                "message": "older_than_days doit être un entier entre 0 et 36500"})
+    dry_run = bool(data.get("dry_run", False))
+
+    result = store.purge(older_than_days, dry_run=dry_run)
+
+    if not dry_run and result.get("status") == "ok":
+        did = _binding_decision_id()
+        for c in result.get("purged", []):
+            log_audit("mission_binding_purge", "deleted",
+                      detail=f"decision_id={did} tenant={c.get('tenant_id')} "
+                             f"expires_at={c.get('expires_at')}")
+        log_audit("mission_binding_purge", "ok",
+                  detail=f"decision_id={did} count={result.get('count', 0)} "
+                         f"older_than_days={older_than_days}")
+    elif not dry_run and result.get("error_type") == "storage_unavailable":
+        log_audit("mission_binding_purge", "error",
+                  detail=f"purge NON persistée (S3) older_than_days={older_than_days}")
+        return await _json_response(send, 503, {"status": "error",
+                "message": result.get("message", "Purge non persistée — S3 indisponible")})
+
+    await _json_response(send, 200, result)
 
 
 # =============================================================================

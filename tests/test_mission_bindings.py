@@ -18,6 +18,8 @@ Non-complaisant — on prouve les invariants de sécurité, pas la couverture :
 Aucune dépendance S3 / Docker : le client S3 est mocké au niveau _get_s3_data.
 """
 
+import asyncio
+import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -25,6 +27,10 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+def _run(coro):
+    return asyncio.run(coro)
 
 # Convention du projet : mcp_vault vit dans src/ (pas d'install du package)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -512,3 +518,183 @@ class TestEncodeInstanceId:
 
     def test_distinct_for_distinct_instances(self):
         assert _encode_instance_id("a:b") != _encode_instance_id("a_b")  # anti-collision
+
+
+# =============================================================================
+# API admin REST /admin/api/mission-bindings — gates + codes HTTP
+# =============================================================================
+
+def _call_admin(path, method, body=b"", token_info="admin", store="unset"):
+    """Appelle handle_admin_api en injectant token_info (auth) et le store factice."""
+    from mcp_vault.admin.api import handle_admin_api
+    scope = {"type": "http", "method": method, "path": path,
+             "headers": [(b"authorization", b"Bearer test-tok")], "query_string": b""}
+    events = []
+
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(ev):
+        events.append(ev)
+
+    if token_info == "admin":
+        token_info = {"client_name": "admin", "permissions": ["admin"], "allowed_resources": []}
+
+    ti = patch("mcp_vault.admin.api._get_token_info", return_value=token_info)
+    if store != "unset":
+        store_ctx = patch("mcp_vault.auth.mission_bindings.get_mission_binding_store",
+                          return_value=store)
+    else:
+        store_ctx = patch("mcp_vault.auth.mission_bindings.get_mission_binding_store",
+                          return_value=None)
+    with ti, store_ctx:
+        _run(handle_admin_api(scope, receive, send, None))
+
+    start = next(e for e in events if e["type"] == "http.response.start")
+    body_ev = next(e for e in events if e["type"] == "http.response.body")
+    return start["status"], (json.loads(body_ev["body"]) if body_ev["body"] else {})
+
+
+def _fake_admin_store():
+    """Store MagicMock disponible pour les tests API (réponses configurables par test)."""
+    store = MagicMock()
+    store.list_all.return_value = []
+    store.create.return_value = {"status": "created", "tenant_id": "acme",
+                                 "allowed_resources": ["prod"], "permissions": ["read"],
+                                 "policy_id": ""}
+    return store
+
+
+class TestMissionBindingAdminApi:
+    def test_list_no_token_401(self):
+        status, _ = _call_admin("/admin/api/mission-bindings", "GET", token_info=None)
+        assert status == 401
+
+    def test_list_non_admin_403(self):
+        status, _ = _call_admin("/admin/api/mission-bindings", "GET",
+                                token_info={"client_name": "u", "permissions": ["read", "write"],
+                                            "allowed_resources": []})
+        assert status == 403
+
+    def test_create_non_admin_403(self):
+        status, _ = _call_admin("/admin/api/mission-bindings", "POST",
+                                body=b'{"tenant_id":"acme"}',
+                                token_info={"client_name": "u", "permissions": ["write"],
+                                            "allowed_resources": []})
+        assert status == 403
+
+    def test_list_ok(self):
+        store = _fake_admin_store()
+        store.list_all.return_value = [{"tenant_id": "acme"}]
+        status, body = _call_admin("/admin/api/mission-bindings", "GET", store=store)
+        assert status == 200 and body["count"] == 1
+
+    def test_list_store_unavailable_503(self):
+        store = _fake_admin_store()
+        store.list_all.side_effect = MissionBindingStoreUnavailable("S3 down")
+        status, body = _call_admin("/admin/api/mission-bindings", "GET", store=store)
+        assert status == 503 and body["status"] == "error"
+
+    def test_create_201(self):
+        store = _fake_admin_store()
+        status, body = _call_admin("/admin/api/mission-bindings", "POST",
+                                   body=b'{"tenant_id":"acme","allowed_resources":["prod"],"permissions":["read"]}',
+                                   store=store)
+        assert status == 201 and body["status"] == "created"
+
+    def test_create_validation_error_400(self):
+        store = _fake_admin_store()
+        store.create.return_value = {"status": "error", "message": "permissions..."}
+        status, _ = _call_admin("/admin/api/mission-bindings", "POST",
+                                body=b'{"tenant_id":"acme"}', store=store)
+        assert status == 400
+
+    def test_create_storage_unavailable_503(self):
+        store = _fake_admin_store()
+        store.create.return_value = {"status": "error", "error_type": "storage_unavailable",
+                                     "message": "S3"}
+        status, _ = _call_admin("/admin/api/mission-bindings", "POST",
+                                body=b'{"tenant_id":"acme"}', store=store)
+        assert status == 503
+
+    def test_get_found_200(self):
+        store = _fake_admin_store()
+        store.get.return_value = {"tenant_id": "acme", "allowed_resources": ["prod"]}
+        status, body = _call_admin("/admin/api/mission-bindings/acme", "GET", store=store)
+        assert status == 200 and body["tenant_id"] == "acme"
+
+    def test_get_not_found_404(self):
+        store = _fake_admin_store()
+        store.get.return_value = None
+        status, _ = _call_admin("/admin/api/mission-bindings/ghost", "GET", store=store)
+        assert status == 404
+
+    def test_get_store_unavailable_503(self):
+        store = _fake_admin_store()
+        store.get.side_effect = MissionBindingStoreUnavailable("down")
+        status, _ = _call_admin("/admin/api/mission-bindings/acme", "GET", store=store)
+        assert status == 503
+
+    def test_delete_200(self):
+        store = _fake_admin_store()
+        store.delete.return_value = True
+        status, body = _call_admin("/admin/api/mission-bindings/acme", "DELETE", store=store)
+        assert status == 200 and body["status"] == "deleted"
+
+    def test_delete_not_found_404(self):
+        store = _fake_admin_store()
+        store.delete.return_value = False
+        status, _ = _call_admin("/admin/api/mission-bindings/ghost", "DELETE", store=store)
+        assert status == 404
+
+    def test_delete_storage_error_503(self):
+        store = _fake_admin_store()
+        store.delete.return_value = "storage_error"
+        status, _ = _call_admin("/admin/api/mission-bindings/acme", "DELETE", store=store)
+        assert status == 503
+
+    def test_delete_store_unavailable_503(self):
+        store = _fake_admin_store()
+        store.delete.return_value = "storage_unavailable"
+        status, _ = _call_admin("/admin/api/mission-bindings/acme", "DELETE", store=store)
+        assert status == 503
+
+    def test_purge_routed_before_id_segment(self):
+        """POST /mission-bindings/purge → purge (PAS get/delete d'un tenant 'purge')."""
+        store = _fake_admin_store()
+        store.purge.return_value = {"status": "ok", "dry_run": False, "count": 0,
+                                    "older_than_days": 30, "purged": []}
+        status, body = _call_admin("/admin/api/mission-bindings/purge", "POST",
+                                   body=b'{"older_than_days":30}', store=store)
+        assert status == 200
+        store.purge.assert_called_once()  # bien routé vers purge, pas vers delete
+
+    def test_purge_bad_older_than_days_400(self):
+        store = _fake_admin_store()
+        status, _ = _call_admin("/admin/api/mission-bindings/purge", "POST",
+                                body=b'{"older_than_days":-5}', store=store)
+        assert status == 400
+        store.purge.assert_not_called()
+
+    def test_purge_storage_unavailable_503(self):
+        store = _fake_admin_store()
+        store.purge.return_value = {"status": "error", "error_type": "storage_unavailable",
+                                    "message": "S3"}
+        status, _ = _call_admin("/admin/api/mission-bindings/purge", "POST",
+                                body=b'{}', store=store)
+        assert status == 503
+
+    def test_store_not_configured_list_ok_empty(self):
+        status, body = _call_admin("/admin/api/mission-bindings", "GET", store="unset")
+        assert status == 200 and body["bindings"] == []
+
+    def test_create_audited_with_decision_id(self):
+        store = _fake_admin_store()
+        with patch("mcp_vault.admin.api.log_audit") as mock_audit:
+            _call_admin("/admin/api/mission-bindings", "POST",
+                        body=b'{"tenant_id":"acme","allowed_resources":["prod"],"permissions":["read"]}',
+                        store=store)
+        assert mock_audit.called
+        detail = mock_audit.call_args.kwargs.get("detail", "")
+        assert detail.startswith("decision_id=")  # decision_id en tête (survit à la troncature)
+        assert "tenant=acme" in detail

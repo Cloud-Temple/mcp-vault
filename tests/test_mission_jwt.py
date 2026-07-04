@@ -1398,7 +1398,10 @@ class TestAdminJwksReload:
         for path, method in [("/admin/api/vaults", "GET"),
                              ("/admin/api/whoami", "GET"),
                              ("/admin/api/health", "GET"),
-                             ("/admin/api/auth/jwks/reload", "POST")]:
+                             ("/admin/api/auth/jwks/reload", "POST"),
+                             # #69 : une mission ne peut JAMAIS s'auto-octroyer un périmètre.
+                             ("/admin/api/mission-bindings", "GET"),
+                             ("/admin/api/mission-bindings", "POST")]:
             scope = {"type": "http", "method": method, "path": path,
                      "headers": [(b"authorization", b"Bearer " + token.encode())],
                      "query_string": b""}
