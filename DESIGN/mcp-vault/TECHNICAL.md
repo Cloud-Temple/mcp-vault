@@ -1,6 +1,6 @@
 # Documentation Technique — MCP Vault
 
-> **Version** : 0.7.0 | **Date** : 2026-06-22 | **Auteur** : Cloud Temple
+> **Version** : 0.8.0 | **Date** : 2026-07-10 | **Auteur** : Cloud Temple
 > **Licence** : Apache 2.0 | **Statut** : ✅ Production-ready (audit V2.1 complété + PKI interne v0.5.1)
 
 ---
@@ -775,7 +775,7 @@ Voir `ARCHITECTURE.md §7.8` pour les détails complets.
 
 | Version             | Mécanisme                                    | Où vivent les clés         | Niveau         |
 | ------------------- | -------------------------------------------- | -------------------------- | -------------- |
-| **v0.7.0** (actuel) | AES-256-GCM+AAD + PBKDF2 + bootstrap key env | Mémoire Python au runtime  | 🟡 Bonne      |
+| **v0.8.0** (actuel) | AES-256-GCM+AAD + PBKDF2 + bootstrap key env | Mémoire Python au runtime  | 🟡 Bonne      |
 | **v1.0**            | Transit Auto-Unseal via OpenBao KMS dédié    | KMS dédié (Shamir 5/3)     | 🟢 Excellente |
 | **v2.0**            | HSM matériel (PKCS#11 / KMIP)                | HSM certifié FIPS 140-2 L3 | 🟢 Maximale   |
 

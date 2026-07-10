@@ -386,7 +386,7 @@ Les clés unseal d'OpenBao sont protégées par **séparation physique à 3 fact
 
 | Version              | Approche                                                                                                            |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| **v0.7.0** (actuel)  | Clés sur S3 chiffrées AES-256-GCM+AAD, mémoire seule au runtime |
+| **v0.8.0** (actuel)  | Clés sur S3 chiffrées AES-256-GCM+AAD, mémoire seule au runtime |
 | **v1.0**             | Transit Auto-Unseal via OpenBao dédié (KMS Cloud Temple)                                                            |
 | **v2.0**             | **Connexion HSM** (Hardware Security Module) Cloud Temple — les clés ne quittent jamais le module matériel certifié |
 
@@ -449,10 +449,10 @@ mcp-vault/
 ├── Dockerfile                # Multi-stage (OpenBao 2.5.1 + Python 3.12)
 ├── requirements.txt          # Dépendances Python
 ├── requirements.lock         # Dépendances pinnées (versions exactes)
-├── VERSION                   # 0.7.0
+├── VERSION                   # 0.8.0
 ├── DESIGN/mcp-vault/
-│   ├── ARCHITECTURE.md       # Spécification détaillée (v0.7.0)
-│   ├── TECHNICAL.md          # Documentation technique (v0.7.0)
+│   ├── ARCHITECTURE.md       # Spécification détaillée (v0.8.0)
+│   ├── TECHNICAL.md          # Documentation technique (v0.8.0)
 │   └── SECURITY_AUDIT.md     # Rapport d'audit consolidé (60 findings V2.1)
 ├── scripts/
 │   ├── mcp_cli.py            # CLI entry point
@@ -509,4 +509,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.7.0
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.8.0

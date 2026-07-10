@@ -1,6 +1,6 @@
 # Changelog — MCP Vault
 
-## [Unreleased] — v0.8.0
+## [0.8.0] — 2026-07-10
 
 ### PEP mission JWT — durcissement de la porte /mcp (issue #47, PR1)
 
@@ -66,6 +66,15 @@ Décision : **tokens illimités autorisés mais EXPLICITES**. Contrat unique de 
 - Cohérent avec `_api_update_vault` / `_api_delete_vault` qui appliquaient déjà ce contrôle au routeur (vault_id dans l'URL).
 - Pas de régression admin : un token admin passe toujours.
 - Pas de régression owner-based : `check_vault_owner` retourne `True` pour un vault inexistant (création autorisée pour le créateur).
+
+### CI — tag + GitHub Release automatiques au bump de VERSION (issue #56)
+
+Premier workflow GitHub Actions du dépôt (`.github/workflows/release.yml`). Au merge sur `main` modifiant `VERSION`, crée automatiquement le tag annoté `vX.Y.Z` + la GitHub Release (notes = section correspondante du CHANGELOG). Idempotent et re-run safe (tag et release gérés indépendamment ; tag existant vérifié contre `GITHUB_SHA`) ; validation stricte de `VERSION` (`X.Y.Z`) ; `actions/checkout` épinglé par SHA. Corrige la cause de l'oubli du tag v0.7.0 (déploiement « par commit nu »).
+
+### Cohérence documentaire + parité CLI (issue #59)
+
+- README (fr + en) et DESIGN (ARCHITECTURE/TECHNICAL) alignés sur v0.7.0 : purge des tokens révoqués (#50) et audit du cycle de vie des accès (#49) documentés ; routes `/admin/api/*` à jour ; compteur d'endpoints périmé corrigé.
+- Nouvelle commande CLI **`logs`** (click + shell) → `GET /admin/api/logs`, pour aligner le CLI sur la console admin ; aide PKI du shell complétée (`issue`).
 
 ## [0.7.0] — 2026-06-22
 
