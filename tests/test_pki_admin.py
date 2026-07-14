@@ -22,11 +22,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 os.environ.setdefault("MCP_SERVER_NAME", "mcp-vault-test")
 os.environ.setdefault("ADMIN_BOOTSTRAP_KEY", "Test-Bootstrap-Key-2026-Pour-Tests!!")
 
-if "hvac" not in sys.modules:
-    _hvac_mock = MagicMock()
-    _hvac_mock.exceptions.Forbidden = Exception
-    _hvac_mock.exceptions.InvalidRequest = Exception
-    sys.modules["hvac"] = _hvac_mock
+# hvac (dep Docker-only) est stubbé de façon DÉTERMINISTE et FAIL-CLOSE dans tests/conftest.py
+# (issue #64) — plus d'injection sys.modules au niveau module ici (même anti-pattern que test_pki).
 
 
 def _run(coro):

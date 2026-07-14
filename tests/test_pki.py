@@ -27,13 +27,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 os.environ.setdefault("MCP_SERVER_NAME", "mcp-vault-test")
 os.environ.setdefault("ADMIN_BOOTSTRAP_KEY", "Test-Bootstrap-Key-2026-Pour-Tests!!")
 
-# hvac n'est pas installé dans le venv local (seulement dans Docker).
-# Mock minimal pour permettre l'import de spaces.py et openbao.manager.
-if "hvac" not in sys.modules:
-    _hvac_mock = MagicMock()
-    _hvac_mock.exceptions.Forbidden = Exception
-    _hvac_mock.exceptions.InvalidRequest = Exception
-    sys.modules["hvac"] = _hvac_mock
+# hvac (dep Docker-only) est stubbé de façon DÉTERMINISTE et centralisée dans
+# tests/conftest.py (issue #64). Auparavant, l'injection sys.modules se faisait ICI au
+# niveau module : elle fuyait vers toute la session et rendait d'autres tests dépendants
+# de l'ordre de collecte (test_06_permissions vert/rouge selon que test_pki passait avant).
 
 
 # ─────────────────────────────────────────────────────────────────────────────

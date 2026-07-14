@@ -23,10 +23,10 @@ os.environ.setdefault("MCP_SERVER_NAME", "mcp-vault-test")
 os.environ.setdefault("ADMIN_BOOTSTRAP_KEY", "Test-Bootstrap-Key-2026-Pour-Tests!!")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-# hvac n'est pas installé localement (disponible en Docker uniquement) — mock global
-_hvac_mock = MagicMock()
-_hvac_mock.Client.return_value = MagicMock()
-sys.modules.setdefault("hvac", _hvac_mock)
+# hvac (dep Docker-only) est stubbé de façon DÉTERMINISTE et FAIL-CLOSE dans tests/conftest.py
+# (issue #64). L'ancienne injection sys.modules au niveau module ici était le même anti-pattern
+# que test_pki (fuite globale, ordre-dépendante) et est désormais inerte. Les tests ci-dessous
+# qui exercent le manager patchent donc `hvac.Client` EXPLICITEMENT (le stub fail-close lève sinon).
 
 
 def run(coro):
@@ -47,6 +47,7 @@ def test_manager_reuses_existing_openbao_instance():
     mock_popen = MagicMock()
 
     with patch.object(mgr, "_is_openbao_reachable", new=AsyncMock(return_value=True)), \
+         patch("hvac.Client", return_value=MagicMock()), \
          patch("subprocess.Popen", mock_popen):
         result = run(mgr.start_openbao())
 
@@ -89,6 +90,7 @@ def test_manager_redirects_bao_logs_to_files():
         return stdout_path, stderr_path
 
     with patch.object(mgr, "_is_openbao_reachable", new=reachable_after_start), \
+         patch("hvac.Client", return_value=MagicMock()), \
          patch("subprocess.Popen", side_effect=fake_popen), \
          patch("mcp_vault.openbao.config.generate_hcl_config", return_value="/tmp/fake.hcl"), \
          patch.object(mgr, "_openbao_log_paths", side_effect=fake_log_paths), \
