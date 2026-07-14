@@ -246,6 +246,7 @@ def wait_for_server(max_wait: int = 30) -> bool:
 # TEST 1 — Connectivité
 # =============================================================================
 
+@pytest.mark.needs_server
 async def test_01_connectivity():
     """Connectivité de base : REST + MCP."""
     print("\n🔌 TEST 1 — Connectivité")

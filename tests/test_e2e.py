@@ -37,6 +37,8 @@ import argparse
 import traceback
 from datetime import datetime
 
+import pytest
+
 # =============================================================================
 # Configuration
 # =============================================================================
@@ -133,6 +135,29 @@ def check_true(name: str, condition: bool, detail: str = "") -> bool:
         FAIL += 1
     RESULTS.append({"test": name, "status": "PASS" if condition else "FAIL"})
     return condition
+
+
+@pytest.fixture(autouse=True)
+def _e2e_guard():
+    """Honnêteté du harnais e2e (issue #64, reco red team) — sous pytest uniquement (le runner
+    standalone `python tests/test_e2e.py` n'utilise PAS les fixtures, donc reste inchangé) :
+
+    1. **SKIP hors harnais** : TOUS les tests de ce module sont e2e (serveur MCP + OpenBao + S3
+       réels). Ils SKIPPENT sauf si MCP_VAULT_E2E=1 est posé par le harnais complet — au lieu de
+       « passer » en complaisance ou d'échouer contre un service tiers.
+    2. **Anti-complaisance** : check()/check_true() n'incrémentaient qu'un compteur servant au
+       résumé standalone → un ❌ restait INVISIBLE pour pytest (le test « passait »). On remet les
+       compteurs à zéro avant chaque test et on assert FAIL==0 après.
+    """
+    if os.getenv("MCP_VAULT_E2E", "").strip().lower() not in ("1", "true", "yes", "on"):
+        pytest.skip("test e2e — poser MCP_VAULT_E2E=1 avec le harnais complet "
+                    "(serveur + OpenBao + S3, cf. scripts/test_e2e.py)")
+    global PASS, FAIL, RESULTS
+    PASS, FAIL, RESULTS = 0, 0, []
+    yield
+    if FAIL:
+        échecs = "; ".join(r["test"] for r in RESULTS if r["status"] == "FAIL")
+        pytest.fail(f"{FAIL} vérification(s) e2e en échec : {échecs}")
 
 
 # =============================================================================

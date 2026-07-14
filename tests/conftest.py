@@ -54,7 +54,28 @@ def _install_hvac_stub_if_absent():
     # `except hvac.exceptions.Forbidden`).
     stub.exceptions.Forbidden = type("Forbidden", (Exception,), {})
     stub.exceptions.InvalidRequest = type("InvalidRequest", (Exception,), {})
+
+    # FAIL-CLOSE (issue #64, reco red team). `hvac.Client(...)` LÈVE au lieu de renvoyer un
+    # MagicMock complaisant : sinon un health_check()/check_vault_owner() non patché renverrait
+    # un truthy → FAUX VERT (un test « passe » sans OpenBao réel). Les tests qui exercent la
+    # couche vault DOIVENT patcher explicitement get_hvac_client()/check_vault_owner() ; à défaut
+    # ils échouent bruyamment ICI plutôt que de mentir.
+    def _fail_close_client(*_a, **_k):
+        raise RuntimeError(
+            "hvac est stubbé pour les tests unitaires (issue #64) : patchez explicitement "
+            "get_hvac_client() ou check_vault_owner() — aucun OpenBao réel dans ce contexte."
+        )
+    stub.Client = _fail_close_client
     sys.modules["hvac"] = stub
 
 
 _install_hvac_stub_if_absent()
+
+
+# test_cli_all.py est un AGRÉGATEUR : il ré-importe les fonctions de tests/cli/test_*.py pour un
+# run standalone (`python tests/test_cli_all.py`). Collecté par pytest, il DUPLIQUE ces tests mais
+# SANS la fixture d'enforcement de tests/cli/conftest.py (hors sous-répertoire) → FAUX VERTS
+# (issue #64, reco red team : un sabotage passait par ce chemin). Les vrais tests tournent dans
+# tests/cli/ (enforcés) ; on exclut donc la collecte pytest de l'agrégateur. Le run standalone
+# (n'utilise pas pytest) reste inchangé.
+collect_ignore = ["test_cli_all.py"]

@@ -67,8 +67,7 @@ skip_no_s3 = pytest.mark.skipif(not s3_configured, reason="S3 non configuré (va
 # Fixtures S3 — Clients réels Dell ECS (hybride SigV2/SigV4)
 # =============================================================================
 
-@pytest.fixture(scope="module")
-def s3_data():
+def _build_s3_data():
     """Client S3 SigV2 pour opérations de données (PUT/GET/DELETE)."""
     config_v2 = Config(
         region_name=S3_REGION,
@@ -77,16 +76,12 @@ def s3_data():
         retries={"max_attempts": 3, "mode": "adaptive"},
     )
     return boto3.client(
-        "s3",
-        endpoint_url=S3_ENDPOINT,
-        aws_access_key_id=S3_ACCESS_KEY,
-        aws_secret_access_key=S3_SECRET_KEY,
-        config=config_v2,
+        "s3", endpoint_url=S3_ENDPOINT, aws_access_key_id=S3_ACCESS_KEY,
+        aws_secret_access_key=S3_SECRET_KEY, config=config_v2,
     )
 
 
-@pytest.fixture(scope="module")
-def s3_meta():
+def _build_s3_meta():
     """Client S3 SigV4 pour opérations métadonnées (HEAD/LIST)."""
     config_v4 = Config(
         region_name=S3_REGION,
@@ -95,23 +90,40 @@ def s3_meta():
         retries={"max_attempts": 3, "mode": "adaptive"},
     )
     return boto3.client(
-        "s3",
-        endpoint_url=S3_ENDPOINT,
-        aws_access_key_id=S3_ACCESS_KEY,
-        aws_secret_access_key=S3_SECRET_KEY,
-        config=config_v4,
+        "s3", endpoint_url=S3_ENDPOINT, aws_access_key_id=S3_ACCESS_KEY,
+        aws_secret_access_key=S3_SECRET_KEY, config=config_v4,
     )
 
 
+@pytest.fixture(scope="module")
+def s3_data():
+    return _build_s3_data()
+
+
+@pytest.fixture(scope="module")
+def s3_meta():
+    return _build_s3_meta()
+
+
 @pytest.fixture(scope="module", autouse=True)
-def cleanup_s3(s3_data, s3_meta):
-    """Nettoie les objets de test après les tests."""
+def cleanup_s3():
+    """Nettoyage best-effort des objets de test APRÈS les tests S3.
+
+    Isolation (issue #64, reco red team) : cette fixture NE dépend PLUS de s3_data/s3_meta.
+    Auparavant, en tant qu'autouse module-scoped réclamant ces fixtures, elle FORÇAIT la création
+    EAGER des clients boto3 pour TOUT le module — y compris les tests auth/config non-S3
+    (TestAuthContext). Avec un S3_ENDPOINT vide, `boto3.client(endpoint_url="")` lève
+    `ValueError: Invalid endpoint` → TOUS les tests du module en erreur hors S3. On n'agit
+    désormais que si S3 est configuré, en construisant les clients à la demande.
+    """
     yield
-    # Cleanup : lister et supprimer tous les objets dans _test/
+    if not s3_configured:
+        return
     try:
-        resp = s3_meta.list_objects_v2(Bucket=S3_BUCKET, Prefix=TEST_PREFIX)
+        meta, data = _build_s3_meta(), _build_s3_data()
+        resp = meta.list_objects_v2(Bucket=S3_BUCKET, Prefix=TEST_PREFIX)
         for obj in resp.get("Contents", []):
-            s3_data.delete_object(Bucket=S3_BUCKET, Key=obj["Key"])
+            data.delete_object(Bucket=S3_BUCKET, Key=obj["Key"])
             print(f"  🧹 Nettoyé: {obj['Key']}")
     except Exception as e:
         print(f"  ⚠️ Cleanup erreur: {e}")
