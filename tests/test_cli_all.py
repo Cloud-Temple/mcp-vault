@@ -37,13 +37,19 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 # Import des modules de test
 # ─────────────────────────────────────────────────────────────────────────────
 
-from tests.cli.test_system import test_system
-from tests.cli.test_vault import test_vault
-from tests.cli.test_secret import test_secret
-from tests.cli.test_ssh import test_ssh
-from tests.cli.test_policy import test_policy
-from tests.cli.test_token import test_token
-from tests.cli.test_audit import test_audit
+# Imports ALIASÉS en `_run_*` (issue #64, reco red team) : sans alias, pytest collecterait ces
+# fonctions `test_*` DANS ce module agrégateur — SANS la fixture d'enforcement de
+# tests/cli/conftest.py (hors sous-répertoire) → faux verts, y compris via une cible explicite
+# `pytest tests/test_cli_all.py::test_system` (que `collect_ignore` ne protège pas). Aliasées, il
+# n'y a plus aucun nom `test_*` ici : pytest ne collecte rien. Les vrais tests tournent (enforcés)
+# dans tests/cli/. Le runner standalone `python tests/test_cli_all.py` est inchangé.
+from tests.cli.test_system import test_system as _run_system
+from tests.cli.test_vault import test_vault as _run_vault
+from tests.cli.test_secret import test_secret as _run_secret
+from tests.cli.test_ssh import test_ssh as _run_ssh
+from tests.cli.test_policy import test_policy as _run_policy
+from tests.cli.test_token import test_token as _run_token
+from tests.cli.test_audit import test_audit as _run_audit
 from tests.cli import print_summary, get_counters, reset_counters
 
 
@@ -52,13 +58,13 @@ from tests.cli import print_summary, get_counters, reset_counters
 # ─────────────────────────────────────────────────────────────────────────────
 
 TEST_REGISTRY = {
-    "system": ("health, about, whoami", test_system),
-    "vault":  ("vault create/list/info/update/delete", test_vault),
-    "secret": ("secret write/read/list/delete/types/password", test_secret),
-    "ssh":    ("ssh setup/sign/ca-key/roles/role-info", test_ssh),
-    "policy": ("policy create/list/get/delete + path_rules", test_policy),
-    "token":  ("token create/list/update/revoke + --policy", test_token),
-    "audit":  ("audit filtres + affichage", test_audit),
+    "system": ("health, about, whoami", _run_system),
+    "vault":  ("vault create/list/info/update/delete", _run_vault),
+    "secret": ("secret write/read/list/delete/types/password", _run_secret),
+    "ssh":    ("ssh setup/sign/ca-key/roles/role-info", _run_ssh),
+    "policy": ("policy create/list/get/delete + path_rules", _run_policy),
+    "token":  ("token create/list/update/revoke + --policy", _run_token),
+    "audit":  ("audit filtres + affichage", _run_audit),
 }
 
 

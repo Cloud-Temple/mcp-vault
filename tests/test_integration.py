@@ -521,9 +521,17 @@ class TestAuthContext:
 class TestConfig:
     """Tests de chargement de la configuration."""
 
-    def test_default_settings(self):
-        """Vérifie les valeurs par défaut de la config."""
-        os.environ.setdefault("MCP_SERVER_NAME", "mcp-vault")
+    def test_default_settings(self, monkeypatch):
+        """Vérifie les valeurs par défaut de la config — INDÉPENDANT de l'env ambiant (issue #64).
+
+        Plusieurs modules de test posent MCP_SERVER_NAME=mcp-vault-test via os.environ.setdefault
+        AU CHARGEMENT → contamination globale ordre-dépendante (rouge en env propre CI si l'un de
+        ces modules est collecté avant ; masqué en local par un .env). On efface les variables dont
+        on teste le DÉFAUT pour valider le vrai défaut du code, quel que soit l'ordre / l'env.
+        """
+        for _var in ("MCP_SERVER_NAME", "MCP_SERVER_PORT", "OPENBAO_ADDR",
+                     "OPENBAO_SHARES", "OPENBAO_THRESHOLD", "VAULT_S3_SYNC_INTERVAL"):
+            monkeypatch.delenv(_var, raising=False)
         from mcp_vault.config import Settings
         settings = Settings()
         assert settings.mcp_server_name == "mcp-vault"
