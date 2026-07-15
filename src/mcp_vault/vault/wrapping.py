@@ -45,6 +45,17 @@ _RESERVED_PREFIXES = ("_vault_meta", "_init/", "_system/")
 # Validation légère du operation_id / mission_id (anti-injection logs)
 _SAFE_ID_RE = re.compile(r'^[a-zA-Z0-9_\-:.]{1,256}$')
 
+
+def is_safe_id(value) -> bool:
+    """Valide STRICTEMENT un identifiant (operation_id, mission_id, accessor/lease_id).
+
+    Validateur centralisé (#78/D6). Utilise fullmatch et NON match : `_SAFE_ID_RE.match("op\\n")`
+    renvoyait un match (le `$` autorise un `\\n` final en fin de chaîne), laissant passer une
+    injection de saut de ligne dans les logs/audit. fullmatch exige que TOUTE la chaîne soit
+    conforme, ce qui ferme la faille. Refuse aussi les non-str (fail-close).
+    """
+    return isinstance(value, str) and _SAFE_ID_RE.fullmatch(value) is not None
+
 # =============================================================================
 # Wrappers lazy — patchables dans les tests sans cascade d'imports
 # =============================================================================
@@ -383,9 +394,9 @@ def _validate_inputs(vault_id: str, secret_path: str,
         pass
 
     # mission_id / operation_id : anti-injection logs
-    if not _SAFE_ID_RE.match(mission_id):
+    if not is_safe_id(mission_id):
         return "mission_id invalide (alphanum + _-:., 1-256 chars)"
-    if not _SAFE_ID_RE.match(operation_id):
+    if not is_safe_id(operation_id):
         return "operation_id invalide (alphanum + _-:., 1-256 chars)"
 
     return None

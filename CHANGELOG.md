@@ -1,5 +1,16 @@
 # Changelog — MCP Vault
 
+## [Unreleased]
+
+### Durcissement `secret_consume` — hygiène & anti-injection (issue #78, Lot A)
+
+Premier lot du durcissement de `secret_consume`, issu d'une revue adversariale du contrat de sortie du broker de secrets. Correctifs **autonomes**, **sans impact sur le contrat de succès**. Les lots B (états terminaux + HMAC anti-DoS sur l'unwrap) et C (autorisation consommateur / cohérence mode `jwt`) suivront.
+
+- **Validation stricte des identifiants (`fullmatch`)** : `_SAFE_ID_RE.match()` acceptait une fin de ligne (`op\n` — le `$` matche avant un `\n` final), laissant passer une injection de saut de ligne dans les logs/audit. Nouveau validateur centralisé `is_safe_id()` (`fullmatch` + refus des non-`str`, fail-close), appliqué à `secret_consume`, `secret_wrap`, `secret_revoke_wrap`, `secret_wrap_lookup` et au cœur `wrap_secret` — **avant tout audit**. `secret_consume` ne validait pas du tout `operation_id` auparavant ; `secret_revoke_wrap` reflétait un préfixe de `lease_id` non validé.
+- **Codes d'erreur fermés (anti-reflection)** : les `reason` qui interpolaient une valeur non vérifiée ne le font plus. `unsupported_algorithm:{alg}` (valeur d'un header JWT non vérifié) → `unsupported_algorithm` ; `mission_status:{state}` / `mission_status_http:{code}` (état/code renvoyés par le service mission) → `mission_inactive` / `mission_status_error`. Les valeurs brutes restent dans les logs serveur, **jamais** renvoyées au client ni versées à l'audit humain. `service_unavailable` (logique 503 du middleware) préservé.
+- **Messages client génériques** : `secret_consume` ne renvoie plus le `reason`/`status_reason` détaillé (`"Mission token invalide"`, `"Mission non active"`) — le détail reste côté serveur.
+- **Tests** : nouveau `test_consume_hygiene_78.py` (fullmatch, rejet `op\n`, non-reflection du `reason`, validation `lease_id`) ; renforcement du test d'injection existant (cas `op\n` final) ; tests de format des `reason` alignés sur les codes fermés.
+
 ## [0.8.0] — 2026-07-10
 
 ### PEP mission JWT — durcissement de la porte /mcp (issue #47, PR1)

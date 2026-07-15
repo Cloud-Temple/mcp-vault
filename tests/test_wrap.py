@@ -518,7 +518,10 @@ def test_server_lookup_validates_operation_id():
             return
 
         # IDs invalides → rejet AVANT lookup (lookup ne doit pas être appelé)
-        invalid_ids = ["op with spaces", "op\ninjection", "a" * 300, "op#bad"]
+        # #78/D6 : "op-trailing\n" couvre l'injection de fin de ligne que .match acceptait
+        # (le `$` matche avant un \n final) et que fullmatch ferme.
+        invalid_ids = ["op with spaces", "op\ninjection", "op-trailing\n",
+                       "op-crlf\r\n", "a" * 300, "op#bad"]
         for bad_id in invalid_ids:
             mock_lookup.reset_mock()
             r = run(secret_wrap_lookup(bad_id))

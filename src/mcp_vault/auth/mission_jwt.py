@@ -564,9 +564,18 @@ async def check_mission_active(
             active = state.upper() in _ACTIVE_MISSION_STATES
             async with _mission_status_lock:
                 _mission_status_cache[mission_id] = (active, now)
-            return active, "" if active else f"mission_status:{state}"
-        # 404 = mission inconnue → fail-close
-        return False, f"mission_status_http:{resp.status_code}"
+            if active:
+                return True, ""
+            # #78/D5 : reason FERMÉ — l'état renvoyé par le service mission est une valeur
+            # EXTERNE ; on la loggue côté serveur mais on ne la reflète jamais dans le code
+            # d'erreur (renvoyé au client / versé à l'audit).
+            logger.info("check_mission_active: mission %s inactive (state=%s)",
+                        mission_id[:16], state)
+            return False, "mission_inactive"
+        # 404 = mission inconnue → fail-close ; code HTTP non reflété dans le reason.
+        logger.info("check_mission_active: mission %s → HTTP %s",
+                    mission_id[:16], resp.status_code)
+        return False, "mission_status_error"
     except Exception as e:
         logger.error("check_mission_active error: %s", type(e).__name__)
         return False, "service_unavailable"

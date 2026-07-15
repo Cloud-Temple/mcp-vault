@@ -145,7 +145,9 @@ class MissionTokenValidator:
         alg = header.get("alg", "")
 
         if alg != "ES256":
-            raise MissionTokenError(f"unsupported_algorithm:{alg or 'missing'}")
+            # #78/D5 : reason FERMÉ — ne jamais interpoler `alg` (valeur d'un header JWT
+            # non vérifié) dans un code d'erreur qui sera loggué/audité/renvoyé au client.
+            raise MissionTokenError("unsupported_algorithm")
 
         signing_key = self._get_signing_key(kid)
 
