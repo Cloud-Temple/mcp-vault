@@ -391,3 +391,42 @@ class TestConsumeLogNoInjection:
             msg = rec.getMessage()
             assert not _has_control_char(msg), \
                 f"injection de ligne dans le log broker: {msg!r}"
+
+
+class TestRegistryAmbiguityLogNoInjection:
+    """Le log d'ambiguïté du registre (get_by_composite_key) ne doit pas injecter de
+    ligne via operation_id/mission_id forgés : le cœur public n'est pas protégé par la
+    validation de façade, et mission_id (claim JWT) n'est jamais validé."""
+
+    def test_ambiguity_warning_escapes_forged_ids(self, caplog):
+        import logging
+        from mcp_vault.vault.wrapping import WrapRegistry
+
+        class _Reg(WrapRegistry):
+            def __init__(self, wraps):
+                self._wraps = wraps
+                self._cache_time = float("inf")
+
+            def load(self):
+                pass
+
+            def _save(self):
+                return True
+
+        op = "op-1\r\nFORGED-OP"
+        mission = "m-1\x85FORGED-MISSION"  # \x85 = U+0085 (NEL) — mission_id jamais validé
+
+        def _entry():
+            return {"operation_id": op, "mission_id": mission, "accessor": "A",
+                    "vault_id": "v", "secret_path": "p", "created_at": "",
+                    "expires_at": "", "status": "active", "tenant_id": "",
+                    "expected_aud": ""}
+
+        reg = _Reg([_entry(), _entry()])  # 2 entrées identiques → ambiguïté → warning
+        with caplog.at_level(logging.WARNING, logger="mcp-vault.wrapping"):
+            result = reg.get_by_composite_key(op, mission)
+        assert result is None, "ambiguïté attendue → None"
+        assert caplog.records, "le warning d'ambiguïté aurait dû être émis"
+        for rec in caplog.records:
+            assert not _has_control_char(rec.getMessage()), \
+                f"injection de ligne dans le log d'ambiguïté: {rec.getMessage()!r}"

@@ -288,7 +288,9 @@ class WrapRegistry:
             return candidates[0]
         if len(candidates) > 1:
             logger.warning(
-                "⚠️ WrapRegistry : %d entrées (op=%s, mission=%s) — ambiguïté",
+                # %r : op/mission peuvent venir d'une entrée S3 historique (fins de ligne)
+                # ou d'un mission_id de claim non validé (#78) — repr échappe les contrôles.
+                "⚠️ WrapRegistry : %d entrées (op=%r, mission=%r) — ambiguïté",
                 len(candidates), operation_id[:16], mission_id[:16],
             )
             return None
@@ -347,7 +349,7 @@ class WrapRegistry:
                 ok = self._save()
                 if not ok:
                     logger.warning(
-                        "⚠️ rollback_consuming S3 fail (op=%s) — "
+                        "⚠️ rollback_consuming S3 fail (op=%r) — "
                         "état mémoire: active, S3: stale-consuming",
                         operation_id[:16],
                     )
@@ -499,7 +501,7 @@ async def wrap_secret(
         # S3 indisponible au passage active : le wrap_token existe côté OpenBao
         # mais n'est pas corrélé → révoquer immédiatement pour éviter une provision
         # non compensable, et retourner une erreur au broker.
-        logger.error("wrap_secret: mark_active S3 failed pour op=%s — révocation immédiate",
+        logger.error("wrap_secret: mark_active S3 failed pour op=%r — révocation immédiate",
                      operation_id[:32])
         try:
             client.auth.token.revoke_accessor(accessor=accessor)
@@ -745,21 +747,21 @@ async def consume_wrap_secret(
     # En mode enforce=True : les wraps sans expected_aud sont refusés (binding incomplet).
     if entry.get("tenant_id") and tenant_id != entry["tenant_id"]:
         logger.warning(
-            "⚠️ consume_wrap_secret : binding mismatch (tenant_id) op=%s — confused-deputy rejeté",
+            "⚠️ consume_wrap_secret : binding mismatch (tenant_id) op=%r — confused-deputy rejeté",
             operation_id[:16],
         )
         return {"status": "error", "error_type": "binding_mismatch",
                 "message": "binding mismatch"}
     if entry.get("expected_aud") and expected_aud != entry["expected_aud"]:
         logger.warning(
-            "⚠️ consume_wrap_secret : binding mismatch (aud) op=%s — confused-deputy rejeté",
+            "⚠️ consume_wrap_secret : binding mismatch (aud) op=%r — confused-deputy rejeté",
             operation_id[:16],
         )
         return {"status": "error", "error_type": "binding_mismatch",
                 "message": "binding mismatch"}
     if enforce and not entry.get("expected_aud"):
         logger.warning(
-            "⚠️ consume_wrap_secret : wrap sans expected_aud en mode enforced op=%s — rejeté",
+            "⚠️ consume_wrap_secret : wrap sans expected_aud en mode enforced op=%r — rejeté",
             operation_id[:16],
         )
         return {"status": "error", "error_type": "binding_incomplete",
