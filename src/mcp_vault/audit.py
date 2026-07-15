@@ -79,6 +79,20 @@ def log_audit(tool_name: str, status: str, vault_id: str = "",
 # AuditStore — Ring buffer + fichier JSONL
 # =============================================================================
 
+# Caractères de contrôle (C0 + DEL) → espace. Défense CENTRALE anti-injection de
+# ligne d'audit (#78) : tout champ texte versé au journal est neutralisé ici, quel
+# que soit l'appelant. La validation à la source (is_safe_id, fullmatch) reste la
+# défense-en-profondeur ; ceci est le filet qui couvre les champs oubliés.
+_AUDIT_CTRL_TO_SPACE = {i: 0x20 for i in list(range(0x20)) + [0x7f]}
+
+
+def _sanitize_audit_field(value) -> str:
+    """Neutralise les caractères de contrôle d'un champ d'audit (fail-close sur non-str)."""
+    if not isinstance(value, str):
+        value = str(value)
+    return value.translate(_AUDIT_CTRL_TO_SPACE)
+
+
 class AuditStore:
     """
     Journal d'audit MCP avec ring buffer mémoire + fichier JSONL persistant.
@@ -120,6 +134,14 @@ class AuditStore:
             detail: str = "", duration_ms: float = 0, client_name: str = ""):
         """Enregistre un événement d'audit."""
         now = datetime.now(timezone.utc)
+
+        # #78 : neutraliser les caractères de contrôle de TOUS les champs texte AVANT
+        # de construire l'entrée (anti-injection de ligne d'audit / manipulation du buffer).
+        client_name = _sanitize_audit_field(client_name)
+        tool_name = _sanitize_audit_field(tool_name)
+        vault_id = _sanitize_audit_field(vault_id)
+        status = _sanitize_audit_field(status)
+        detail = _sanitize_audit_field(detail)
 
         # Tronquer le détail si trop long
         if len(detail) > self.MAX_DETAIL_LEN:

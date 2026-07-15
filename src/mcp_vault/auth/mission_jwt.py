@@ -276,7 +276,10 @@ class JWKSCache:
 
         if status != 200 or not body:
             self._schedule_backoff_locked()
-            raise JWKSUnavailable(f"jwks_http_{status}")
+            # #78/D5 : reason FERMÉ — le code HTTP (valeur externe du serveur JWKS) est
+            # loggué serveur, jamais reflété dans le reason (audit PEP / stderr).
+            logger.warning("JWKS fetch HTTP %s — backoff", status)
+            raise JWKSUnavailable("jwks_http_error")
 
         try:
             keys = self._parse_jwks(body)

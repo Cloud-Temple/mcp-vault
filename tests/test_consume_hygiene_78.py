@@ -177,3 +177,94 @@ class TestRevokeWrapValidatesLeaseId:
             r = run(secret_revoke(lease_id="hvs.CAESIFooBar-1234.5678"))
         assert r["status"] == "ok", f"accessor réaliste rejeté à tort: {r}"
         mock_core.assert_called_once()
+
+
+# =============================================================================
+# Défense CENTRALE — l'audit neutralise les caractères de contrôle (tous champs)
+# =============================================================================
+
+class TestAuditFieldSanitization:
+    """Filet central : quel que soit l'appelant, aucun caractère de contrôle ne survit
+    dans une entrée d'audit (anti-injection / manipulation du journal humain)."""
+
+    def test_control_chars_neutralized_all_fields(self, tmp_path):
+        from mcp_vault.audit import AuditStore
+        store = AuditStore(tmp_path / "audit.jsonl")
+        store.log(tool_name="secret_wrap", status="error",
+                  vault_id="prod\nFAKE  2026  admin  ok", detail="op=x\r\ninjected-line",
+                  client_name="cli\x7fent")
+        entry = store._buffer[-1]
+        for field in ("vault_id", "detail", "client", "tool", "status"):
+            val = entry[field]
+            assert "\n" not in val and "\r" not in val and "\x7f" not in val, \
+                f"caractère de contrôle résiduel dans {field}: {val!r}"
+
+    def test_single_physical_line_in_file(self, tmp_path):
+        """Une entrée = exactement UNE ligne physique (pas de 2e ligne forgée par \\n)."""
+        from mcp_vault.audit import AuditStore
+        path = tmp_path / "audit.jsonl"
+        store = AuditStore(path)
+        store.log(tool_name="secret_wrap", status="ok",
+                  vault_id="v\nADMIN GRANT", detail="d\nfake")
+        content = path.read_text()
+        assert content.count("\n") == 1, \
+            f"l'entrée occupe plus d'une ligne physique: {content!r}"
+
+    def test_non_str_field_failclose(self, tmp_path):
+        """Un champ non-str ne casse pas l'audit (fail-close via str())."""
+        from mcp_vault.audit import AuditStore
+        store = AuditStore(tmp_path / "audit.jsonl")
+        store.log(tool_name="secret_wrap", status="ok", vault_id=None, detail=12345)
+        entry = store._buffer[-1]
+        assert isinstance(entry["vault_id"], str) and isinstance(entry["detail"], str)
+
+
+# =============================================================================
+# D6 (cœur) — _validate_inputs : fullmatch sur vault_id / secret_path, sans echo
+# =============================================================================
+
+class TestValidateInputsFullmatch:
+    def test_vault_id_trailing_newline_rejected(self):
+        from mcp_vault.vault.wrapping import _validate_inputs
+        assert _validate_inputs("prod\n", "db/p", "m-1", "op-1") is not None
+
+    def test_secret_path_trailing_newline_rejected(self):
+        from mcp_vault.vault.wrapping import _validate_inputs
+        assert _validate_inputs("prod", "db/p\n", "m-1", "op-1") is not None
+
+    def test_valid_inputs_pass(self):
+        """Non-complaisance : des entrées valides passent toujours (fullmatch ne sur-bloque pas)."""
+        from mcp_vault.vault.wrapping import _validate_inputs
+        assert _validate_inputs("prod", "db/pass", "m-1", "op-1") is None
+
+    def test_secret_path_error_message_no_raw_echo(self):
+        """Le message d'erreur ne reflète PAS la valeur brute (anti-reflection client + audit)."""
+        from mcp_vault.vault.wrapping import _validate_inputs
+        err = _validate_inputs("prod", "db/p\ninjected-token", "m-1", "op-1")
+        assert err is not None and "injected-token" not in err and "\n" not in err
+
+
+# =============================================================================
+# D5 — reason JWKS fermé (le code HTTP externe ne fuit pas dans l'audit PEP)
+# =============================================================================
+
+class TestJwksReasonClosed:
+    def test_jwks_http_error_reason_is_closed(self):
+        """Un code HTTP non-200 du serveur JWKS → reason fermé `jwks_http_error`.
+
+        Vecteur réel d'exposition : `force_reload()` (endpoint admin
+        POST /admin/api/auth/jwks/reload) propage le reason TEL QUEL. (Le chemin
+        `get_key` normal le remap déjà en `jwks_unavailable` générique.) Le reason ne
+        doit jamais contenir la valeur externe (l'ancien `jwks_http_{status}`).
+        """
+        from mcp_vault.auth.mission_jwt import JWKSCache, JWKSUnavailable
+
+        def http_500_fetch(url, etag, timeout):
+            return 500, None, None  # (status, etag, body) — non-200, fail-close
+
+        cache = JWKSCache("http://mock-jwks/x", ttl_seconds=60, fetch=http_500_fetch)
+        with pytest.raises(JWKSUnavailable) as exc_info:
+            cache.force_reload()
+        assert exc_info.value.reason == "jwks_http_error", \
+            f"code HTTP reflété dans le reason: {exc_info.value.reason!r}"
+        assert "500" not in exc_info.value.reason

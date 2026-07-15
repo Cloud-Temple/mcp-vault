@@ -371,17 +371,23 @@ def _validate_inputs(vault_id: str, secret_path: str,
     dans secrets.py (réutilise _PATH_PATTERN et la liste de préfixes réservés).
     """
     # vault_id : alphanum + tirets, 1–64 chars (cohérent avec spaces.py)
-    if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9\-]{0,62}[a-zA-Z0-9]$', vault_id) \
-            and not re.match(r'^[a-zA-Z0-9]$', vault_id):
+    # #78 : fullmatch (et non match) + type-safe — `.match`+`$` acceptait un `\n` final
+    # (le vault_id remonte ensuite dans l'audit via _r → injection de ligne).
+    if not isinstance(vault_id, str) or (
+        not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9\-]{0,62}[a-zA-Z0-9]', vault_id)
+        and not re.fullmatch(r'[a-zA-Z0-9]', vault_id)
+    ):
         return "vault_id invalide (alphanum + tirets, 1-64 chars)"
 
     # secret_path : identique à secrets.py _validate_secret_path()
     # Regex : alphanum + / _ . - uniquement, commence par alphanum
-    _PATH_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9/_.\-]{0,255}$')
-    if not secret_path:
+    _PATH_RE = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9/_.\-]{0,255}')
+    if not isinstance(secret_path, str) or not secret_path:
         return "secret_path requis"
-    if ".." in secret_path or "\\" in secret_path or not _PATH_RE.match(secret_path):
-        return f"secret_path invalide: '{secret_path}' (caractères autorisés : alphanum / _ . -)"
+    # #78 : fullmatch + message SANS echo de la valeur brute (anti-reflection dans le
+    # message renvoyé au client et versé à l'audit).
+    if ".." in secret_path or "\\" in secret_path or not _PATH_RE.fullmatch(secret_path):
+        return "secret_path invalide (caractères autorisés : alphanum / _ . -)"
     for prefix in _RESERVED_PREFIXES:
         if secret_path.startswith(prefix):
             return f"secret_path '{secret_path}' est un chemin réservé"

@@ -663,6 +663,13 @@ class TestCheckMissionActive:
         assert why == "mission_status_error"
         assert "404" not in why, "le code HTTP ne doit plus fuiter dans le reason"
 
+    def test_inactive_state_reason_is_closed(self):
+        """#78/D5 : un état renvoyé par le service mission (valeur EXTERNE, ici même
+        porteuse d'un \\n) ne doit JAMAIS être reflété dans le reason — fermeture stricte."""
+        active, why = self._check(state="EVIL\nINJECTED-STATE", mission="mis_evilstate")
+        assert active is False
+        assert why == "mission_inactive", f"état externe reflété dans le reason: {why!r}"
+
     def test_network_error_fail_close(self):
         client = MagicMock()
         client.__aenter__ = AsyncMock(side_effect=OSError("down"))
