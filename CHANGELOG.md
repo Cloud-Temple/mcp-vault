@@ -1,6 +1,6 @@
 # Changelog — MCP Vault
 
-## [Unreleased]
+## [0.8.1] — 2026-07-15
 
 ### Durcissement `secret_consume` — hygiène & anti-injection de journal (issue #78, Lot A)
 
@@ -11,7 +11,11 @@ Premier lot du durcissement de `secret_consume`, issu d'une revue adversariale (
 - **Codes d'erreur fermés (anti-reflection)** — les `reason` qui interpolaient une valeur non vérifiée ne le font plus : `unsupported_algorithm:{alg}` → `unsupported_algorithm` ; `mission_status:{state}` / `mission_status_http:{code}` → `mission_inactive` / `mission_status_error` ; `jwks_http_{status}` → `jwks_http_error`. Les valeurs brutes restent en log serveur, **jamais** renvoyées au client ni versées à l'audit humain. `service_unavailable` (logique 503 du middleware) préservé.
 - **Messages client génériques** — `secret_consume` ne renvoie plus le `reason`/`status_reason` détaillé (`"Mission token invalide"`, `"Mission non active"`).
 - **Journaux serveur anti-injection** — les valeurs externes (claims du refus PEP sur `stderr`, état de mission, `operation_id`/`mission_id`/`vault_id`/`secret_path` issus du registre ou d'un claim) sont sanitisées ou journalisées via `repr`.
-- **Tests** — nouveau `tests/test_consume_hygiene_78.py` (23 tests non-complaisants : `fullmatch`, sanitisation d'audit + rechargement + C1/Unicode, non-reflection des `reason`, non-injection `stderr` PEP, log du broker) + renforcement des tests d'injection existants. `VERSION` inchangée (pas de release automatique).
+- **Tests** — nouveau `tests/test_consume_hygiene_78.py` (23 tests non-complaisants : `fullmatch`, sanitisation d'audit + rechargement + C1/Unicode, non-reflection des `reason`, non-injection `stderr` PEP, log du broker) + renforcement des tests d'injection existants.
+
+### Fiabilité du harnais de test (issue #64)
+
+Durcissement **test-only** (aucun code de production) mergé après la 0.8.0 : stub `hvac` déterministe fail-close, `sys.path` centralisé, markers `needs_server`/`needs_s3` + opt-in `MCP_VAULT_E2E`, fixtures anti-complaisance (`assert FAIL == 0`), migration du contrat `space_ids` → `allowed_resources`. Fiabilise la suite de tests sans changer le comportement produit.
 
 ## [0.8.0] — 2026-07-10
 
