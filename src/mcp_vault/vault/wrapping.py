@@ -800,8 +800,11 @@ async def consume_wrap_secret(
 
     # ── 4. Marquer consumed ─────────────────────────────────────────
     registry.mark_consumed(operation_id, mission_id)
+    # #78 : %r (repr échappe les caractères de contrôle) — vault_id/secret_path
+    # proviennent du registre S3, qui a pu être écrit avec des fins de ligne par une
+    # version antérieure (validation .match+$). Évite l'injection de ligne au log.
     logger.info(
-        "✅ consume_wrap_secret : op=%s mission=%s vault=%s path=%s",
+        "✅ consume_wrap_secret : op=%r mission=%r vault=%r path=%r",
         operation_id[:16], mission_id[:16],
         entry.get("vault_id", "?"), entry.get("secret_path", "?"),
     )

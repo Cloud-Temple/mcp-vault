@@ -92,13 +92,18 @@ _AUDIT_CTRL_TO_SPACE = {
 
 
 def sanitize_audit_field(value) -> str:
-    """Neutralise les caractères de contrôle d'un champ de journal (fail-close sur non-str).
+    """Neutralise les caractères de contrôle d'un champ de journal.
 
-    Publique : utilisable hors AuditStore (ex. lignes stderr du PEP, logs serveur)
-    pour garantir qu'aucune valeur externe ne forge de saut de ligne dans un log.
+    Publique : utilisable hors AuditStore (lignes stderr du PEP, logs serveur) pour
+    garantir qu'aucune valeur externe ne forge de saut de ligne dans un log.
+    Coercition défensive des non-str via str() ; si `__str__` lève (objet hostile),
+    on retombe sur une sentinelle plutôt que de propager l'exception (#78).
     """
     if not isinstance(value, str):
-        value = str(value)
+        try:
+            value = str(value)
+        except Exception:
+            return "<unrepresentable>"
     return value.translate(_AUDIT_CTRL_TO_SPACE)
 
 
@@ -133,13 +138,15 @@ class AuditStore:
                     if line:
                         try:
                             entry = json.loads(line)
-                            # #78 : re-sanitiser au rechargement — une entrée écrite avant
-                            # le durcissement (ou par un autre writer) ne doit pas
-                            # réintroduire de caractère de contrôle dans le buffer mémoire.
-                            for _k in ("client", "tool", "category", "vault_id",
-                                       "status", "detail"):
-                                if _k in entry:
-                                    entry[_k] = sanitize_audit_field(entry[_k])
+                            # #78 : re-sanitiser TOUTE valeur textuelle au rechargement —
+                            # une entrée écrite avant le durcissement (ou par un autre
+                            # writer) ne doit réintroduire AUCUN caractère de contrôle dans
+                            # le buffer mémoire (couvre ts, detail, et tout champ str, pas
+                            # une liste figée de clés).
+                            if isinstance(entry, dict):
+                                for _k, _v in entry.items():
+                                    if isinstance(_v, str):
+                                        entry[_k] = sanitize_audit_field(_v)
                             self._buffer.append(entry)
                         except json.JSONDecodeError:
                             pass

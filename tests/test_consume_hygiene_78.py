@@ -224,23 +224,24 @@ class TestAuditFieldSanitization:
             assert not _has_control_char(entry[field]), \
                 f"contrôle dans le champ fichier {field}: {entry[field]!r}"
 
-    def test_load_recent_re_sanitizes_historical_entries(self, tmp_path):
-        """Une entrée historique (écrite avant le durcissement) est re-nettoyée au
-        rechargement dans le buffer (load_recent), pas seulement à l'écriture."""
+    def test_load_recent_re_sanitizes_all_string_fields(self, tmp_path):
+        """Rechargement : TOUS les champs texte re-nettoyés, y compris `ts` (le round 3
+        avait trouvé `ts`/`duration_ms` oubliés par une liste de clés figée)."""
         import json as _json
         from mcp_vault.audit import AuditStore
         path = tmp_path / "audit.jsonl"
         path.write_text(_json.dumps({
-            "ts": "2026-01-01T00:00:00+00:00", "client": "x", "tool": "t",
+            "ts": "2026-01-01T00:00:00+00:00 FORGED", "client": "x", "tool": "t",
             "category": "c", "vault_id": "prod\nFORGED 2026 admin",
             "status": "ok", "detail": "d\x85nel", "duration_ms": 0,
         }) + "\n")
         store = AuditStore(path)
         store.load_recent()
         entry = store._buffer[-1]
-        for field in ("vault_id", "detail"):
-            assert not _has_control_char(entry[field]), \
-                f"contrôle non nettoyé au rechargement dans {field}: {entry[field]!r}"
+        for field, val in entry.items():
+            if isinstance(val, str):
+                assert not _has_control_char(val), \
+                    f"contrôle non nettoyé au rechargement dans {field}: {val!r}"
 
     def test_non_str_field_failclose(self, tmp_path):
         """Un champ non-str ne casse pas l'audit (fail-close via str())."""
@@ -249,6 +250,16 @@ class TestAuditFieldSanitization:
         store.log(tool_name="secret_wrap", status="ok", vault_id=None, detail=12345)
         entry = store._buffer[-1]
         assert isinstance(entry["vault_id"], str) and isinstance(entry["detail"], str)
+
+    def test_sanitize_hostile_str_returns_sentinel(self):
+        """Un objet dont __str__ lève ne fait pas planter la sanitisation (sentinelle)."""
+        from mcp_vault.audit import sanitize_audit_field
+
+        class _Hostile:
+            def __str__(self):
+                raise RuntimeError("boom")
+
+        assert sanitize_audit_field(_Hostile()) == "<unrepresentable>"
 
 
 # =============================================================================
@@ -316,12 +327,67 @@ class TestPepDenyStderrSanitized:
         mw = AuthMiddleware(app=lambda *a, **k: None)
         claims_ctx = {"mission_id": "m\nFORGED-LINE", "tenant_id": "t\r\nEVIL-TENANT",
                       "jti": "j\x85nel", "issuer_decision_id": ""}
-        mw._audit_pep_deny("some_reason", claims_ctx)
+        # reason porte aussi des CR/LF (round 3 : le test précédent passait un reason
+        # sans contrôle, donc restait vert même sans sanitisation du reason).
+        mw._audit_pep_deny("bad\r\nFORGED-REASON", claims_ctx)
         err = capsys.readouterr().err
         deny_lines = [ln for ln in err.splitlines() if "PEP deny" in ln]
         assert len(deny_lines) == 1, \
             f"le refus PEP occupe {len(deny_lines)} lignes stderr: {err!r}"
         # Valeurs neutralisées (espaces) et maintenues sur la ligne deny, pas coupées.
         residual = err.replace(deny_lines[0], "")
-        for forged in ("FORGED-LINE", "EVIL-TENANT"):
+        for forged in ("FORGED-LINE", "EVIL-TENANT", "FORGED-REASON"):
             assert forged not in residual, f"'{forged}' a forgé une ligne stderr séparée"
+
+
+# =============================================================================
+# Broker — le log de consume n'injecte pas de ligne via une entrée S3 forgée
+# =============================================================================
+
+class TestConsumeLogNoInjection:
+    """Le log de succès de consume_wrap_secret ne doit pas forger de lignes à partir de
+    vault_id/secret_path issus d'une entrée de registre S3 historique (écrite avant le
+    durcissement, quand `.match`+`$` acceptait des fins de ligne)."""
+
+    def test_forged_registry_fields_escaped_in_log(self, caplog):
+        import sys as _sys
+        import logging
+        from unittest.mock import MagicMock
+        from mcp_vault.vault.wrapping import consume_wrap_secret, WrapRegistry
+
+        class _Reg(WrapRegistry):
+            def __init__(self):
+                self._wraps = [{
+                    "operation_id": "op-1", "accessor": "ACC", "mission_id": "m-1",
+                    "vault_id": "prod\r\nFORGED-VAULT", "secret_path": "p FORGED-PATH",
+                    "created_at": "", "expires_at": "", "status": "active",
+                    "tenant_id": "", "expected_aud": "",
+                }]
+                self._cache_time = float("inf")
+
+            def load(self):
+                pass
+
+            def _save(self):
+                return True
+
+        reg = _Reg()
+        mock_hvac = MagicMock()
+        mock_ephemeral = MagicMock()
+        mock_hvac.Client.return_value = mock_ephemeral
+        mock_ephemeral.sys.unwrap.return_value = {"data": {"data": {"k": "v"}, "metadata": {}}}
+        cfg = MagicMock(); cfg.openbao_addr = "http://127.0.0.1:8200"
+
+        with patch.dict(_sys.modules, {"hvac": mock_hvac}), \
+             patch("mcp_vault.vault.wrapping._get_client", return_value=MagicMock()), \
+             patch("mcp_vault.vault.wrapping._get_config", return_value=cfg), \
+             patch("mcp_vault.vault.wrapping.get_wrap_registry", return_value=reg), \
+             caplog.at_level(logging.INFO, logger="mcp-vault.wrapping"):
+            result = run(consume_wrap_secret(wrap_token="wt", operation_id="op-1",
+                                             mission_id="m-1"))
+
+        assert result["status"] == "ok", f"consume inattendu: {result}"
+        for rec in caplog.records:
+            msg = rec.getMessage()
+            assert not _has_control_char(msg), \
+                f"injection de ligne dans le log broker: {msg!r}"
