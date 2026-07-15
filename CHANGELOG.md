@@ -1,5 +1,18 @@
 # Changelog — MCP Vault
 
+## [Unreleased]
+
+### Durcissement `secret_consume` — hygiène & anti-injection de journal (issue #78, Lot A)
+
+Premier lot du durcissement de `secret_consume`, issu d'une revue adversariale (5 rounds, OpenBao réel) du contrat de sortie du broker de secrets. Correctifs **autonomes**, **sans impact sur le contrat de succès**. Les lots B (états terminaux + HMAC anti-DoS sur l'unwrap) et C (autorisation consommateur / cohérence mode `jwt`) suivront.
+
+- **Validation stricte des identifiants (`fullmatch`)** — `_SAFE_ID_RE.match()` acceptait une fin de ligne (`op\n` : le `$` matche avant un `\n` final), laissant passer une injection de saut de ligne dans les journaux. Nouveau validateur centralisé `is_safe_id()` (`fullmatch` + refus des non-`str`, fail-close), appliqué à `secret_consume` (qui ne validait pas `operation_id`), `secret_wrap`, `secret_revoke_wrap`, `secret_wrap_lookup` et au cœur `_validate_inputs` (dont `vault_id`/`secret_path`) — **avant tout audit**. `secret_revoke_wrap` ne reflète plus un `lease_id` non validé.
+- **Défense centrale d'audit** — `AuditStore` neutralise les caractères de contrôle (C0 + DEL + C1 dont U+0085 NEL + séparateurs Unicode U+2028/U+2029) sur tous les champs, à l'**écriture** et au **rechargement** (`load_recent`) ; `sanitize_audit_field()` (publique) est robuste sur les valeurs non-`str`.
+- **Codes d'erreur fermés (anti-reflection)** — les `reason` qui interpolaient une valeur non vérifiée ne le font plus : `unsupported_algorithm:{alg}` → `unsupported_algorithm` ; `mission_status:{state}` / `mission_status_http:{code}` → `mission_inactive` / `mission_status_error` ; `jwks_http_{status}` → `jwks_http_error`. Les valeurs brutes restent en log serveur, **jamais** renvoyées au client ni versées à l'audit humain. `service_unavailable` (logique 503 du middleware) préservé.
+- **Messages client génériques** — `secret_consume` ne renvoie plus le `reason`/`status_reason` détaillé (`"Mission token invalide"`, `"Mission non active"`).
+- **Journaux serveur anti-injection** — les valeurs externes (claims du refus PEP sur `stderr`, état de mission, `operation_id`/`mission_id`/`vault_id`/`secret_path` issus du registre ou d'un claim) sont sanitisées ou journalisées via `repr`.
+- **Tests** — nouveau `tests/test_consume_hygiene_78.py` (23 tests non-complaisants : `fullmatch`, sanitisation d'audit + rechargement + C1/Unicode, non-reflection des `reason`, non-injection `stderr` PEP, log du broker) + renforcement des tests d'injection existants. `VERSION` inchangée (pas de release automatique).
+
 ## [0.8.0] — 2026-07-10
 
 ### PEP mission JWT — durcissement de la porte /mcp (issue #47, PR1)

@@ -478,7 +478,7 @@ async def secret_wrap(
         {status, wrap_token (SENSIBLE), secret_id, accessor, vault_url, expires_at, intended_use}
     """
     from .auth.context import check_admin_permission, check_access, check_path_policy
-    from .vault.wrapping import wrap_secret
+    from .vault.wrapping import wrap_secret, is_safe_id
 
     # check_admin assure que seul mcp-mission (token admin) peut créer des wraps
     admin_err = check_admin_permission()
@@ -487,6 +487,14 @@ async def secret_wrap(
 
     if ttl_seconds < 60 or ttl_seconds > 3600:
         return {"status": "error", "message": "ttl_seconds doit être entre 60 et 3600"}
+
+    # #78/D6 : valider les identifiants AVANT l'appel core ET l'audit (_r logge op_id[:32]).
+    if not is_safe_id(operation_id):
+        return {"status": "error", "error_type": "invalid_input",
+                "message": "operation_id invalide (alphanum + _-:., 1-256 chars)"}
+    if not is_safe_id(mission_id):
+        return {"status": "error", "error_type": "invalid_input",
+                "message": "mission_id invalide (alphanum + _-:., 1-256 chars)"}
 
     # En mode ENFORCE=true + JWKS configuré : enrichir expected_aud automatiquement
     # pour garantir le binding complet côté secret_consume (ÉLEVÉ — issue #29).
@@ -536,14 +544,16 @@ async def secret_revoke_wrap(lease_id: str) -> dict:
         {status: "ok", state: "revoked" | "already_revoked" | "not_found"}
     """
     from .auth.context import check_admin_permission
-    from .vault.wrapping import revoke_wrap
+    from .vault.wrapping import revoke_wrap, is_safe_id
 
     admin_err = check_admin_permission()
     if admin_err:
         return admin_err
 
-    if not lease_id:
-        return {"status": "error", "message": "lease_id requis"}
+    # #78/D5 (annexe) : lease_id validé avant d'être reflété (réponse + audit).
+    if not is_safe_id(lease_id):
+        return {"status": "error", "error_type": "invalid_input",
+                "message": "lease_id invalide (alphanum + _-:., 1-256 chars)"}
 
     result = await revoke_wrap(lease_id)
     _r("secret_revoke_wrap", result, detail=f"prefix={lease_id[:8]}...")
@@ -573,16 +583,14 @@ async def secret_wrap_lookup(operation_id: str) -> dict:
         {status, state, operation_id, count_revoked, entries_found}
     """
     from .auth.context import check_admin_permission
-    from .vault.wrapping import lookup_and_revoke_by_operation_id
+    from .vault.wrapping import lookup_and_revoke_by_operation_id, is_safe_id
 
     admin_err = check_admin_permission()
     if admin_err:
         return admin_err
 
-    from .vault.wrapping import lookup_and_revoke_by_operation_id, _SAFE_ID_RE
-    if not operation_id:
-        return {"status": "error", "message": "operation_id requis"}
-    if not _SAFE_ID_RE.match(operation_id):
+    # #78/D6 : validation stricte (fullmatch, via is_safe_id) AVANT tout audit.
+    if not is_safe_id(operation_id):
         return {"status": "error", "error_type": "invalid_input",
                 "message": "operation_id invalide (alphanum + _-:., 1-256 chars)"}
 
@@ -624,7 +632,12 @@ async def secret_consume(
         operation_id: Identifiant de l'opération (corrélation registry).
         mission_token: JWT mission compact ES256 (SENSIBLE — ne jamais loguer).
     """
-    from .vault.wrapping import consume_wrap_secret
+    from .vault.wrapping import consume_wrap_secret, is_safe_id
+
+    # #78/D6 : valider operation_id AVANT toute logique/audit (anti-injection log).
+    if not is_safe_id(operation_id):
+        return {"status": "error", "error_type": "invalid_input",
+                "message": "operation_id invalide (alphanum + _-:., 1-256 chars)"}
 
     enforce = settings.enforce_mission_token_validation
     jwks_url = settings.mission_jwks_url
@@ -651,8 +664,11 @@ async def secret_consume(
                 reason = getattr(e, "reason", "jwt_validation_failed")
                 logger.warning("secret_consume JWT rejected: %s", reason)
                 if enforce:
+                    # #78/D5 : message client GÉNÉRIQUE — le reason (potentiellement porteur
+                    # d'une valeur non vérifiée) reste dans le log serveur ci-dessus, jamais
+                    # renvoyé au client ni versé à l'audit humain.
                     return {"status": "error", "error_type": "jwt_invalid",
-                            "message": f"Mission token invalide : {reason}"}
+                            "message": "Mission token invalide"}
                 logger.warning(
                     "secret_consume : JWT invalide ignoré (ENFORCE=false) — reason=%s", reason
                 )
@@ -672,8 +688,9 @@ async def secret_consume(
         if not status_ok:
             logger.warning("secret_consume : mission inactive — %s", status_reason)
             if enforce:
+                # #78/D5 : message client générique — status_reason loggué serveur, non reflété.
                 return {"status": "error", "error_type": "mission_inactive",
-                        "message": f"Mission non active : {status_reason}"}
+                        "message": "Mission non active"}
 
     # ── Consommation médiée ─────────────────────────────────────────
     # Extraire tenant_id depuis les claims JWT.

@@ -659,7 +659,16 @@ class TestCheckMissionActive:
     def test_http_404_fail_close(self):
         active, why = self._check(status_code=404, mission="mis_404")
         assert active is False
-        assert "404" in why
+        # #78/D5 : reason FERMÉ — le code HTTP (valeur externe) n'est plus reflété.
+        assert why == "mission_status_error"
+        assert "404" not in why, "le code HTTP ne doit plus fuiter dans le reason"
+
+    def test_inactive_state_reason_is_closed(self):
+        """#78/D5 : un état renvoyé par le service mission (valeur EXTERNE, ici même
+        porteuse d'un \\n) ne doit JAMAIS être reflété dans le reason — fermeture stricte."""
+        active, why = self._check(state="EVIL\nINJECTED-STATE", mission="mis_evilstate")
+        assert active is False
+        assert why == "mission_inactive", f"état externe reflété dans le reason: {why!r}"
 
     def test_network_error_fail_close(self):
         client = MagicMock()
@@ -863,10 +872,10 @@ class TestAuthMiddlewareJwtMode:
 
     def test_mission_inactive_403(self):
         priv, h = self._valid_setup(status_url="http://mission/{mission_id}/status")
-        with patch("mcp_vault.auth.middleware.AuthMiddleware._validate_mission_jwt",
-                   wraps=None) if False else patch(
-                "mcp_vault.auth.mission_jwt.check_mission_active",
-                new=AsyncMock(return_value=(False, "mission_status:CLOSED"))):
+        # #78/D5 : le reason inactif réel est désormais fermé ("mission_inactive", sans état
+        # interpolé). Le mock reflète ce format ; tout reason != service_unavailable → 403.
+        with patch("mcp_vault.auth.mission_jwt.check_mission_active",
+                   new=AsyncMock(return_value=(False, "mission_inactive"))):
             events = h.call(token=_make_mission_token(priv))
         assert h.status_of(events) == 403
 

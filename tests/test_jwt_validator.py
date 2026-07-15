@@ -256,6 +256,12 @@ class TestMissionTokenValidatorC18:
         token = jwt.encode(payload, "secret-hmac", algorithm="HS256")
 
         self._assert_rejected(validator, token, "unsupported_algorithm")
+        # #78/D5 : fermeture STRICTE — le reason NE doit PAS contenir la valeur `alg`
+        # (l'ancien format "unsupported_algorithm:HS256" passait le check de préfixe).
+        with pytest.raises(MissionTokenError) as exc_info:
+            validator.validate(token)
+        assert exc_info.value.reason == "unsupported_algorithm", \
+            f"reason non fermé (valeur alg reflétée ?): {exc_info.value.reason!r}"
 
     def test_unknown_kid_after_refresh_rejected(self):
         """kid absent du JWKS même après refresh → kid_unknown_or_revoked."""
@@ -295,8 +301,9 @@ class TestMissionTokenValidatorC18:
         for bad_token in ["not.a.jwt", "garbage", "", "eyJ.bad"]:
             with pytest.raises(MissionTokenError) as exc_info:
                 validator.validate(bad_token)
+            # #78/D5 : reason FERMÉ — plus de valeur `alg` interpolée (était "unsupported_algorithm:missing").
             assert exc_info.value.reason in ("invalid_token_format", "decode_error",
-                                              "unsupported_algorithm:missing", "validation_failed")
+                                              "unsupported_algorithm", "validation_failed")
 
 
 # ── Tests JWKS cache et anti-DoS (via le JWKSCache partagé — issue #47) ───────

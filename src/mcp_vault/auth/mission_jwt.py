@@ -276,7 +276,10 @@ class JWKSCache:
 
         if status != 200 or not body:
             self._schedule_backoff_locked()
-            raise JWKSUnavailable(f"jwks_http_{status}")
+            # #78/D5 : reason FERMÉ — le code HTTP (valeur externe du serveur JWKS) est
+            # loggué serveur, jamais reflété dans le reason (audit PEP / stderr).
+            logger.warning("JWKS fetch HTTP %s — backoff", status)
+            raise JWKSUnavailable("jwks_http_error")
 
         try:
             keys = self._parse_jwks(body)
@@ -564,9 +567,20 @@ async def check_mission_active(
             active = state.upper() in _ACTIVE_MISSION_STATES
             async with _mission_status_lock:
                 _mission_status_cache[mission_id] = (active, now)
-            return active, "" if active else f"mission_status:{state}"
-        # 404 = mission inconnue → fail-close
-        return False, f"mission_status_http:{resp.status_code}"
+            if active:
+                return True, ""
+            # #78/D5 : reason FERMÉ — l'état renvoyé par le service mission est une valeur
+            # EXTERNE ; on la loggue côté serveur mais on ne la reflète jamais dans le code
+            # d'erreur (renvoyé au client / versé à l'audit).
+            # #78 : %r (repr) — state est une valeur EXTERNE du service mission ;
+            # repr échappe tout caractère de contrôle (anti-injection du log serveur).
+            logger.info("check_mission_active: mission %r inactive (state=%r)",
+                        mission_id[:16], state)
+            return False, "mission_inactive"
+        # 404 = mission inconnue → fail-close ; code HTTP non reflété dans le reason.
+        logger.info("check_mission_active: mission %r → HTTP %s",
+                    mission_id[:16], resp.status_code)
+        return False, "mission_status_error"
     except Exception as e:
         logger.error("check_mission_active error: %s", type(e).__name__)
         return False, "service_unavailable"

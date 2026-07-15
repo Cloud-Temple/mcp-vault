@@ -79,6 +79,34 @@ def log_audit(tool_name: str, status: str, vault_id: str = "",
 # AuditStore — Ring buffer + fichier JSONL
 # =============================================================================
 
+# Codepoints neutralisés → espace. Défense CENTRALE anti-injection de ligne (#78) :
+# tout champ texte versé à un journal est nettoyé ici, quel que soit l'appelant.
+# Couvre C0 (0x00-0x1F) + DEL (0x7F) + C1 (0x80-0x9F, dont U+0085 NEL) + séparateurs
+# de ligne/paragraphe Unicode (U+2028/U+2029) — tous interprétables comme un saut de
+# ligne par un terminal ou un parseur. La validation à la source (is_safe_id,
+# fullmatch) reste la défense-en-profondeur.
+_AUDIT_CTRL_TO_SPACE = {
+    i: 0x20
+    for i in list(range(0x20)) + [0x7f] + list(range(0x80, 0xa0)) + [0x2028, 0x2029]
+}
+
+
+def sanitize_audit_field(value) -> str:
+    """Neutralise les caractères de contrôle d'un champ de journal.
+
+    Publique : utilisable hors AuditStore (lignes stderr du PEP, logs serveur) pour
+    garantir qu'aucune valeur externe ne forge de saut de ligne dans un log.
+    Coercition défensive des non-str via str() ; si `__str__` lève (objet hostile),
+    on retombe sur une sentinelle plutôt que de propager l'exception (#78).
+    """
+    if not isinstance(value, str):
+        try:
+            value = str(value)
+        except Exception:
+            return "<unrepresentable>"
+    return value.translate(_AUDIT_CTRL_TO_SPACE)
+
+
 class AuditStore:
     """
     Journal d'audit MCP avec ring buffer mémoire + fichier JSONL persistant.
@@ -110,6 +138,15 @@ class AuditStore:
                     if line:
                         try:
                             entry = json.loads(line)
+                            # #78 : re-sanitiser TOUTE valeur textuelle au rechargement —
+                            # une entrée écrite avant le durcissement (ou par un autre
+                            # writer) ne doit réintroduire AUCUN caractère de contrôle dans
+                            # le buffer mémoire (couvre ts, detail, et tout champ str, pas
+                            # une liste figée de clés).
+                            if isinstance(entry, dict):
+                                for _k, _v in entry.items():
+                                    if isinstance(_v, str):
+                                        entry[_k] = sanitize_audit_field(_v)
                             self._buffer.append(entry)
                         except json.JSONDecodeError:
                             pass
@@ -120,6 +157,14 @@ class AuditStore:
             detail: str = "", duration_ms: float = 0, client_name: str = ""):
         """Enregistre un événement d'audit."""
         now = datetime.now(timezone.utc)
+
+        # #78 : neutraliser les caractères de contrôle de TOUS les champs texte AVANT
+        # de construire l'entrée (anti-injection de ligne d'audit / manipulation du buffer).
+        client_name = sanitize_audit_field(client_name)
+        tool_name = sanitize_audit_field(tool_name)
+        vault_id = sanitize_audit_field(vault_id)
+        status = sanitize_audit_field(status)
+        detail = sanitize_audit_field(detail)
 
         # Tronquer le détail si trop long
         if len(detail) > self.MAX_DETAIL_LEN:

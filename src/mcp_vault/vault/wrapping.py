@@ -45,6 +45,17 @@ _RESERVED_PREFIXES = ("_vault_meta", "_init/", "_system/")
 # Validation légère du operation_id / mission_id (anti-injection logs)
 _SAFE_ID_RE = re.compile(r'^[a-zA-Z0-9_\-:.]{1,256}$')
 
+
+def is_safe_id(value) -> bool:
+    """Valide STRICTEMENT un identifiant (operation_id, mission_id, accessor/lease_id).
+
+    Validateur centralisé (#78/D6). Utilise fullmatch et NON match : `_SAFE_ID_RE.match("op\\n")`
+    renvoyait un match (le `$` autorise un `\\n` final en fin de chaîne), laissant passer une
+    injection de saut de ligne dans les logs/audit. fullmatch exige que TOUTE la chaîne soit
+    conforme, ce qui ferme la faille. Refuse aussi les non-str (fail-close).
+    """
+    return isinstance(value, str) and _SAFE_ID_RE.fullmatch(value) is not None
+
 # =============================================================================
 # Wrappers lazy — patchables dans les tests sans cascade d'imports
 # =============================================================================
@@ -277,7 +288,9 @@ class WrapRegistry:
             return candidates[0]
         if len(candidates) > 1:
             logger.warning(
-                "⚠️ WrapRegistry : %d entrées (op=%s, mission=%s) — ambiguïté",
+                # %r : op/mission peuvent venir d'une entrée S3 historique (fins de ligne)
+                # ou d'un mission_id de claim non validé (#78) — repr échappe les contrôles.
+                "⚠️ WrapRegistry : %d entrées (op=%r, mission=%r) — ambiguïté",
                 len(candidates), operation_id[:16], mission_id[:16],
             )
             return None
@@ -336,7 +349,7 @@ class WrapRegistry:
                 ok = self._save()
                 if not ok:
                     logger.warning(
-                        "⚠️ rollback_consuming S3 fail (op=%s) — "
+                        "⚠️ rollback_consuming S3 fail (op=%r) — "
                         "état mémoire: active, S3: stale-consuming",
                         operation_id[:16],
                     )
@@ -360,17 +373,23 @@ def _validate_inputs(vault_id: str, secret_path: str,
     dans secrets.py (réutilise _PATH_PATTERN et la liste de préfixes réservés).
     """
     # vault_id : alphanum + tirets, 1–64 chars (cohérent avec spaces.py)
-    if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9\-]{0,62}[a-zA-Z0-9]$', vault_id) \
-            and not re.match(r'^[a-zA-Z0-9]$', vault_id):
+    # #78 : fullmatch (et non match) + type-safe — `.match`+`$` acceptait un `\n` final
+    # (le vault_id remonte ensuite dans l'audit via _r → injection de ligne).
+    if not isinstance(vault_id, str) or (
+        not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9\-]{0,62}[a-zA-Z0-9]', vault_id)
+        and not re.fullmatch(r'[a-zA-Z0-9]', vault_id)
+    ):
         return "vault_id invalide (alphanum + tirets, 1-64 chars)"
 
     # secret_path : identique à secrets.py _validate_secret_path()
     # Regex : alphanum + / _ . - uniquement, commence par alphanum
-    _PATH_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9/_.\-]{0,255}$')
-    if not secret_path:
+    _PATH_RE = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9/_.\-]{0,255}')
+    if not isinstance(secret_path, str) or not secret_path:
         return "secret_path requis"
-    if ".." in secret_path or "\\" in secret_path or not _PATH_RE.match(secret_path):
-        return f"secret_path invalide: '{secret_path}' (caractères autorisés : alphanum / _ . -)"
+    # #78 : fullmatch + message SANS echo de la valeur brute (anti-reflection dans le
+    # message renvoyé au client et versé à l'audit).
+    if ".." in secret_path or "\\" in secret_path or not _PATH_RE.fullmatch(secret_path):
+        return "secret_path invalide (caractères autorisés : alphanum / _ . -)"
     for prefix in _RESERVED_PREFIXES:
         if secret_path.startswith(prefix):
             return f"secret_path '{secret_path}' est un chemin réservé"
@@ -383,9 +402,9 @@ def _validate_inputs(vault_id: str, secret_path: str,
         pass
 
     # mission_id / operation_id : anti-injection logs
-    if not _SAFE_ID_RE.match(mission_id):
+    if not is_safe_id(mission_id):
         return "mission_id invalide (alphanum + _-:., 1-256 chars)"
-    if not _SAFE_ID_RE.match(operation_id):
+    if not is_safe_id(operation_id):
         return "operation_id invalide (alphanum + _-:., 1-256 chars)"
 
     return None
@@ -482,7 +501,7 @@ async def wrap_secret(
         # S3 indisponible au passage active : le wrap_token existe côté OpenBao
         # mais n'est pas corrélé → révoquer immédiatement pour éviter une provision
         # non compensable, et retourner une erreur au broker.
-        logger.error("wrap_secret: mark_active S3 failed pour op=%s — révocation immédiate",
+        logger.error("wrap_secret: mark_active S3 failed pour op=%r — révocation immédiate",
                      operation_id[:32])
         try:
             client.auth.token.revoke_accessor(accessor=accessor)
@@ -728,21 +747,21 @@ async def consume_wrap_secret(
     # En mode enforce=True : les wraps sans expected_aud sont refusés (binding incomplet).
     if entry.get("tenant_id") and tenant_id != entry["tenant_id"]:
         logger.warning(
-            "⚠️ consume_wrap_secret : binding mismatch (tenant_id) op=%s — confused-deputy rejeté",
+            "⚠️ consume_wrap_secret : binding mismatch (tenant_id) op=%r — confused-deputy rejeté",
             operation_id[:16],
         )
         return {"status": "error", "error_type": "binding_mismatch",
                 "message": "binding mismatch"}
     if entry.get("expected_aud") and expected_aud != entry["expected_aud"]:
         logger.warning(
-            "⚠️ consume_wrap_secret : binding mismatch (aud) op=%s — confused-deputy rejeté",
+            "⚠️ consume_wrap_secret : binding mismatch (aud) op=%r — confused-deputy rejeté",
             operation_id[:16],
         )
         return {"status": "error", "error_type": "binding_mismatch",
                 "message": "binding mismatch"}
     if enforce and not entry.get("expected_aud"):
         logger.warning(
-            "⚠️ consume_wrap_secret : wrap sans expected_aud en mode enforced op=%s — rejeté",
+            "⚠️ consume_wrap_secret : wrap sans expected_aud en mode enforced op=%r — rejeté",
             operation_id[:16],
         )
         return {"status": "error", "error_type": "binding_incomplete",
@@ -783,8 +802,11 @@ async def consume_wrap_secret(
 
     # ── 4. Marquer consumed ─────────────────────────────────────────
     registry.mark_consumed(operation_id, mission_id)
+    # #78 : %r (repr échappe les caractères de contrôle) — vault_id/secret_path
+    # proviennent du registre S3, qui a pu être écrit avec des fins de ligne par une
+    # version antérieure (validation .match+$). Évite l'injection de ligne au log.
     logger.info(
-        "✅ consume_wrap_secret : op=%s mission=%s vault=%s path=%s",
+        "✅ consume_wrap_secret : op=%r mission=%r vault=%r path=%r",
         operation_id[:16], mission_id[:16],
         entry.get("vault_id", "?"), entry.get("secret_path", "?"),
     )
