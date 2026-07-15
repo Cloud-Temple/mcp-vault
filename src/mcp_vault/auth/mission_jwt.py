@@ -572,11 +572,13 @@ async def check_mission_active(
             # #78/D5 : reason FERMÉ — l'état renvoyé par le service mission est une valeur
             # EXTERNE ; on la loggue côté serveur mais on ne la reflète jamais dans le code
             # d'erreur (renvoyé au client / versé à l'audit).
-            logger.info("check_mission_active: mission %s inactive (state=%s)",
+            # #78 : %r (repr) — state est une valeur EXTERNE du service mission ;
+            # repr échappe tout caractère de contrôle (anti-injection du log serveur).
+            logger.info("check_mission_active: mission %r inactive (state=%r)",
                         mission_id[:16], state)
             return False, "mission_inactive"
         # 404 = mission inconnue → fail-close ; code HTTP non reflété dans le reason.
-        logger.info("check_mission_active: mission %s → HTTP %s",
+        logger.info("check_mission_active: mission %r → HTTP %s",
                     mission_id[:16], resp.status_code)
         return False, "mission_status_error"
     except Exception as e:

@@ -183,32 +183,64 @@ class TestRevokeWrapValidatesLeaseId:
 # Défense CENTRALE — l'audit neutralise les caractères de contrôle (tous champs)
 # =============================================================================
 
+def _has_control_char(s) -> bool:
+    """True si s contient un C0/DEL/C1 ou un séparateur de ligne/paragraphe Unicode."""
+    return any(
+        ord(ch) < 0x20 or ord(ch) == 0x7f or 0x80 <= ord(ch) <= 0x9f
+        or ord(ch) in (0x2028, 0x2029)
+        for ch in s
+    )
+
+
 class TestAuditFieldSanitization:
-    """Filet central : quel que soit l'appelant, aucun caractère de contrôle ne survit
-    dans une entrée d'audit (anti-injection / manipulation du journal humain)."""
+    """Filet central : quel que soit l'appelant, aucun caractère de contrôle (C0, DEL,
+    C1, séparateurs Unicode) ne survit dans une entrée d'audit — buffer ET fichier,
+    à l'écriture ET au rechargement."""
 
     def test_control_chars_neutralized_all_fields(self, tmp_path):
         from mcp_vault.audit import AuditStore
         store = AuditStore(tmp_path / "audit.jsonl")
         store.log(tool_name="secret_wrap", status="error",
-                  vault_id="prod\nFAKE  2026  admin  ok", detail="op=x\r\ninjected-line",
+                  vault_id="prod\nFAKE 2026 admin ok",
+                  detail="op=x\r\ninjected\x85nel sep",  # C0 + C1 (NEL) + U+2028
                   client_name="cli\x7fent")
         entry = store._buffer[-1]
         for field in ("vault_id", "detail", "client", "tool", "status"):
-            val = entry[field]
-            assert "\n" not in val and "\r" not in val and "\x7f" not in val, \
-                f"caractère de contrôle résiduel dans {field}: {val!r}"
+            assert not _has_control_char(entry[field]), \
+                f"caractère de contrôle résiduel dans {field}: {entry[field]!r}"
 
-    def test_single_physical_line_in_file(self, tmp_path):
-        """Une entrée = exactement UNE ligne physique (pas de 2e ligne forgée par \\n)."""
+    def test_file_entry_clean_after_json_reload(self, tmp_path):
+        """Non-complaisant : recharger la ligne via json.loads et vérifier l'ABSENCE de
+        contrôle dans chaque champ (json.dumps échappe \\n → un simple comptage de lignes
+        physiques serait complaisant et resterait vert sans le correctif)."""
+        import json as _json
         from mcp_vault.audit import AuditStore
         path = tmp_path / "audit.jsonl"
         store = AuditStore(path)
         store.log(tool_name="secret_wrap", status="ok",
-                  vault_id="v\nADMIN GRANT", detail="d\nfake")
-        content = path.read_text()
-        assert content.count("\n") == 1, \
-            f"l'entrée occupe plus d'une ligne physique: {content!r}"
+                  vault_id="v\nADMIN GRANT", detail="d\r\nfake\x85nel")
+        entry = _json.loads(path.read_text().splitlines()[0])
+        for field in ("vault_id", "detail"):
+            assert not _has_control_char(entry[field]), \
+                f"contrôle dans le champ fichier {field}: {entry[field]!r}"
+
+    def test_load_recent_re_sanitizes_historical_entries(self, tmp_path):
+        """Une entrée historique (écrite avant le durcissement) est re-nettoyée au
+        rechargement dans le buffer (load_recent), pas seulement à l'écriture."""
+        import json as _json
+        from mcp_vault.audit import AuditStore
+        path = tmp_path / "audit.jsonl"
+        path.write_text(_json.dumps({
+            "ts": "2026-01-01T00:00:00+00:00", "client": "x", "tool": "t",
+            "category": "c", "vault_id": "prod\nFORGED 2026 admin",
+            "status": "ok", "detail": "d\x85nel", "duration_ms": 0,
+        }) + "\n")
+        store = AuditStore(path)
+        store.load_recent()
+        entry = store._buffer[-1]
+        for field in ("vault_id", "detail"):
+            assert not _has_control_char(entry[field]), \
+                f"contrôle non nettoyé au rechargement dans {field}: {entry[field]!r}"
 
     def test_non_str_field_failclose(self, tmp_path):
         """Un champ non-str ne casse pas l'audit (fail-close via str())."""
@@ -268,3 +300,28 @@ class TestJwksReasonClosed:
         assert exc_info.value.reason == "jwks_http_error", \
             f"code HTTP reflété dans le reason: {exc_info.value.reason!r}"
         assert "500" not in exc_info.value.reason
+
+
+# =============================================================================
+# Annexe — le refus PEP ne forge pas de lignes stderr via des claims CR/LF
+# =============================================================================
+
+class TestPepDenyStderrSanitized:
+    """`_audit_pep_deny` journalise sur stderr : des claims forgés (CR/LF/NEL) ne
+    doivent PAS y forger de lignes supplémentaires (le JSONL était déjà couvert par
+    AuditStore ; ici c'est le print stderr)."""
+
+    def test_forged_claims_do_not_forge_stderr_lines(self, capsys):
+        from mcp_vault.auth.middleware import AuthMiddleware
+        mw = AuthMiddleware(app=lambda *a, **k: None)
+        claims_ctx = {"mission_id": "m\nFORGED-LINE", "tenant_id": "t\r\nEVIL-TENANT",
+                      "jti": "j\x85nel", "issuer_decision_id": ""}
+        mw._audit_pep_deny("some_reason", claims_ctx)
+        err = capsys.readouterr().err
+        deny_lines = [ln for ln in err.splitlines() if "PEP deny" in ln]
+        assert len(deny_lines) == 1, \
+            f"le refus PEP occupe {len(deny_lines)} lignes stderr: {err!r}"
+        # Valeurs neutralisées (espaces) et maintenues sur la ligne deny, pas coupées.
+        residual = err.replace(deny_lines[0], "")
+        for forged in ("FORGED-LINE", "EVIL-TENANT"):
+            assert forged not in residual, f"'{forged}' a forgé une ligne stderr séparée"

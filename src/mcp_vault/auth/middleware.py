@@ -341,12 +341,16 @@ class AuthMiddleware:
         corrélation d'audit E2E avec mcp-mission.
         """
         import uuid
+        from ..audit import sanitize_audit_field as _san
         decision_id = uuid.uuid4().hex
-        detail_parts = [f"decision_id={decision_id}", f"reason={reason}"]
+        # #78 : claims issus du JWT (tenant_id/mission_id/jti) = valeurs potentiellement
+        # forgées → sanitisées AVANT log_audit ET print stderr (anti-injection de ligne).
+        detail_parts = [f"decision_id={decision_id}", f"reason={_san(reason)}"]
         for key in ("mission_id", "tenant_id", "jti", "issuer_decision_id"):
             if claims_ctx.get(key):
-                detail_parts.append(f"{key}={claims_ctx[key]}")
-        client = f"mission:{claims_ctx['tenant_id']}" if claims_ctx.get("tenant_id") else "?"
+                detail_parts.append(f"{key}={_san(str(claims_ctx[key]))}")
+        client = (f"mission:{_san(str(claims_ctx['tenant_id']))}"
+                  if claims_ctx.get("tenant_id") else "?")
         try:
             from ..audit import log_audit
             log_audit("mission_pep", "denied", detail=" ".join(detail_parts),
