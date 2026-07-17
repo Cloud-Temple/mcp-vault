@@ -1,6 +1,6 @@
 # Changelog — MCP Vault
 
-## [Unreleased]
+## [0.8.2] — 2026-07-17
 
 ### Console admin — navigation par dossier des secrets (KV v2) + durcissements (issue #81)
 
