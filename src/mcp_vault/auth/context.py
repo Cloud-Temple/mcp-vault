@@ -408,9 +408,14 @@ def can_read_vault_content(vault_id: str) -> bool:
     if "admin" in token_info.get("permissions", []):
         return True
     if token_info.get("auth_type") == "mission_jwt":
-        # Capability outil (deny-by-default) évaluée sans auditer.
-        return ("secret_list" in MISSION_JWT_ALLOWED_TOOLS
-                or "secret_list" in MISSION_JWT_PUBLIC_TOOLS)
+        # Capability outil (deny-by-default) évaluée sans auditer. On NE retourne
+        # PAS True ici : une mission peut être restreinte par un policy_id
+        # (path_rules) — on poursuit l'évaluation policy commune ci-dessous, pour
+        # s'aligner exactement sur check_policy + check_path_policy (#81 R3, sinon
+        # sur-autorisation : compteur exposé malgré une policy qui refuse).
+        if not ("secret_list" in MISSION_JWT_ALLOWED_TOOLS
+                or "secret_list" in MISSION_JWT_PUBLIC_TOOLS):
+            return False
     policy_id = token_info.get("policy_id", "")
     if not policy_id:
         return True

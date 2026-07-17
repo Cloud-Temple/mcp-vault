@@ -448,41 +448,92 @@ def test_can_read_vault_content_policy_gated_and_silent():
         ctx.current_token_info.reset(h)
 
 
-def test_list_vaults_hides_cardinality_without_list_right():
+def test_can_read_vault_content_mission_with_restrictive_policy():
     """
-    Tableau des vaults : une identité SANS droit de lister → root_entries_count /
-    secrets_count OMIS (None → l'UI affiche « — »), jamais un « 0 » trompeur ;
-    get_space_info est appelé avec count=False (pas de list).
+    NON-RÉGRESSION (finding Codex R3, sur-autorisation) : une mission_jwt AVEC un
+    policy_id restrictif ne doit PAS être sur-autorisée. L'appartenance de
+    secret_list à l'allowlist mission n'implique pas un accès inconditionnel : la
+    policy (is_tool_allowed / is_path_allowed) tranche, comme pour un token S3.
     """
+    from mcp_vault.auth import context as ctx
+    tok = {"permissions": ["read"], "auth_type": "mission_jwt", "policy_id": "m", "client_name": "c"}
+    h = ctx.current_token_info.set(tok)
+    try:
+        store = MagicMock()
+        # secret_list refusé par la policy de la mission → False (pas de fuite compteur)
+        store.is_tool_allowed.return_value = False
+        store.is_path_allowed.return_value = True
+        with patch("mcp_vault.auth.policies.get_policy_store", return_value=store), \
+             patch("mcp_vault.audit.log_audit") as mock_audit:
+            assert ctx.can_read_vault_content("v") is False
+            mock_audit.assert_not_called()
+        # racine refusée par la path policy → False aussi
+        store.is_tool_allowed.return_value = True
+        store.is_path_allowed.return_value = False
+        with patch("mcp_vault.auth.policies.get_policy_store", return_value=store):
+            assert ctx.can_read_vault_content("v") is False
+        # policy pleinement autorisante → True
+        store.is_tool_allowed.return_value = True
+        store.is_path_allowed.return_value = True
+        with patch("mcp_vault.auth.policies.get_policy_store", return_value=store):
+            assert ctx.can_read_vault_content("v") is True
+    finally:
+        ctx.current_token_info.reset(h)
+
+
+def _fake_gsi():
+    """get_space_info simulé fidèle : n'ajoute la cardinalité QUE si count=True."""
+    async def fake(vault_id, count=True):
+        base = {"status": "ok", "vault_id": vault_id, "description": ""}
+        if count:
+            base["root_entries_count"] = 3
+            base["secrets_count"] = 3
+        return base
+    return AsyncMock(side_effect=fake)
+
+
+def _run_list_vaults_with_store(tool_ok, path_ok):
+    """
+    Exécute GET /admin/api/vaults avec le VRAI can_read_vault_content (non mocké) :
+    token read + policy_id, PolicyStore réglé par (tool_ok, path_ok). Le token est
+    posé dans le contextvar (lu par can_read_vault_content). Retourne (body, gsi).
+    """
+    from mcp_vault.auth import context as ctx
     scope = _make_scope("GET", "/admin/api/vaults")
     vault_list = {"status": "ok", "vaults": [{"vault_id": "v1", "description": ""}]}
-    info = {"status": "ok", "vault_id": "v1", "description": ""}  # count=False → pas de cardinalité
-    gsi = AsyncMock(return_value=info)
-    with patch("mcp_vault.admin.api._get_token_info", return_value=_token_info(["read"])), \
-         patch("mcp_vault.admin.api.check_policy", return_value=None), \
-         patch("mcp_vault.admin.api.can_read_vault_content", return_value=False), \
-         patch("mcp_vault.vault.spaces.list_spaces", new=AsyncMock(return_value=vault_list)), \
-         patch("mcp_vault.vault.spaces.get_space_info", new=gsi):
-        status, body = _run(_call(scope))
-    assert status == 200
+    gsi = _fake_gsi()
+    tok = {"permissions": ["read"], "policy_id": "p", "client_name": "c", "allowed_resources": ["v1"]}
+    store = MagicMock()
+    store.is_tool_allowed.return_value = tool_ok
+    store.is_path_allowed.return_value = path_ok
+    h = ctx.current_token_info.set(tok)
+    try:
+        with patch("mcp_vault.admin.api._get_token_info", return_value=tok), \
+             patch("mcp_vault.admin.api.check_policy", return_value=None), \
+             patch("mcp_vault.auth.policies.get_policy_store", return_value=store), \
+             patch("mcp_vault.vault.spaces.list_spaces", new=AsyncMock(return_value=vault_list)), \
+             patch("mcp_vault.vault.spaces.get_space_info", new=gsi):
+            _status, body = _run(_call(scope))
+    finally:
+        ctx.current_token_info.reset(h)
+    return body, gsi
+
+
+def test_list_vaults_hides_cardinality_without_list_right():
+    """
+    Tableau : identité SANS droit de lister → cardinalité OMISE (None → UI « — »),
+    jamais « 0 ». NON-COMPLAISANT : le VRAI can_read_vault_content s'exécute (aucun
+    mock du helper) — un sabotage du helper (→ True) ferait rougir ce test.
+    """
+    body, gsi = _run_list_vaults_with_store(tool_ok=False, path_ok=True)  # secret_list refusé
     v = body["vaults"][0]
     assert v.get("root_entries_count") is None and v.get("secrets_count") is None
     assert gsi.call_args.kwargs.get("count") is False
 
 
 def test_list_vaults_shows_cardinality_with_list_right():
-    """Avec droit de lister → cardinalité présente (get_space_info count=True)."""
-    scope = _make_scope("GET", "/admin/api/vaults")
-    vault_list = {"status": "ok", "vaults": [{"vault_id": "v1", "description": ""}]}
-    info = {"status": "ok", "vault_id": "v1", "description": "", "root_entries_count": 3, "secrets_count": 3}
-    gsi = AsyncMock(return_value=info)
-    with patch("mcp_vault.admin.api._get_token_info", return_value=_token_info(["read"])), \
-         patch("mcp_vault.admin.api.check_policy", return_value=None), \
-         patch("mcp_vault.admin.api.can_read_vault_content", return_value=True), \
-         patch("mcp_vault.vault.spaces.list_spaces", new=AsyncMock(return_value=vault_list)), \
-         patch("mcp_vault.vault.spaces.get_space_info", new=gsi):
-        status, body = _run(_call(scope))
-    assert status == 200
+    """Avec droit de lister (store autorise) → cardinalité présente (count=True)."""
+    body, gsi = _run_list_vaults_with_store(tool_ok=True, path_ok=True)
     assert body["vaults"][0].get("root_entries_count") == 3
     assert gsi.call_args.kwargs.get("count") is True
 
