@@ -369,8 +369,10 @@ def _validate_inputs(vault_id: str, secret_path: str,
     """
     Valide vault_id, secret_path, mission_id, operation_id.
     Retourne un message d'erreur si invalide, None si OK.
-    Les règles de secret_path sont identiques à celles de _validate_secret_path()
-    dans secrets.py (réutilise _PATH_PATTERN et la liste de préfixes réservés).
+    La validation de secret_path est propre à cette fonction (indépendante de
+    _validate_secret_path() dans secrets.py, pour ne pas coupler le chemin
+    critique wrap au listing admin) ; elle réutilise la liste de préfixes
+    réservés via _is_reserved_path.
     """
     # vault_id : alphanum + tirets, 1–64 chars (cohérent avec spaces.py)
     # #78 : fullmatch (et non match) + type-safe — `.match`+`$` acceptait un `\n` final
@@ -381,7 +383,8 @@ def _validate_inputs(vault_id: str, secret_path: str,
     ):
         return "vault_id invalide (alphanum + tirets, 1-64 chars)"
 
-    # secret_path : identique à secrets.py _validate_secret_path()
+    # secret_path : validation locale (proche de secrets.py _validate_secret_path
+    # mais indépendante — le chemin critique wrap n'est pas couplé au listing admin).
     # Regex : alphanum + / _ . - uniquement, commence par alphanum
     _PATH_RE = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9/_.\-]{0,255}')
     if not isinstance(secret_path, str) or not secret_path:

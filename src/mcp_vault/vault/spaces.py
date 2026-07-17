@@ -256,12 +256,16 @@ async def get_space_info(vault_id: str) -> dict:
         if not mount_info:
             return {"status": "error", "message": f"Vault '{vault_id}' non trouvé"}
 
-        # ── Compter les secrets (en excluant _vault_meta) ─────
-        secret_count = 0
+        # ── Compter les ENTRÉES de premier niveau (dossiers ET feuilles) ─────
+        # NB (#81) : le `list` KV v2 non récursif renvoie aussi les sous-dossiers
+        # (suffixe '/'). Ce nombre n'est donc PAS le total de secrets feuilles ;
+        # aucun comptage récursif n'est fait (choix délibéré : pas de coût de
+        # parcours en profondeur sur un gros vault).
+        root_entries = 0
         try:
             secrets = client.secrets.kv.v2.list_secrets(path="", mount_point=vault_id)
             keys = secrets.get("data", {}).get("keys", [])
-            secret_count = len([k for k in keys if k != VAULT_META_PATH])
+            root_entries = len([k for k in keys if k != VAULT_META_PATH])
         except Exception:
             pass  # Pas de secrets ou erreur de listing
 
@@ -274,7 +278,12 @@ async def get_space_info(vault_id: str) -> dict:
             "description": meta.get("description", mount_info.get("description", "")),
             "type": mount_info.get("type"),
             "options": mount_info.get("options", {}),
-            "secrets_count": secret_count,
+            # root_entries_count : nom honnête (#81) = entrées de 1er niveau.
+            # secrets_count : conservé pour compat (MCP vault_info, CLI, dashboard,
+            # tests) — MÊME valeur ; sa sémantique réelle est « entrées », pas
+            # « feuilles » (pas de comptage récursif).
+            "root_entries_count": root_entries,
+            "secrets_count": root_entries,
         }
 
         # Ajouter les métadonnées si elles existent
