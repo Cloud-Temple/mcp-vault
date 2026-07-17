@@ -576,5 +576,41 @@ def test_js_domid_is_injective_under_node():
     assert result["bad"] == [], f"domId non bijectif : {result['bad']}"
 
 
+def test_js_dashboard_sum_is_honest_under_node():
+    """
+    dashboard.js `sumRootEntries` : une cardinalité inconnue (null) n'est JAMAIS
+    comptée comme 0 et rend le total `partial` (affiché « + ») ; les valeurs
+    connues s'additionnent. Exécute la VRAIE fonction de prod sous Node.
+    Test PERMANENT réclamé par la revue Codex R4 (bloque la régression R3 en CI).
+    """
+    import shutil
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node absent — test dashboard non exécutable ici")
+
+    dash_js = os.path.join(os.path.dirname(__file__), "..", "src", "mcp_vault", "static", "js", "dashboard.js")
+    harness = (
+        "const fs=require('fs'),vm=require('vm');"
+        "const code=fs.readFileSync(process.argv[1],'utf8');"
+        "const ctx={console};vm.createContext(ctx);"
+        "vm.runInContext(code,ctx);"
+        "let bad=[];"
+        "const f=ctx.sumRootEntries;"
+        "const a=f([{root_entries_count:2},{root_entries_count:null}]);"      # 1 connu + 1 inconnu
+        "if(!(a.sum===2 && a.partial===true)) bad.push('null+2='+JSON.stringify(a));"
+        "const b=f([{root_entries_count:2},{root_entries_count:3}]);"          # tous connus
+        "if(!(b.sum===5 && b.partial===false)) bad.push('2+3='+JSON.stringify(b));"
+        "const c=f([{root_entries_count:null}]);"                              # tout inconnu → 0 mais partial
+        "if(!(c.sum===0 && c.partial===true)) bad.push('null='+JSON.stringify(c));"
+        "const d=f([]);"                                                       # vide
+        "if(!(d.sum===0 && d.partial===false)) bad.push('empty='+JSON.stringify(d));"
+        "console.log(JSON.stringify({bad}));"
+    )
+    out = subprocess.run([node, "-e", harness, dash_js], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, f"Node a échoué : {out.stderr}"
+    result = json.loads(out.stdout.strip().splitlines()[-1])
+    assert result["bad"] == [], f"sumRootEntries incorrect : {result['bad']}"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

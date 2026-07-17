@@ -2,6 +2,16 @@
    MCP Vault Admin — Dashboard View
    ═══════════════════════════════════════════════════════════════════════ */
 
+/* ─── #81 : somme honnête des cardinalités (testable sous Node) ─── */
+// Additionne les cardinalités CONNUES (nombres) ; `partial` vaut true si au moins
+// une est inconnue (null : coffre non listable ou backend indisponible) — une
+// inconnue n'est JAMAIS comptée comme 0, et le total partiel est signalé (« + »).
+function sumRootEntries(vaultsArr) {
+    const arr = vaultsArr || [];
+    const known = arr.map(v => v.root_entries_count).filter(n => typeof n === 'number');
+    return { sum: known.reduce((s, n) => s + n, 0), partial: known.length < arr.length };
+}
+
 async function loadDashboard() {
     const el = document.getElementById('page-dashboard');
     el.innerHTML = '<div class="empty-state">Chargement…</div>';
@@ -16,13 +26,9 @@ async function loadDashboard() {
 
     const vc = vaults.count || 0;
     const tc = (tokens.tokens || []).filter(t => !t.revoked && !t.expired).length;
-    // #81 : somme honnête — ignore les cardinalités inconnues (null : coffres non
-    // listables ou backend indisponible) et signale un total PARTIEL par « + »
-    // plutôt que de les compter comme 0 (erreur/inconnu ≠ zéro).
-    const _vaultsArr = vaults.vaults || [];
-    const _known = _vaultsArr.map(v => v.root_entries_count).filter(n => typeof n === 'number');
-    const sc = _known.reduce((s, n) => s + n, 0);
-    const scPartial = _known.length < _vaultsArr.length;
+    // #81 : somme honnête (cf. sumRootEntries) — null (coffre non listable /
+    // backend indisponible) exclu, total partiel signalé par « + », jamais 0.
+    const { sum: sc, partial: scPartial } = sumRootEntries(vaults.vaults);
     const pc = policies ? (policies.policies || []).length : 0;
 
     el.innerHTML = `
