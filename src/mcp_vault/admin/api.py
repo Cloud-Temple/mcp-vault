@@ -13,7 +13,7 @@ import platform
 from pathlib import Path
 
 from ..config import get_settings
-from ..auth.context import current_token_info, check_policy, check_path_policy
+from ..auth.context import current_token_info, check_policy, check_path_policy, can_read_vault_content
 from ..auth.token_store import get_token_store, TokenStore
 from ..auth.middleware import get_activity_log
 from ..audit import log_audit
@@ -723,23 +723,28 @@ async def _api_list_vaults(send, allowed_vault_ids=None, owner_filter=None):
     # Enrichir chaque vault avec ses métadonnées (secrets_count, dates)
     enriched = []
     for vault in result.get("vaults", []):
+        vid = vault["vault_id"]
         try:
-            info = await get_space_info(vault["vault_id"])
+            # #81 : cardinalité seulement si l'identité peut LISTER ce vault
+            # (moindre privilège, test silencieux — pas de faux « denied »).
+            info = await get_space_info(vid, count=can_read_vault_content(vid))
             enriched.append({
-                "vault_id": vault["vault_id"],
+                "vault_id": vid,
                 "description": info.get("description", vault.get("description", "")),
-                "root_entries_count": info.get("root_entries_count", 0),
-                "secrets_count": info.get("secrets_count", 0),
+                # None (absent) = inconnu / non autorisé → jamais un « 0 » trompeur ;
+                # l'UI affiche « — » (backend indisponible ≠ vault vide).
+                "root_entries_count": info.get("root_entries_count"),
+                "secrets_count": info.get("secrets_count"),
                 "created_at": info.get("created_at", ""),
                 "created_by": info.get("created_by", ""),
                 "updated_at": info.get("updated_at", ""),
             })
         except Exception:
             enriched.append({
-                "vault_id": vault["vault_id"],
+                "vault_id": vid,
                 "description": vault.get("description", ""),
-                "root_entries_count": 0,
-                "secrets_count": 0,
+                "root_entries_count": None,
+                "secrets_count": None,
             })
 
     await _json_response(send, 200, {

@@ -248,7 +248,7 @@ async def vault_info(vault_id: str) -> dict:
     Args:
         vault_id: Identifiant du vault
     """
-    from .auth.context import check_access, check_policy
+    from .auth.context import check_access, check_policy, can_read_vault_content
     from .vault.spaces import get_space_info
 
     policy_err = check_policy("vault_info")
@@ -258,7 +258,12 @@ async def vault_info(vault_id: str) -> dict:
     if access_err:
         return access_err
 
-    return _r("vault_info", await get_space_info(vault_id), vault_id)
+    # #81 : n'exposer la cardinalité (secrets_count/root_entries_count) que si
+    # l'identité peut LISTER le contenu (moindre privilège). Test silencieux, sans
+    # faux 'denied'. Une identité autorisée conserve le compteur (contrat inchangé).
+    return _r("vault_info",
+              await get_space_info(vault_id, count=can_read_vault_content(vault_id)),
+              vault_id)
 
 
 @mcp.tool()

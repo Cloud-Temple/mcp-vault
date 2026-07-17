@@ -359,12 +359,17 @@ def _mock_mount_client(list_side_effect=None, keys=None):
 
 def test_get_space_info_count_false_skips_list():
     from mcp_vault.vault import spaces
-    client = _mock_mount_client(list_side_effect=AssertionError("list ne doit PAS être appelé"))
+    # LIST disponible mais il ne DOIT pas être appelé quand count=False.
+    client = _mock_mount_client(keys=["a/", "b/"])
     with patch.object(spaces, "get_hvac_client", return_value=client), \
          patch.object(spaces, "_read_vault_meta", return_value={}):
         res = _run(spaces.get_space_info("v", count=False))
     assert res["status"] == "ok"
     assert "root_entries_count" not in res and "secrets_count" not in res
+    # NON-COMPLAISANCE (finding Codex R2) : vérification EXPLICITE qu'aucun LIST n'a
+    # eu lieu. Un side_effect AssertionError serait absorbé par le `except` de
+    # get_space_info → faux vert ; on espionne donc l'appel réel.
+    client.secrets.kv.v2.list_secrets.assert_not_called()
 
 
 def test_get_space_info_error_is_not_silent_zero():
@@ -400,6 +405,86 @@ def test_get_space_info_count_true_counts_entries():
         res = _run(spaces.get_space_info("v", count=True))
     # _vault_meta exclu → 2 entrées
     assert res.get("root_entries_count") == 2 and res.get("secrets_count") == 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# D quater. Moindre privilège sur la cardinalité (finding Codex R2, NO-GO)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_can_read_vault_content_admin_none_and_no_policy():
+    from mcp_vault.auth import context as ctx
+    for tok, expected in (
+        ({"permissions": ["admin"]}, True),          # admin → tout
+        (None, True),                                # pas de token → pas de restriction
+        ({"permissions": ["read"], "policy_id": ""}, True),  # pas de policy → pas de restriction
+        ({"permissions": ["read"], "auth_type": "mission_jwt"}, True),  # secret_list ∈ allowlist
+    ):
+        h = ctx.current_token_info.set(tok)
+        try:
+            assert ctx.can_read_vault_content("v") is expected, f"{tok} → {expected}"
+        finally:
+            ctx.current_token_info.reset(h)
+
+
+def test_can_read_vault_content_policy_gated_and_silent():
+    """policy_id présent : décision via le store ; ET aucun audit (silencieux)."""
+    from mcp_vault.auth import context as ctx
+    h = ctx.current_token_info.set({"permissions": ["read"], "policy_id": "p", "client_name": "c"})
+    try:
+        # PolicyStore absent → fail-close
+        with patch("mcp_vault.auth.policies.get_policy_store", return_value=None), \
+             patch("mcp_vault.audit.log_audit") as mock_audit:
+            assert ctx.can_read_vault_content("v") is False
+            mock_audit.assert_not_called()  # AUCUN faux 'denied'
+        store = MagicMock()
+        for tool_ok, path_ok, expected in ((True, True, True), (False, True, False), (True, False, False)):
+            store.is_tool_allowed.return_value = tool_ok
+            store.is_path_allowed.return_value = path_ok
+            with patch("mcp_vault.auth.policies.get_policy_store", return_value=store), \
+                 patch("mcp_vault.audit.log_audit") as mock_audit:
+                assert ctx.can_read_vault_content("v") is expected, f"{tool_ok},{path_ok}→{expected}"
+                mock_audit.assert_not_called()
+    finally:
+        ctx.current_token_info.reset(h)
+
+
+def test_list_vaults_hides_cardinality_without_list_right():
+    """
+    Tableau des vaults : une identité SANS droit de lister → root_entries_count /
+    secrets_count OMIS (None → l'UI affiche « — »), jamais un « 0 » trompeur ;
+    get_space_info est appelé avec count=False (pas de list).
+    """
+    scope = _make_scope("GET", "/admin/api/vaults")
+    vault_list = {"status": "ok", "vaults": [{"vault_id": "v1", "description": ""}]}
+    info = {"status": "ok", "vault_id": "v1", "description": ""}  # count=False → pas de cardinalité
+    gsi = AsyncMock(return_value=info)
+    with patch("mcp_vault.admin.api._get_token_info", return_value=_token_info(["read"])), \
+         patch("mcp_vault.admin.api.check_policy", return_value=None), \
+         patch("mcp_vault.admin.api.can_read_vault_content", return_value=False), \
+         patch("mcp_vault.vault.spaces.list_spaces", new=AsyncMock(return_value=vault_list)), \
+         patch("mcp_vault.vault.spaces.get_space_info", new=gsi):
+        status, body = _run(_call(scope))
+    assert status == 200
+    v = body["vaults"][0]
+    assert v.get("root_entries_count") is None and v.get("secrets_count") is None
+    assert gsi.call_args.kwargs.get("count") is False
+
+
+def test_list_vaults_shows_cardinality_with_list_right():
+    """Avec droit de lister → cardinalité présente (get_space_info count=True)."""
+    scope = _make_scope("GET", "/admin/api/vaults")
+    vault_list = {"status": "ok", "vaults": [{"vault_id": "v1", "description": ""}]}
+    info = {"status": "ok", "vault_id": "v1", "description": "", "root_entries_count": 3, "secrets_count": 3}
+    gsi = AsyncMock(return_value=info)
+    with patch("mcp_vault.admin.api._get_token_info", return_value=_token_info(["read"])), \
+         patch("mcp_vault.admin.api.check_policy", return_value=None), \
+         patch("mcp_vault.admin.api.can_read_vault_content", return_value=True), \
+         patch("mcp_vault.vault.spaces.list_spaces", new=AsyncMock(return_value=vault_list)), \
+         patch("mcp_vault.vault.spaces.get_space_info", new=gsi):
+        status, body = _run(_call(scope))
+    assert status == 200
+    assert body["vaults"][0].get("root_entries_count") == 3
+    assert gsi.call_args.kwargs.get("count") is True
 
 
 # ─────────────────────────────────────────────────────────────────────────────

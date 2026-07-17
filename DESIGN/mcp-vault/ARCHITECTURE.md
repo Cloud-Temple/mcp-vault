@@ -307,7 +307,7 @@ AdminMiddleware (ASGI, derrière PkiMiddleware)
 - **HTML/CSS/JS publics** : la page de login est servie sans auth (l'auth se fait côté API)
 - **CORS preflight** : OPTIONS géré pour les appels AJAX cross-origin
 - **Path traversal** : protection contre les `../` dans les chemins statiques ; validation canonique par segments des chemins de secrets (rejet `//`, `.`, `..`, slash terminal ; #81)
-- **Listing contrôlé (#81)** : les noms de secrets ne sont exposés que via le canal `secret_list` (policy vérifiée) ; la fiche vault (`vault_info`) ne les liste plus (fin d'une fuite de droits)
+- **Listing contrôlé + moindre privilège (#81)** : le contenu d'un vault (noms **et** cardinalité) n'est exposé qu'aux identités ayant le droit `secret_list` (policy vérifiée). La fiche vault ne liste plus les noms ; le compteur d'entrées (tableau, tableau de bord, outil `vault_info`) est conditionné à ce droit via un test **silencieux** (`can_read_vault_content`, sans faux événement d'audit)
 
 ---
 

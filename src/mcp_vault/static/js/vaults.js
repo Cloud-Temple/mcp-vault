@@ -304,7 +304,7 @@ async function loadVaults() {
             html += `<tr style="cursor:pointer" onclick="selectVault('${esc(v.vault_id)}')">
                 <td><strong style="color:var(--accent)">📁 ${esc(v.vault_id)}</strong></td>
                 <td style="color:var(--text2);max-width:200px;overflow:hidden;text-overflow:ellipsis">${esc(v.description || '')}</td>
-                <td><span class="badge badge-info" title="Entrées de premier niveau (dossiers et secrets)">${v.root_entries_count || 0}</span></td>
+                <td><span class="badge badge-info" title="Entrées de premier niveau (dossiers et secrets) — « — » si non autorisé ou indisponible">${v.root_entries_count ?? '—'}</span></td>
                 <td>${ownerBadge}</td>
                 <td style="color:var(--muted);font-size:0.75rem">${fmtDate(v.created_at)}</td>
             </tr>`;
