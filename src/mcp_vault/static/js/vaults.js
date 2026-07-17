@@ -292,7 +292,7 @@ async function loadVaults() {
     } else {
         // Vue tableau pour mieux afficher les colonnes
         html += '<div class="card" style="padding:0;overflow-x:auto"><table>';
-        html += '<thead><tr><th>Vault</th><th>Description</th><th>Secrets</th><th>Owner</th><th>Créé le</th></tr></thead><tbody>';
+        html += '<thead><tr><th>Vault</th><th>Description</th><th title="Entrées de premier niveau (dossiers et secrets), sans parcours récursif">Entrées</th><th>Owner</th><th>Créé le</th></tr></thead><tbody>';
         for (const v of vaults) {
             const isOwner = v.created_by === STATE.clientName;
             const ownerBadge = v.created_by
@@ -304,7 +304,7 @@ async function loadVaults() {
             html += `<tr style="cursor:pointer" onclick="selectVault('${esc(v.vault_id)}')">
                 <td><strong style="color:var(--accent)">📁 ${esc(v.vault_id)}</strong></td>
                 <td style="color:var(--text2);max-width:200px;overflow:hidden;text-overflow:ellipsis">${esc(v.description || '')}</td>
-                <td><span class="badge badge-info">${v.secrets_count || 0}</span></td>
+                <td><span class="badge badge-info" title="Entrées de premier niveau (dossiers et secrets) — « — » si non autorisé ou indisponible">${v.root_entries_count ?? '—'}</span></td>
                 <td>${ownerBadge}</td>
                 <td style="color:var(--muted);font-size:0.75rem">${fmtDate(v.created_at)}</td>
             </tr>`;
@@ -329,7 +329,11 @@ async function selectVault(vaultId) {
     const data = await api(`/vaults/${vaultId}`);
     if (data.status === 'error') { el.innerHTML = `<div class="empty-state">Erreur : ${esc(data.message)}</div>`; return; }
 
-    const keys = data.secret_keys || [];
+    // #81 : la fiche vault ne renvoie plus les clés (fuite de policy). On liste
+    // la racine via l'endpoint contrôlé (check_policy secret_list + path policy).
+    const listing = await api(`/vaults/${vaultId}/secrets`);
+    const keys = (listing && listing.status === 'ok') ? (listing.keys || []) : [];
+    const listErr = (listing && listing.status !== 'ok') ? (listing.message || 'listing non autorisé') : '';
     const roles = data.ssh_ca_roles || [];
 
     let html = `<div class="card mt-1">
@@ -343,7 +347,7 @@ async function selectVault(vaultId) {
         </div>
         ${data.description ? `<p style="color:var(--text2);margin:0.5rem 0">${esc(data.description)}</p>` : ''}
         <table style="margin-bottom:0.8rem">
-            <tr><td style="color:var(--muted);width:120px">Secrets</td><td>${data.secrets_count || 0}</td></tr>
+            <tr><td style="color:var(--muted);width:120px" title="Entrées de premier niveau (dossiers et secrets), issues du listing autorisé">Entrées</td><td>${listErr ? '—' : keys.length}</td></tr>
             <tr><td style="color:var(--muted)">Créé par</td><td>${esc(data.created_by || '—')}</td></tr>
             <tr><td style="color:var(--muted)">Créé le</td><td>${fmtDate(data.created_at)}</td></tr>
             <tr><td style="color:var(--muted)">Modifié</td><td>${fmtDate(data.updated_at)}</td></tr>
@@ -380,19 +384,12 @@ async function selectVault(vaultId) {
     if (canWrite()) html += `<button class="btn btn-primary btn-sm" onclick="promptWriteSecret('${esc(vaultId)}')">+ Ajouter</button>`;
     html += '</div>';
 
-    if (keys.length === 0) {
-        html += '<div class="empty-state" style="padding:1rem">Aucun secret</div>';
+    if (listErr) {
+        html += `<div class="empty-state" style="padding:1rem;color:var(--danger)">Listing indisponible : ${esc(listErr)}</div>`;
+    } else if (keys.length === 0) {
+        html += '<div class="empty-state" style="padding:1rem">Aucune entrée</div>';
     } else {
-        html += '<div id="secretsList">';
-        for (const k of keys) {
-            const kid = esc(k).replace(/\//g, '_');
-            html += `<div class="secret-item" onclick="toggleSecret('${esc(vaultId)}','${esc(k)}','sd_${kid}')">
-                <span>🔑</span><code>${esc(k)}</code>
-                ${isAdmin() ? `<button class="btn btn-danger btn-sm" style="margin-left:auto" onclick="event.stopPropagation();promptDeleteSecret('${esc(vaultId)}','${esc(k)}')">🗑️</button>` : ''}
-            </div>
-            <div id="sd_${kid}" class="hidden"></div>`;
-        }
-        html += '</div>';
+        html += `<div id="secretsList">${renderSecretsList(vaultId, '', keys)}</div>`;
     }
 
     html += '</div>';
@@ -424,6 +421,66 @@ async function toggleSecret(vaultId, secretPath, elId) {
         <div style="margin-bottom:0.4rem;font-size:0.7rem;color:var(--muted)">Version ${data.version} — ${fmtDate(data.created_time)}</div>
         ${lines.join('\n')}
     </div>`;
+}
+
+/* ─── #81 : rendu d'une liste d'entrées (dossiers + feuilles), réutilisé à la racine et dans un dossier déplié ─── */
+// basePrefix : préfixe complet du niveau ('' à la racine, sinon finit par '/').
+// keys : clés RELATIVES renvoyées par l'API (un dossier finit par '/').
+function renderSecretsList(vaultId, basePrefix, keys) {
+    let out = '';
+    for (const k of keys) {
+        const fullPath = basePrefix + k;                 // reconstruction du chemin complet
+        const vid = esc(vaultId);
+        const fp = esc(fullPath);
+        if (k.endsWith('/')) {                            // dossier
+            const elId = domId('fold', fullPath);
+            out += `<div class="secret-item" onclick="toggleFolder('${vid}','${fp}','${elId}')">
+                <span>📁</span><code>${esc(k)}</code>
+                <span style="color:var(--muted);font-size:0.72rem;margin-left:auto">dossier</span>
+            </div>
+            <div id="${elId}" class="hidden"></div>`;
+        } else {                                          // feuille (secret)
+            const elId = domId('sd', fullPath);
+            out += `<div class="secret-item" onclick="toggleSecret('${vid}','${fp}','${elId}')">
+                <span>🔑</span><code>${esc(k)}</code>
+                ${isAdmin() ? `<button class="btn btn-danger btn-sm" style="margin-left:auto" onclick="event.stopPropagation();promptDeleteSecret('${vid}','${fp}')">🗑️</button>` : ''}
+            </div>
+            <div id="${elId}" class="hidden"></div>`;
+        }
+    }
+    return out;
+}
+
+/* ─── #81 : identifiant DOM bijectif (hex UTF-8) — évite la collision 'a/b' vs 'a_b' ─── */
+function domId(prefix, path) {
+    const bytes = new TextEncoder().encode(path);
+    let hex = '';
+    for (const b of bytes) hex += b.toString(16).padStart(2, '0');
+    return `${prefix}_${hex}`;
+}
+
+/* ─── #81 : déplier un dossier (liste son contenu, expansion niveau par niveau) ─── */
+async function toggleFolder(vaultId, folderPath, elId) {
+    const el = document.getElementById(elId);
+    if (!el) return;
+    if (!el.classList.contains('hidden')) { el.classList.add('hidden'); return; }
+
+    el.innerHTML = '<div class="secret-detail">Chargement…</div>';
+    el.classList.remove('hidden');
+
+    // folderPath finit par '/' ; on liste via ?prefix=<chemin sans slash final>.
+    const prefix = folderPath.endsWith('/') ? folderPath.slice(0, -1) : folderPath;
+    const data = await api(`/vaults/${vaultId}/secrets?prefix=${encodeURIComponent(prefix)}`);
+    if (!data || data.status !== 'ok') {
+        el.innerHTML = `<div class="secret-detail" style="color:var(--danger)">Erreur : ${esc((data && data.message) || 'listing impossible')}</div>`;
+        return;
+    }
+    const keys = data.keys || [];
+    if (keys.length === 0) {
+        el.innerHTML = '<div class="secret-detail" style="color:var(--muted)">(dossier vide)</div>';
+        return;
+    }
+    el.innerHTML = `<div style="margin-left:0.8rem;border-left:2px solid var(--border);padding-left:0.6rem">${renderSecretsList(vaultId, folderPath, keys)}</div>`;
 }
 
 /* ─── Create vault ─── */

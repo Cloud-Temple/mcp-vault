@@ -238,11 +238,17 @@ async def list_spaces(
 # CRUD — Info (détaillé, avec métadonnées)
 # ═══════════════════════════════════════════════════════════════════════
 
-async def get_space_info(vault_id: str) -> dict:
+async def get_space_info(vault_id: str, count: bool = True) -> dict:
     """
     Informations détaillées sur un espace vault, incluant les métadonnées.
 
-    Retourne : description, nombre de secrets, created_at, created_by, etc.
+    Retourne : description, created_at/by, etc. et, si `count` (défaut),
+    `root_entries_count`/`secrets_count`.
+
+    `count=False` (#81) : ne PAS lister le contenu — utilisé par la fiche vault
+    admin, qui affiche la cardinalité à partir du listing contrôlé (canal soumis
+    à `secret_list`). Évite un `list` indirect et une fuite de cardinalité à un
+    token autorisé sur `vault_info` mais interdit sur `secret_list`.
     """
     client = get_hvac_client()
     if not client:
@@ -256,14 +262,22 @@ async def get_space_info(vault_id: str) -> dict:
         if not mount_info:
             return {"status": "error", "message": f"Vault '{vault_id}' non trouvé"}
 
-        # ── Compter les secrets (en excluant _vault_meta) ─────
-        secret_count = 0
-        try:
-            secrets = client.secrets.kv.v2.list_secrets(path="", mount_point=vault_id)
-            keys = secrets.get("data", {}).get("keys", [])
-            secret_count = len([k for k in keys if k != VAULT_META_PATH])
-        except Exception:
-            pass  # Pas de secrets ou erreur de listing
+        # ── Compter les ENTRÉES de premier niveau (dossiers ET feuilles) ─────
+        # NB (#81) : le `list` KV v2 non récursif renvoie aussi les sous-dossiers
+        # (suffixe '/'). Ce nombre n'est donc PAS le total de secrets feuilles ;
+        # aucun comptage récursif (choix délibéré : pas de coût sur un gros vault).
+        # root_entries : None = cardinalité inconnue (erreur backend) ; 0 = vault
+        # vide CONFIRMÉ. On ne transforme jamais une erreur OpenBao en « 0 » muet.
+        root_entries = None
+        if count:
+            try:
+                secrets = client.secrets.kv.v2.list_secrets(path="", mount_point=vault_id)
+                keys = secrets.get("data", {}).get("keys", [])
+                root_entries = len([k for k in keys if k != VAULT_META_PATH])
+            except Exception as e:
+                if "InvalidPath" in type(e).__name__ or "404" in str(e):
+                    root_entries = 0  # vault vide (cas normal, pas une erreur)
+                # sinon : root_entries reste None → cardinalité omise, pas « 0 »
 
         # ── Lire les métadonnées ──────────────────────────────
         meta = _read_vault_meta(client, vault_id)
@@ -274,8 +288,14 @@ async def get_space_info(vault_id: str) -> dict:
             "description": meta.get("description", mount_info.get("description", "")),
             "type": mount_info.get("type"),
             "options": mount_info.get("options", {}),
-            "secrets_count": secret_count,
         }
+        # root_entries_count : nom honnête (#81) = entrées de 1er niveau.
+        # secrets_count : conservé pour compat (MCP vault_info, CLI, dashboard) —
+        # MÊME valeur ; sémantique = « entrées », pas « feuilles ». Champs omis si
+        # la cardinalité n'a pas été calculée (count=False) ou est inconnue.
+        if root_entries is not None:
+            result["root_entries_count"] = root_entries
+            result["secrets_count"] = root_entries
 
         # Ajouter les métadonnées si elles existent
         if meta:

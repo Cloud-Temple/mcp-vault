@@ -1,5 +1,23 @@
 # Changelog — MCP Vault
 
+## [Unreleased]
+
+### Console admin — navigation par dossier des secrets (KV v2) + durcissements (issue #81)
+
+Correctif du bug d'affichage : dans la console `/admin`, un vault contenant des **dossiers** KV v2 (préfixes, ex. `bootstrap/`, `mcp-teleport/`) affichait « Secret non trouvé » au clic, car l'UI tentait de **lire** un dossier comme un secret. La navigation par dossier manquait côté console — elle existait déjà côté agent MCP (`secret_list(vault_id, prefix)`). Plan validé par revue adversariale (Codex, OpenBao réel).
+
+- **Navigation par dossier (console + API admin)** — `GET /admin/api/vaults/{id}/secrets?prefix=<sous-dossier>` liste le contenu d'un niveau ; l'UI distingue **dossier** (suffixe `/`, dépliable) et **feuille** (secret, lisible), avec expansion niveau par niveau. Les clés listées étant relatives au préfixe, l'UI reconstruit le chemin complet.
+- **Moindre privilège sur le contenu (defense-in-depth)** — plus aucune surface ne divulgue le contenu d'un vault (noms **ou** simple cardinalité) à une identité sans droit de **lister** :
+  - la fiche d'un vault (`GET /admin/api/vaults/{id}`) ne renvoie plus les noms (`secret_keys` retiré) ni de compteur (`get_space_info(count=False)`, aucun `list` indirect) ; la console affiche le nombre d'entrées à partir du **listing contrôlé** ;
+  - le listing (racine incluse) passe **toujours** par `check_policy("secret_list")` + `check_path_policy` ;
+  - la **cardinalité** (`root_entries_count`/`secrets_count`) exposée par le tableau des vaults, le tableau de bord et l'outil agent `vault_info` est désormais **conditionnée au droit de lister** (`can_read_vault_content`, test **silencieux** — pas de faux `denied`). Une identité autorisée conserve le compteur (contrat inchangé) ; sinon il est **omis** (UI : « — »).
+- **Contournement de policy fermé (« validate vs use »)** — le préfixe de listing est **canonicalisé avant** `check_path_policy` (`normalize_list_path`, côté console **et** agent MCP), pour que le contrôle de droits et l'appel OpenBao portent sur la **même** valeur. Sinon `?prefix=%2F` (→ `/`), autorisé par une policy sur `/`, listait la racine (`""`). Le préfixe `/` seul est rejeté.
+- **Compteur honnête** — l'ancien « Secrets : N » comptait en réalité les **entrées de premier niveau** (dossiers compris). Libellé corrigé en « Entrées » ; nouveau champ `root_entries_count` (sémantique explicite, sans parcours récursif). Une **erreur backend** n'est plus présentée comme « 0 » : la cardinalité inconnue est **omise** (UI : « — »), distincte d'un vault vide (0). `secrets_count` conservé (compat MCP `vault_info` / CLI), même valeur, sémantique documentée (entrées, pas feuilles).
+- **Validation de chemin canonique (anti-traversal, cohérent #78)** — `_validate_secret_path` valide désormais **par segments** : rejet des segments vides (`//`, slash terminal), de `.` et `..`, contrôle de type, et **message constant** (la valeur rejetée n'est plus réinjectée dans la réponse ni dans l'audit MCP → vecteur d'injection de journal fermé). `list_secrets` applique cette validation **avant** tout appel OpenBao (elle en était dépourvue), ce qui durcit aussi l'outil MCP `secret_list`.
+- **Routage admin durci** — le segment `/secrets` est reconnu exactement (écarte `/secretsfoo`) et les doubles slashs ne sont plus masqués silencieusement.
+- **UI** — identifiants d'éléments dépliables rendus bijectifs (hex UTF-8) pour éviter la collision `a/b` vs `a_b`.
+- **Tests** — `tests/test_secrets_folder_nav_81.py` (28 tests unitaires : validation canonique, canonicalisation `normalize_list_path` + non-contournement `?prefix=/`, routage, fuite noms **et** cardinalité, gating moindre-privilège `can_read_vault_content` (admin/mission/token/policy) sans faux audit, comptage `count=False`/erreur≠0, `domId` bijectif et somme `sumRootEntries` du dashboard exécutés sous Node) + `tests/test_secrets_folder_nav_openbao_81.py` (5 tests d'intégration OpenBao réel : dossiers/feuilles, clés relatives, collision feuille+dossier, lecture d'un dossier, préfixes piégés rejetés). Non-complaisance vérifiée par sabotage (4 rounds de revue adversariale Codex sur OpenBao + PolicyStore réels).
+
 ## [0.8.1] — 2026-07-15
 
 ### Durcissement `secret_consume` — hygiène & anti-injection de journal (issue #78, Lot A)

@@ -266,7 +266,7 @@ contre l'écriture directe par les utilisateurs (via `RESERVED_PATHS` dans secre
 | --------------------------- | -------------------------------------------------------------------- | ---------------------------------------- |
 | `create_space(id, desc)`    | `sys.enable_secrets_engine("kv", path=id, options={"version": "2"})` | + écriture `_vault_meta` avec owner/date |
 | `list_spaces(allowed_ids?)` | `sys.list_mounted_secrets_engines()` → filtre type "kv"              | Filtrage par vault_ids du token          |
-| `get_space_info(id)`        | Mounts info + `kv.v2.list_secrets()` pour le count                   | + lecture `_vault_meta` pour métadonnées |
+| `get_space_info(id)`        | Mounts info + `kv.v2.list_secrets()` pour le count                   | + `_vault_meta` ; `root_entries_count`/`secrets_count` = entrées 1er niveau, pas de récursif (#81) |
 | `update_space(id, desc)`    | `sys.tune_mount_configuration()` + `_vault_meta`                     | Mise à jour description + updated_at/by  |
 | `delete_space(id)`          | `sys.disable_secrets_engine(path=id)`                                | Supprime tout (secrets + métadonnées)    |
 
@@ -279,7 +279,7 @@ empêche l'écriture directe, la suppression et masque ces chemins dans les list
 | ------------------------------------------ | ------------------------------------------ | ------------------------------------------------------------ |
 | `write_secret(vault_id, path, data, type)` | `kv.v2.create_or_update_secret()`          | Validation type + enrichissement + protection RESERVED_PATHS |
 | `read_secret(vault_id, path, version)`     | `kv.v2.read_secret_version()`              | Version 0 = dernière                                         |
-| `list_secrets(vault_id, path)`             | `kv.v2.list_secrets()`                     | Clés uniquement, filtre `_vault_meta`                        |
+| `list_secrets(vault_id, path)`             | `kv.v2.list_secrets()`                     | Clés du niveau `path` (relatives), filtre `_vault_meta` ; validation canonique anti-traversal (#81) |
 | `delete_secret(vault_id, path)`            | `kv.v2.delete_metadata_and_all_versions()` | Irréversible, protection RESERVED_PATHS                      |
 
 ### 3.10 `vault/ssh_ca.py` — SSH Certificate Authority

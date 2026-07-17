@@ -13,13 +13,28 @@ import platform
 from pathlib import Path
 
 from ..config import get_settings
-from ..auth.context import current_token_info, check_policy, check_path_policy
+from ..auth.context import current_token_info, check_policy, check_path_policy, can_read_vault_content
 from ..auth.token_store import get_token_store, TokenStore
 from ..auth.middleware import get_activity_log
 from ..audit import log_audit
 
 # Limite maximale de taille du body HTTP (10 MB)
 _MAX_BODY_SIZE = 10 * 1024 * 1024
+
+
+def _query_param(scope, name: str, default: str = "") -> str:
+    """
+    Extrait un paramètre de query string d'une requête ASGI.
+
+    Retourne la première valeur (URL-décodée) ou `default`. Robuste : une
+    query_string absente ou mal formée retombe sur `default`.
+    """
+    from urllib.parse import parse_qs
+    qs = scope.get("query_string", b"")
+    if isinstance(qs, (bytes, bytearray)):
+        qs = qs.decode("utf-8", "replace")
+    values = parse_qs(qs).get(name)
+    return values[0] if values else default
 
 
 async def handle_admin_api(scope, receive, send, mcp):
@@ -199,10 +214,18 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
                 return await _api_ssh_role_info(send, vault_id, role_name)
 
     # --- Routes secrets (read = list/get, write = create, admin = delete) ---
-    if path.startswith("/admin/api/vaults/") and "/secrets" in path:
-        parts = path[len("/admin/api/vaults/"):].split("/secrets", 1)
-        vault_id = parts[0]
-        secret_path = parts[1].lstrip("/") if len(parts) > 1 else ""
+    # SÉCURITÉ #81 : le segment "/secrets" est reconnu EXACTEMENT (pas comme
+    # sous-chaîne → écarte "/secretsfoo"). vault_id = 1er segment (jamais de
+    # '/'). On ne retire qu'UN slash de séparation : les '//' ne sont donc pas
+    # masqués silencieusement, ils seront rejetés par la validation de chemin.
+    _secrets_rest = path[len("/admin/api/vaults/"):] if path.startswith("/admin/api/vaults/") else ""
+    _secrets_slash = _secrets_rest.find("/")
+    _secrets_vault = _secrets_rest[:_secrets_slash] if _secrets_slash != -1 else ""
+    _secrets_tail = _secrets_rest[_secrets_slash:] if _secrets_slash != -1 else ""
+    if _secrets_vault and (_secrets_tail == "/secrets" or _secrets_tail.startswith("/secrets/")):
+        vault_id = _secrets_vault
+        _after = _secrets_tail[len("/secrets"):]            # "" ou "/<secret_path>"
+        secret_path = _after[1:] if _after.startswith("/") else _after
 
         # SÉCURITÉ : vérifier l'accès au vault (owner/allowed_resources)
         access_err = _check_vault_access(token_info, vault_id)
@@ -210,13 +233,27 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
             return await _json_response(send, 403, access_err)
 
         if method == "GET" and not secret_path:
+            # LIST d'un niveau : racine, ou sous-dossier via ?prefix=<sous-chemin>
+            # (#81). Le listing passe TOUJOURS par ce chemin contrôlé
+            # (check_policy secret_list + check_path_policy). La fiche vault ne
+            # renvoie plus les clés → plus de fuite des noms de secrets à un token
+            # autorisé sur vault_info mais interdit sur secret_list.
             policy_err = check_policy("secret_list")
             if policy_err:
                 return await _json_response(send, 403, policy_err)
-            path_err = check_path_policy(vault_id, "", "read")
+            # SÉCURITÉ #81 : canonicaliser le préfixe AVANT le contrôle de policy,
+            # pour que le PDP (check_path_policy) et l'appel OpenBao portent sur la
+            # MÊME valeur canonique. Sinon `?prefix=%2F` (→ "/") est autorisé par une
+            # policy sur "/" puis liste la racine ("") → contournement de policy.
+            from ..vault.secrets import normalize_list_path
+            prefix = normalize_list_path(_query_param(scope, "prefix"))
+            if prefix is None:
+                return await _json_response(send, 400,
+                        {"status": "error", "message": "Préfixe de listing invalide"})
+            path_err = check_path_policy(vault_id, prefix, "read")
             if path_err:
                 return await _json_response(send, 403, path_err)
-            return await _api_list_secrets(send, vault_id)
+            return await _api_list_secrets(send, vault_id, prefix)
         if method == "GET" and secret_path:
             policy_err = check_policy("secret_read")
             if policy_err:
@@ -628,11 +665,18 @@ async def _api_delete_vault(send, vault_id):
     await _json_response(send, status, result)
 
 
-async def _api_list_secrets(send, vault_id):
-    """GET /admin/api/vaults/{vault_id}/secrets — Lister les secrets."""
+async def _api_list_secrets(send, vault_id, prefix=""):
+    """
+    GET /admin/api/vaults/{vault_id}/secrets[?prefix=<sous-dossier>]
+
+    Liste les entrées d'un niveau : racine par défaut, ou contenu du sous-dossier
+    `prefix` (#81). Les sous-dossiers ressortent avec un '/' final ; les clés sont
+    relatives à `prefix`. Un préfixe invalide (validation `list_secrets`) → 400.
+    """
     from ..vault.secrets import list_secrets
-    result = await list_secrets(vault_id)
-    await _json_response(send, 200, result)
+    result = await list_secrets(vault_id, prefix)
+    status = 200 if result.get("status") == "ok" else 400
+    await _json_response(send, status, result)
 
 
 async def _api_read_secret(send, vault_id, secret_path):
@@ -679,21 +723,28 @@ async def _api_list_vaults(send, allowed_vault_ids=None, owner_filter=None):
     # Enrichir chaque vault avec ses métadonnées (secrets_count, dates)
     enriched = []
     for vault in result.get("vaults", []):
+        vid = vault["vault_id"]
         try:
-            info = await get_space_info(vault["vault_id"])
+            # #81 : cardinalité seulement si l'identité peut LISTER ce vault
+            # (moindre privilège, test silencieux — pas de faux « denied »).
+            info = await get_space_info(vid, count=can_read_vault_content(vid))
             enriched.append({
-                "vault_id": vault["vault_id"],
+                "vault_id": vid,
                 "description": info.get("description", vault.get("description", "")),
-                "secrets_count": info.get("secrets_count", 0),
+                # None (absent) = inconnu / non autorisé → jamais un « 0 » trompeur ;
+                # l'UI affiche « — » (backend indisponible ≠ vault vide).
+                "root_entries_count": info.get("root_entries_count"),
+                "secrets_count": info.get("secrets_count"),
                 "created_at": info.get("created_at", ""),
                 "created_by": info.get("created_by", ""),
                 "updated_at": info.get("updated_at", ""),
             })
         except Exception:
             enriched.append({
-                "vault_id": vault["vault_id"],
+                "vault_id": vid,
                 "description": vault.get("description", ""),
-                "secrets_count": 0,
+                "root_entries_count": None,
+                "secrets_count": None,
             })
 
     await _json_response(send, 200, {
@@ -706,17 +757,16 @@ async def _api_list_vaults(send, allowed_vault_ids=None, owner_filter=None):
 async def _api_vault_detail(send, vault_id):
     """GET /admin/api/vaults/{vault_id} — Détail d'un vault."""
     from ..vault.spaces import get_space_info
-    from ..vault.secrets import list_secrets
     from ..vault.ssh_ca import list_ssh_roles
 
-    # Infos de base
-    info = await get_space_info(vault_id)
+    # SÉCURITÉ #81 : la fiche vault NE divulgue PLUS le contenu (ni noms ni
+    # cardinalité). count=False → get_space_info ne fait aucun `list`. La console
+    # affiche le nombre d'entrées à partir du listing GET .../secrets, seul canal
+    # soumis à check_policy("secret_list") + check_path_policy. Un token autorisé
+    # sur vault_info mais interdit sur secret_list n'apprend donc rien du contenu.
+    info = await get_space_info(vault_id, count=False)
     if info.get("status") == "error":
         return await _json_response(send, 404, info)
-
-    # Liste des clés de secrets (pas les valeurs !)
-    secrets = await list_secrets(vault_id)
-    keys = secrets.get("keys", [])
 
     # SSH CA : lister les rôles (si CA configurée)
     ssh_roles = []
@@ -731,8 +781,6 @@ async def _api_vault_detail(send, vault_id):
         "status": "ok",
         "vault_id": vault_id,
         "description": info.get("description", ""),
-        "secrets_count": info.get("secrets_count", 0),
-        "secret_keys": keys,
         "created_at": info.get("created_at", ""),
         "created_by": info.get("created_by", ""),
         "updated_at": info.get("updated_at", ""),

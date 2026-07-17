@@ -2,6 +2,16 @@
    MCP Vault Admin — Dashboard View
    ═══════════════════════════════════════════════════════════════════════ */
 
+/* ─── #81 : somme honnête des cardinalités (testable sous Node) ─── */
+// Additionne les cardinalités CONNUES (nombres) ; `partial` vaut true si au moins
+// une est inconnue (null : coffre non listable ou backend indisponible) — une
+// inconnue n'est JAMAIS comptée comme 0, et le total partiel est signalé (« + »).
+function sumRootEntries(vaultsArr) {
+    const arr = vaultsArr || [];
+    const known = arr.map(v => v.root_entries_count).filter(n => typeof n === 'number');
+    return { sum: known.reduce((s, n) => s + n, 0), partial: known.length < arr.length };
+}
+
 async function loadDashboard() {
     const el = document.getElementById('page-dashboard');
     el.innerHTML = '<div class="empty-state">Chargement…</div>';
@@ -16,14 +26,16 @@ async function loadDashboard() {
 
     const vc = vaults.count || 0;
     const tc = (tokens.tokens || []).filter(t => !t.revoked && !t.expired).length;
-    const sc = (vaults.vaults || []).reduce((s, v) => s + (v.secrets_count || 0), 0);
+    // #81 : somme honnête (cf. sumRootEntries) — null (coffre non listable /
+    // backend indisponible) exclu, total partiel signalé par « + », jamais 0.
+    const { sum: sc, partial: scPartial } = sumRootEntries(vaults.vaults);
     const pc = policies ? (policies.policies || []).length : 0;
 
     el.innerHTML = `
         <div class="stats-grid" style="margin-bottom:1.2rem">
             <div class="stat-card"><div class="stat-value">${health.status === 'ok' ? '✅' : '❌'}</div><div class="stat-label">Service</div></div>
             <div class="stat-card" style="cursor:pointer" onclick="navigate('vaults')"><div class="stat-value">${vc}</div><div class="stat-label">Vaults</div></div>
-            <div class="stat-card"><div class="stat-value">${sc}</div><div class="stat-label">Secrets</div></div>
+            <div class="stat-card"><div class="stat-value">${sc}${scPartial ? '+' : ''}</div><div class="stat-label" title="Entrées de premier niveau des vaults listables (« + » = total partiel : certains coffres non listables)">Entrées</div></div>
             ${isAdmin() ? `<div class="stat-card" style="cursor:pointer" onclick="navigate('policies')"><div class="stat-value">${pc}</div><div class="stat-label">Policies</div></div>` : ''}
             <div class="stat-card" ${isAdmin() ? 'style="cursor:pointer" onclick="navigate(\'tokens\')"' : ''}><div class="stat-value">${tc}</div><div class="stat-label">Tokens</div></div>
             <div class="stat-card"><div class="stat-value">${health.tools_count || 0}</div><div class="stat-label">Outils MCP</div></div>

@@ -19,22 +19,61 @@ logger = logging.getLogger("mcp-vault.secrets")
 # Chemins réservés — protégés contre l'écriture/lecture/suppression directe
 RESERVED_PATHS = {VAULT_META_PATH}
 
-# SÉCURITÉ V3-23 : Validation regex des chemins de secrets
-_PATH_PATTERN = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9/_.\-]{0,255}$')
+# SÉCURITÉ V3-23 / #81 : validation canonique des chemins de secrets.
+# Un chemin est une suite de segments séparés par '/'. Chaque segment doit
+# commencer par un caractère alphanumérique puis n'utiliser que [a-zA-Z0-9_.-].
+# Rejette donc : segment vide (⇒ '//' et slash terminal), '.' et '..'
+# (anti-traversal), '\', caractères de contrôle et séparateurs exotiques.
+_MAX_PATH_LEN = 256
+_SEGMENT_PATTERN = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9_.\-]*')
 
 
 def _validate_secret_path(path: str) -> Optional[dict]:
     """
-    Valide le format d'un chemin de secret.
+    Valide le format d'un chemin de secret (canonique, anti-traversal).
 
-    SÉCURITÉ V3-23 : empêche les traversals vers endpoints OpenBao internes.
-    Rejette : ../, \\, chemins vides, caractères spéciaux.
+    SÉCURITÉ V3-23 : empêche les traversals vers les endpoints OpenBao internes.
+    SÉCURITÉ #81 (cohérent #78) : validation par segments (rejette '//', slash
+    terminal, '.', '..'), contrôle de type, et message **constant** — la valeur
+    rejetée n'est jamais réinjectée dans la réponse ni dans l'audit MCP
+    (`server._r`), ce qui ferme un vecteur d'injection de journal.
     """
-    if not path:
+    if path == "":
         return None  # Chemin vide = listing racine, OK
-    if ".." in path or "\\" in path or not _PATH_PATTERN.match(path):
-        return {"status": "error", "message": f"Chemin invalide: '{path}'"}
+    if not isinstance(path, str) or len(path) > _MAX_PATH_LEN or "\\" in path:
+        return {"status": "error", "message": "Chemin de secret invalide"}
+    for segment in path.split("/"):
+        if segment in ("", ".", "..") or not _SEGMENT_PATTERN.fullmatch(segment):
+            return {"status": "error", "message": "Chemin de secret invalide"}
     return None
+
+
+def normalize_list_path(raw) -> Optional[str]:
+    """
+    Canonicalise ET valide un chemin de LISTING (préfixe de dossier).
+
+    Retourne le chemin canonique (`str`) si valide, ou `None` si invalide.
+
+    SÉCURITÉ #81 (« validate vs use ») : la MÊME valeur canonique doit servir au
+    contrôle de policy (`check_path_policy`) ET à l'appel OpenBao. Normaliser
+    APRÈS le contrôle ouvrait un contournement : `?prefix=%2F` (→ `"/"`) était
+    autorisé par une policy sur `"/"` puis listait la racine (`""`). D'où :
+
+    - `""` = racine (autorisé) ;
+    - un slash terminal unique est retiré ;
+    - un préfixe non vide qui se réduit à vide (cas `"/"`) est **rejeté** ;
+    - le reste doit passer `_validate_secret_path` (rejette `//`, `.`, `..`, etc.).
+    """
+    if not isinstance(raw, str):
+        return None
+    if raw == "":
+        return ""  # racine
+    canonical = raw[:-1] if raw.endswith("/") else raw
+    if canonical == "":  # ex. "/" seul → ambigu (alias de la racine) → rejet
+        return None
+    if _validate_secret_path(canonical) is not None:
+        return None
+    return canonical
 
 
 def _is_reserved_path(path: str) -> bool:
@@ -146,21 +185,38 @@ async def read_secret(vault_id: str, path: str, version: int = 0) -> dict:
 
 
 async def list_secrets(vault_id: str, path: str = "") -> dict:
-    """Liste les secrets d'un vault (clés uniquement, pas les valeurs)."""
+    """
+    Liste les entrées d'un niveau du vault (clés uniquement, pas les valeurs).
+
+    En KV v2, `list` renvoie les entrées du niveau `path` : les feuilles
+    (secrets) apparaissent telles quelles, les sous-dossiers avec un '/' final.
+    Les clés retournées sont **relatives** à `path` (OpenBao 2.x / hvac 2.x) —
+    l'appelant reconstruit le chemin complet en préfixant par `path`.
+
+    `path` peut désigner un sous-dossier ("bootstrap" ou "bootstrap/") ; le
+    slash terminal éventuel est normalisé.
+    """
+    # SÉCURITÉ #81 : canonicaliser + valider via la source unique normalize_list_path
+    # (la MÊME valeur canonique doit servir au contrôle de policy amont). Validation
+    # ABSENTE avant #81 — protège aussi l'outil MCP secret_list (anti-traversal).
+    norm_path = normalize_list_path(path)
+    if norm_path is None:
+        return {"status": "error", "message": "Chemin de secret invalide"}
+
     client = get_hvac_client()
     if not client:
         return {"status": "error", "message": "OpenBao non connecté"}
 
     try:
-        response = client.secrets.kv.v2.list_secrets(path=path, mount_point=vault_id)
+        response = client.secrets.kv.v2.list_secrets(path=norm_path, mount_point=vault_id)
         all_keys = response.get("data", {}).get("keys", [])
         # Filtrer les chemins réservés (ex: _vault_meta)
         keys = [k for k in all_keys if k not in RESERVED_PATHS]
-        return {"status": "ok", "vault_id": vault_id, "path": path, "keys": keys, "count": len(keys)}
+        return {"status": "ok", "vault_id": vault_id, "path": norm_path, "keys": keys, "count": len(keys)}
     except Exception as e:
         if "InvalidPath" in str(type(e).__name__) or "404" in str(e):
-            return {"status": "ok", "vault_id": vault_id, "path": path, "keys": [], "count": 0}
-        logger.error(f"❌ Erreur listing secrets {vault_id}/{path}: {e}")
+            return {"status": "ok", "vault_id": vault_id, "path": norm_path, "keys": [], "count": 0}
+        logger.error("❌ Erreur listing secrets %s/%r: %s", vault_id, norm_path, e)
         return {"status": "error", "message": str(e)}
 
 

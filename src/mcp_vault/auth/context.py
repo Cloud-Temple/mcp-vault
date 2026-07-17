@@ -388,6 +388,45 @@ def check_path_policy(vault_id: str, path: str,
     }
 
 
+def can_read_vault_content(vault_id: str) -> bool:
+    """
+    Indique si l'identité courante a le droit de LISTER le contenu d'un vault
+    (capability `secret_list` + path policy racine), calculé **sans effet de bord
+    d'audit**.
+
+    SÉCURITÉ #81 : sert à décider d'exposer une **cardinalité** (nombre d'entrées
+    d'un vault) sans divulguer le contenu à une identité qui n'a pas le droit de
+    lister — et sans générer de faux événement `denied` (ce que feraient
+    `check_policy`/`check_path_policy`/`enforce_mission_jwt_tool`, qui journalisent
+    les refus). Reprend leur logique de décision en version silencieuse ; ces
+    fonctions restent la référence pour les vraies opérations. L'accès au vault
+    lui-même est supposé déjà validé par `check_access()` chez l'appelant.
+    """
+    token_info = current_token_info.get()
+    if token_info is None:
+        return True
+    if "admin" in token_info.get("permissions", []):
+        return True
+    if token_info.get("auth_type") == "mission_jwt":
+        # Capability outil (deny-by-default) évaluée sans auditer. On NE retourne
+        # PAS True ici : une mission peut être restreinte par un policy_id
+        # (path_rules) — on poursuit l'évaluation policy commune ci-dessous, pour
+        # s'aligner exactement sur check_policy + check_path_policy (#81 R3, sinon
+        # sur-autorisation : compteur exposé malgré une policy qui refuse).
+        if not ("secret_list" in MISSION_JWT_ALLOWED_TOOLS
+                or "secret_list" in MISSION_JWT_PUBLIC_TOOLS):
+            return False
+    policy_id = token_info.get("policy_id", "")
+    if not policy_id:
+        return True
+    from .policies import get_policy_store
+    store = get_policy_store()
+    if not store:
+        return False  # fail-close, cohérent avec check_policy/check_path_policy
+    return bool(store.is_tool_allowed(policy_id, "secret_list")
+                and store.is_path_allowed(policy_id, vault_id, "", "read"))
+
+
 def get_current_client_name() -> str:
     """Retourne le nom du client courant (depuis le token)."""
     token_info = current_token_info.get()

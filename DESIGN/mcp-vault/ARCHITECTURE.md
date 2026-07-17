@@ -281,6 +281,8 @@ AdminMiddleware (ASGI, derrière PkiMiddleware)
             ├── GET  /admin/api/health          → état du serveur + OpenBao status
             ├── GET  /admin/api/vaults          → lister les vaults
             ├── POST /admin/api/vaults          → créer un vault
+            ├── GET  /admin/api/vaults/{id}/secrets[?prefix=] → lister un niveau (nav dossier, #81)
+            ├── GET  /admin/api/vaults/{id}/secrets/{path}    → lire un secret (feuille)
             ├── GET  /admin/api/tokens          → lister les tokens S3
             ├── POST /admin/api/tokens          → créer un token
             ├── PUT  /admin/api/tokens/{name}   → modifier un token (policy / permissions / vaults)
@@ -295,7 +297,7 @@ AdminMiddleware (ASGI, derrière PkiMiddleware)
 | Vue           | Description                                                                                                |
 | ------------- | ---------------------------------------------------------------------------------------------------------- |
 | **Dashboard** | État du serveur (version, OpenBao sealed/unsealed, S3 sync status, last sync, vaults count), stats tokens  |
-| **Vaults**    | Grille des vaults avec nombre de secrets, tags, date de création. Clic = détail des clés (pas les valeurs) |
+| **Vaults**    | Grille des vaults avec nombre d'**entrées** (1er niveau), date de création. Clic = détail + **navigation par dossier** KV v2 : dossiers dépliables, feuilles lisibles (pas les valeurs en liste ; #81) |
 | **Tokens**    | Table CRUD : créer (checkboxes vault_ids, permissions), info, révoquer, purger les révoqués (dry-run). Token brut affiché une seule fois  |
 | **Activité**  | Logs temps réel (ring buffer mémoire 200 entrées, auto-refresh 5s). Méthode, path, status, durée           |
 
@@ -304,7 +306,8 @@ AdminMiddleware (ASGI, derrière PkiMiddleware)
 - **Authentification admin** : seul le `ADMIN_BOOTSTRAP_KEY` ou un token S3 avec permission `admin` donne accès à l'API
 - **HTML/CSS/JS publics** : la page de login est servie sans auth (l'auth se fait côté API)
 - **CORS preflight** : OPTIONS géré pour les appels AJAX cross-origin
-- **Path traversal** : protection contre les `../` dans les chemins statiques
+- **Path traversal** : protection contre les `../` dans les chemins statiques ; validation canonique par segments des chemins de secrets (rejet `//`, `.`, `..`, slash terminal ; #81)
+- **Listing contrôlé + moindre privilège (#81)** : le contenu d'un vault (noms **et** cardinalité) n'est exposé qu'aux identités ayant le droit `secret_list` (policy vérifiée). La fiche vault ne liste plus les noms ; le compteur d'entrées (tableau, tableau de bord, outil `vault_info`) est conditionné à ce droit via un test **silencieux** (`can_read_vault_content`, sans faux événement d'audit)
 
 ---
 
