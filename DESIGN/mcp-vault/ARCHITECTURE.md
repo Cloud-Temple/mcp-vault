@@ -1,6 +1,6 @@
 # Architecture — MCP Vault
 
-> **Version** : 0.8.0 | **Date** : 2026-07-10 | **Auteur** : Cloud Temple  
+> **Version** : 0.8.2 | **Date** : 2026-07-17 | **Auteur** : Cloud Temple  
 > **Projet** : mcp-vault | **Licence** : Apache 2.0  
 > **Statut** : ✅ Implémenté — Production-ready (PKI interne v0.5.x + C18 v0.6.x)
 
@@ -2173,4 +2173,4 @@ result = await vault_client.call("ssh_sign_key", {
 
 ---
 
-*Document mis à jour le 10 juillet 2026 — MCP Vault v0.8.0 (36 outils MCP, pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer)*
+*Document mis à jour le 17 juillet 2026 — MCP Vault v0.8.2 (36 outils MCP, pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer)*
