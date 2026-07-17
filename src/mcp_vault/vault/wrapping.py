@@ -673,6 +673,59 @@ async def lookup_and_revoke_by_operation_id(operation_id: str) -> dict:
     }
 
 
+# États d'entrée reconnus du registre (transitions register_pending → mark_active
+# → try_mark_consuming → mark_consumed, + mark_revoked / mark_failed).
+_KNOWN_WRAP_STATUSES = frozenset({"pending", "active", "consuming", "consumed", "revoked", "failed"})
+
+
+async def status_by_operation_id(operation_id: str) -> dict:
+    """
+    Consulte l'état des wraps d'un operation_id — **lecture seule, aucune
+    révocation ni écriture durable** (issue #77). À l'inverse de
+    `lookup_and_revoke_by_operation_id`, cette fonction ne modifie rien.
+
+    ⚠️ Contrat = **instantané best-effort du registre**, PAS une vérité OpenBao :
+    - le registre a un cache (`CACHE_TTL`) et S3 est *last-write-wins* ;
+    - `active` signifie « actif dans l'instantané » — **pas** une garantie de
+      consommabilité (un wrap expiré côté OpenBao peut encore ressortir `active`,
+      et une consommation concurrente peut invalider l'instantané) ;
+    - la lecture peut rafraîchir le cache mémoire (`find_by_operation_id` →
+      `_maybe_refresh`), mais n'écrit jamais sur S3 et ne révoque jamais.
+
+    États : `not_found | pending | active | consuming | consumed | revoked |
+    failed | ambiguous | registry_inconsistent` (OK) ; `backend_unavailable`
+    (status=error). Ne renvoie **jamais** d'`accessor` ni de `wrap_token`.
+    """
+    registry = get_wrap_registry()
+    if not registry:
+        return {"status": "error", "error_type": "backend_unavailable",
+                "message": "WrapRegistry non disponible (S3 requis)"}
+
+    entries = registry.find_by_operation_id(operation_id)
+    if not entries:
+        return {"status": "ok", "state": "not_found"}
+    if len(entries) > 1:
+        # Anomalie (duplication) — on ne divulgue pas le compte (activité interne).
+        return {"status": "ok", "state": "ambiguous"}
+
+    # Une seule entrée. PROJECTION NEUVE : `find_by_operation_id` renvoie des
+    # références VIVANTES du registre — on ne mute jamais l'entrée (un pop/masquage
+    # corromprait la mémoire, puis S3 au prochain _save). On lit, on construit un
+    # dict neuf, sans jamais exposer accessor/wrap_token.
+    raw_status = entries[0].get("status")
+    if raw_status not in _KNOWN_WRAP_STATUSES:
+        return {"status": "ok", "state": "registry_inconsistent"}
+
+    result = {"status": "ok", "state": raw_status}
+    # expires_at INDICATIF pour les états vivants (aide le consommateur à jauger la
+    # fraîcheur) — le TTL faisant foi reste côté OpenBao.
+    if raw_status in ("pending", "active", "consuming"):
+        expires_at = entries[0].get("expires_at")
+        if isinstance(expires_at, str) and expires_at:
+            result["expires_at"] = expires_at
+    return result
+
+
 def _infer_intended_use(secret_path: str) -> str:
     """Déduit l'intended_use depuis le chemin du secret (heuristique)."""
     path_lower = secret_path.lower()

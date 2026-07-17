@@ -574,15 +574,20 @@ async def secret_revoke_wrap(lease_id: str) -> dict:
 @mcp.tool()
 async def secret_wrap_lookup(operation_id: str) -> dict:
     """
-    Retrouve et révoque les wraps créés avec un operation_id donné.
+    ⚠️ RÉVOQUE les wraps créés avec un operation_id donné (effet de bord destructif).
 
     Utilisé par mcp-mission pour compenser les provisions orphelines (#74) :
     si le broker crashe entre un wrap réussi côté Vault et sa confirmation,
-    ce tool permet de retrouver et révoquer les wraps non rattachés.
+    ce tool retrouve **et révoque** les wraps non rattachés.
+
+    ⚠️ Ce n'est PAS une consultation : appeler cet outil sur un wrap actif le
+    RÉVOQUE. Pour consulter l'état SANS effet de bord, utiliser
+    `secret_wrap_status` (issue #77).
 
     États retournés (idempotent) :
         not_found        — aucune provision pour cet operation_id
-        found_unattached — provision trouvée, révoquée maintenant
+        found_unattached — provision orpheline (pending sans accessor) ; **NON**
+                           révoquée (le TTL OpenBao l'expirera)
         already_revoked  — déjà révoqué lors d'un appel précédent
         revoked          — révocation effectuée maintenant
         ambiguous        — plusieurs provisions (toutes révoquées)
@@ -607,6 +612,45 @@ async def secret_wrap_lookup(operation_id: str) -> dict:
 
     result = await lookup_and_revoke_by_operation_id(operation_id)
     _r("secret_wrap_lookup", result, detail=f"op={operation_id[:32]}")
+    return result
+
+
+@mcp.tool()
+async def secret_wrap_status(operation_id: str) -> dict:
+    """
+    Consulte l'état d'un secret partagé (wrap) par operation_id — LECTURE SEULE.
+
+    Contrairement à `secret_wrap_lookup` (qui RÉVOQUE — compensation orpheline #74),
+    cet outil ne modifie rien : il retourne un **instantané best-effort** du
+    registre (cache court, S3 *last-write-wins*). `active` signifie « actif dans
+    l'instantané », PAS une garantie de consommabilité (un wrap expiré côté OpenBao
+    peut encore apparaître actif ; une consommation concurrente peut l'invalider).
+    Aucune révocation, aucune écriture durable (issue #77).
+
+    États : not_found | pending | active | consuming | consumed | revoked |
+            failed | ambiguous | registry_inconsistent (status=ok) ;
+            backend_unavailable (status=error).
+
+    Args:
+        operation_id: Identifiant de corrélation write-ahead.
+
+    Returns:
+        {status, state, expires_at?} — jamais d'accessor ni de wrap_token.
+    """
+    from .auth.context import check_admin_permission
+    from .vault.wrapping import status_by_operation_id, is_safe_id
+
+    admin_err = check_admin_permission()
+    if admin_err:
+        return admin_err
+
+    # #78/D6 : validation stricte (fullmatch, via is_safe_id) AVANT tout audit.
+    if not is_safe_id(operation_id):
+        return {"status": "error", "error_type": "invalid_input",
+                "message": "operation_id invalide (alphanum + _-:., 1-256 chars)"}
+
+    result = await status_by_operation_id(operation_id)
+    _r("secret_wrap_status", result, detail=f"op={operation_id[:32]}")
     return result
 
 
