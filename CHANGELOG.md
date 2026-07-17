@@ -1,5 +1,19 @@
 # Changelog — MCP Vault
 
+## [Unreleased]
+
+### Console admin — navigation par dossier des secrets (KV v2) + durcissements (issue #81)
+
+Correctif du bug d'affichage : dans la console `/admin`, un vault contenant des **dossiers** KV v2 (préfixes, ex. `bootstrap/`, `mcp-teleport/`) affichait « Secret non trouvé » au clic, car l'UI tentait de **lire** un dossier comme un secret. La navigation par dossier manquait côté console — elle existait déjà côté agent MCP (`secret_list(vault_id, prefix)`). Plan validé par revue adversariale (Codex, OpenBao réel).
+
+- **Navigation par dossier (console + API admin)** — `GET /admin/api/vaults/{id}/secrets?prefix=<sous-dossier>` liste le contenu d'un niveau ; l'UI distingue **dossier** (suffixe `/`, dépliable) et **feuille** (secret, lisible), avec expansion niveau par niveau. Les clés listées étant relatives au préfixe, l'UI reconstruit le chemin complet.
+- **Fuite de droits corrigée (defense-in-depth)** — la fiche d'un vault (`GET /admin/api/vaults/{id}`) ne renvoie plus les noms de secrets (`secret_keys` retiré) : un token autorisé sur `vault_info` mais **interdit** sur `secret_list` ne les voit plus. Le listing (racine incluse) passe désormais **toujours** par le canal contrôlé (`check_policy("secret_list")` + `check_path_policy`).
+- **Compteur honnête** — l'ancien « Secrets : N » comptait en réalité les **entrées de premier niveau** (dossiers compris). Nouveau champ `root_entries_count` (sémantique explicite, sans parcours récursif) affiché sous le libellé « Entrées » (tableau des vaults, fiche, tableau de bord). `secrets_count` est conservé (compat MCP `vault_info` / CLI) avec sa sémantique désormais documentée (entrées, pas feuilles).
+- **Validation de chemin canonique (anti-traversal, cohérent #78)** — `_validate_secret_path` valide désormais **par segments** : rejet des segments vides (`//`, slash terminal), de `.` et `..`, contrôle de type, et **message constant** (la valeur rejetée n'est plus réinjectée dans la réponse ni dans l'audit MCP → vecteur d'injection de journal fermé). `list_secrets` applique cette validation **avant** tout appel OpenBao (elle en était dépourvue), ce qui durcit aussi l'outil MCP `secret_list`.
+- **Routage admin durci** — le segment `/secrets` est reconnu exactement (écarte `/secretsfoo`) et les doubles slashs ne sont plus masqués silencieusement.
+- **UI** — identifiants d'éléments dépliables rendus bijectifs (hex UTF-8) pour éviter la collision `a/b` vs `a_b`.
+- **Tests** — `tests/test_secrets_folder_nav_81.py` (15 tests unitaires : validation canonique, routage, fuite de droits, non-régression, `domId` bijectif exécuté sous Node) + `tests/test_secrets_folder_nav_openbao_81.py` (5 tests d'intégration OpenBao réel : dossiers/feuilles, clés relatives, collision feuille+dossier, lecture d'un dossier, traversal rejeté).
+
 ## [0.8.1] — 2026-07-15
 
 ### Durcissement `secret_consume` — hygiène & anti-injection de journal (issue #78, Lot A)
