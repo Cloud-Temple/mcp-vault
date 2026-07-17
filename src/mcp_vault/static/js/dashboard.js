@@ -16,14 +16,14 @@ async function loadDashboard() {
 
     const vc = vaults.count || 0;
     const tc = (tokens.tokens || []).filter(t => !t.revoked && !t.expired).length;
-    const sc = (vaults.vaults || []).reduce((s, v) => s + (v.secrets_count || 0), 0);
+    const sc = (vaults.vaults || []).reduce((s, v) => s + (v.root_entries_count || 0), 0);
     const pc = policies ? (policies.policies || []).length : 0;
 
     el.innerHTML = `
         <div class="stats-grid" style="margin-bottom:1.2rem">
             <div class="stat-card"><div class="stat-value">${health.status === 'ok' ? '✅' : '❌'}</div><div class="stat-label">Service</div></div>
             <div class="stat-card" style="cursor:pointer" onclick="navigate('vaults')"><div class="stat-value">${vc}</div><div class="stat-label">Vaults</div></div>
-            <div class="stat-card"><div class="stat-value">${sc}</div><div class="stat-label">Secrets</div></div>
+            <div class="stat-card"><div class="stat-value">${sc}</div><div class="stat-label" title="Entrées de premier niveau, tous vaults confondus">Entrées</div></div>
             ${isAdmin() ? `<div class="stat-card" style="cursor:pointer" onclick="navigate('policies')"><div class="stat-value">${pc}</div><div class="stat-label">Policies</div></div>` : ''}
             <div class="stat-card" ${isAdmin() ? 'style="cursor:pointer" onclick="navigate(\'tokens\')"' : ''}><div class="stat-value">${tc}</div><div class="stat-label">Tokens</div></div>
             <div class="stat-card"><div class="stat-value">${health.tools_count || 0}</div><div class="stat-label">Outils MCP</div></div>
