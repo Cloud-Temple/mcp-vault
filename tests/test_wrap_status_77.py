@@ -147,6 +147,34 @@ def test_status_survives_malformed_entry_via_real_registry():
     assert res["status"] == "ok" and res["state"] == "registry_inconsistent"
 
 
+def test_status_registry_inconsistent_on_non_str_status():
+    """
+    Un `status` non-str (liste/dict NON hashable, int, None) ne doit pas faire
+    lever `in frozenset` (TypeError) — registre corrompu → registry_inconsistent.
+    """
+    from mcp_vault.vault import wrapping as w
+    for bad in ([], {}, 123, None):
+        entry = _entry("active")
+        entry["status"] = bad
+        with patch.object(w, "get_wrap_registry", return_value=_registry_with([entry])):
+            res = _run(w.status_by_operation_id("op-1"))
+        assert res["status"] == "ok" and res["state"] == "registry_inconsistent", f"{bad!r} → {res}"
+
+
+def test_registry_last_load_ok_recovers_after_successful_save():
+    """
+    Reprise après panne S3 : `_last_load_ok=False`, puis un `_save()` réussi (S3
+    revenu) doit remettre le flag à True — sinon la consultation d'état resterait
+    bloquée en backend_unavailable malgré un cache persisté et fiable.
+    """
+    from mcp_vault.vault import wrapping as w
+    reg = w.WrapRegistry(MagicMock())
+    reg._last_load_ok = False                              # panne S3 antérieure
+    reg._get_s3_data = MagicMock(return_value=MagicMock())  # S3 revenu (put_object OK)
+    assert reg._save() is True
+    assert reg._last_load_ok is True, "un save réussi doit lever le flag de panne S3"
+
+
 # ── NON-COMPLAISANCE : lecture pure (pas de mutation, pas de fuite) ──────────
 
 def test_status_never_leaks_accessor_or_token():

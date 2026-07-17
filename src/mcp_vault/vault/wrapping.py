@@ -193,6 +193,11 @@ class WrapRegistry:
                 ContentType="application/json",
             )
             self._cache_time = time.time()  # invalide le cache après write
+            # #77 : un save réussi prouve que S3 est joignable et que le cache mémoire
+            # est persisté — on lève un éventuel _last_load_ok=False laissé par une
+            # panne S3 antérieure (sinon la consultation d'état resterait bloquée en
+            # backend_unavailable après reprise de S3).
+            self._last_load_ok = True
             return True
         except Exception as e:
             logger.error("WrapRegistry S3 save FAILED: %s — compensation indisponible", type(e).__name__)
@@ -741,7 +746,9 @@ async def status_by_operation_id(operation_id: str) -> dict:
     if not isinstance(entry, dict):
         return {"status": "ok", "state": "registry_inconsistent"}
     raw_status = entry.get("status")
-    if raw_status not in _KNOWN_WRAP_STATUSES:
+    # Contrôle de TYPE avant le test d'appartenance : un status non-str (liste/dict,
+    # non hashable) ferait lever `in frozenset`. Registre corrompu → état neutre.
+    if not isinstance(raw_status, str) or raw_status not in _KNOWN_WRAP_STATUSES:
         return {"status": "ok", "state": "registry_inconsistent"}
 
     result = {"status": "ok", "state": raw_status}
