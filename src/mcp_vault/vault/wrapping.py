@@ -706,7 +706,10 @@ async def status_by_operation_id(operation_id: str) -> dict:
       consommabilité (un wrap expiré côté OpenBao peut encore ressortir `active`,
       et une consommation concurrente peut invalider l'instantané) ;
     - la lecture peut rafraîchir le cache mémoire (`find_by_operation_id` →
-      `_maybe_refresh`), mais n'écrit jamais sur S3 et ne révoque jamais.
+      `_maybe_refresh`), mais n'écrit jamais sur S3 et ne révoque jamais ;
+    - `backend_unavailable` signale que le DERNIER rafraîchissement S3 a échoué ;
+      une panne S3 survenant PENDANT la fenêtre de cache (`CACHE_TTL`) n'est pas
+      détectée — l'état renvoyé peut alors être périmé (best-effort assumé).
 
     États : `not_found | pending | active | consuming | consumed | revoked |
     failed | ambiguous | registry_inconsistent` (OK) ; `backend_unavailable`
@@ -753,11 +756,18 @@ async def status_by_operation_id(operation_id: str) -> dict:
 
     result = {"status": "ok", "state": raw_status}
     # expires_at INDICATIF pour les états vivants (aide le consommateur à jauger la
-    # fraîcheur) — le TTL faisant foi reste côté OpenBao.
+    # fraîcheur) — le TTL faisant foi reste côté OpenBao. Validé STRICTEMENT comme
+    # ISO-8601 avant d'être reflété : une entrée de registre corrompue pourrait sinon
+    # y cacher une valeur arbitraire (ex. un secret) qui ressortirait au client (#77).
     if raw_status in ("pending", "active", "consuming"):
         expires_at = entry.get("expires_at")
         if isinstance(expires_at, str) and expires_at:
-            result["expires_at"] = expires_at
+            try:
+                datetime.fromisoformat(expires_at)
+            except ValueError:
+                pass  # non-ISO → on n'expose rien
+            else:
+                result["expires_at"] = expires_at
     return result
 
 

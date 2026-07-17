@@ -220,6 +220,26 @@ def test_status_expires_at_only_for_live_states():
             assert "expires_at" not in _run(w.status_by_operation_id("op-1")), f"{st} ne devrait pas exposer expires_at"
 
 
+def test_status_expires_at_rejects_non_iso_value():
+    """
+    NON-FUITE (finding Codex R3) : un expires_at non-ISO (valeur arbitraire injectée
+    dans une entrée corrompue) ne doit JAMAIS être reflété ; une date ISO valide, oui.
+    """
+    from mcp_vault.vault import wrapping as w
+    entry = _entry("active")
+    entry["expires_at"] = "ACC-SECRET-SMUGGLED"          # arbitraire, non-ISO
+    with patch.object(w, "get_wrap_registry", return_value=_registry_with([entry])):
+        res = _run(w.status_by_operation_id("op-1"))
+    assert res["state"] == "active"
+    assert "expires_at" not in res, "un expires_at non-ISO ne doit pas être reflété"
+    assert "ACC-SECRET-SMUGGLED" not in str(res)
+    # une date ISO valide reste exposée
+    entry["expires_at"] = "2099-01-01T00:00:00+00:00"
+    with patch.object(w, "get_wrap_registry", return_value=_registry_with([entry])):
+        res2 = _run(w.status_by_operation_id("op-1"))
+    assert res2.get("expires_at") == "2099-01-01T00:00:00+00:00"
+
+
 # ── Outil MCP secret_wrap_status : autz + validation ─────────────────────────
 
 def test_mcp_secret_wrap_status_admin_only():
