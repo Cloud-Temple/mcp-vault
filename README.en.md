@@ -63,7 +63,7 @@ On shutdown (`docker compose stop`):
 
 ---
 
-## 🛠️ MCP tools (36)
+## 🛠️ MCP tools (37)
 
 ### System (2)
 
@@ -147,7 +147,7 @@ Sovereign CA for the ecosystem: Caddy WAFs enroll via ACME exactly like with Let
 >
 > **`PKI_BASE_URL`** (optional): base URL for CDPs and the OpenBao ACME cluster path. Empty = derived from `MCP_ALLOWED_HOSTS`. Docker test override: `http://mcp-vault:8030`. Must be `http(s)://`.
 
-### JIT Wrap Broker + mediated consumption — C18 (4) *(v0.4.13 / v0.6.x)*
+### JIT Wrap Broker + mediated consumption — C18 (5) *(v0.4.13 / v0.6.x)*
 
 Contract for the mcp-mission `CredentialBrokerService`: single-use credential delivery via OpenBao response wrapping (cubbyhole), with a write-ahead registry on S3 for orphan compensation, and anti-confused-deputy validation (C18).
 
@@ -155,7 +155,8 @@ Contract for the mcp-mission `CredentialBrokerService`: single-use credential de
 | --- | --- | --- |
 | `secret_wrap(vault_id, secret_path, mission_id, operation_id, ttl_seconds?, tenant_id?, expected_aud?)` | admin | Creates a single-use wrap token (write-ahead registry) |
 | `secret_revoke_wrap(lease_id)` | admin | Idempotent revocation of a wrap token (not found = success) |
-| `secret_wrap_lookup(operation_id)` | admin | Finds & revokes wraps by operation_id (orphan compensation #74) |
+| `secret_wrap_lookup(operation_id)` | admin | Finds & **revokes** wraps by operation_id (orphan compensation #74) |
+| `secret_wrap_status(operation_id)` | admin | Reads a wrap's state **without revoking it** — read-only, best-effort snapshot (#77) |
 | `secret_consume(wrap_token, operation_id, mission_token)` | admin | Validates ES256/JWKS JWT, checks full binding (mission_id, tenant_id, aud), unwraps OpenBao (C18) |
 
 > Enable C18 validation with `ENFORCE_MISSION_TOKEN_VALIDATION=true`. Default (false): log warning, continue — zero impact in standalone mode without mcp-mission.
@@ -420,7 +421,7 @@ docker compose exec mcp-vault python tests/test_e2e.py --test enforcement
 
 | Category               | Tests  | Description                                                                        |
 | ---------------------- | ------ | ---------------------------------------------------------------------------------- |
-| System                 | 7      | health, about, services, tools_count (36)                                          |
+| System                 | 7      | health, about, services, tools_count (37)                                          |
 | Vault CRUD             | 28     | create + metadata, list, info + owner, update, delete, confirm, errors             |
 | Secrets CRUD           | 24     | 10 types written, read/list/delete, validation                                     |
 | Versioning             | 8      | v1→v2→v3, read latest, read specific                                               |
