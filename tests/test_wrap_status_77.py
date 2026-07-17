@@ -49,9 +49,10 @@ def _entry(status, op="op-1", accessor="ACC-SECRET-XYZ",
     }
 
 
-def _registry_with(entries):
+def _registry_with(entries, last_load_ok=True):
     reg = MagicMock()
     reg.find_by_operation_id.return_value = entries
+    reg._last_load_ok = last_load_ok
     return reg
 
 
@@ -96,6 +97,54 @@ def test_status_backend_unavailable_when_no_registry():
     with patch.object(w, "get_wrap_registry", return_value=None):
         res = _run(w.status_by_operation_id("op-1"))
     assert res["status"] == "error" and res.get("error_type") == "backend_unavailable"
+
+
+# ── Robustesse (findings Codex R-diff) : panne S3 & registre corrompu ────────
+
+def test_status_backend_unavailable_on_s3_refresh_failure():
+    """
+    Panne S3 effective (dernier load échoué → `_last_load_ok=False`) : la
+    consultation NE doit PAS présenter un instantané périmé comme fiable — elle
+    remonte `backend_unavailable` plutôt qu'un not_found/active trompeur.
+    """
+    from mcp_vault.vault import wrapping as w
+    reg = _registry_with([_entry("active")], last_load_ok=False)
+    with patch.object(w, "get_wrap_registry", return_value=reg):
+        res = _run(w.status_by_operation_id("op-1"))
+    assert res["status"] == "error" and res.get("error_type") == "backend_unavailable"
+
+
+def test_status_registry_inconsistent_on_find_exception():
+    """Une exception de find_by_operation_id (registre corrompu) → registry_inconsistent, pas d'exception MCP."""
+    from mcp_vault.vault import wrapping as w
+    reg = MagicMock()
+    reg._last_load_ok = True
+    reg.find_by_operation_id.side_effect = KeyError("operation_id")
+    with patch.object(w, "get_wrap_registry", return_value=reg):
+        res = _run(w.status_by_operation_id("op-1"))
+    assert res["status"] == "ok" and res["state"] == "registry_inconsistent"
+
+
+def test_status_registry_inconsistent_on_non_dict_entry():
+    from mcp_vault.vault import wrapping as w
+    with patch.object(w, "get_wrap_registry", return_value=_registry_with([None])):
+        res = _run(w.status_by_operation_id("op-1"))
+    assert res["state"] == "registry_inconsistent"
+
+
+def test_status_survives_malformed_entry_via_real_registry():
+    """
+    Chemin réel : une entrée `{}` dans le registre fait lever find_by_operation_id
+    (KeyError 'operation_id'). status doit renvoyer registry_inconsistent sans crasher.
+    """
+    from mcp_vault.vault import wrapping as w
+    reg = w.WrapRegistry(MagicMock())
+    reg._wraps = [{}]          # entrée corrompue (pas de clé operation_id)
+    reg._cache_time = 9e18     # cache "frais" → pas de refresh S3
+    reg._last_load_ok = True
+    with patch.object(w, "get_wrap_registry", return_value=reg):
+        res = _run(w.status_by_operation_id("op-1"))
+    assert res["status"] == "ok" and res["state"] == "registry_inconsistent"
 
 
 # ── NON-COMPLAISANCE : lecture pure (pas de mutation, pas de fuite) ──────────

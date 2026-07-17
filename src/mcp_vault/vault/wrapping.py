@@ -144,6 +144,11 @@ class WrapRegistry:
         self.settings = settings
         self._wraps: list[dict] = []
         self._cache_time: float = 0
+        # #77 : True tant que le dernier load() a abouti (succès ou 404 = vide connu) ;
+        # False si un load() a échoué sur une panne S3 effective. Sert à la
+        # consultation d'état (status_by_operation_id) pour ne pas présenter un
+        # instantané périmé comme fiable. Additif — n'affecte pas le flux broker.
+        self._last_load_ok: bool = True
 
     def _get_s3_data(self):
         from ..s3_client import get_s3_data_client
@@ -156,11 +161,17 @@ class WrapRegistry:
             data = json.loads(resp["Body"].read().decode())
             self._wraps = data.get("wraps", [])
             self._cache_time = time.time()
+            self._last_load_ok = True
         except Exception as e:
             if "NoSuchKey" in str(e) or "404" in str(e):
                 self._wraps = []
                 self._cache_time = time.time()
+                self._last_load_ok = True  # absence de fichier = registre vide connu
             else:
+                # #77 : panne S3 effective — le cache n'est PAS rafraîchi. On le
+                # signale pour que la consultation d'état (status) ne masque pas
+                # l'indisponibilité en renvoyant un not_found/active trompeur.
+                self._last_load_ok = False
                 logger.warning("WrapRegistry S3 load: %s", type(e).__name__)
 
     def _save(self) -> bool:
@@ -701,7 +712,21 @@ async def status_by_operation_id(operation_id: str) -> dict:
         return {"status": "error", "error_type": "backend_unavailable",
                 "message": "WrapRegistry non disponible (S3 requis)"}
 
-    entries = registry.find_by_operation_id(operation_id)
+    # Lecture DÉFENSIVE : une entrée malformée (dict sans clés, None, …) ne doit
+    # jamais faire crasher la consultation — registre corrompu → registry_inconsistent,
+    # jamais d'exception MCP.
+    try:
+        entries = registry.find_by_operation_id(operation_id)
+    except Exception:
+        logger.warning("status_by_operation_id : registre illisible (op=%r)", operation_id[:16])
+        return {"status": "ok", "state": "registry_inconsistent"}
+
+    # #77 : si le dernier rafraîchissement S3 a échoué (panne effective), l'instantané
+    # est indéterminé — ne pas le présenter comme fiable (not_found/active trompeur).
+    if getattr(registry, "_last_load_ok", True) is False:
+        return {"status": "error", "error_type": "backend_unavailable",
+                "message": "Registre non rafraîchi (S3 injoignable) — état indéterminé"}
+
     if not entries:
         return {"status": "ok", "state": "not_found"}
     if len(entries) > 1:
@@ -712,7 +737,10 @@ async def status_by_operation_id(operation_id: str) -> dict:
     # références VIVANTES du registre — on ne mute jamais l'entrée (un pop/masquage
     # corromprait la mémoire, puis S3 au prochain _save). On lit, on construit un
     # dict neuf, sans jamais exposer accessor/wrap_token.
-    raw_status = entries[0].get("status")
+    entry = entries[0]
+    if not isinstance(entry, dict):
+        return {"status": "ok", "state": "registry_inconsistent"}
+    raw_status = entry.get("status")
     if raw_status not in _KNOWN_WRAP_STATUSES:
         return {"status": "ok", "state": "registry_inconsistent"}
 
@@ -720,7 +748,7 @@ async def status_by_operation_id(operation_id: str) -> dict:
     # expires_at INDICATIF pour les états vivants (aide le consommateur à jauger la
     # fraîcheur) — le TTL faisant foi reste côté OpenBao.
     if raw_status in ("pending", "active", "consuming"):
-        expires_at = entries[0].get("expires_at")
+        expires_at = entry.get("expires_at")
         if isinstance(expires_at, str) and expires_at:
             result["expires_at"] = expires_at
     return result
