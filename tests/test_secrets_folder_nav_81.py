@@ -249,27 +249,29 @@ def test_router_double_slash_not_masked():
 # D. Fuite de policy (finding Codex #1)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_vault_detail_no_longer_leaks_secret_keys():
+def test_vault_detail_no_leak_names_nor_cardinality():
     """
-    La fiche vault (GET /vaults/{id}) ne renvoie plus 'secret_keys' et ne liste plus
-    (list_secrets non appelé) → plus de fuite de noms via le canal vault_info.
-    Elle expose root_entries_count (compteur honnête).
+    Fiche vault (GET /vaults/{id}) : ne divulgue NI les noms (secret_keys) NI la
+    cardinalité (root_entries_count/secrets_count), et n'appelle pas list_secrets.
+    get_space_info est invoqué avec count=False (pas de list indirect) ; le nombre
+    d'entrées vient du listing contrôlé côté UI.
     """
     scope = _make_scope("GET", "/admin/api/vaults/test-vault")
     info = {"status": "ok", "vault_id": "test-vault", "description": "",
-            "root_entries_count": 2, "secrets_count": 2,
             "created_at": "", "created_by": "admin", "updated_at": "", "updated_by": ""}
+    gsi = AsyncMock(return_value=info)
     with patch("mcp_vault.admin.api._get_token_info", return_value=_token_info(["read"])), \
          patch("mcp_vault.admin.api.check_policy", return_value=None), \
          patch("mcp_vault.admin.api._check_vault_access", return_value=None), \
-         patch("mcp_vault.vault.spaces.get_space_info", new=AsyncMock(return_value=info)), \
+         patch("mcp_vault.vault.spaces.get_space_info", new=gsi), \
          patch("mcp_vault.vault.ssh_ca.list_ssh_roles", new=AsyncMock(return_value={"status": "ok", "roles": []})), \
          patch("mcp_vault.vault.secrets.list_secrets", new=AsyncMock()) as mock_list:
         status, body = _run(_call(scope))
     assert status == 200
-    assert "secret_keys" not in body, "FUITE : la fiche vault expose encore secret_keys"
-    assert body.get("root_entries_count") == 2
-    mock_list.assert_not_called()  # la fiche ne liste plus les secrets
+    assert "secret_keys" not in body, "FUITE : noms de secrets"
+    assert "root_entries_count" not in body and "secrets_count" not in body, "FUITE : cardinalité"
+    mock_list.assert_not_called()
+    assert gsi.call_args.kwargs.get("count") is False, f"get_space_info doit avoir count=False : {gsi.call_args}"
 
 
 def test_listing_denied_when_secret_list_policy_forbidden():
@@ -290,6 +292,114 @@ def test_listing_denied_when_secret_list_policy_forbidden():
         status, _ = _run(_call(scope))
     assert status == 403
     mock_list.assert_not_called()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# D bis. Bypass de policy par préfixe non canonique (finding Codex round 2, NO-GO)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_normalize_list_path():
+    from mcp_vault.vault.secrets import normalize_list_path
+    assert normalize_list_path("") == ""
+    assert normalize_list_path("bootstrap") == "bootstrap"
+    assert normalize_list_path("bootstrap/") == "bootstrap"   # slash terminal normalisé
+    assert normalize_list_path("a/b/c") == "a/b/c"
+    # rejets : '/' (alias racine ambigu), '//', segments vides, '.', '..', newline, non-str
+    for bad in ("/", "//", "bootstrap//", "..", ".", "foo/../bar", "bootstrap/\nx", 123, None, b"x"):
+        assert normalize_list_path(bad) is None, f"devrait rejeter {bad!r}"
+
+
+def test_router_prefix_slash_rejected_before_policy_and_list():
+    """
+    NON-COMPLAISANCE (finding NO-GO) : ?prefix=%2F (→ '/') est REJETÉ (400) AVANT
+    check_path_policy ET avant tout listing → plus de contournement de policy par
+    'validate vs use' (le PDP voyait '/', l'action listait la racine '').
+    """
+    scope = _make_scope("GET", "/admin/api/vaults/test-vault/secrets", query=b"prefix=%2F")
+    with patch("mcp_vault.admin.api._get_token_info", return_value=_token_info(["read"])), \
+         patch("mcp_vault.admin.api.check_policy", return_value=None), \
+         patch("mcp_vault.admin.api.check_path_policy", return_value=None) as mock_cpp, \
+         patch("mcp_vault.admin.api._check_vault_access", return_value=None), \
+         patch("mcp_vault.admin.api._api_list_secrets", new=AsyncMock()) as mock_list:
+        status, _ = _run(_call(scope))
+    assert status == 400, f"prefix=/ doit être rejeté (400), obtenu {status}"
+    mock_cpp.assert_not_called()   # rejeté AVANT le PDP
+    mock_list.assert_not_called()  # aucun listing
+
+
+def test_router_prefix_canonical_feeds_policy_and_list_same_value():
+    """
+    Le PDP et l'appel de listing reçoivent la MÊME valeur canonique :
+    ?prefix=bootstrap%2F (→ 'bootstrap/') devient 'bootstrap' pour les DEUX.
+    """
+    scope = _make_scope("GET", "/admin/api/vaults/test-vault/secrets", query=b"prefix=bootstrap%2F")
+    with patch("mcp_vault.admin.api._get_token_info", return_value=_token_info(["read"])), \
+         patch("mcp_vault.admin.api.check_policy", return_value=None), \
+         patch("mcp_vault.admin.api.check_path_policy", return_value=None) as mock_cpp, \
+         patch("mcp_vault.admin.api._check_vault_access", return_value=None), \
+         patch("mcp_vault.admin.api._api_list_secrets", new=AsyncMock()) as mock_list:
+        status, _ = _run(_call(scope))
+    mock_cpp.assert_called_once_with("test-vault", "bootstrap", "read")
+    mock_list.assert_called_once_with(ANY, "test-vault", "bootstrap")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# D ter. Compteur : count=False (pas de list indirect) + erreur ≠ 0 silencieux
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _mock_mount_client(list_side_effect=None, keys=None):
+    client = MagicMock()
+    client.sys.list_mounted_secrets_engines.return_value = {"data": {"v/": {"type": "kv", "options": {}}}}
+    if list_side_effect is not None:
+        client.secrets.kv.v2.list_secrets.side_effect = list_side_effect
+    else:
+        client.secrets.kv.v2.list_secrets.return_value = {"data": {"keys": list(keys or [])}}
+    return client
+
+
+def test_get_space_info_count_false_skips_list():
+    from mcp_vault.vault import spaces
+    client = _mock_mount_client(list_side_effect=AssertionError("list ne doit PAS être appelé"))
+    with patch.object(spaces, "get_hvac_client", return_value=client), \
+         patch.object(spaces, "_read_vault_meta", return_value={}):
+        res = _run(spaces.get_space_info("v", count=False))
+    assert res["status"] == "ok"
+    assert "root_entries_count" not in res and "secrets_count" not in res
+
+
+def test_get_space_info_error_is_not_silent_zero():
+    """Une erreur backend NON-404 → cardinalité OMISE (jamais un '0' trompeur)."""
+    from mcp_vault.vault import spaces
+    client = _mock_mount_client(list_side_effect=RuntimeError("boom 500"))
+    with patch.object(spaces, "get_hvac_client", return_value=client), \
+         patch.object(spaces, "_read_vault_meta", return_value={}):
+        res = _run(spaces.get_space_info("v", count=True))
+    assert res["status"] == "ok"
+    assert "secrets_count" not in res and "root_entries_count" not in res
+
+
+def test_get_space_info_empty_vault_is_zero():
+    """Un vault vide (InvalidPath/404) → cardinalité 0 CONFIRMÉE (cas normal)."""
+    from mcp_vault.vault import spaces
+
+    class InvalidPath(Exception):
+        pass
+
+    client = _mock_mount_client(list_side_effect=InvalidPath("404 not found"))
+    with patch.object(spaces, "get_hvac_client", return_value=client), \
+         patch.object(spaces, "_read_vault_meta", return_value={}):
+        res = _run(spaces.get_space_info("v", count=True))
+    assert res.get("secrets_count") == 0 and res.get("root_entries_count") == 0
+
+
+def test_get_space_info_count_true_counts_entries():
+    from mcp_vault.vault import spaces
+    client = _mock_mount_client(keys=["bootstrap/", "mcp-teleport/", "_vault_meta"])
+    with patch.object(spaces, "get_hvac_client", return_value=client), \
+         patch.object(spaces, "_read_vault_meta", return_value={}):
+        res = _run(spaces.get_space_info("v", count=True))
+    # _vault_meta exclu → 2 entrées
+    assert res.get("root_entries_count") == 2 and res.get("secrets_count") == 2
 
 
 # ─────────────────────────────────────────────────────────────────────────────

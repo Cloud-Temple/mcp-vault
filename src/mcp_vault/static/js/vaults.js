@@ -347,7 +347,7 @@ async function selectVault(vaultId) {
         </div>
         ${data.description ? `<p style="color:var(--text2);margin:0.5rem 0">${esc(data.description)}</p>` : ''}
         <table style="margin-bottom:0.8rem">
-            <tr><td style="color:var(--muted);width:120px" title="Entrées de premier niveau (dossiers et secrets), sans parcours récursif">Entrées</td><td>${data.root_entries_count || 0}</td></tr>
+            <tr><td style="color:var(--muted);width:120px" title="Entrées de premier niveau (dossiers et secrets), issues du listing autorisé">Entrées</td><td>${listErr ? '—' : keys.length}</td></tr>
             <tr><td style="color:var(--muted)">Créé par</td><td>${esc(data.created_by || '—')}</td></tr>
             <tr><td style="color:var(--muted)">Créé le</td><td>${fmtDate(data.created_at)}</td></tr>
             <tr><td style="color:var(--muted)">Modifié</td><td>${fmtDate(data.updated_at)}</td></tr>

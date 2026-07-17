@@ -130,7 +130,8 @@ def test_absent_prefix_is_empty_list(real_client):
 def test_traversal_rejected_before_openbao(real_client):
     from mcp_vault.vault import secrets as sec
     with _patched(real_client):
-        for bad in ("../sys", "bootstrap/../..", "bootstrap//"):
+        # '/' (alias racine ambigu, ex-bypass ?prefix=%2F) inclus dans les rejets
+        for bad in ("../sys", "bootstrap/../..", "bootstrap//", "/"):
             res = _run(sec.list_secrets(_MOUNT, bad))
             assert res["status"] == "error", f"{bad!r} devrait être rejeté"
 

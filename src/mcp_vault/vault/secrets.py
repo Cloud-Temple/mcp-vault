@@ -48,6 +48,34 @@ def _validate_secret_path(path: str) -> Optional[dict]:
     return None
 
 
+def normalize_list_path(raw) -> Optional[str]:
+    """
+    Canonicalise ET valide un chemin de LISTING (préfixe de dossier).
+
+    Retourne le chemin canonique (`str`) si valide, ou `None` si invalide.
+
+    SÉCURITÉ #81 (« validate vs use ») : la MÊME valeur canonique doit servir au
+    contrôle de policy (`check_path_policy`) ET à l'appel OpenBao. Normaliser
+    APRÈS le contrôle ouvrait un contournement : `?prefix=%2F` (→ `"/"`) était
+    autorisé par une policy sur `"/"` puis listait la racine (`""`). D'où :
+
+    - `""` = racine (autorisé) ;
+    - un slash terminal unique est retiré ;
+    - un préfixe non vide qui se réduit à vide (cas `"/"`) est **rejeté** ;
+    - le reste doit passer `_validate_secret_path` (rejette `//`, `.`, `..`, etc.).
+    """
+    if not isinstance(raw, str):
+        return None
+    if raw == "":
+        return ""  # racine
+    canonical = raw[:-1] if raw.endswith("/") else raw
+    if canonical == "":  # ex. "/" seul → ambigu (alias de la racine) → rejet
+        return None
+    if _validate_secret_path(canonical) is not None:
+        return None
+    return canonical
+
+
 def _is_reserved_path(path: str) -> bool:
     """
     Vérifie si un chemin est réservé (match exact OU sous-chemin).
@@ -168,13 +196,12 @@ async def list_secrets(vault_id: str, path: str = "") -> dict:
     `path` peut désigner un sous-dossier ("bootstrap" ou "bootstrap/") ; le
     slash terminal éventuel est normalisé.
     """
-    # SÉCURITÉ #81 : normaliser un slash terminal (dossier) puis valider le
-    # chemin de listing. Cette validation était ABSENTE avant #81 — elle protège
-    # aussi l'outil MCP secret_list (défense en profondeur, anti-traversal).
-    norm_path = path[:-1] if isinstance(path, str) and path.endswith("/") else path
-    path_err = _validate_secret_path(norm_path)
-    if path_err:
-        return path_err
+    # SÉCURITÉ #81 : canonicaliser + valider via la source unique normalize_list_path
+    # (la MÊME valeur canonique doit servir au contrôle de policy amont). Validation
+    # ABSENTE avant #81 — protège aussi l'outil MCP secret_list (anti-traversal).
+    norm_path = normalize_list_path(path)
+    if norm_path is None:
+        return {"status": "error", "message": "Chemin de secret invalide"}
 
     client = get_hvac_client()
     if not client:

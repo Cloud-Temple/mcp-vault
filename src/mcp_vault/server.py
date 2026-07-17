@@ -402,7 +402,7 @@ async def secret_list(vault_id: str, path: str = "") -> dict:
         path: Préfixe pour filtrer (optionnel)
     """
     from .auth.context import check_access, check_policy, check_path_policy
-    from .vault.secrets import list_secrets
+    from .vault.secrets import list_secrets, normalize_list_path
 
     policy_err = check_policy("secret_list")
     if policy_err:
@@ -410,12 +410,18 @@ async def secret_list(vault_id: str, path: str = "") -> dict:
     access_err = check_access(vault_id)
     if access_err:
         return access_err
+    # SÉCURITÉ #81 : canonicaliser AVANT check_path_policy — le PDP et l'appel
+    # OpenBao doivent porter sur la MÊME valeur (sinon `?prefix=%2F` contourne la
+    # policy en listant la racine). Message constant (anti-injection d'audit).
+    canonical = normalize_list_path(path)
+    if canonical is None:
+        return {"status": "error", "message": "Chemin de secret invalide"}
     # SÉCURITÉ V2-05b : check_path_policy sur secret_list (consistance avec read/write/delete)
-    path_err = check_path_policy(vault_id, path, "read")
+    path_err = check_path_policy(vault_id, canonical, "read")
     if path_err:
         return path_err
 
-    return _r("secret_list", await list_secrets(vault_id, path), vault_id)
+    return _r("secret_list", await list_secrets(vault_id, canonical), vault_id)
 
 
 @mcp.tool()

@@ -241,7 +241,15 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
             policy_err = check_policy("secret_list")
             if policy_err:
                 return await _json_response(send, 403, policy_err)
-            prefix = _query_param(scope, "prefix")
+            # SÉCURITÉ #81 : canonicaliser le préfixe AVANT le contrôle de policy,
+            # pour que le PDP (check_path_policy) et l'appel OpenBao portent sur la
+            # MÊME valeur canonique. Sinon `?prefix=%2F` (→ "/") est autorisé par une
+            # policy sur "/" puis liste la racine ("") → contournement de policy.
+            from ..vault.secrets import normalize_list_path
+            prefix = normalize_list_path(_query_param(scope, "prefix"))
+            if prefix is None:
+                return await _json_response(send, 400,
+                        {"status": "error", "message": "Préfixe de listing invalide"})
             path_err = check_path_policy(vault_id, prefix, "read")
             if path_err:
                 return await _json_response(send, 403, path_err)
@@ -746,15 +754,14 @@ async def _api_vault_detail(send, vault_id):
     from ..vault.spaces import get_space_info
     from ..vault.ssh_ca import list_ssh_roles
 
-    # Infos de base
-    info = await get_space_info(vault_id)
+    # SÉCURITÉ #81 : la fiche vault NE divulgue PLUS le contenu (ni noms ni
+    # cardinalité). count=False → get_space_info ne fait aucun `list`. La console
+    # affiche le nombre d'entrées à partir du listing GET .../secrets, seul canal
+    # soumis à check_policy("secret_list") + check_path_policy. Un token autorisé
+    # sur vault_info mais interdit sur secret_list n'apprend donc rien du contenu.
+    info = await get_space_info(vault_id, count=False)
     if info.get("status") == "error":
         return await _json_response(send, 404, info)
-
-    # SÉCURITÉ #81 : la fiche vault NE liste PLUS les clés de secrets ici.
-    # Le listing (racine incluse) passe par GET .../secrets, qui applique
-    # check_policy("secret_list") + check_path_policy — sinon un token autorisé
-    # sur vault_info mais interdit sur secret_list verrait les noms de secrets.
 
     # SSH CA : lister les rôles (si CA configurée)
     ssh_roles = []
@@ -769,8 +776,6 @@ async def _api_vault_detail(send, vault_id):
         "status": "ok",
         "vault_id": vault_id,
         "description": info.get("description", ""),
-        "root_entries_count": info.get("root_entries_count", 0),
-        "secrets_count": info.get("secrets_count", 0),
         "created_at": info.get("created_at", ""),
         "created_by": info.get("created_by", ""),
         "updated_at": info.get("updated_at", ""),
