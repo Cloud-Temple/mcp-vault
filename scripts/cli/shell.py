@@ -132,8 +132,8 @@ async def cmd_vault(client, args="", json_output=False):
 
 
 SECRET_OPS = ("write", "read", "list", "delete", "consume",
-              "wrap", "revoke-wrap", "wrap-lookup")
-WRAP_OPS = ("wrap", "revoke-wrap", "wrap-lookup")
+              "wrap", "revoke-wrap", "wrap-lookup", "wrap-status")
+WRAP_OPS = ("wrap", "revoke-wrap", "wrap-lookup", "wrap-status")
 
 
 async def cmd_secret(client, args="", json_output=False):
@@ -230,6 +230,9 @@ async def cmd_secret(client, args="", json_output=False):
     elif op == "wrap-lookup" and len(parts) >= 2:
         # secret wrap-lookup <operation_id>
         result = await client.call_tool("secret_wrap_lookup", {"operation_id": parts[1]})
+    elif op == "wrap-status" and len(parts) >= 2:
+        # secret wrap-status <operation_id> — consultation LECTURE SEULE (#77, ne révoque pas)
+        result = await client.call_tool("secret_wrap_status", {"operation_id": parts[1]})
     else:
         show_warning(f"Usage: secret {op} <vault> <path>")
         if op == "wrap":

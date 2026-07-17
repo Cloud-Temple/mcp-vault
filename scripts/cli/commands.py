@@ -494,14 +494,36 @@ def secret_revoke_wrap_cmd(ctx, lease_id, output_json):
 @click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
 @click.pass_context
 def secret_wrap_lookup_cmd(ctx, operation_id, output_json):
-    """Retrouver et révoquer les wraps d'un operation_id (compensation orphelins).
+    """Retrouver et RÉVOQUER les wraps d'un operation_id (compensation orphelins).
 
     \b
     OPERATION_ID : identifiant d'opération à rechercher dans le registry.
+    ⚠️ Révoque les wraps trouvés. Pour consulter sans effet de bord : wrap-status.
     """
     async def _run():
         client = MCPClient(ctx.obj["url"], ctx.obj["token"])
         result = await client.call_tool("secret_wrap_lookup", {"operation_id": operation_id})
+        if output_json:
+            show_json(result)
+        else:
+            show_wrap_result(result)
+    asyncio.run(_run())
+
+
+@secret_group.command("wrap-status")
+@click.argument("operation_id")
+@click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
+@click.pass_context
+def secret_wrap_status_cmd(ctx, operation_id, output_json):
+    """Consulter l'état d'un wrap par operation_id (LECTURE SEULE, ne révoque pas).
+
+    \b
+    OPERATION_ID : identifiant d'opération à consulter dans le registry.
+    Instantané best-effort ; contrairement à wrap-lookup, ne révoque rien (#77).
+    """
+    async def _run():
+        client = MCPClient(ctx.obj["url"], ctx.obj["token"])
+        result = await client.call_tool("secret_wrap_status", {"operation_id": operation_id})
         if output_json:
             show_json(result)
         else:
