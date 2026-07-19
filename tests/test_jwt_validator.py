@@ -334,6 +334,59 @@ class TestMissionTokenValidatorC18:
         )
         self._assert_rejected(validator, token_wrong_kind, "component_id_mismatch")
 
+    def test_init_mission_token_validator_propagates_component_kind(self):
+        """Câblage réel : `init_mission_token_validator()` (le point d'entrée
+        utilisé par lifecycle.py, pas la construction directe de
+        MissionTokenValidator) doit transmettre `component_kind` jusqu'au
+        validateur singleton résultant — sinon MCP_COMPONENT_KIND non-défaut ne
+        ferait rien malgré le câblage dans lifecycle.py (issue #86)."""
+        import mcp_vault.auth.jwt_validator as jv
+        from mcp_vault.auth.jwt_validator import MissionTokenError
+        priv, pub, _ = _make_es256_keypair()
+        jwks = _make_jwks(pub)
+        import json as _json
+
+        def fake_fetch(url, etag, timeout):
+            return 200, None, _json.dumps(jwks).encode()
+
+        saved = jv._validator
+        try:
+            from mcp_vault.auth.mission_jwt import JWKSCache
+            # init_mission_token_validator() appelle init_jwks_cache() en interne,
+            # qui créerait un JWKSCache RÉEL (fetch HTTP véritable au premier
+            # get_key()). On patche get_jwks_cache — consulté par _get_cache() de
+            # l'instance à CHAQUE validate() — pour qu'il retourne toujours le cache
+            # mocké, peu importe ce que fait init_jwks_cache en parallèle. Le patch
+            # doit rester actif pendant les appels validate() ci-dessous, pas
+            # seulement pendant l'initialisation.
+            cache = JWKSCache("http://mock-jwks/x", ttl_seconds=60, fetch=fake_fetch)
+            patcher = patch.object(jv, "get_jwks_cache", return_value=cache)
+            patcher.start()
+            try:
+                validator = jv.init_mission_token_validator(
+                    jwks_url="http://mock-jwks/x",
+                    expected_aud="mcp-vault:test",
+                    component_kind="live_memory",
+                )
+                assert jv.get_mission_token_validator() is validator
+
+                token_ok = _make_token(
+                    priv, extra_claims={"component_id": {"live_memory": "mcp-vault:test"}},
+                )
+                claims = validator.validate(token_ok)
+                assert claims["mission_id"] == "mission-abc"
+
+                token_wrong_kind = _make_token(
+                    priv, extra_claims={"component_id": {"vault": "mcp-vault:test"}},
+                )
+                with pytest.raises(MissionTokenError) as exc_info:
+                    validator.validate(token_wrong_kind)
+                assert exc_info.value.reason == "component_id_mismatch"
+            finally:
+                patcher.stop()
+        finally:
+            jv._validator = saved
+
     def test_missing_tenant_id_rejected(self):
         priv, pub, _ = _make_es256_keypair()
         jwks = _make_jwks(pub)
@@ -718,6 +771,39 @@ class TestSecretConsumeEndToEnd:
         finally:
             object.__setattr__(settings, 'enforce_mission_token_validation', original_enforce)
             object.__setattr__(settings, 'mission_jwks_url', original_jwks)
+
+    def test_consume_with_enforce_and_empty_expected_aud_returns_misconfigured(self):
+        """ENFORCE=true, JWKS configuré, mais audience résolue vide (JWT_URL
+        configuré sans MCP_INSTANCE_ID/MISSION_TOKEN_AUD) → misconfigured (pas
+        jwt_invalid) — cohérent avec les autres retours misconfigured de ce bloc
+        et avec secret_wrap (issue #86)."""
+        import mcp_vault.auth.jwt_validator as jv
+        from mcp_vault.auth.jwt_validator import MissionTokenError
+        from mcp_vault.server import settings
+
+        original_enforce = settings.enforce_mission_token_validation
+        original_jwks = settings.mission_jwks_url
+        try:
+            object.__setattr__(settings, "enforce_mission_token_validation", True)
+            object.__setattr__(settings, "mission_jwks_url", "http://mock/.well-known/jwks.json")
+
+            mock_validator = MagicMock()
+            mock_validator.validate.side_effect = MissionTokenError("misconfigured_expected_aud")
+
+            with patch.object(jv, "_validator", mock_validator):
+                from mcp_vault.server import secret_consume
+                result = _run(secret_consume(
+                    wrap_token="wt-abc", operation_id="op-123", mission_token="dummy",
+                ))
+        finally:
+            object.__setattr__(settings, "enforce_mission_token_validation", original_enforce)
+            object.__setattr__(settings, "mission_jwks_url", original_jwks)
+
+        assert result["status"] == "error", result
+        assert result["error_type"] == "misconfigured", (
+            f"attendu misconfigured (config serveur), obtenu {result['error_type']!r} "
+            "— ne doit pas être confondu avec un JWT réellement invalide"
+        )
 
     def test_singleton_used_not_reinstantiated(self):
         """

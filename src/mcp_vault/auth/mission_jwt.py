@@ -465,8 +465,13 @@ def validate_mission_token(
     except _pyjwt.InvalidIssuerError:
         raise MissionTokenInvalid("bad_iss")
     except _pyjwt.MissingRequiredClaimError as exc:
-        logger.warning("mission_token claim requis manquant (%s)", getattr(exc, "claim", "?"))
-        raise MissionTokenInvalid("missing_claim")
+        # Le nom du claim vient de `require=[...]` ci-dessus (valeur FERMÉE, l'un des
+        # 8 noms de claims attendus) — jamais une valeur externe non fiable, sûr à
+        # propager dans le reason (issue #86 : préserve le niveau de détail attendu
+        # par le contrat historique C18 `missing_claim:<claim>`).
+        claim = getattr(exc, "claim", "") or ""
+        logger.warning("mission_token claim requis manquant (%s)", claim or "?")
+        raise MissionTokenInvalid(f"missing_claim:{claim}" if claim else "missing_claim")
     except _pyjwt.InvalidSignatureError:
         logger.warning("mission_token signature invalide")
         raise MissionTokenInvalid("bad_signature")

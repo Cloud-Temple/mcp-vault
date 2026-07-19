@@ -345,21 +345,21 @@ Non-authentifié par design (RFC 8555 ACME + JWS). Anti-traversal sur acme_suffi
 
 **Admin REST** *(v0.5.1)* : `GET /admin/api/pki/roles` et `GET /admin/api/pki/roles/{role_name}` — info non-secrète (configuration du rôle ACME), accessible à tout token valide pour diagnostic.
 
-### 3.11c `auth/jwt_validator.py` — Validateur JWT mission_token *(v0.6.8)*
+### 3.11c `auth/jwt_validator.py` — Validateur JWT mission_token *(v0.6.8, alignement PEP #86)*
 
-Validation JWT ES256/JWKS pour l'anti-confused-deputy C18 (issue #26). Singleton process-wide depuis v0.6.8 (issue #29).
+Validation JWT ES256/JWKS pour l'anti-confused-deputy C18 (issue #26). Singleton process-wide depuis v0.6.8 (issue #29). Depuis le Lot 2 (#86), `validate()` délègue à `mission_jwt.validate_mission_token()` — le même contrat que le PEP `/mcp` (`AuthMiddleware`) : plus de logique `jwt.decode()` dupliquée.
 
 | Classe/Fonction | Description |
 | --- | --- |
-| `MissionTokenValidator(jwks_url, expected_aud, cache_ttl, ...)` | Validateur thread-safe. Cache JWKS TTL-borné (60s), refresh kid inconnu, rate-limit 3/min |
-| `validate(token_compact)` → dict | ES256, iss=mcp-mission, aud, exp+leeway, mission_id requis. Jamais le token dans les erreurs. |
-| `MissionTokenError(reason)` | reason = code machine ("invalid_signature", "token_expired", "kid_unknown_or_revoked"...) |
-| `init_mission_token_validator(jwks_url, ...)` | Initialise le singleton au startup (lifecycle.py step 1e). Retourne None si jwks_url vide. |
+| `MissionTokenValidator(jwks_url, expected_aud, cache_ttl, ..., component_kind="vault")` | Validateur thread-safe. Cache JWKS TTL-borné (60s), refresh kid inconnu, rate-limit 3/min. `expected_iss` non configurable (fixé à `"mcp-mission"`, `ValueError` sinon). |
+| `validate(token_compact)` → dict | Délègue à `validate_mission_token()` : ES256, `iss=mcp-mission`, `exp` strict (leeway=0), `iat` (anti-skew, tolérance `leeway_seconds`), `aud`, `mission_id`, `jti`, `tenant_id`, `scope`, `component_id[component_kind] == aud` tous requis. `expected_aud` vide → rejet explicite (`misconfigured_expected_aud`). Jamais le token dans les erreurs. |
+| `MissionTokenError(reason)` | reason = code machine, vocabulaire historique C18 préservé pour les cas pré-existants ("invalid_signature", "token_expired", "kid_unknown_or_revoked", "missing_claim:<claim>"...) + nouveaux codes (#86) : "iat_future", "bad_mission_id", "bad_jti", "bad_tenant_id", "bad_scope", "component_id_mismatch". |
+| `init_mission_token_validator(jwks_url, ..., component_kind="vault")` | Initialise le singleton au startup (lifecycle.py step 1e). Retourne None si jwks_url vide. |
 | `get_mission_token_validator()` | Retourne le singleton process-wide. None si non configuré. |
 
-**Thread-safety** : `threading.Lock` protège le cache JWKS et la fenêtre glissante du rate-limit. `_fetch_jwks_from_url()` est toujours appelé sous ce lock.
+**Thread-safety** : le cache JWKS partagé (`auth/mission_jwt.py`, issue #47) est protégé par son propre `threading.Lock`.
 
-**Singleton process-wide** : un seul `MissionTokenValidator` pour tout le processus. Le cache JWKS (60s) et le rate-limit (3 refreshes/min) sont ainsi effectivement globaux. `secret_consume` utilise `get_mission_token_validator()` — fail-close si absent en mode `ENFORCE=true`.
+**Singleton process-wide** : un seul `MissionTokenValidator` pour tout le processus, adossé au JWKSCache singleton partagé avec le PEP `/mcp`. `secret_consume` utilise `get_mission_token_validator()` — fail-close si absent en mode `ENFORCE=true`.
 
 **Standalone** : si `MISSION_JWKS_URL` est vide, le validateur n'est pas instancié et `secret_consume` fonctionne en mode non-enforced.
 

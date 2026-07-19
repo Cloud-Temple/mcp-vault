@@ -75,11 +75,9 @@ _INVALID_REASON_MAP = {
     "bad_jwk": "jwks_unavailable",
     "expired": "token_expired",
     "bad_iss": "invalid_issuer",
-    # Perte de granularité assumée : validate_mission_token() ne propage pas le nom
-    # du claim manquant (contrairement à PyJWT MissingRequiredClaimError.claim) —
-    # aligné sur le PEP, qui a le même comportement. Le reason ne fuit de toute
-    # façon jamais au client (secret_consume renvoie toujours error_type="jwt_invalid").
-    "missing_claim": "missing_claim",
+    # "missing_claim"/"missing_claim:<claim>" : géré à part dans validate() (préfixe
+    # dynamique, cf. ci-dessous) — pas d'entrée ici, une seule clé ne peut pas
+    # représenter toutes les combinaisons "missing_claim:<claim>" possibles.
     "bad_signature": "invalid_signature",
     "invalid": "validation_failed",
     "bad_aud": "invalid_audience",
@@ -203,6 +201,12 @@ class MissionTokenValidator:
                 iat_leeway=self._leeway,
             )
         except MissionTokenInvalid as e:
+            # "missing_claim[:<claim>]" est déjà au format historique C18 attendu
+            # (préserve le nom du claim, cf. mission_jwt.validate_mission_token) —
+            # ne PAS le passer par le dict, qui ne peut pas connaître à l'avance
+            # chaque combinaison "missing_claim:<claim>" possible.
+            if e.reason.startswith("missing_claim"):
+                raise MissionTokenError(e.reason) from None
             raise MissionTokenError(_INVALID_REASON_MAP.get(e.reason, "validation_failed")) from None
         except MissionTokenForbidden as e:
             raise MissionTokenError(_FORBIDDEN_REASON_MAP.get(e.reason, "invalid_audience")) from None

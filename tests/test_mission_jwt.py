@@ -544,8 +544,9 @@ class TestValidateMissionToken:
         token = _make_mission_token(priv, overrides={"mission_id": bad_value})
         with pytest.raises(MissionTokenInvalid) as exc_info:
             _validate(token, cache)
-        # "" déclenche missing_claim ou bad_mission_id selon PyJWT — les deux fail-close.
-        assert exc_info.value.reason in (reason, "missing_claim")
+        # "" déclenche missing_claim[:mission_id] ou bad_mission_id selon PyJWT —
+        # les deux fail-close (issue #86 : le reason porte désormais le nom du claim).
+        assert exc_info.value.reason == reason or exc_info.value.reason.startswith("missing_claim")
 
     def test_bad_tenant_id_rejected(self):
         priv, pub = _make_es256_keypair()
@@ -570,7 +571,7 @@ class TestValidateMissionToken:
         token = _make_mission_token(priv, overrides={"scope": bad_scope})
         with pytest.raises(MissionTokenInvalid) as exc_info:
             _validate(token, cache)
-        assert exc_info.value.reason in ("bad_scope", "missing_claim")
+        assert exc_info.value.reason == "bad_scope" or exc_info.value.reason.startswith("missing_claim")
 
     def test_aud_wrong_type_rejected_401_not_500(self):
         """aud forgé (dict) → 401 propre, jamais un crash."""
