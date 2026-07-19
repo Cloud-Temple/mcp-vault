@@ -174,7 +174,7 @@ Second enforcement point (PEP) for the mcp-mission `mission_token` (ES256 JWT), 
 | `jwt` | `mission_token` JWT ES256 **required** (opaque bearer rejected). Also requires `ENFORCE_MISSION_TOKEN_VALIDATION=true` and `MISSION_STATUS_URL` (fail-fast, #86). |
 | `dual-stack` | Valid JWT **or** valid opaque bearer (migration). Same requirements as `jwt` above. |
 
-In `jwt`/`dual-stack`, the middleware **actively rejects**: `401` (missing/opaque/invalid JWT), `403` (`aud`/`component_id` ≠ instance, inactive mission), `503` (JWKS unavailable — fail-close). An invalid JWT **never** falls back to the bearer path. The token is checked against the real mcp-mission contract (`aud` contains `MCP_INSTANCE_ID`, `component_id["vault"] == MCP_INSTANCE_ID`, `iss`, `exp` leeway 0, `iat` anti-skew). The admin bootstrap key remains accepted (break-glass).
+In `jwt`/`dual-stack`, the middleware **actively rejects**: `401` (missing/opaque/invalid JWT), `403` (`aud`/`component_id` ≠ instance, inactive mission), `503` (JWKS unavailable — fail-close). An invalid JWT **never** falls back to the bearer path. The token is checked against the real mcp-mission contract (`aud` contains `MCP_INSTANCE_ID`, `component_id[MCP_COMPONENT_KIND] == MCP_INSTANCE_ID`, `iss`, `exp` leeway 0, `iat` anti-skew). The admin bootstrap key remains accepted (break-glass).
 
 > A valid mission identity is **authenticated and instance-bound**, then mcp-vault (**local PDP**) resolves a **locally-provisioned vault scope** for it. Without a grant, **no access** (deny-by-default); infra tools (`system_*`, PKI inventory) and the admin plane (`vault_create/delete`, `ssh_*`) are denied to it. The admin endpoint `POST /admin/api/auth/jwks/reload` forces a JWKS reload (urgent `kid` revocation).
 
