@@ -140,7 +140,7 @@
 | **HealthCheckMiddleware** | Health check HTTP (/health, /healthz, /ready)    | ASGI middleware               |
 | **AuthMiddleware**        | Auth Bearer Token + **PEP mission JWT** (#47) + **octroi périmètre vault** (MissionBindingStore, #69) + ContextVar | ASGI middleware (starter-kit) |
 | **LoggingMiddleware**     | Logging requêtes + ring buffer mémoire           | ASGI middleware (starter-kit) |
-| **Outils MCP**            | Façade MCP (36 outils)                           | FastMCP (starter-kit)         |
+| **Outils MCP**            | Façade MCP (37 outils)                           | FastMCP (starter-kit)         |
 | **hvac client**           | Client Python vers OpenBao                       | `hvac` library                |
 | **OpenBao process**       | Moteur de secrets (chiffrement, policies, audit) | Binaire `bao` (Go, embedded)  |
 | **S3 Sync Manager**       | Synchronisation storage local ↔ S3               | boto3 + tar/gzip              |
@@ -876,7 +876,7 @@ les rôles SSH) sans pouvoir modifier quoi que ce soit.
 
 > 💡 **Introspection** : l'endpoint `/admin/api/whoami` et la commande CLI `whoami` permettent de vérifier l'identité et les permissions du token courant (client_name, auth_type, permissions, vaults autorisés).
 
-**Total : 36 outils MCP** (5 vaults + 6 secrets + 4 wrap/broker C18 + 5 SSH CA + 8 PKI + 4 policies + 1 token + 1 audit + 2 system)
+**Total : 37 outils MCP** (5 vaults + 6 secrets + 5 wrap/broker C18 + 5 SSH CA + 8 PKI + 4 policies + 1 token + 1 audit + 2 system)
 
 #### 6.7.1 Architecture du journal d'audit
 
@@ -1420,7 +1420,7 @@ mcp-vault/
 ├── src/mcp_vault/
 │   ├── __init__.py
 │   ├── __main__.py            # python -m mcp_vault
-│   ├── server.py              # 36 outils MCP + create_app() + middlewares + bannière
+│   ├── server.py              # 37 outils MCP + create_app() + middlewares + bannière
 │   ├── config.py              # Config Pydantic-settings (S3, OpenBao, sync, WAF)
 │   ├── admin/                 # Console d'administration web (/admin)
 │   │   ├── __init__.py
@@ -2173,4 +2173,4 @@ result = await vault_client.call("ssh_sign_key", {
 
 ---
 
-*Document mis à jour le 17 juillet 2026 — MCP Vault v0.8.2 (36 outils MCP, pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer)*
+*Document mis à jour le 17 juillet 2026 — MCP Vault v0.8.2 (37 outils MCP, pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer)*

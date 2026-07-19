@@ -49,7 +49,7 @@ MCP Vault est un serveur MCP (Model Context Protocol) qui fournit une gestion s�
 │  │  HealthCheckMiddleware → /health, /healthz, /ready       │  │
 │  │  AuthMiddleware     → Bearer token → contextvars         │  │
 │  │  LoggingMiddleware  → stderr + ring buffer (200 entrées) │  │
-│  │  FastMCP            → /mcp (Streamable HTTP, 36 outils)  │  │
+│  │  FastMCP            → /mcp (Streamable HTTP, 37 outils)  │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │                                                                │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
@@ -631,7 +631,7 @@ volumes:
 
 | #   | Catégorie              | Tests  | Description                                                                 |
 | --- | ---------------------- | ------ | --------------------------------------------------------------------------- |
-| 1   | Système                | 7      | health, about, services, version, tools_count (36)                          |
+| 1   | Système                | 7      | health, about, services, version, tools_count (37)                          |
 | 2   | Vault Spaces CRUD      | ~28    | create, list, info, update, delete, metadata, erreurs                       |
 | 3   | Secrets CRUD           | ~24    | 14 types, write/read/list/delete, validation                                |
 | 4   | Versioning & Rotation  | 8      | v1/v2/v3, lecture version spécifique                                        |

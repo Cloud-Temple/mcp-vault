@@ -1,5 +1,16 @@
 # Changelog — MCP Vault
 
+## [Unreleased]
+
+### Broker de secrets — consultation d'état en lecture seule (issue #77)
+
+`secret_wrap_lookup` **révoque** volontairement les wraps (compensation des provisions orphelines #74), mais son nom laissait croire à une consultation : un consommateur vérifiant l'état d'un wrap le **révoquait** (piège d'intégration remonté par mcp-mission au pré-canari). Aucun moyen de lire l'état sans effet de bord n'existait.
+
+- **Nouvel outil MCP `secret_wrap_status(operation_id)` (lecture seule)** — retourne l'état d'un wrap (`not_found | pending | active | consuming | consumed | revoked | failed | ambiguous | registry_inconsistent`, ou `backend_unavailable`) **sans révocation ni écriture durable**. Contrat = **instantané best-effort** du registre (cache court, S3 *last-write-wins*) : `active` signifie « actif dans l'instantané », **pas** une garantie de consommabilité (un wrap expiré côté OpenBao peut encore ressortir `active`). Ne renvoie **jamais** l'`accessor` ni le `wrap_token` (projection neuve — aucune mutation d'une référence vivante du registre). **Admin-only** (V1) ; l'ouverture aux identités mission relève de #78 Lot C.
+- **`secret_wrap_lookup` clarifié** — docstring corrigée : avertissement explicite qu'il **RÉVOQUE**, renvoi vers `secret_wrap_status` ; l'état `found_unattached` est décrit correctement (provision orpheline sans accessor, **non** révoquée). Comportement **inchangé** (#74 intact).
+- **Parité CLI** — `secret wrap-status <operation_id>` (miroir lecture seule de `secret wrap-lookup`).
+- **Tests** — `tests/test_wrap_status_77.py` : classification de chaque état sans effet de bord, non-mutation de la référence registre, non-exposition `accessor`/`wrap_token`, admin-only, validation `operation_id` ; intégration OpenBao réel (`wrap → status → consume` **réussit**, prouvant l'absence de révocation ; contraste avec `secret_wrap_lookup` qui révoque).
+
 ## [0.8.2] — 2026-07-17
 
 ### Console admin — navigation par dossier des secrets (KV v2) + durcissements (issue #81)
