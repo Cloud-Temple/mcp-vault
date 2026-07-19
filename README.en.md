@@ -323,7 +323,7 @@ Copy `.env.example` → `.env` and adjust. Variables are grouped by domain:
 | **Storage sync** | `VAULT_S3_PREFIX`, `VAULT_S3_SYNC_INTERVAL` | No |
 | **PKI** *(v0.5.x)* | `PKI_BASE_URL` | No — overrides ACME URL in Docker tests |
 | **Mission JWT** *(v0.6.x)* | `ENFORCE_MISSION_TOKEN_VALIDATION`, `MISSION_JWKS_URL`, `MISSION_TOKEN_AUD`, `MISSION_JWKS_CACHE_TTL`, `MISSION_STATUS_URL` | No — standalone without mcp-mission |
-| **Mission JWT PEP** *(v0.8.0)* | `MCP_AUTH_MODE` (`bearer`/`jwt`/`dual-stack`), `MCP_INSTANCE_ID`, `MCP_COMPONENT_KIND` | No — default `bearer` = zero impact. `jwt`/`dual-stack` require `MISSION_JWKS_URL` + `MCP_INSTANCE_ID` |
+| **Mission JWT PEP** *(v0.8.0)* | `MCP_AUTH_MODE` (`bearer`/`jwt`/`dual-stack`), `MCP_INSTANCE_ID`, `MCP_COMPONENT_KIND` | No — default `bearer` = zero impact. `jwt`/`dual-stack` require `MISSION_JWKS_URL` + `MCP_INSTANCE_ID` + `ENFORCE_MISSION_TOKEN_VALIDATION=true` + `MISSION_STATUS_URL` (fail-fast, #86) |
 | **CLI tokens** | `VAULT_WRAP_TOKEN`, `VAULT_MISSION_TOKEN` | No — export before the command, never in `.env` |
 
 > **Sensitive CLI tokens**: `VAULT_WRAP_TOKEN` and `VAULT_MISSION_TOKEN` must NOT be stored in `.env` — they change on every operation. Pass them via `export` or inline:

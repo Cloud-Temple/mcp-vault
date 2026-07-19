@@ -1633,6 +1633,37 @@ class TestMissionPepConfig:
             object.__setattr__(settings, "mcp_instance_id", saved[3])
             object.__setattr__(settings, "enforce_mission_token_validation", saved[4])
 
+    def test_main_fail_fast_enforce_false_in_jwt_mode(self):
+        """main() refuse de démarrer en mode jwt sans enforce C18 (finding CRITIQUE 1)
+        — chemin réel de production (pas seulement create_app(), cf. revue du diff
+        Codex qui notait l'absence de test réel sur main())."""
+        import secrets
+        from mcp_vault.server import main, settings
+        saved = (settings.admin_bootstrap_key, settings.mcp_auth_mode,
+                 settings.mission_jwks_url, settings.mcp_instance_id,
+                 settings.enforce_mission_token_validation)
+        try:
+            object.__setattr__(settings, "admin_bootstrap_key", secrets.token_urlsafe(48))
+            object.__setattr__(settings, "mcp_auth_mode", "jwt")
+            object.__setattr__(settings, "mission_jwks_url", "http://m/jwks")
+            object.__setattr__(settings, "mcp_instance_id", INSTANCE_ID)
+            object.__setattr__(settings, "enforce_mission_token_validation", False)
+            # main() ne doit JAMAIS atteindre create_app()/uvicorn : si le fail-fast
+            # est contourné, ce mock lève pour le signaler bruyamment (pas un simple
+            # comptage d'appel qui pourrait passer inaperçu).
+            with patch("mcp_vault.server.create_app",
+                       side_effect=AssertionError("create_app() atteint malgré un "
+                                                   "fail-fast cense l'empêcher")), \
+                 pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 1
+        finally:
+            object.__setattr__(settings, "admin_bootstrap_key", saved[0])
+            object.__setattr__(settings, "mcp_auth_mode", saved[1])
+            object.__setattr__(settings, "mission_jwks_url", saved[2])
+            object.__setattr__(settings, "mcp_instance_id", saved[3])
+            object.__setattr__(settings, "enforce_mission_token_validation", saved[4])
+
     def test_resolved_mission_aud_priority(self):
         s = self._settings(mcp_instance_id="canonical")
         assert s.resolved_mission_aud == "canonical"
