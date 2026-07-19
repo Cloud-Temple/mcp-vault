@@ -1422,19 +1422,19 @@ def create_app():
             "(ex: python -c \"import secrets; print(secrets.token_urlsafe(48))\")."
         )
 
-    # ── Fail-fast PEP mission JWT (issue #47) ──────────────────────────────
-    # Refuse de démarrer en mode jwt/dual-stack avec une config incohérente
-    # (jwks_url absent, audience absente, drift instance_id/mission_token_aud).
+    # ── Fail-fast validation mission JWT (issues #47, #86) ─────────────────
+    # Refuse de démarrer avec une config incohérente : jwks_url/audience absents,
+    # drift instance_id/mission_token_aud, PEP actif sans enforcement C18, statut
+    # mission absent/mal formé/hors bornes — dès que le PEP transport (jwt/dual-stack)
+    # OU l'enforcement C18 seul (bearer + ENFORCE_MISSION_TOKEN_VALIDATION=true) est
+    # actif. Voir Settings.check_mission_pep_config() pour le détail des règles.
+    # NB : un lancement `uvicorn ...:create_app --factory` passe par ce fail-fast
+    # mais n'exécute pas vault_startup() (lifespan) — le validateur C18/JWKS ne sera
+    # donc pas opérationnel malgré une config validée ici ; ce chemin reste fail-close
+    # (503) mais n'est pas un mode de démarrage pleinement supporté en prod.
     pep_ok, pep_msg = settings.check_mission_pep_config()
     if not pep_ok:
-        raise RuntimeError(f"Config PEP mission JWT invalide — démarrage refusé : {pep_msg}")
-    if settings.mcp_auth_mode != "bearer" and not settings.mission_status_url:
-        # Mode dégradé assumé (aussi signalé ici pour les lancements ASGI directs
-        # via create_app --factory, qui ne passent pas par main()).
-        logger.warning(
-            "⚠️  MISSION_STATUS_URL non configuré : vérification mission active "
-            "DÉSACTIVÉE au PEP /mcp — révocation par expiration du token uniquement."
-        )
+        raise RuntimeError(f"Config mission JWT invalide — démarrage refusé : {pep_msg}")
 
     from .auth.middleware import AuthMiddleware, LoggingMiddleware, HealthCheckMiddleware
     from .admin.middleware import AdminMiddleware
@@ -1490,25 +1490,18 @@ def main():
         sys.exit(1)
     logger.info("✅ ADMIN_BOOTSTRAP_KEY validée (entropie suffisante)")
 
-    # ── Fail-fast PEP mission JWT (issue #47) ──────────────────────────────
+    # ── Fail-fast validation mission JWT (issues #47, #86) ─────────────────
     pep_ok, pep_msg = settings.check_mission_pep_config()
     if not pep_ok:
-        logger.error(f"❌ Config PEP mission JWT invalide : {pep_msg}")
+        logger.error(f"❌ Config mission JWT invalide : {pep_msg}")
         logger.error("   Démarrage refusé (fail-fast sécurité).")
         sys.exit(1)
     if settings.mcp_auth_mode != "bearer":
         logger.info(f"🛡️  PEP mission JWT actif (mode={settings.mcp_auth_mode}, "
                     f"aud={settings.resolved_mission_aud})")
-        if not settings.mission_status_url:
-            # Mode dégradé assumé : sans MISSION_STATUS_URL, aucune vérification de
-            # mission active à la porte → la révocation d'une mission close/abort
-            # repose UNIQUEMENT sur l'expiration (exp ≤ 3600s) du mission_token.
-            logger.warning(
-                "⚠️  MISSION_STATUS_URL non configuré : vérification mission active "
-                "DÉSACTIVÉE au PEP /mcp — révocation par expiration du token uniquement "
-                "(exp ≤ 3600s). Configurez MISSION_STATUS_URL pour une révocation quasi "
-                "temps réel des missions closes/abandonnées."
-            )
+    if settings.enforce_mission_token_validation:
+        logger.info("🎫  Enforcement C18 actif (secret_consume) — "
+                     f"statut mission vérifié via {settings.mission_status_url}")
 
     app = create_app()
 

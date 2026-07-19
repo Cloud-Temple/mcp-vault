@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Durcissement PEP mission JWT — fail-fast de configuration (issue #86, Lot 1)
+
+Suite à une revue adversariale Codex du PEP mission JWT (#47) préalable à son activation en production (verdict NO-GO, 7 findings bloquants — issue #86). Premier lot : ferme le finding CRITIQUE (partie configuration) et le finding sur la révocation mission non bornée. Les lots suivants (alignement C18/PEP, Policy Store fail-close, durcissement async JWKS, TTL binding) restent à faire sur #86.
+
+- **`ENFORCE_MISSION_TOKEN_VALIDATION` désormais obligatoire (fail-fast au boot)** dès que la validation mission_token est active — que ce soit via le PEP transport (`MCP_AUTH_MODE=jwt`/`dual-stack`) ou via l'enforcement C18 seul en mode `bearer` (mécanisme historique #26). Avant ce correctif, activer le PEP `/mcp` n'empêchait pas `secret_consume` de rester en mode permissif par défaut : une mission abortée passée en paramètre `mission_token` pouvait encore obtenir la libération d'un secret.
+- **`MISSION_STATUS_URL` désormais obligatoire** dans les mêmes conditions — sans elle, une mission abortée conservait l'accès jusqu'à expiration du `mission_token` (jusqu'à 1h). L'URL doit en outre contenir le placeholder littéral `{mission_id}` (fail-fast si absent) : une URL statique aurait pu valider silencieusement n'importe quelle mission comme active.
+- **`MISSION_STATUS_CACHE_TTL` désormais borné à `[0,30]` secondes** (0 = pas de cache) dans les mêmes conditions — une valeur hors bornes retardait arbitrairement la détection d'une mission abortée.
+- **Code mort retiré** — les avertissements `logger.warning` devenus inatteignables (le fail-fast de configuration s'exécute avant) ont été supprimés de `create_app()` et `main()`.
+- **Tests** — `tests/test_mission_jwt.py::TestMissionPepConfig` (13 nouveaux cas non-complaisants : chaque nouvelle règle testée en échec ET en succès, y compris le cas bearer + enforcement C18 seul) ; `tests/test_jwt_validator.py` (test de bout en bout prouvant qu'une mission confirmée inactive dans le paramètre `mission_token` est bloquée avant tout appel à `consume_wrap_secret`, quelle que soit l'identité active sur le transport). Revue de plan Codex adversariale avant implémentation (a trouvé l'angle mort du mode bearer + enforcement C18 seul, absent du plan initial).
+
 ### Broker de secrets — consultation d'état en lecture seule (issue #77)
 
 `secret_wrap_lookup` **révoque** volontairement les wraps (compensation des provisions orphelines #74), mais son nom laissait croire à une consultation : un consommateur vérifiant l'état d'un wrap le **révoquait** (piège d'intégration remonté par mcp-mission au pré-canari). Aucun moyen de lire l'état sans effet de bord n'existait.

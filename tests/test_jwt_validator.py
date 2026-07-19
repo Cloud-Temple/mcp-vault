@@ -668,6 +668,165 @@ class TestSecretConsumeEndToEnd:
         assert result["status"] == "error", f"Attendu error, obtenu: {result}"
         assert result["error_type"] == "misconfigured", f"Attendu misconfigured: {result}"
 
+    def test_enforce_true_inactive_parameter_mission_blocked_despite_active_header_identity(self):
+        """
+        CRITIQUE (issue #86, finding 1 — POC de la revue Codex pré-canari #47).
+
+        Le PEP /mcp valide le TRANSPORT (header, identité A). `secret_consume`
+        valide le PARAMÈTRE `mission_token` (identité B) — volontairement découplé
+        du header (cf. auth/context.py, confirmé par la revue de plan Lot 1 : ne PAS
+        lier les deux, le design est correct une fois l'enforcement C18 garanti).
+
+        POC original (AVANT ce lot) : `inactive_parameter_mission_with_active_
+        header_context_release=ok` — avec ENFORCE_MISSION_TOKEN_VALIDATION=false
+        (défaut), une mission B confirmée INACTIVE libérait quand même le secret.
+
+        Ce test prouve qu'avec enforce=true (désormais imposé au boot par
+        Settings.check_mission_pep_config() dès que la validation mission_token est
+        active), la mission B inactive est refusée AVANT tout appel à
+        consume_wrap_secret — quelle que soit l'identité active sur le transport.
+
+        NON-COMPLAISANCE (revue du diff Codex, mutation adversariale) : le mock de
+        `_check_mission_active` doit être DISCRIMINANT (side_effect qui distingue
+        mission-A de mission-B), sinon un bug qui confondrait les deux missions
+        resterait indétectable — une première version de ce test avec un
+        `return_value` statique restait verte même après substitution de
+        `mission-B` par `mission-A` dans le code testé.
+        """
+        import mcp_vault.auth.jwt_validator as jv
+        from mcp_vault.auth.context import current_token_info
+        from mcp_vault.server import settings
+
+        orig_enforce = settings.enforce_mission_token_validation
+        orig_jwks = settings.mission_jwks_url
+        orig_status_url = settings.mission_status_url
+        try:
+            object.__setattr__(settings, "enforce_mission_token_validation", True)
+            object.__setattr__(settings, "mission_jwks_url", "http://mock/.well-known/jwks.json")
+            object.__setattr__(settings, "mission_status_url", "http://mock/status/{mission_id}")
+
+            # Paramètre mission_token : identité B, JWT authentifié (validateur mocké).
+            mock_validator = MagicMock()
+            mock_validator.validate.return_value = {
+                "mission_id": "mission-B", "tenant_id": "tenant-B",
+                "aud": "mcp-vault:test", "iss": "mcp-mission", "exp": 9999999999,
+            }
+
+            # Contexte transport : identité A, active, SANS AUCUN lien avec B — le
+            # PEP aurait validé A sur le header ; secret_consume ne le consulte pas.
+            tok = current_token_info.set({
+                "auth_type": "mission_jwt", "client_name": "mission:tenant-A",
+                "mission_id": "mission-A", "tenant_id": "tenant-A",
+                "permissions": ["read"], "allowed_resources": ["vault-a"],
+            })
+
+            # Discriminant : A est active, B est inactive. Un code qui vérifierait
+            # (par erreur) l'identité du transport (A) au lieu du paramètre (B)
+            # obtiendrait `active=True` et le test échouerait sur l'assertion finale.
+            async def fake_check_mission_active(mission_id, status_url_template, cache_ttl):
+                if mission_id == "mission-A":
+                    return True, ""
+                if mission_id == "mission-B":
+                    return False, "mission_inactive"
+                raise AssertionError(f"mission_id inattendu dans le test : {mission_id!r}")
+
+            mock_consume = AsyncMock(return_value={"status": "ok", "data": {"secret": "leaked"}})
+            try:
+                with patch.object(jv, "_validator", mock_validator), \
+                     patch("mcp_vault.server._check_mission_active",
+                           side_effect=fake_check_mission_active) as mock_status, \
+                     patch("mcp_vault.vault.wrapping.consume_wrap_secret", mock_consume):
+                    from mcp_vault.server import secret_consume
+                    result = _run(secret_consume(
+                        wrap_token="wt-b", operation_id="op-b",
+                        mission_token="jwt-of-mission-b",
+                    ))
+            finally:
+                current_token_info.reset(tok)
+        finally:
+            object.__setattr__(settings, "enforce_mission_token_validation", orig_enforce)
+            object.__setattr__(settings, "mission_jwks_url", orig_jwks)
+            object.__setattr__(settings, "mission_status_url", orig_status_url)
+
+        assert mock_status.await_count == 1, "check_mission_active jamais appelé"
+        # Preuve explicite que c'est bien B (le paramètre), et non A (le transport),
+        # qui a été soumis au contrôle d'activité — pas seulement le résultat final.
+        called_mission_id = mock_status.call_args.kwargs.get("mission_id")
+        assert called_mission_id == "mission-B", (
+            f"check_mission_active appelé avec mission_id={called_mission_id!r} — "
+            "attendu 'mission-B' (le paramètre mission_token), pas l'identité du "
+            "transport."
+        )
+        assert result["status"] == "error", (
+            f"mission B inactive mais secret_consume a renvoyé un succès : {result}")
+        assert result["error_type"] == "mission_inactive", result
+        mock_consume.assert_not_called()
+
+    def test_enforce_true_active_parameter_mission_reaches_unwrap(self):
+        """
+        Symétrique du test précédent (issue #86) : si la mission B du PARAMÈTRE est
+        ACTIVE, `secret_consume` doit atteindre l'unwrap normalement — preuve que le
+        contrôle porte spécifiquement sur B (le paramètre) et non sur un état global
+        toujours-inactif qui ferait passer le test précédent par accident.
+        """
+        import mcp_vault.auth.jwt_validator as jv
+        from mcp_vault.auth.context import current_token_info
+        from mcp_vault.server import settings
+
+        orig_enforce = settings.enforce_mission_token_validation
+        orig_jwks = settings.mission_jwks_url
+        orig_status_url = settings.mission_status_url
+        try:
+            object.__setattr__(settings, "enforce_mission_token_validation", True)
+            object.__setattr__(settings, "mission_jwks_url", "http://mock/.well-known/jwks.json")
+            object.__setattr__(settings, "mission_status_url", "http://mock/status/{mission_id}")
+
+            mock_validator = MagicMock()
+            mock_validator.validate.return_value = {
+                "mission_id": "mission-B", "tenant_id": "tenant-B",
+                "aud": "mcp-vault:test", "iss": "mcp-mission", "exp": 9999999999,
+            }
+
+            tok = current_token_info.set({
+                "auth_type": "mission_jwt", "client_name": "mission:tenant-A",
+                "mission_id": "mission-A", "tenant_id": "tenant-A",
+                "permissions": ["read"], "allowed_resources": ["vault-a"],
+            })
+
+            async def fake_check_mission_active(mission_id, status_url_template, cache_ttl):
+                if mission_id == "mission-A":
+                    return False, "mission_inactive"  # A inactive n'a AUCUNE importance
+                if mission_id == "mission-B":
+                    return True, ""
+                raise AssertionError(f"mission_id inattendu dans le test : {mission_id!r}")
+
+            mock_consume = AsyncMock(return_value={"status": "ok", "data": {"secret": "x"}})
+            try:
+                with patch.object(jv, "_validator", mock_validator), \
+                     patch("mcp_vault.server._check_mission_active",
+                           side_effect=fake_check_mission_active) as mock_status, \
+                     patch("mcp_vault.vault.wrapping.consume_wrap_secret", mock_consume):
+                    from mcp_vault.server import secret_consume
+                    result = _run(secret_consume(
+                        wrap_token="wt-b", operation_id="op-b",
+                        mission_token="jwt-of-mission-b",
+                    ))
+            finally:
+                current_token_info.reset(tok)
+        finally:
+            object.__setattr__(settings, "enforce_mission_token_validation", orig_enforce)
+            object.__setattr__(settings, "mission_jwks_url", orig_jwks)
+            object.__setattr__(settings, "mission_status_url", orig_status_url)
+
+        called_mission_id = mock_status.call_args.kwargs.get("mission_id")
+        assert called_mission_id == "mission-B", (
+            f"check_mission_active appelé avec mission_id={called_mission_id!r} — "
+            "attendu 'mission-B'."
+        )
+        assert result["status"] == "ok", (
+            f"mission B active mais secret_consume a renvoyé une erreur : {result}")
+        mock_consume.assert_called_once()
+
     def test_wrap_token_never_in_audit_result(self):
         """wrap_token et mission_token ne doivent JAMAIS apparaître dans l'audit."""
         import asyncio
