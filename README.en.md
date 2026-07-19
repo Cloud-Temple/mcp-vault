@@ -161,6 +161,7 @@ Contract for the mcp-mission `CredentialBrokerService`: single-use credential de
 
 > Enable C18 validation with `ENFORCE_MISSION_TOKEN_VALIDATION=true`. Default (false): log warning, continue — zero impact in standalone mode without mcp-mission.
 > `tenant_id` and `expected_aud` in `secret_wrap` feed the full C18 binding on the `secret_consume` side *(v0.6.8)*.
+> ⚠️ *(#86)* As soon as `ENFORCE_MISSION_TOKEN_VALIDATION=true` (standalone, or via the `/mcp` PEP below), `MISSION_JWKS_URL`, `MCP_INSTANCE_ID`/`MISSION_TOKEN_AUD` **and** `MISSION_STATUS_URL` become mandatory (fail-fast at boot) — otherwise an aborted mission would keep access until the `mission_token` expires.
 
 ### Mission JWT PEP — `/mcp` front door *(v0.8.0, #47 + #69)*
 
@@ -169,8 +170,8 @@ Second enforcement point (PEP) for the mcp-mission `mission_token` (ES256 JWT), 
 | Mode | `/mcp` behaviour |
 | --- | --- |
 | `bearer` *(default)* | Opaque bearer only — historical behaviour, **zero impact**. |
-| `jwt` | `mission_token` JWT ES256 **required** (opaque bearer rejected). |
-| `dual-stack` | Valid JWT **or** valid opaque bearer (migration). |
+| `jwt` | `mission_token` JWT ES256 **required** (opaque bearer rejected). Also requires `ENFORCE_MISSION_TOKEN_VALIDATION=true` and `MISSION_STATUS_URL` (fail-fast, #86). |
+| `dual-stack` | Valid JWT **or** valid opaque bearer (migration). Same requirements as `jwt` above. |
 
 In `jwt`/`dual-stack`, the middleware **actively rejects**: `401` (missing/opaque/invalid JWT), `403` (`aud`/`component_id` ≠ instance, inactive mission), `503` (JWKS unavailable — fail-close). An invalid JWT **never** falls back to the bearer path. The token is checked against the real mcp-mission contract (`aud` contains `MCP_INSTANCE_ID`, `component_id["vault"] == MCP_INSTANCE_ID`, `iss`, `exp` leeway 0, `iat` anti-skew). The admin bootstrap key remains accepted (break-glass).
 

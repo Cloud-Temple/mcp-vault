@@ -116,14 +116,31 @@ class Settings(BaseSettings):
         return self.mcp_instance_id or self.mission_token_aud
 
     def check_mission_pep_config(self) -> tuple[bool, str]:
-        """Valide la cohérence de la config PEP mission JWT (fail-fast au boot).
+        """Valide la cohérence de la config mission JWT (fail-fast au boot).
+
+        La validation du mission_token peut être active par DEUX portes indépendantes
+        (issue #86, finding 1 — trouvé par revue de plan Codex) :
+          - le PEP transport /mcp (mcp_auth_mode ∈ {jwt, dual-stack}) ;
+          - l'enforcement C18 de secret_consume seul (enforce_mission_token_validation=
+            true en mode bearer — mécanisme historique #26, indépendant de #47).
+        Les DEUX portes exigent les mêmes garanties (clés JWKS, audience, statut
+        mission) : sans cela, activer le PEP transport n'empêche pas secret_consume
+        de rester permissif (c'était exactement le scénario du finding CRITIQUE).
 
         Règles :
           1. mcp_auth_mode ∈ {bearer, jwt, dual-stack}.
           2. mcp_instance_id et mission_token_aud, si tous deux renseignés, doivent
              être identiques (une seule vérité d'audience — anti config-drift).
-          3. En mode != bearer : mission_jwks_url ET resolved_mission_aud requis
-             (sinon le PEP ne peut ni récupérer les clés ni vérifier l'audience).
+          3. Si une des deux portes est active : mission_jwks_url ET
+             resolved_mission_aud requis (sinon aucun mission_token n'est vérifiable).
+          4. Si le PEP transport est actif (mode != bearer) : l'enforcement C18 doit
+             l'être aussi (sinon secret_consume reste permissif malgré le PEP).
+          5. Si une des deux portes est active : mission_status_url requis (sinon une
+             mission abortée garde l'accès jusqu'à expiration du token, jusqu'à 1h),
+             doit contenir le placeholder littéral '{mission_id}' (sinon une URL
+             statique validerait silencieusement n'importe quelle mission comme
+             active), et mission_status_cache_ttl doit être dans [0,30]s (0 = pas de
+             cache ; recommandation mcp-mission ≤30s).
 
         Returns:
             (True, "") si OK, (False, message) sinon.
@@ -143,16 +160,55 @@ class Settings(BaseSettings):
                 "une seule audience mission doit être configurée (config drift)."
             )
 
-        if self.mcp_auth_mode != "bearer":
+        pep_active = self.mcp_auth_mode != "bearer"
+        mission_validation_active = pep_active or self.enforce_mission_token_validation
+
+        if mission_validation_active:
             if not self.mission_jwks_url:
                 return False, (
-                    f"MCP_AUTH_MODE='{self.mcp_auth_mode}' requiert MISSION_JWKS_URL "
-                    "(URL du JWKS public de mcp-mission)."
+                    "MISSION_JWKS_URL requis dès que la validation mission_token est "
+                    "active (MCP_AUTH_MODE != bearer, ou "
+                    "ENFORCE_MISSION_TOKEN_VALIDATION=true) — URL du JWKS public de "
+                    "mcp-mission."
                 )
             if not self.resolved_mission_aud:
                 return False, (
-                    f"MCP_AUTH_MODE='{self.mcp_auth_mode}' requiert MCP_INSTANCE_ID "
-                    "(ou MISSION_TOKEN_AUD) pour vérifier l'audience du mission_token."
+                    "MCP_INSTANCE_ID (ou MISSION_TOKEN_AUD) requis dès que la "
+                    "validation mission_token est active, pour vérifier l'audience "
+                    "du mission_token."
+                )
+
+        if pep_active and not self.enforce_mission_token_validation:
+            return False, (
+                f"MCP_AUTH_MODE='{self.mcp_auth_mode}' requiert "
+                "ENFORCE_MISSION_TOKEN_VALIDATION=true — sans cela, secret_consume "
+                "reste en mode permissif (mission_token invalide ou mission inactive "
+                "ignorés) même si le PEP /mcp est actif."
+            )
+
+        if mission_validation_active:
+            if not self.mission_status_url:
+                return False, (
+                    "MISSION_STATUS_URL requis dès que la validation mission_token "
+                    "est active (MCP_AUTH_MODE != bearer, ou "
+                    "ENFORCE_MISSION_TOKEN_VALIDATION=true) — sans cela, une mission "
+                    "abortée garde l'accès jusqu'à expiration du mission_token "
+                    "(jusqu'à 1h). Doit contenir le placeholder '{mission_id}', ex : "
+                    "https://mcp-mission.example/api/v1/missions/{mission_id}/status"
+                )
+            if "{mission_id}" not in self.mission_status_url:
+                return False, (
+                    f"MISSION_STATUS_URL='{self.mission_status_url}' ne contient pas "
+                    "le placeholder littéral '{mission_id}' — une URL statique "
+                    "validerait silencieusement n'importe quelle mission comme "
+                    "active."
+                )
+            if not (0 <= self.mission_status_cache_ttl <= 30):
+                return False, (
+                    f"MISSION_STATUS_CACHE_TTL={self.mission_status_cache_ttl} hors "
+                    "bornes [0,30] secondes (0 = pas de cache) — une valeur négative "
+                    "est invalide, une valeur trop grande retarde la détection d'une "
+                    "mission abortée."
                 )
 
         return True, ""

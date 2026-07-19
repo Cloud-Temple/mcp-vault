@@ -1480,8 +1480,158 @@ class TestMissionPepConfig:
         ok, _ = self._settings(
             mcp_auth_mode="dual-stack", mission_jwks_url="http://m/jwks",
             mcp_instance_id=INSTANCE_ID,
+            enforce_mission_token_validation=True,
+            mission_status_url="http://m/status/{mission_id}",
         ).check_mission_pep_config()
         assert ok is True
+
+    # ── Lot 1 (issue #86, findings 1 & 6) ────────────────────────────────────
+    # ENFORCE_MISSION_TOKEN_VALIDATION et MISSION_STATUS_URL deviennent requis dès
+    # que la validation mission_token est réellement active — que ce soit via le
+    # PEP transport (jwt/dual-stack) OU via l'enforcement C18 seul de secret_consume
+    # en mode bearer (#26 historique, découvert par la revue de plan Codex : un
+    # simple garde sur mcp_auth_mode != bearer laissait passer bearer+enforce=true
+    # sans MISSION_STATUS_URL).
+
+    def test_jwt_mode_without_enforce_rejected(self):
+        """Mode jwt complet (jwks+instance_id) mais sans enforce C18 → rejeté
+        (finding CRITIQUE 1 : secret_consume resterait permissif malgré le PEP actif)."""
+        ok, msg = self._settings(
+            mcp_auth_mode="jwt", mission_jwks_url="http://m/jwks",
+            mcp_instance_id=INSTANCE_ID,
+            mission_status_url="http://m/status/{mission_id}",
+        ).check_mission_pep_config()
+        assert ok is False
+        assert "ENFORCE_MISSION_TOKEN_VALIDATION" in msg
+
+    def test_jwt_mode_without_mission_status_url_rejected(self):
+        """Mode jwt + enforce complet mais sans URL de statut → rejeté (finding 6)."""
+        ok, msg = self._settings(
+            mcp_auth_mode="jwt", mission_jwks_url="http://m/jwks",
+            mcp_instance_id=INSTANCE_ID, enforce_mission_token_validation=True,
+        ).check_mission_pep_config()
+        assert ok is False
+        assert "MISSION_STATUS_URL" in msg
+
+    def test_bearer_mode_enforce_true_without_jwks_rejected(self):
+        """bearer + enforce=true (C18 seul, #26) sans JWKS → rejeté : la garde ne
+        doit PAS être conditionnée à mcp_auth_mode != bearer (trouvé par la revue
+        de plan — secret_consume peut être enforcé indépendamment du PEP #47)."""
+        ok, msg = self._settings(
+            enforce_mission_token_validation=True,
+        ).check_mission_pep_config()
+        assert ok is False
+        assert "MISSION_JWKS_URL" in msg
+
+    def test_bearer_mode_enforce_true_without_audience_rejected(self):
+        ok, msg = self._settings(
+            enforce_mission_token_validation=True, mission_jwks_url="http://m/jwks",
+        ).check_mission_pep_config()
+        assert ok is False
+        assert "MCP_INSTANCE_ID" in msg
+
+    def test_bearer_mode_enforce_true_without_status_url_rejected(self):
+        ok, msg = self._settings(
+            enforce_mission_token_validation=True, mission_jwks_url="http://m/jwks",
+            mcp_instance_id=INSTANCE_ID,
+        ).check_mission_pep_config()
+        assert ok is False
+        assert "MISSION_STATUS_URL" in msg
+
+    def test_bearer_mode_enforce_true_complete_config_valid(self):
+        """bearer + enforce=true entièrement configuré (JWKS+audience+statut) → accepté."""
+        ok, _ = self._settings(
+            enforce_mission_token_validation=True, mission_jwks_url="http://m/jwks",
+            mcp_instance_id=INSTANCE_ID,
+            mission_status_url="http://m/status/{mission_id}",
+        ).check_mission_pep_config()
+        assert ok is True
+
+    def test_bearer_mode_enforce_false_status_url_ttl_not_validated(self):
+        """bearer + enforce=false (défaut) : mission_status_url/TTL ne sont PAS
+        validés même hors bornes — la validation mission n'est pas active du tout,
+        aucune garantie de sécurité n'en dépend."""
+        ok, _ = self._settings(
+            mission_status_url="http://m/status/{mission_id}",
+            mission_status_cache_ttl=99999,
+        ).check_mission_pep_config()
+        assert ok is True
+
+    def test_mission_status_url_missing_placeholder_rejected(self):
+        """URL de statut sans le littéral '{mission_id}' → rejetée : une URL statique
+        (ex. un health check générique) validerait silencieusement N'IMPORTE QUELLE
+        mission comme active (trouvé par la revue de plan Codex)."""
+        ok, msg = self._settings(
+            enforce_mission_token_validation=True, mission_jwks_url="http://m/jwks",
+            mcp_instance_id=INSTANCE_ID,
+            mission_status_url="http://m/status/always-running",
+        ).check_mission_pep_config()
+        assert ok is False
+        assert "{mission_id}" in msg
+
+    def test_mission_status_ttl_too_high_rejected(self):
+        ok, msg = self._settings(
+            mcp_auth_mode="jwt", mission_jwks_url="http://m/jwks",
+            mcp_instance_id=INSTANCE_ID, enforce_mission_token_validation=True,
+            mission_status_url="http://m/status/{mission_id}",
+            mission_status_cache_ttl=999,
+        ).check_mission_pep_config()
+        assert ok is False
+        assert "MISSION_STATUS_CACHE_TTL" in msg
+
+    def test_mission_status_ttl_negative_rejected(self):
+        ok, msg = self._settings(
+            mcp_auth_mode="jwt", mission_jwks_url="http://m/jwks",
+            mcp_instance_id=INSTANCE_ID, enforce_mission_token_validation=True,
+            mission_status_url="http://m/status/{mission_id}",
+            mission_status_cache_ttl=-1,
+        ).check_mission_pep_config()
+        assert ok is False
+        assert "MISSION_STATUS_CACHE_TTL" in msg
+
+    def test_mission_status_ttl_zero_accepted_no_cache(self):
+        """TTL=0 (pas de cache — recommandation Codex : 0 est une capacité, pas un
+        risque de sécurité, contrairement à une valeur trop grande) → accepté."""
+        ok, _ = self._settings(
+            mcp_auth_mode="jwt", mission_jwks_url="http://m/jwks",
+            mcp_instance_id=INSTANCE_ID, enforce_mission_token_validation=True,
+            mission_status_url="http://m/status/{mission_id}",
+            mission_status_cache_ttl=0,
+        ).check_mission_pep_config()
+        assert ok is True
+
+    def test_mission_status_ttl_upper_bound_30_accepted(self):
+        ok, _ = self._settings(
+            mcp_auth_mode="jwt", mission_jwks_url="http://m/jwks",
+            mcp_instance_id=INSTANCE_ID, enforce_mission_token_validation=True,
+            mission_status_url="http://m/status/{mission_id}",
+            mission_status_cache_ttl=30,
+        ).check_mission_pep_config()
+        assert ok is True
+
+    def test_create_app_fail_fast_enforce_false_in_jwt_mode(self):
+        """create_app() refuse de démarrer en mode jwt sans enforce C18 (finding
+        CRITIQUE 1 — pas seulement Settings.check_mission_pep_config() isolé)."""
+        import secrets
+        from mcp_vault.server import create_app, settings
+        saved = (settings.admin_bootstrap_key, settings.mcp_auth_mode,
+                 settings.mission_jwks_url, settings.mcp_instance_id,
+                 settings.enforce_mission_token_validation)
+        try:
+            object.__setattr__(settings, "admin_bootstrap_key", secrets.token_urlsafe(48))
+            object.__setattr__(settings, "mcp_auth_mode", "jwt")
+            object.__setattr__(settings, "mission_jwks_url", "http://m/jwks")
+            object.__setattr__(settings, "mcp_instance_id", INSTANCE_ID)
+            object.__setattr__(settings, "enforce_mission_token_validation", False)
+            with pytest.raises(RuntimeError) as exc_info:
+                create_app()
+            assert "ENFORCE_MISSION_TOKEN_VALIDATION" in str(exc_info.value)
+        finally:
+            object.__setattr__(settings, "admin_bootstrap_key", saved[0])
+            object.__setattr__(settings, "mcp_auth_mode", saved[1])
+            object.__setattr__(settings, "mission_jwks_url", saved[2])
+            object.__setattr__(settings, "mcp_instance_id", saved[3])
+            object.__setattr__(settings, "enforce_mission_token_validation", saved[4])
 
     def test_resolved_mission_aud_priority(self):
         s = self._settings(mcp_instance_id="canonical")
@@ -1503,7 +1653,7 @@ class TestMissionPepConfig:
             object.__setattr__(settings, "mcp_instance_id", "")
             with pytest.raises(RuntimeError) as exc_info:
                 create_app()
-            assert "PEP" in str(exc_info.value)
+            assert "MISSION_JWKS_URL" in str(exc_info.value)
         finally:
             object.__setattr__(settings, "admin_bootstrap_key", saved[0])
             object.__setattr__(settings, "mcp_auth_mode", saved[1])
