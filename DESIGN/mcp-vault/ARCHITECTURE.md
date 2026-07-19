@@ -203,7 +203,11 @@ Ce mécanisme est **request-scoped** (isolé par requête, thread-safe en asynci
 Bearer opaque historique, `AuthMiddleware` est le **second point d'application** du
 `mission_token` JWT ES256 de mcp-mission (le premier étant `secret_consume`/C18, à la
 consommation). Il en est l'**unique lecteur du header** et l'unique writer du
-ContextVar sur `/mcp`. Piloté par `MCP_AUTH_MODE` :
+ContextVar sur `/mcp`. Depuis le Lot 2 (#86), les deux points d'application délèguent
+à la **même** fonction de validation (`mission_jwt.validate_mission_token()`) : un
+JWT authentique mais destiné à une autre instance (aud multiple, `component_id`
+différent) est rejeté de façon identique aux deux portes, plus seulement à celle-ci.
+Piloté par `MCP_AUTH_MODE` :
 
 - `bearer` *(défaut)* — comportement historique, **zéro impact** ;
 - `jwt` — `mission_token` JWT ES256 obligatoire (bearer opaque refusé) ;

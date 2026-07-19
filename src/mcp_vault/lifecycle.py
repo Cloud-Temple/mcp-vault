@@ -112,6 +112,7 @@ async def vault_startup() -> bool:
             cache_ttl=settings.mission_jwks_cache_ttl,
             max_refresh_per_min=settings.mission_jwks_max_refresh_per_min,
             leeway_seconds=settings.mission_token_leeway_seconds,
+            component_kind=settings.mcp_component_kind,  # aligné PEP, issue #86
         )
         if _v:
             logger.info("✅ Mission Token Validator prêt (JWKS configuré)")

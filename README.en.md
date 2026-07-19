@@ -157,11 +157,12 @@ Contract for the mcp-mission `CredentialBrokerService`: single-use credential de
 | `secret_revoke_wrap(lease_id)` | admin | Idempotent revocation of a wrap token (not found = success) |
 | `secret_wrap_lookup(operation_id)` | admin | Finds & **revokes** wraps by operation_id (orphan compensation #74) |
 | `secret_wrap_status(operation_id)` | admin | Reads a wrap's state **without revoking it** — read-only, best-effort snapshot (#77) |
-| `secret_consume(wrap_token, operation_id, mission_token)` | admin | Validates ES256/JWKS JWT, checks full binding (mission_id, tenant_id, aud), unwraps OpenBao (C18) |
+| `secret_consume(wrap_token, operation_id, mission_token)` | admin | Validates ES256/JWKS JWT (full PEP contract since *(#86)*: exp/iat/iss/aud/mission_id/jti/scope/tenant_id + `component_id`), checks full binding (mission_id, tenant_id, aud), unwraps OpenBao (C18) |
 
 > Enable C18 validation with `ENFORCE_MISSION_TOKEN_VALIDATION=true`. Default (false): log warning, continue — zero impact in standalone mode without mcp-mission.
 > `tenant_id` and `expected_aud` in `secret_wrap` feed the full C18 binding on the `secret_consume` side *(v0.6.8)*.
 > ⚠️ *(#86)* As soon as `ENFORCE_MISSION_TOKEN_VALIDATION=true` (standalone, or via the `/mcp` PEP below), `MISSION_JWKS_URL`, `MCP_INSTANCE_ID`/`MISSION_TOKEN_AUD` **and** `MISSION_STATUS_URL` become mandatory (fail-fast at boot) — otherwise an aborted mission would keep access until the `mission_token` expires.
+> ⚠️ *(#86)* The validator now applies EXACTLY the same contract as the `/mcp` PEP below (same required claims, same `component_id` check) — a genuine JWT meant for another vault instance is now rejected by both enforcement points, not just the first one.
 
 ### Mission JWT PEP — `/mcp` front door *(v0.8.0, #47 + #69)*
 
