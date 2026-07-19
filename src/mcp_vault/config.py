@@ -69,7 +69,9 @@ class Settings(BaseSettings):
 
     # Audience attendue dans le mission_token (anti-confused-deputy).
     # Doit correspondre à l'aud JWT : ex "mcp-vault:prod:v1" ou l'instance_id Vault.
-    # Vide = vérification aud désactivée (non recommandé en production).
+    # Alias legacy de mcp_instance_id (cf. resolved_mission_aud). Vide = secret_consume
+    # (C18) rejette explicitement toute validation JWT (misconfigured_expected_aud,
+    # issue #86) — plus un mode permissif où la vérification aud serait désactivée.
     mission_token_aud: str = ""
 
     # TTL du cache JWKS en secondes (défaut 60s — compromis révocation/performance).

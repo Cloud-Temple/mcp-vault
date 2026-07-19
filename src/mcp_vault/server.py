@@ -719,6 +719,14 @@ async def secret_consume(
                 reason = getattr(e, "reason", "jwt_validation_failed")
                 logger.warning("secret_consume JWT rejected: %s", reason)
                 if enforce:
+                    if reason == "misconfigured_expected_aud":
+                        # Misconfiguration serveur (MISSION_TOKEN_AUD/MCP_INSTANCE_ID
+                        # non résolu), pas un JWT invalide — cohérent avec les autres
+                        # retours "misconfigured" de ce bloc et de secret_wrap (#86).
+                        return {"status": "error", "error_type": "misconfigured",
+                                "message": "Configuration mission_token incomplète "
+                                           "(audience non résolue) — redémarrer le "
+                                           "service après correction"}
                     # #78/D5 : message client GÉNÉRIQUE — le reason (potentiellement porteur
                     # d'une valeur non vérifiée) reste dans le log serveur ci-dessus, jamais
                     # renvoyé au client ni versé à l'audit humain.

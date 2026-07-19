@@ -203,19 +203,24 @@ Ce mécanisme est **request-scoped** (isolé par requête, thread-safe en asynci
 Bearer opaque historique, `AuthMiddleware` est le **second point d'application** du
 `mission_token` JWT ES256 de mcp-mission (le premier étant `secret_consume`/C18, à la
 consommation). Il en est l'**unique lecteur du header** et l'unique writer du
-ContextVar sur `/mcp`. Piloté par `MCP_AUTH_MODE` :
+ContextVar sur `/mcp`. Depuis le Lot 2 (#86), les deux points d'application délèguent
+à la **même** fonction de validation (`mission_jwt.validate_mission_token()`) : un
+JWT authentique mais destiné à une autre instance (aud multiple, `component_id`
+différent) est rejeté de façon identique aux deux portes, plus seulement à celle-ci.
+Piloté par `MCP_AUTH_MODE` :
 
 - `bearer` *(défaut)* — comportement historique, **zéro impact** ;
 - `jwt` — `mission_token` JWT ES256 obligatoire (bearer opaque refusé) ;
 - `dual-stack` — JWT valide **ou** bearer opaque valide (migration).
 
 En `jwt`/`dual-stack`, le middleware **refuse activement** (jamais d'injection
-silencieuse de `None`) : `401` (token absent/opaque/JWT invalide), `403` (`aud` ne
-contient pas `MCP_INSTANCE_ID`, `component_id["vault"] ≠ MCP_INSTANCE_ID`, mission
-inactive), `503` (JWKS indisponible — fail-close). Un JWT structurellement invalide
-(`alg=none`/`HS256`) part vers la validation et finit en `401` — **jamais** de fallback
-vers le bearer. La bootstrap key admin reste acceptée (break-glass, constant-time avant
-tout dispatch JWT).
+silencieuse de `None`) : `401` (token absent/opaque/JWT invalide, `exp` strict
+leeway=0, `iat` hors tolérance `MISSION_TOKEN_LEEWAY_SECONDS`), `403` (`aud` ne
+contient pas `MCP_INSTANCE_ID`, `component_id[MCP_COMPONENT_KIND] ≠ MCP_INSTANCE_ID`,
+mission inactive), `503` (JWKS indisponible — fail-close). Un JWT structurellement
+invalide (`alg=none`/`HS256`) part vers la validation et finit en `401` — **jamais**
+de fallback vers le bearer. La bootstrap key admin reste acceptée (break-glass,
+constant-time avant tout dispatch JWT).
 
 Le **cache JWKS est unique au processus** (`auth/mission_jwt.py` : backoff exponentiel +
 jitter, ETag/304, fail-close, throttle anti-DoS sur `kid` inconnu) et partagé avec

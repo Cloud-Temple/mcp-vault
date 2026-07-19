@@ -157,11 +157,12 @@ Contrat pour le `CredentialBrokerService` de mcp-mission : livraison de credenti
 | `secret_revoke_wrap(lease_id)` | admin | Révocation idempotente d'un wrap token (introuvable = succès) |
 | `secret_wrap_lookup(operation_id)` | admin | Retrouve & **révoque** les wraps par operation_id (compensation orphelins #74) |
 | `secret_wrap_status(operation_id)` | admin | Consulte l'état d'un wrap **sans le révoquer** — lecture seule, instantané best-effort (#77) |
-| `secret_consume(wrap_token, operation_id, mission_token)` | admin | Valide JWT ES256/JWKS, vérifie binding complet (mission_id, tenant_id, aud), unwrap OpenBao (C18) |
+| `secret_consume(wrap_token, operation_id, mission_token)` | admin | Valide JWT ES256/JWKS (contrat PEP complet depuis *(#86)* : exp/iat/iss/aud/mission_id/jti/scope/tenant_id + `component_id`), vérifie binding complet (mission_id, tenant_id, aud), unwrap OpenBao (C18) |
 
 > Activer la validation C18 avec `ENFORCE_MISSION_TOKEN_VALIDATION=true`. Par défaut (false) : log warning, continue — zéro impact standalone sans mcp-mission.
 > `tenant_id` et `expected_aud` dans `secret_wrap` alimentent le binding C18 complet côté `secret_consume` *(v0.6.8)*.
 > ⚠️ *(#86)* Dès que `ENFORCE_MISSION_TOKEN_VALIDATION=true` (seul, ou via le PEP `/mcp` ci-dessous), `MISSION_JWKS_URL`, `MCP_INSTANCE_ID`/`MISSION_TOKEN_AUD` **et** `MISSION_STATUS_URL` deviennent obligatoires (fail-fast au boot) — sans quoi une mission abortée conserverait l'accès jusqu'à expiration du `mission_token`.
+> ⚠️ *(#86)* Le validateur applique désormais EXACTEMENT le même contrat que le PEP `/mcp` ci-dessous (mêmes claims requis, même vérification `component_id`) — un JWT authentique mais destiné à une autre instance vault est rejeté par les deux points d'application, pas seulement le premier.
 
 ### PEP mission JWT — porte `/mcp` *(v0.8.0, #47 + #69)*
 
@@ -173,7 +174,7 @@ Second point d'application (PEP) du `mission_token` JWT ES256 de mcp-mission, **
 | `jwt` | `mission_token` JWT ES256 **obligatoire** (bearer opaque refusé). Requiert aussi `ENFORCE_MISSION_TOKEN_VALIDATION=true` et `MISSION_STATUS_URL` (fail-fast, #86). |
 | `dual-stack` | JWT valide **OU** bearer opaque valide (migration). Mêmes exigences que `jwt` ci-dessus. |
 
-En `jwt`/`dual-stack`, le middleware **refuse activement** : `401` (token absent/opaque/JWT invalide), `403` (`aud`/`component_id` ≠ instance, mission inactive), `503` (JWKS indisponible — fail-close). Un JWT invalide ne retombe **jamais** sur le bearer. Le token est vérifié contre le contrat réel mcp-mission (`aud` contient `MCP_INSTANCE_ID`, `component_id["vault"] == MCP_INSTANCE_ID`, `iss`, `exp` leeway 0, `iat` anti-skew). La bootstrap key admin reste acceptée (break-glass).
+En `jwt`/`dual-stack`, le middleware **refuse activement** : `401` (token absent/opaque/JWT invalide), `403` (`aud`/`component_id` ≠ instance, mission inactive), `503` (JWKS indisponible — fail-close). Un JWT invalide ne retombe **jamais** sur le bearer. Le token est vérifié contre le contrat réel mcp-mission (`aud` contient `MCP_INSTANCE_ID`, `component_id[MCP_COMPONENT_KIND] == MCP_INSTANCE_ID`, `iss`, `exp` leeway 0, `iat` anti-skew). La bootstrap key admin reste acceptée (break-glass).
 
 > Une identité mission valide est **authentifiée et liée à l'instance**, puis mcp-vault (**PDP local**) lui résout un **périmètre vault provisionné localement**. Sans octroi, **aucun accès** (deny-by-default) ; les outils d'infra (`system_*`, inventaire PKI) et l'admin-plane (`vault_create/delete`, `ssh_*`) lui sont refusés. L'endpoint admin `POST /admin/api/auth/jwks/reload` force le rechargement du JWKS (révocation urgente de `kid`).
 

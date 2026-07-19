@@ -86,17 +86,36 @@ def _make_token(
     iss: str = "mcp-mission",
     aud: str = "mcp-vault:test",
     exp_delta: int = 300,
+    iat_delta: int = 0,
     extra_claims: dict = None,
+    component_kind: str = "vault",
+    omit: tuple = (),
 ) -> str:
-    """Génère un JWT ES256 signé pour les tests."""
+    """Génère un JWT ES256 signé pour les tests, COMPLET par défaut (issue #86,
+    Lot 2 : le validateur exige désormais les mêmes claims que le PEP — iss, aud,
+    exp, iat, mission_id, jti, tenant_id, scope, component_id).
+
+    `iat_delta` : décalage de `iat` par rapport à maintenant (secondes) — permet de
+    tester l'anti-skew futur (iat_delta > leeway configuré).
+
+    `omit` : noms de claims à retirer du payload par ailleurs complet — pour tester
+    l'absence d'UN claim précis sans construire un payload minimal à la main (qui
+    ne prouverait que "un claim quelconque manque", pas lequel).
+    """
     now = datetime.now(timezone.utc)
     payload = {
         "iss": iss,
         "aud": aud,
         "exp": int((now + timedelta(seconds=exp_delta)).timestamp()),
-        "iat": int(now.timestamp()),
+        "iat": int((now + timedelta(seconds=iat_delta)).timestamp()),
         "mission_id": mission_id,
+        "jti": f"jti-{mission_id}",
+        "tenant_id": "tenant-test",
+        "scope": [f"{aud}:mission/{mission_id}:*"],
+        "component_id": {component_kind: aud},
     }
+    for key in omit:
+        payload.pop(key, None)
     if extra_claims:
         payload.update(extra_claims)
 
@@ -110,7 +129,7 @@ def _make_token(
 
 # ── Fixture : validator avec JWKS mocké ───────────────────────────────────────
 
-def _make_validator(jwks_dict: dict, aud: str = "mcp-vault:test"):
+def _make_validator(jwks_dict: dict, aud: str = "mcp-vault:test", component_kind: str = "vault"):
     """Crée un MissionTokenValidator adossé à un JWKSCache mocké (pas d'appel réseau).
 
     Depuis l'issue #47, le validator délègue la résolution des clés au JWKSCache
@@ -131,6 +150,7 @@ def _make_validator(jwks_dict: dict, aud: str = "mcp-vault:test"):
         cache_ttl=60,
         max_refresh_per_min=3,
         jwks_cache=cache,
+        component_kind=component_kind,
     )
 
 
@@ -221,23 +241,11 @@ class TestMissionTokenValidatorC18:
         self._assert_rejected(validator, token, "invalid_audience")
 
     def test_missing_mission_id_rejected(self):
-        """mission_id absent → missing_claim."""
+        """mission_id absent (token par ailleurs complet) → missing_claim."""
         priv, pub, _ = _make_es256_keypair()
         jwks = _make_jwks(pub)
         validator = _make_validator(jwks)
-
-        payload = {
-            "iss": "mcp-mission", "aud": "mcp-vault:test",
-            "exp": int((datetime.now(timezone.utc) + timedelta(seconds=300)).timestamp()),
-            "iat": int(datetime.now(timezone.utc).timestamp()),
-            # mission_id absent intentionnellement
-        }
-        priv_pem = priv.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.PKCS8,
-            serialization.NoEncryption(),
-        )
-        token = jwt.encode(payload, priv_pem, algorithm="ES256", headers={"kid": "test-key-1"})
+        token = _make_token(priv, omit=("mission_id",))
 
         self._assert_rejected(validator, token, "missing_claim")
 
@@ -276,6 +284,208 @@ class TestMissionTokenValidatorC18:
         # Le fetch mocké du JWKSCache retourne toujours le même JWKS (sans key-v2) :
         # le refresh forcé sur kid inconnu ne trouve rien → kid_unknown_or_revoked.
         self._assert_rejected(validator, token, "kid_unknown_or_revoked")
+
+    # ── Lot 2 (issue #86, finding 2) — alignement sur le contrat PEP ────────────
+
+    def test_component_id_mismatch_rejected(self):
+        """RÉGRESSION EXACTE DU FINDING 2 : un JWT avec `aud` MULTIPLE (contient
+        l'audience attendue ET une autre instance) mais `component_id` pointant
+        vers l'AUTRE instance doit être rejeté. Avant ce lot, ce token passait C18
+        (aud non vérifié comme liste, component_id jamais vérifié) alors que le PEP
+        /mcp l'aurait refusé — confusion inter-instances (confused-deputy)."""
+        priv, pub, _ = _make_es256_keypair()
+        jwks = _make_jwks(pub)
+        validator = _make_validator(jwks, aud="mcp-vault:prod")
+        token = _make_token(
+            priv, aud="mcp-vault:prod",
+            extra_claims={
+                "aud": ["mcp-vault:prod", "mcp-vault:staging"],  # contient bien l'attendue
+                "component_id": {"vault": "mcp-vault:staging"},  # mais désigne l'AUTRE instance
+            },
+        )
+        self._assert_rejected(validator, token, "component_id_mismatch")
+
+    def test_missing_component_id_rejected(self):
+        """component_id absent (token par ailleurs complet) → component_id_mismatch
+        (pas missing_claim : component_id n'est pas dans le `require` PyJWT, c'est
+        le check manuel post-décodage de validate_mission_token qui le détecte)."""
+        priv, pub, _ = _make_es256_keypair()
+        jwks = _make_jwks(pub)
+        validator = _make_validator(jwks)
+        token = _make_token(priv, omit=("component_id",))
+        self._assert_rejected(validator, token, "component_id_mismatch")
+
+    def test_component_kind_non_default_respected(self):
+        """component_kind non-défaut (ex: 'live_memory') est réellement pris en
+        compte, pas juste accepté silencieusement sans effet : un component_id
+        clé 'vault' (l'ancien défaut) ne doit PLUS matcher pour ce validateur."""
+        priv, pub, _ = _make_es256_keypair()
+        jwks = _make_jwks(pub)
+        validator = _make_validator(jwks, component_kind="live_memory")
+
+        token_ok = _make_token(
+            priv, extra_claims={"component_id": {"live_memory": "mcp-vault:test"}},
+        )
+        claims = validator.validate(token_ok)
+        assert claims["mission_id"] == "mission-abc"
+
+        token_wrong_kind = _make_token(
+            priv, extra_claims={"component_id": {"vault": "mcp-vault:test"}},
+        )
+        self._assert_rejected(validator, token_wrong_kind, "component_id_mismatch")
+
+    def test_init_mission_token_validator_propagates_component_kind(self):
+        """Câblage réel : `init_mission_token_validator()` (le point d'entrée
+        utilisé par lifecycle.py, pas la construction directe de
+        MissionTokenValidator) doit transmettre `component_kind` jusqu'au
+        validateur singleton résultant — sinon MCP_COMPONENT_KIND non-défaut ne
+        ferait rien malgré le câblage dans lifecycle.py (issue #86)."""
+        import mcp_vault.auth.jwt_validator as jv
+        from mcp_vault.auth.jwt_validator import MissionTokenError
+        priv, pub, _ = _make_es256_keypair()
+        jwks = _make_jwks(pub)
+        import json as _json
+
+        def fake_fetch(url, etag, timeout):
+            return 200, None, _json.dumps(jwks).encode()
+
+        saved = jv._validator
+        try:
+            from mcp_vault.auth.mission_jwt import JWKSCache
+            # init_mission_token_validator() appelle init_jwks_cache() en interne,
+            # qui créerait un JWKSCache RÉEL (fetch HTTP véritable au premier
+            # get_key()). On patche get_jwks_cache — consulté par _get_cache() de
+            # l'instance à CHAQUE validate() — pour qu'il retourne toujours le cache
+            # mocké, peu importe ce que fait init_jwks_cache en parallèle. Le patch
+            # doit rester actif pendant les appels validate() ci-dessous, pas
+            # seulement pendant l'initialisation.
+            cache = JWKSCache("http://mock-jwks/x", ttl_seconds=60, fetch=fake_fetch)
+            patcher = patch.object(jv, "get_jwks_cache", return_value=cache)
+            patcher.start()
+            try:
+                validator = jv.init_mission_token_validator(
+                    jwks_url="http://mock-jwks/x",
+                    expected_aud="mcp-vault:test",
+                    component_kind="live_memory",
+                )
+                assert jv.get_mission_token_validator() is validator
+
+                token_ok = _make_token(
+                    priv, extra_claims={"component_id": {"live_memory": "mcp-vault:test"}},
+                )
+                claims = validator.validate(token_ok)
+                assert claims["mission_id"] == "mission-abc"
+
+                token_wrong_kind = _make_token(
+                    priv, extra_claims={"component_id": {"vault": "mcp-vault:test"}},
+                )
+                with pytest.raises(MissionTokenError) as exc_info:
+                    validator.validate(token_wrong_kind)
+                assert exc_info.value.reason == "component_id_mismatch"
+            finally:
+                patcher.stop()
+        finally:
+            jv._validator = saved
+
+    def test_missing_tenant_id_rejected(self):
+        priv, pub, _ = _make_es256_keypair()
+        jwks = _make_jwks(pub)
+        validator = _make_validator(jwks)
+        token = _make_token(priv, omit=("tenant_id",))
+        self._assert_rejected(validator, token, "missing_claim")
+
+    def test_missing_jti_rejected(self):
+        priv, pub, _ = _make_es256_keypair()
+        jwks = _make_jwks(pub)
+        validator = _make_validator(jwks)
+        token = _make_token(priv, omit=("jti",))
+        self._assert_rejected(validator, token, "missing_claim")
+
+    def test_missing_scope_rejected(self):
+        priv, pub, _ = _make_es256_keypair()
+        jwks = _make_jwks(pub)
+        validator = _make_validator(jwks)
+        token = _make_token(priv, omit=("scope",))
+        self._assert_rejected(validator, token, "missing_claim")
+
+    def test_empty_scope_rejected(self):
+        """scope PRÉSENT mais liste vide → bad_scope (distinct de missing_claim :
+        PyJWT considère une liste vide comme un claim « présent »)."""
+        priv, pub, _ = _make_es256_keypair()
+        jwks = _make_jwks(pub)
+        validator = _make_validator(jwks)
+        token = _make_token(priv, extra_claims={"scope": []})
+        self._assert_rejected(validator, token, "bad_scope")
+
+    def test_empty_tenant_id_rejected(self):
+        priv, pub, _ = _make_es256_keypair()
+        jwks = _make_jwks(pub)
+        validator = _make_validator(jwks)
+        token = _make_token(priv, extra_claims={"tenant_id": ""})
+        self._assert_rejected(validator, token, "bad_tenant_id")
+
+    def test_iat_in_future_beyond_leeway_rejected(self):
+        """iat daté dans le futur au-delà du leeway configuré → iat_future
+        (anti-skew horloge avancée — absent de C18 avant ce lot)."""
+        priv, pub, _ = _make_es256_keypair()
+        jwks = _make_jwks(pub)
+        from mcp_vault.auth.jwt_validator import MissionTokenValidator
+        from mcp_vault.auth.mission_jwt import JWKSCache
+        import json as _json
+
+        def fake_fetch(url, etag, timeout):
+            return 200, None, _json.dumps(jwks).encode()
+
+        cache = JWKSCache("http://mock-jwks/x", ttl_seconds=60, fetch=fake_fetch)
+        validator = MissionTokenValidator(
+            jwks_url="http://mock-jwks/x", expected_aud="mcp-vault:test",
+            jwks_cache=cache, leeway_seconds=10,
+        )
+        token = _make_token(priv, iat_delta=100)  # 100s dans le futur, leeway=10s
+        self._assert_rejected(validator, token, "iat_future")
+
+    def test_expired_with_configured_leeway_still_rejected(self):
+        """`exp` reste STRICT (leeway=0) même avec MISSION_TOKEN_LEEWAY_SECONDS
+        configuré à une valeur non nulle — le leeway ne s'applique QU'à `iat`,
+        jamais à `exp` (alignement PEP, issue #86). Avant ce lot, ce comportement
+        était déjà celui produit de fait (bug PyJWT ignorant `options["leeway"]"),
+        ce test le rend explicite et intentionnel."""
+        priv, pub, _ = _make_es256_keypair()
+        jwks = _make_jwks(pub)
+        from mcp_vault.auth.jwt_validator import MissionTokenValidator
+        from mcp_vault.auth.mission_jwt import JWKSCache
+        import json as _json
+
+        def fake_fetch(url, etag, timeout):
+            return 200, None, _json.dumps(jwks).encode()
+
+        cache = JWKSCache("http://mock-jwks/x", ttl_seconds=60, fetch=fake_fetch)
+        validator = MissionTokenValidator(
+            jwks_url="http://mock-jwks/x", expected_aud="mcp-vault:test",
+            jwks_cache=cache, leeway_seconds=10,
+        )
+        token = _make_token(priv, exp_delta=-1)  # expiré depuis 1s
+        self._assert_rejected(validator, token, "token_expired")
+
+    def test_expected_iss_override_rejected_at_construction(self):
+        """Un `expected_iss` différent de 'mcp-mission' est refusé à la
+        construction — le contrat mcp-mission fixe l'issuer, non configurable
+        depuis l'alignement sur le PEP (évite l'illusion d'un réglage sans effet)."""
+        from mcp_vault.auth.jwt_validator import MissionTokenValidator
+        with pytest.raises(ValueError, match="mcp-mission"):
+            MissionTokenValidator(jwks_url="http://m/jwks", expected_iss="other-issuer")
+
+    def test_empty_expected_aud_rejected_explicitly(self):
+        """`expected_aud` vide → rejet EXPLICITE (misconfigured_expected_aud), pas
+        un rejet confus « invalid_audience » qui laisserait croire à un problème
+        côté token alors que la cause est une configuration serveur incomplète."""
+        from mcp_vault.auth.jwt_validator import MissionTokenValidator, MissionTokenError
+        priv, pub, _ = _make_es256_keypair()
+        validator = _make_validator(_make_jwks(pub), aud="")
+        token = _make_token(priv)
+        with pytest.raises(MissionTokenError) as exc_info:
+            validator.validate(token)
+        assert exc_info.value.reason == "misconfigured_expected_aud"
 
     def test_token_compact_never_in_error_message(self):
         """Le token compact ne doit jamais apparaître dans le message d'erreur."""
@@ -561,6 +771,39 @@ class TestSecretConsumeEndToEnd:
         finally:
             object.__setattr__(settings, 'enforce_mission_token_validation', original_enforce)
             object.__setattr__(settings, 'mission_jwks_url', original_jwks)
+
+    def test_consume_with_enforce_and_empty_expected_aud_returns_misconfigured(self):
+        """ENFORCE=true, JWKS configuré, mais audience résolue vide (JWT_URL
+        configuré sans MCP_INSTANCE_ID/MISSION_TOKEN_AUD) → misconfigured (pas
+        jwt_invalid) — cohérent avec les autres retours misconfigured de ce bloc
+        et avec secret_wrap (issue #86)."""
+        import mcp_vault.auth.jwt_validator as jv
+        from mcp_vault.auth.jwt_validator import MissionTokenError
+        from mcp_vault.server import settings
+
+        original_enforce = settings.enforce_mission_token_validation
+        original_jwks = settings.mission_jwks_url
+        try:
+            object.__setattr__(settings, "enforce_mission_token_validation", True)
+            object.__setattr__(settings, "mission_jwks_url", "http://mock/.well-known/jwks.json")
+
+            mock_validator = MagicMock()
+            mock_validator.validate.side_effect = MissionTokenError("misconfigured_expected_aud")
+
+            with patch.object(jv, "_validator", mock_validator):
+                from mcp_vault.server import secret_consume
+                result = _run(secret_consume(
+                    wrap_token="wt-abc", operation_id="op-123", mission_token="dummy",
+                ))
+        finally:
+            object.__setattr__(settings, "enforce_mission_token_validation", original_enforce)
+            object.__setattr__(settings, "mission_jwks_url", original_jwks)
+
+        assert result["status"] == "error", result
+        assert result["error_type"] == "misconfigured", (
+            f"attendu misconfigured (config serveur), obtenu {result['error_type']!r} "
+            "— ne doit pas être confondu avec un JWT réellement invalide"
+        )
 
     def test_singleton_used_not_reinstantiated(self):
         """

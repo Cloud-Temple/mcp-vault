@@ -112,14 +112,14 @@ Utilise `pydantic-settings` pour charger la configuration depuis les variables d
 | `VAULT_S3_SYNC_INTERVAL` | `60`                      | Intervalle sync en secondes |
 | `PKI_BASE_URL`           | *(vide)*                  | Override URL base PKI (ACME directory, CDPs). Utile en test Docker : `http://mcp-vault:8030`. Doit être http(s)://. |
 | `MCP_AUTH_MODE`          | `bearer`                  | PEP mission JWT porte /mcp (#47). `bearer` = historique (zéro impact). `jwt` = mission_token obligatoire. `dual-stack` = JWT valide OU bearer (migration). `jwt`/`dual-stack` exigent `MISSION_JWKS_URL` + `MCP_INSTANCE_ID` + `ENFORCE_MISSION_TOKEN_VALIDATION=true` + `MISSION_STATUS_URL` (fail-fast au boot, #86). |
-| `MCP_INSTANCE_ID`        | *(vide)*                  | Identifiant d'instance de CE vault : doit figurer dans `aud` du mission_token ET valoir `component_id["vault"]`. Source unique d'audience (`resolved_mission_aud`) — remplace `MISSION_TOKEN_AUD` (alias legacy ; divergence des deux = fail-fast boot). |
+| `MCP_INSTANCE_ID`        | *(vide)*                  | Identifiant d'instance de CE vault : doit figurer dans `aud` du mission_token ET valoir `component_id[MCP_COMPONENT_KIND]`. Source unique d'audience (`resolved_mission_aud`) — remplace `MISSION_TOKEN_AUD` (alias legacy ; divergence des deux = fail-fast boot). |
 | `MCP_COMPONENT_KIND`     | `vault`                   | Clé de `component_id` vérifiée (`component_id[kind] == MCP_INSTANCE_ID`). |
-| `ENFORCE_MISSION_TOKEN_VALIDATION` | `false` | `true` = hard-reject JWT dans secret_consume. `false` = log warning, continue (standalone compatible). Obligatoire dès `MCP_AUTH_MODE != bearer` (fail-fast, #86) — sinon secret_consume resterait permissif malgré le PEP actif. Active seul (mode bearer), requiert aussi `MISSION_JWKS_URL`/audience/`MISSION_STATUS_URL`. |
+| `ENFORCE_MISSION_TOKEN_VALIDATION` | `false` | `true` = hard-reject JWT dans secret_consume. `false` = log warning, continue (standalone compatible). Obligatoire dès `MCP_AUTH_MODE != bearer` (fail-fast, #86) — sinon secret_consume resterait permissif malgré le PEP actif. Active seul (mode bearer), requiert aussi `MISSION_JWKS_URL`/audience/`MISSION_STATUS_URL`. Depuis le Lot 2 (#86), le validateur applique le contrat PEP complet (exp/iat/iss/aud/mission_id/jti/scope/tenant_id + `component_id`) ; audience vide = rejet explicite `misconfigured`, plus de mode permissif silencieux. |
 | `MISSION_JWKS_URL`       | *(vide)*                  | JWKS public mcp-mission (`/.well-known/jwks.json`). Vide = validation désactivée. Requis dès que la validation mission_token est active (PEP ou `ENFORCE_MISSION_TOKEN_VALIDATION=true` seul). |
 | `MISSION_TOKEN_AUD`      | *(vide)*                  | Audience attendue dans le JWT (anti-confused-deputy). Ex : `mcp-vault:prod:v1`. |
 | `MISSION_JWKS_CACHE_TTL` | `60`                      | TTL cache JWKS en secondes. |
 | `MISSION_JWKS_MAX_REFRESH_PER_MIN` | `3`             | Rate-limit refresh JWKS (anti-DoS). |
-| `MISSION_TOKEN_LEEWAY_SECONDS` | `10`                | Tolérance clock skew JWT en secondes. |
+| `MISSION_TOKEN_LEEWAY_SECONDS` | `10`                | Tolérance clock skew JWT en secondes — s'applique UNIQUEMENT à `iat` (anti-skew futur). `exp` est TOUJOURS strict (leeway=0), y compris pour secret_consume depuis le Lot 2 (#86). |
 | `MISSION_STATUS_URL`     | *(vide)*                  | Template URL statut mission mcp-mission — **doit contenir littéralement `{mission_id}`** (fail-fast sinon, #86 : une URL statique validerait silencieusement n'importe quelle mission). Allow-list d'états actifs `{RUNNING, WAITING_HUMAN, PAUSED}` (fail-close : état inconnu = inactif). Requis dès que la validation mission_token est active (PEP ou `ENFORCE_MISSION_TOKEN_VALIDATION=true` seul) — fail-fast au boot (#86, remplace l'ancien mode dégradé signalé par un simple warning). |
 | `MISSION_STATUS_CACHE_TTL` | `5`                     | TTL cache statut mission en secondes (court — fail-close rapide). Borné à `[0,30]`s dès que `MISSION_STATUS_URL` est requis (0 = pas de cache) — fail-fast au boot (#86). |
 
@@ -345,21 +345,21 @@ Non-authentifié par design (RFC 8555 ACME + JWS). Anti-traversal sur acme_suffi
 
 **Admin REST** *(v0.5.1)* : `GET /admin/api/pki/roles` et `GET /admin/api/pki/roles/{role_name}` — info non-secrète (configuration du rôle ACME), accessible à tout token valide pour diagnostic.
 
-### 3.11c `auth/jwt_validator.py` — Validateur JWT mission_token *(v0.6.8)*
+### 3.11c `auth/jwt_validator.py` — Validateur JWT mission_token *(v0.6.8, alignement PEP #86)*
 
-Validation JWT ES256/JWKS pour l'anti-confused-deputy C18 (issue #26). Singleton process-wide depuis v0.6.8 (issue #29).
+Validation JWT ES256/JWKS pour l'anti-confused-deputy C18 (issue #26). Singleton process-wide depuis v0.6.8 (issue #29). Depuis le Lot 2 (#86), `validate()` délègue à `mission_jwt.validate_mission_token()` — le même contrat que le PEP `/mcp` (`AuthMiddleware`) : plus de logique `jwt.decode()` dupliquée.
 
 | Classe/Fonction | Description |
 | --- | --- |
-| `MissionTokenValidator(jwks_url, expected_aud, cache_ttl, ...)` | Validateur thread-safe. Cache JWKS TTL-borné (60s), refresh kid inconnu, rate-limit 3/min |
-| `validate(token_compact)` → dict | ES256, iss=mcp-mission, aud, exp+leeway, mission_id requis. Jamais le token dans les erreurs. |
-| `MissionTokenError(reason)` | reason = code machine ("invalid_signature", "token_expired", "kid_unknown_or_revoked"...) |
-| `init_mission_token_validator(jwks_url, ...)` | Initialise le singleton au startup (lifecycle.py step 1e). Retourne None si jwks_url vide. |
+| `MissionTokenValidator(jwks_url, expected_aud, cache_ttl, ..., component_kind="vault")` | Validateur thread-safe. Cache JWKS TTL-borné (60s), refresh kid inconnu, rate-limit 3/min. `expected_iss` non configurable (fixé à `"mcp-mission"`, `ValueError` sinon). |
+| `validate(token_compact)` → dict | Délègue à `validate_mission_token()` : ES256, `iss=mcp-mission`, `exp` strict (leeway=0), `iat` (anti-skew, tolérance `leeway_seconds`), `aud`, `mission_id`, `jti`, `tenant_id`, `scope`, `component_id[component_kind] == aud` tous requis. `expected_aud` vide → rejet explicite (`misconfigured_expected_aud`). Jamais le token dans les erreurs. |
+| `MissionTokenError(reason)` | reason = code machine, vocabulaire historique C18 préservé pour les cas pré-existants ("invalid_signature", "token_expired", "kid_unknown_or_revoked", "missing_claim:<claim>"...) + nouveaux codes (#86) : "iat_future", "bad_mission_id", "bad_jti", "bad_tenant_id", "bad_scope", "component_id_mismatch". |
+| `init_mission_token_validator(jwks_url, ..., component_kind="vault")` | Initialise le singleton au startup (lifecycle.py step 1e). Retourne None si jwks_url vide. |
 | `get_mission_token_validator()` | Retourne le singleton process-wide. None si non configuré. |
 
-**Thread-safety** : `threading.Lock` protège le cache JWKS et la fenêtre glissante du rate-limit. `_fetch_jwks_from_url()` est toujours appelé sous ce lock.
+**Thread-safety** : le cache JWKS partagé (`auth/mission_jwt.py`, issue #47) est protégé par son propre `threading.Lock`.
 
-**Singleton process-wide** : un seul `MissionTokenValidator` pour tout le processus. Le cache JWKS (60s) et le rate-limit (3 refreshes/min) sont ainsi effectivement globaux. `secret_consume` utilise `get_mission_token_validator()` — fail-close si absent en mode `ENFORCE=true`.
+**Singleton process-wide** : un seul `MissionTokenValidator` pour tout le processus, adossé au JWKSCache singleton partagé avec le PEP `/mcp`. `secret_consume` utilise `get_mission_token_validator()` — fail-close si absent en mode `ENFORCE=true`.
 
 **Standalone** : si `MISSION_JWKS_URL` est vide, le validateur n'est pas instancié et `secret_consume` fonctionne en mode non-enforced.
 
