@@ -9,9 +9,28 @@ _system/tokens.json sur le bucket S3.
 Pattern :
     init_token_store()     → Appelé au démarrage (charge depuis S3)
     get_token_store()      → Getter singleton (retourne None si pas configuré)
+
+Durcissement validation (issue #86, extension Lot 3) :
+    `create()`/`update()`/`load()` partagent désormais la MÊME validation
+    stricte de `permissions`/`allowed_resources` (jamais permissive par
+    défaut — corrige un bug d'élévation de privilège : `update()` acceptait
+    un `permissions` non-liste, par ex. `{"admin": true}`, dont l'itération
+    sur les CLÉS du dict passait à tort le test `isinstance(p, str) and p in
+    VALID_PERMISSIONS` ; un `tokens.json` corrompu avec `permissions: "admin"`
+    (string) produisait le même bypass via `"admin" in "admin"`).
+
+    ⚠️ LIMITE EXPLICITE DE CE LOT : `available`/`last_error` sont
+    DIAGNOSTIQUES SEULEMENT. `get_by_hash()`/`create()`/`update()`/`revoke()`
+    ne consultent PAS cet état — une panne S3 détectée après TTL continue de
+    servir le cache bearer périmé (y compris après une révocation distante),
+    exactement comme avant ce lot. Fermer ce résidu (fail-close complet de
+    l'authentification bearer, comme PolicyStore/MissionBindingStore) est un
+    chantier séparé à impact opérationnel plus large (deny-all bearer
+    pendant une panne S3), qui reste hors scope ici.
 """
 
 import logging
+import re
 import sys
 import time
 import json
@@ -21,6 +40,12 @@ from typing import Optional
 logger = logging.getLogger("mcp-vault.token-store")
 
 from ..config import get_settings
+
+# Intervalle minimal de re-tentative de chargement après un échec (store
+# diagnostiqué invalide). N'affecte QUE la vitesse de récupération d'un état
+# `available` observable — ne bloque aucune décision dans ce lot (cf. limite
+# ci-dessus).
+_RETRY_AFTER_ERROR_SECONDS = 10.0
 
 # =============================================================================
 # Token Store singleton
@@ -42,9 +67,118 @@ def init_token_store():
     if settings.s3_endpoint_url and settings.s3_bucket_name:
         _token_store = TokenStore(settings)
         _token_store.load()
-        print(f"🔑 Token Store S3 initialisé ({_token_store.count()} tokens)", file=sys.stderr)
+        if _token_store.available:
+            print(f"🔑 Token Store S3 initialisé ({_token_store.count()} tokens)", file=sys.stderr)
+        else:
+            print(
+                f"⚠️  Token Store S3 INDISPONIBLE au démarrage : {_token_store.last_error} — "
+                "voir docstring module (diagnostic seulement, aucune mutation/lecture bloquée)",
+                file=sys.stderr,
+            )
     else:
         print("🔑 Token Store S3 non configuré (bootstrap key uniquement)", file=sys.stderr)
+
+
+# =============================================================================
+# Validation (module-level, testable isolément)
+# =============================================================================
+
+_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _validate_permissions(permissions) -> tuple:
+    """Valide une liste de permissions (source unique — create()/update()/load()).
+
+    Returns:
+        (liste_validée, "") si OK, (None, message) sinon.
+    """
+    if not isinstance(permissions, list) or not permissions:
+        return None, "permissions doit être une liste non vide (read|write|admin)"
+    if not all(isinstance(p, str) and p in TokenStore.VALID_PERMISSIONS for p in permissions):
+        return None, f"Permissions invalides: {permissions}. Valides: read, write, admin"
+    return list(permissions), ""
+
+
+def _validate_allowed_resources(allowed_resources) -> tuple:
+    """Valide allowed_resources (liste de vault_id ; vide = owner-based, légitime).
+
+    Returns:
+        (liste_validée, "") si OK, (None, message) sinon.
+    """
+    if not isinstance(allowed_resources, list) or not all(isinstance(v, str) for v in allowed_resources):
+        return None, "allowed_resources doit être une liste de chaînes"
+    return list(allowed_resources), ""
+
+
+def _validate_and_normalize_token(raw) -> dict:
+    """Valide strictement un token TEL QUE LU depuis S3 (défense en profondeur).
+
+    Ne mute jamais l'entrée fournie. Lève ValueError(message) si invalide.
+
+    Réutilise EXACTEMENT la même validation permissions/allowed_resources que
+    create()/update() (_validate_permissions/_validate_allowed_resources) —
+    un token chargé depuis un blob corrompu ne doit jamais devenir plus
+    permissif qu'un token créé/modifié normalement via l'API.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError("token doit être un objet")
+
+    token_hash = raw.get("hash")
+    if not isinstance(token_hash, str) or not _HASH_RE.match(token_hash):
+        raise ValueError(f"hash invalide (SHA-256 hex 64 caractères minuscules attendu) : {token_hash!r}")
+
+    client_name = raw.get("client_name", "")
+    if not isinstance(client_name, str):
+        raise ValueError(f"client_name invalide : {client_name!r}")
+
+    permissions, perr = _validate_permissions(raw.get("permissions"))
+    if permissions is None:
+        raise ValueError(f"permissions invalides : {perr}")
+
+    allowed_resources, aerr = _validate_allowed_resources(raw.get("allowed_resources", []))
+    if allowed_resources is None:
+        raise ValueError(f"allowed_resources invalide : {aerr}")
+
+    # Compat historique : les tokens antérieurs à l'ajout des policies n'ont pas
+    # ce champ (absent → ""). Sentinel "_remove" (bug SPA < v0.4.11) normalisé
+    # ICI, dans la forme validée — jamais persisté tel quel par create()/update().
+    policy_id = raw.get("policy_id", "")
+    if policy_id == "_remove":
+        policy_id = ""
+    if not isinstance(policy_id, str):
+        raise ValueError(f"policy_id invalide : {policy_id!r}")
+
+    revoked = raw.get("revoked", False)
+    if not isinstance(revoked, bool):
+        raise ValueError(f"revoked invalide (booléen attendu) : {revoked!r}")
+
+    expires_at = raw.get("expires_at")
+    if expires_at is not None:
+        if not isinstance(expires_at, str):
+            raise ValueError(f"expires_at invalide : {expires_at!r}")
+        from datetime import datetime
+        try:
+            parsed = datetime.fromisoformat(expires_at)
+        except ValueError:
+            raise ValueError(f"expires_at non parseable : {expires_at!r}")
+        if parsed.tzinfo is None:
+            raise ValueError(f"expires_at doit être timezone-aware : {expires_at!r}")
+
+    def _as_str(v):
+        return v if isinstance(v, str) else ""
+
+    return {
+        "hash": token_hash,
+        "client_name": client_name,
+        "permissions": permissions,
+        "allowed_resources": allowed_resources,
+        "policy_id": policy_id,
+        "email": _as_str(raw.get("email", "")),
+        "created_at": _as_str(raw.get("created_at", "")),
+        "expires_at": expires_at,
+        "revoked": revoked,
+        "revoked_at": _as_str(raw.get("revoked_at", "")),
+    }
 
 
 # =============================================================================
@@ -58,6 +192,8 @@ class TokenStore:
     - Stockage sur S3 : _system/tokens.json
     - Cache mémoire avec TTL de 5 minutes
     - CRUD : create, list, info, revoke
+    - État observable available/last_error : DIAGNOSTIQUE SEULEMENT dans ce
+      lot (voir docstring module) — ne bloque ni lecture ni mutation.
     """
 
     CACHE_TTL = 300  # 5 minutes
@@ -93,8 +229,19 @@ class TokenStore:
     def __init__(self, settings):
         self.settings = settings
         self._tokens: dict = {}  # hash → token_info
-        self._cache_time: float = 0
+        self._cache_time: float = 0.0
         self._s3_client = None
+        self._available: bool = True
+        self._last_error: str = ""
+
+    # ── État observable (diagnostique seulement, cf. docstring module) ────
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    @property
+    def last_error(self) -> str:
+        return self._last_error
 
     def _get_s3_data(self):
         """Client S3 SigV2 pour PUT/GET/DELETE (données)."""
@@ -106,30 +253,106 @@ class TokenStore:
         from ..s3_client import get_s3_meta_client
         return get_s3_meta_client()
 
+    @staticmethod
+    def _is_missing_key_error(e: Exception) -> bool:
+        """True UNIQUEMENT pour l'absence nominale de l'objet tokens.json (NoSuchKey).
+
+        Même logique robuste que PolicyStore/MissionBindingStore : ne se fie JAMAIS
+        à une sous-chaîne "404"/"NoSuchKey" dans str(e) — seul botocore
+        ClientError.response["Error"]["Code"] == "NoSuchKey" est nominal.
+        """
+        try:
+            from botocore.exceptions import ClientError
+        except ImportError:
+            return False  # sans botocore, toute erreur = indisponible (fail-close)
+        if not isinstance(e, ClientError):
+            return False
+        resp = getattr(e, "response", {}) or {}
+        return resp.get("Error", {}).get("Code", "") == "NoSuchKey"
+
+    def _mark_invalid(self, msg: str):
+        """Passe le store en état INDISPONIBLE observable (diagnostique seulement).
+
+        Ne touche jamais self._tokens. N'empêche AUCUNE lecture/mutation dans ce
+        lot (cf. limite documentée en tête de module) — sert uniquement à rendre
+        une corruption/panne détectée VISIBLE (logs, futur lot).
+        """
+        self._available = False
+        self._last_error = msg
+        self._cache_time = time.time()  # throttle la re-tentative (_maybe_refresh)
+        logger.error(
+            "Token Store INVALIDE : %s — cache bearer conservé tel quel "
+            "(diagnostique seulement dans ce lot, voir docstring module)", msg,
+        )
+
     def load(self):
-        """Charge les tokens depuis S3 (GET = SigV2)."""
+        """Charge les tokens depuis S3 avec validation atomique (défense en profondeur).
+
+        - Objet absent (NoSuchKey)              → store VIDE mais writable — nominal (1er boot).
+        - Réseau/403/timeout/bucket absent       → INVALID, cache conservé, PAS d'écrasement.
+        - JSON corrompu / schéma top-level cassé → INVALID (top-level doit être
+          exactement {"tokens": [...]} — {} seul n'est PAS traité comme un store
+          vide, seul NoSuchKey l'est).
+        - hash dupliqué                          → INVALID (jamais un écrasement
+          silencieux via la compréhension dict naïve).
+        - UNE SEULE entrée non conforme (schéma/permissions/types) → INVALID :
+          tout-ou-rien, cohérent avec PolicyStore.load() — un chargement partiel
+          ferait confiance à un fichier déclaré corrompu.
+        """
         try:
             s3 = self._get_s3_data()
             resp = s3.get_object(Bucket=self.settings.s3_bucket_name, Key=self.S3_KEY)
-            data = json.loads(resp["Body"].read().decode())
-            self._tokens = {t["hash"]: t for t in data.get("tokens", [])}
-            self._cache_time = time.time()
-            # Migration : nettoie les valeurs "_remove" stockées par erreur
-            # (bug SPA < v0.4.11 : l'admin /admin envoyait le sentinel MCP tel quel).
-            dirty = False
-            for token in self._tokens.values():
-                if token.get("policy_id") == "_remove":
-                    token["policy_id"] = ""
-                    dirty = True
-            if dirty:
-                self._save()
-                print("ℹ️  Token Store : migration policy_id '_remove' → '' effectuée.", file=sys.stderr)
+            raw = resp["Body"].read().decode()
         except Exception as e:
-            if "NoSuchKey" in str(e) or "404" in str(e):
+            if self._is_missing_key_error(e):
                 self._tokens = {}
                 self._cache_time = time.time()
+                self._available = True
+                self._last_error = ""
+                return
+            self._mark_invalid(f"S3 GET: {type(e).__name__}")
+            return
+
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            self._mark_invalid("JSON invalide")
+            return
+
+        if not isinstance(data, dict) or not isinstance(data.get("tokens"), list):
+            self._mark_invalid("schéma top-level invalide (attendu {'tokens': [...]})")
+            return
+
+        validated: dict = {}
+        dirty = False  # migration policy_id "_remove" → "" à re-persister
+        for t in data["tokens"]:
+            if isinstance(t, dict) and t.get("policy_id") == "_remove":
+                dirty = True
+            try:
+                norm = _validate_and_normalize_token(t)
+            except ValueError as e:
+                h = t.get("hash") if isinstance(t, dict) else None
+                self._mark_invalid(f"token hash={h!r} non conforme: {e}")
+                return
+            if norm["hash"] in validated:
+                self._mark_invalid(f"hash dupliqué: {norm['hash']!r}")
+                return
+            validated[norm["hash"]] = norm
+
+        self._tokens = validated
+        self._cache_time = time.time()
+        self._available = True
+        self._last_error = ""
+
+        # Migration : nettoie les valeurs "_remove" stockées par erreur
+        # (bug SPA < v0.4.11 : l'admin /admin envoyait le sentinel MCP tel quel).
+        # La forme en mémoire est déjà propre (normalisée par le validateur) ;
+        # on re-persiste pour que le fichier S3 lui-même soit nettoyé.
+        if dirty:
+            if self._save():
+                print("ℹ️  Token Store : migration policy_id '_remove' → '' effectuée.", file=sys.stderr)
             else:
-                print(f"⚠️  Token Store S3 : {e}", file=sys.stderr)
+                logger.error("Token Store : migration '_remove' non persistée — S3 indisponible")
 
     def _save(self) -> bool:
         """
@@ -160,12 +383,18 @@ class TokenStore:
             return True
         except Exception as e:
             logger.error("Token Store S3 save FAILED: %s — état mémoire non persisté", type(e).__name__)
+            self._mark_invalid(f"S3 PUT: {type(e).__name__}")
             return False
 
     def _maybe_refresh(self):
-        """Rafraîchit le cache si le TTL est dépassé."""
-        if time.time() - self._cache_time > self.CACHE_TTL:
-            self.load()
+        """Rafraîchit le cache si le TTL est dépassé (ou plus vite si état invalide)."""
+        elapsed = time.time() - self._cache_time
+        if self._available:
+            if elapsed > self.CACHE_TTL:
+                self.load()
+        else:
+            if elapsed > _RETRY_AFTER_ERROR_SECONDS:
+                self.load()
 
     def get_by_hash(self, token_hash: str) -> Optional[dict]:
         """Cherche un token par son hash SHA-256. Vérifie l'expiration."""
@@ -184,13 +413,19 @@ class TokenStore:
         # Validation des permissions — défense en profondeur (issue #48).
         # Le store ne doit JAMAIS persister un flag inconnu ni une liste vide,
         # quel que soit l'appelant (le point d'entrée HTTP valide déjà, mais le
-        # store doit être sûr par lui-même). Cohérent avec update().
-        if not isinstance(permissions, list) or not permissions:
-            return {"status": "error", "error_type": "invalid_permissions",
-                    "message": "permissions doit être une liste non vide (read|write|admin)"}
-        if not all(isinstance(p, str) and p in self.VALID_PERMISSIONS for p in permissions):
-            return {"status": "error", "error_type": "invalid_permissions",
-                    "message": f"Permissions invalides: {permissions}. Valides: read, write, admin"}
+        # store doit être sûr par lui-même). Cohérent avec update() (source unique
+        # _validate_permissions, pas une resaisie divergente).
+        permissions, perr = _validate_permissions(permissions)
+        if permissions is None:
+            return {"status": "error", "error_type": "invalid_permissions", "message": perr}
+
+        # `is None` STRICT (TokenStore hardening) — jamais `x or []` : une valeur
+        # falsy invalide (ex. allowed_resources=False) serait sinon silencieusement
+        # blanchie en [] AVANT toute validation réelle du contenu.
+        allowed_resources = [] if allowed_resources is None else allowed_resources
+        allowed_resources, aerr = _validate_allowed_resources(allowed_resources)
+        if allowed_resources is None:
+            return {"status": "error", "message": aerr}
 
         # Validation expiration (défense en profondeur, issue #65) : même règle qu'à la
         # frontière HTTP (source unique validate_expires_in_days). Le store doit être sûr
@@ -198,6 +433,9 @@ class TokenStore:
         exp_err = self.validate_expires_in_days(expires_in_days)
         if exp_err:
             return {"status": "error", "error_type": "invalid_expiration", "message": exp_err}
+
+        if not isinstance(policy_id, str):
+            return {"status": "error", "message": "policy_id doit être une chaîne"}
 
         import secrets
         from datetime import datetime, timezone, timedelta
@@ -214,7 +452,7 @@ class TokenStore:
             "hash": token_hash,
             "client_name": client_name,
             "permissions": permissions,
-            "allowed_resources": allowed_resources or [],
+            "allowed_resources": allowed_resources,
             "policy_id": policy_id,
             "email": email,
             "created_at": now.isoformat(),
@@ -300,6 +538,41 @@ class TokenStore:
         if err:
             return {"status": "error", "message": err}
 
+        # ── TOUTES les validations AVANT tout effet de bord ──────────────
+        # (TokenStore hardening) : un payload invalide ne doit déclencher NI
+        # refresh S3 NI résolution de hash NI écriture de migration. Source
+        # unique de validation, réutilisée par create()/load() — pas une
+        # resaisie locale divergente.
+        validated_permissions = None
+        if permissions is not None:
+            validated_permissions, perr = _validate_permissions(permissions)
+            if validated_permissions is None:
+                return {"status": "error", "error_type": "invalid_permissions", "message": perr}
+
+        validated_allowed_resources = None
+        if allowed_resources is not None:
+            validated_allowed_resources, aerr = _validate_allowed_resources(allowed_resources)
+            if validated_allowed_resources is None:
+                return {"status": "error", "message": aerr}
+
+        validated_policy_id = None
+        if policy_id is not None:
+            if not isinstance(policy_id, str):
+                return {"status": "error", "message": "policy_id doit être une chaîne"}
+            # Convertit le sentinel "_remove" en "" pour compatibilité avec l'outil MCP
+            validated_policy_id = "" if policy_id == "_remove" else policy_id
+
+        updated_fields = []
+        if policy_id is not None:
+            updated_fields.append("policy_id")
+        if permissions is not None:
+            updated_fields.append("permissions")
+        if allowed_resources is not None:
+            updated_fields.append("allowed_resources")
+
+        if not updated_fields:
+            return {"status": "error", "message": "Aucun champ à modifier"}
+
         self._maybe_refresh()
 
         try:
@@ -314,36 +587,19 @@ class TokenStore:
         if token.get("revoked"):
             return {"status": "error", "message": f"Token {hash_prefix}... est révoqué"}
 
-        # ── TOUTES les validations AVANT toute mutation ──────────────────
-        if permissions is not None:
-            if not all(isinstance(p, str) and p in self.VALID_PERMISSIONS for p in permissions):
-                return {"status": "error", "message": f"Permissions invalides: {permissions}"}
-
-        updated_fields = []
-        if policy_id is not None:
-            updated_fields.append("policy_id")
-        if permissions is not None:
-            updated_fields.append("permissions")
-        if allowed_resources is not None:
-            updated_fields.append("allowed_resources")
-
-        if not updated_fields:
-            return {"status": "error", "message": "Aucun champ à modifier"}
-
         # ── Snapshot AVANT mutation pour rollback si _save échoue ────────
         import copy
         snapshot = copy.deepcopy(dict(token))
 
         # ── Mutations uniquement après validation et snapshot ─────────────
         if policy_id is not None:
-            # Convertit le sentinel "_remove" en "" pour compatibilité avec l'outil MCP
-            token["policy_id"] = "" if policy_id == "_remove" else policy_id
+            token["policy_id"] = validated_policy_id
 
         if permissions is not None:
-            token["permissions"] = permissions
+            token["permissions"] = validated_permissions
 
         if allowed_resources is not None:
-            token["allowed_resources"] = allowed_resources
+            token["allowed_resources"] = validated_allowed_resources
 
         if not self._save():
             self._tokens[target_hash].clear()

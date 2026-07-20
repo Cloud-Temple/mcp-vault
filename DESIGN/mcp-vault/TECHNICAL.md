@@ -227,6 +227,25 @@ d'autres tokens. La sémantique est désormais "vide = mes vaults".
 - `count()` → Nombre de tokens actifs
 - `purge_revoked(older_than_days=30, dry_run=False)` → Supprime définitivement les tokens **révoqués** depuis plus de N jours (rétention). Fail-close si `revoked_at` absent/corrompu/sans fuseau ; rollback si `_save()` échoue ; `dry_run` retourne les candidats sans rien supprimer. N'affecte jamais un token actif ni un token expiré non révoqué. *(v0.7.0)*
 
+**Validation stricte partagée (issue #86, extension Lot 3)** : `create()`, `update()` et
+`load()` valident désormais `permissions`/`allowed_resources` via les MÊMES helpers
+(`_validate_permissions`/`_validate_allowed_resources`), jamais une resaisie locale
+divergente. Corrige un bug d'élévation de privilège : `update()` validait `permissions`
+par simple itération (`all(isinstance(p,str) and p in VALID_PERMISSIONS for p in
+permissions)`) SANS vérifier que c'était une liste — un `dict` `{"admin": true}` itéré
+donne ses CLÉS (`"admin"`, une chaîne valide), passait donc la validation et était stocké
+tel quel ; au moment de la décision (`context.py`, `"admin" in permissions`), tester
+l'appartenance d'une clé de dict retournait `True` → le token devenait admin total. Même
+bypass via un `tokens.json` corrompu chargé avec `permissions: "admin"` (string → test de
+sous-chaîne). `load()` valide désormais chaque token (tout-ou-rien, cohérent avec
+`PolicyStore.load()`), avec état observable `available`/`last_error`.
+
+⚠️ **LIMITE EXPLICITE** : `available`/`last_error` sont **diagnostiques seulement** dans ce
+lot — `get_by_hash()` ne les consulte pas. Une panne S3 détectée après TTL continue de
+servir le cache bearer périmé (y compris après une révocation distante). Un fail-close
+complet de l'authentification bearer (comme `PolicyStore`/`MissionBindingStore`) reste un
+chantier séparé, à impact opérationnel plus large (deny-all bearer pendant une panne S3).
+
 ### 3.7 `vault/types.py` — Types de secrets
 
 **14 types** avec validation des champs requis :
