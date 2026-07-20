@@ -274,7 +274,7 @@ def check_policy(tool_name: str) -> Optional[dict]:
         return None
 
     # Vérifier via PolicyStore
-    from .policies import get_policy_store
+    from .policies import get_policy_store, PolicyStoreUnavailable
 
     store = get_policy_store()
     if not store:
@@ -289,11 +289,28 @@ def check_policy(tool_name: str) -> Optional[dict]:
                       client_name=client)
         except Exception:
             pass
-        return {"status": "error",
+        return {"status": "error", "error_type": "policy_store_unavailable",
                 "message": f"PolicyStore indisponible — policy '{policy_id}' ne peut être vérifiée",
                 "policy_id": policy_id}
 
-    if store.is_tool_allowed(policy_id, tool_name):
+    # issue #86 Lot 3 : panne/corruption S3 détectée après TTL → refus OBSERVABLE,
+    # jamais une décision silencieuse basée sur la dernière policy connue en cache.
+    try:
+        allowed = store.is_tool_allowed(policy_id, tool_name)
+    except PolicyStoreUnavailable as e:
+        client = token_info.get("client_name", "?")
+        try:
+            from ..audit import log_audit
+            log_audit(tool_name, "denied",
+                      detail=f"PolicyStore indisponible — policy '{policy_id}' non vérifiable ({e})",
+                      client_name=client)
+        except Exception:
+            pass
+        return {"status": "error", "error_type": "policy_store_unavailable",
+                "message": f"PolicyStore indisponible — policy '{policy_id}' ne peut être vérifiée",
+                "policy_id": policy_id}
+
+    if allowed:
         return None
 
     # Audit : enregistrer le refus de policy (événement de sécurité)
@@ -344,7 +361,7 @@ def check_path_policy(vault_id: str, path: str,
     if not policy_id:
         return None  # Pas de policy → pas de restriction
 
-    from .policies import get_policy_store
+    from .policies import get_policy_store, PolicyStoreUnavailable
 
     store = get_policy_store()
     if not store:
@@ -357,11 +374,27 @@ def check_path_policy(vault_id: str, path: str,
                       client_name=client, vault_id=vault_id)
         except Exception:
             pass
-        return {"status": "error",
+        return {"status": "error", "error_type": "policy_store_unavailable",
                 "message": f"PolicyStore indisponible — path policy '{policy_id}' ne peut être vérifiée",
                 "policy_id": policy_id}
 
-    if store.is_path_allowed(policy_id, vault_id, path, required_permission):
+    # issue #86 Lot 3 : panne/corruption S3 détectée après TTL → refus OBSERVABLE.
+    try:
+        path_allowed = store.is_path_allowed(policy_id, vault_id, path, required_permission)
+    except PolicyStoreUnavailable as e:
+        client = token_info.get("client_name", "?")
+        try:
+            from ..audit import log_audit
+            log_audit(f"secret_{required_permission}", "denied",
+                      detail=f"PolicyStore indisponible — path policy '{policy_id}' non vérifiable ({e})",
+                      client_name=client, vault_id=vault_id)
+        except Exception:
+            pass
+        return {"status": "error", "error_type": "policy_store_unavailable",
+                "message": f"PolicyStore indisponible — path policy '{policy_id}' ne peut être vérifiée",
+                "policy_id": policy_id}
+
+    if path_allowed:
         return None
 
     # Refusé — log audit
@@ -419,12 +452,18 @@ def can_read_vault_content(vault_id: str) -> bool:
     policy_id = token_info.get("policy_id", "")
     if not policy_id:
         return True
-    from .policies import get_policy_store
+    from .policies import get_policy_store, PolicyStoreUnavailable
     store = get_policy_store()
     if not store:
         return False  # fail-close, cohérent avec check_policy/check_path_policy
-    return bool(store.is_tool_allowed(policy_id, "secret_list")
-                and store.is_path_allowed(policy_id, vault_id, "", "read"))
+    # issue #86 Lot 3 : store indisponible (panne/corruption détectée) → False,
+    # cohérent avec le fail-close de check_policy/check_path_policy. Pas d'audit
+    # ici (fonction volontairement silencieuse, cf. docstring).
+    try:
+        return bool(store.is_tool_allowed(policy_id, "secret_list")
+                    and store.is_path_allowed(policy_id, vault_id, "", "read"))
+    except PolicyStoreUnavailable:
+        return False
 
 
 def get_current_client_name() -> str:

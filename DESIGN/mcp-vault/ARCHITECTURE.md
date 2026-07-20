@@ -856,6 +856,13 @@ les rôles SSH) sans pouvoir modifier quoi que ce soit.
 └──────────────────────────────────────────────────────────────┘
 ```
 
+**Fail-close sur panne/corruption S3 détectée après TTL** *(issue #86 Lot 3)* : même état
+observable `available`/`last_error` que le MissionBindingStore (§2.3 ci-dessus) — après TTL,
+une indisponibilité ou corruption détectée ne sert plus une policy périmée ; le PEP refuse de
+manière observable (`PolicyStoreUnavailable` → dict d'erreur MCP structuré / HTTP 503 REST),
+jamais un fail-open silencieux. Ferme UNIQUEMENT ce sous-cas — pas la race d'écriture
+multi-instance générale (#51/#13, hors scope, cf. §3.12 TECHNICAL.md).
+
 ### 6.5 Tokens MCP
 
 | Outil                                                                        | Perm  | Description                |

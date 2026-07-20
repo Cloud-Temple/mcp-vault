@@ -496,11 +496,19 @@ class MissionBindingStore:
             return {"status": "error", "message": res_msg}
 
         if policy_id:
-            from .policies import get_policy_store
+            # issue #86 Lot 3 : référence policy_id non vérifiable (store absent OU
+            # indisponible) → refus explicite, aucun binding créé sur une référence
+            # que l'on ne peut pas confirmer.
+            from .policies import get_policy_store, PolicyStoreUnavailable
             ps = get_policy_store()
             if ps is None:
                 return {"status": "error", "message": "policy_id référencé mais Policy Store non configuré"}
-            if ps.get(policy_id) is None:
+            try:
+                policy_found = ps.get(policy_id)
+            except PolicyStoreUnavailable as e:
+                return {"status": "error", "error_type": "policy_store_unavailable",
+                        "message": f"Policy Store indisponible — policy_id '{policy_id}' ne peut être vérifié ({e})"}
+            if policy_found is None:
                 return {"status": "error", "message": f"policy_id '{policy_id}' inexistant"}
 
         # expires_at : si fourni, doit être une date ISO parseable (fail-fast à la création).

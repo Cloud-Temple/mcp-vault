@@ -402,6 +402,28 @@ Même pattern que `token_store.py` : singleton + cache mémoire TTL 5 min + stoc
 - `policy_id` : alphanum + tirets + underscores, max 64 chars
 - `path_rules` : chaque règle doit avoir `vault_pattern`, permissions ∈ {read, write, admin}
 - Doublon interdit (policy_id unique)
+- `_validate_and_normalize_policy()` (interne) : validation stricte partagée par `load()`
+  (chaque policy du blob S3) et `create()` — champs `allowed_tools`/`denied_tools`/`path_rules`
+  OBLIGATOIREMENT présents, `vault_pattern` non vide, `permissions` normalisée à `["read"]`
+  si absente (JAMAIS un défaut admin/write). Une seule policy non conforme invalide TOUT le
+  chargement (tout-ou-rien, jamais un chargement partiel).
+
+**Fail-close sur panne/corruption S3 détectée après TTL** *(issue #86 Lot 3, finding 3)* :
+même pattern `available`/`last_error` que `MissionBindingStore` (§3.12b). `_ensure_available()`
+lève `PolicyStoreUnavailable` (jamais un fail-open silencieux sur cache périmé) — consommée par
+`get()`, `list_all()`, `get_vault_permissions()`, `is_tool_allowed()`, `is_path_allowed()`.
+`create()`/`delete()` retournent `{"status":"error","error_type":"policy_store_unavailable"}` /
+`"policy_store_unavailable"` (refus AVANT toute écriture si déjà indisponible). Retry accéléré
+10s (borné par processus) si invalide, TTL normal 300s sinon. Côté admin REST, un helper
+centralisé (`_policy_error_response`) mappe `error_type=="policy_store_unavailable"` en HTTP 503
+sur les ~18 sites `check_policy()`/`check_path_policy()`, distinct d'un refus de policy ordinaire
+(403).
+
+⚠️ **LIMITATION HORS SCOPE (non fermée par ce lot)** : ce mécanisme ferme le sous-cas
+« panne/corruption détectée », PAS la race d'écriture multi-instance générale (deux instances
+qui écrivent concurremment SANS aucune panne — last-write-wins structurel sur le fichier unique
+partagé `_system/policies.json`, cf. #13/#51, nécessite un vrai CAS/ETag S3). `TokenStore`
+partage la même limitation non traitée (résidu tracé séparément).
 
 ### 3.12b `auth/mission_bindings.py` — Mission Binding Store S3 *(#69, v0.8.0)*
 
