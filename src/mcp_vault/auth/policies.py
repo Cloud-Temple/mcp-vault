@@ -142,8 +142,11 @@ def _validate_and_normalize_policy(policy) -> dict:
             raise ValueError(f"vault_pattern invalide (chaîne non vide requise) : {vault_pattern!r}")
         if "permissions" in rule:
             permissions = rule["permissions"]
+            # isinstance(p, str) AVANT le test d'appartenance : un élément non
+            # hachable (ex. `permissions: [["read"]]`) ferait lever TypeError par
+            # `in _VALID_PERMISSIONS` sans le court-circuit — bug round 1 diff review.
             if (not isinstance(permissions, list) or not permissions
-                    or not all(p in _VALID_PERMISSIONS for p in permissions)):
+                    or not all(isinstance(p, str) and p in _VALID_PERMISSIONS for p in permissions)):
                 raise ValueError(f"permissions invalides dans path_rule : {permissions!r}")
             permissions = list(permissions)
         else:
@@ -393,12 +396,16 @@ class PolicyStore:
             return {"status": "error", "message": f"Policy '{policy_id}' existe déjà"}
 
         now = datetime.now(timezone.utc).isoformat()
+        # `is None` STRICT (round 1 diff review) — jamais `x or []` : une valeur
+        # falsy invalide (ex. allowed_tools=False au lieu d'une liste/None) serait
+        # sinon silencieusement blanchie en [] AVANT validation, créant une policy
+        # "tout autorisé" au lieu d'être rejetée par _validate_and_normalize_policy.
         draft = {
             "policy_id": policy_id,
             "description": description,
-            "allowed_tools": allowed_tools or [],
-            "denied_tools": denied_tools or [],
-            "path_rules": path_rules or [],
+            "allowed_tools": [] if allowed_tools is None else allowed_tools,
+            "denied_tools": [] if denied_tools is None else denied_tools,
+            "path_rules": [] if path_rules is None else path_rules,
             "created_at": now,
             "created_by": created_by,
         }

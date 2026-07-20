@@ -187,6 +187,16 @@ class TestValidateAndNormalizePolicy:
             _validate_and_normalize_policy(
                 _policy(path_rules=[{"vault_pattern": "p", "allowed_paths": [123]}]))
 
+    def test_path_rule_permissions_non_hashable_element_raises_valueerror_not_typeerror(self):
+        """BLOQUANT round 1 diff review : `permissions` contenant un élément non
+        hachable (ex. liste imbriquée) faisait lever TypeError par `p in
+        _VALID_PERMISSIONS` (non capturé par load(), qui ne catche que
+        ValueError) — 500 brut au lieu du refus structuré. Doit lever
+        ValueError proprement, comme toute autre valeur de permissions invalide."""
+        with pytest.raises(ValueError):
+            _validate_and_normalize_policy(
+                _policy(path_rules=[{"vault_pattern": "p", "permissions": [["read"]]}]))
+
     def test_does_not_mutate_input(self):
         p = _policy(path_rules=[{"vault_pattern": "x"}])
         original = json.dumps(p)
@@ -265,6 +275,17 @@ class TestLoad:
         p2 = _policy(policy_id="dup", allowed_tools=["b"])
         store._get_s3_data = MagicMock(return_value=_fake_s3(get_return=_file_bytes([p1, p2])))
         store.load()
+        assert store.available is False
+
+    def test_load_permissions_non_hashable_marks_invalid_not_crash(self):
+        """BLOQUANT round 1 diff review : reproduit le crash exact via load() —
+        un blob S3 avec permissions=[["read"]] ne doit JAMAIS faire remonter une
+        exception non gérée hors de load() ; le store doit passer available=False
+        de façon observable, comme toute autre policy corrompue."""
+        store = PolicyStore(SimpleNamespace(s3_bucket_name="b"))
+        corrupted = _policy(path_rules=[{"vault_pattern": "p", "permissions": [["read"]]}])
+        store._get_s3_data = MagicMock(return_value=_fake_s3(get_return=_file_bytes([corrupted])))
+        store.load()  # ne doit lever AUCUNE exception
         assert store.available is False
 
     def test_successful_load_resets_available_and_last_error(self):
@@ -377,6 +398,18 @@ class TestCreateAndDelete:
         result = store.create("p", path_rules=[{"vault_pattern": "prod-*"}])
         assert result["status"] == "created"
         assert result["path_rules"][0]["permissions"] == ["read"]
+
+    def test_create_rejects_falsy_non_none_allowed_tools(self):
+        """BLOQUANT round 1 diff review : `allowed_tools or []` blanchissait
+        SILENCIEUSEMENT toute valeur falsy (False, 0, "") en [] AVANT validation
+        — [] signifie "tous les outils autorisés" (is_tool_allowed). Un
+        allowed_tools=False (erreur de saisie/type) créait donc une policy
+        PERMISSIVE TOTALE au lieu d'être rejeté. Doit être un refus explicite."""
+        store = _make_store()
+        result = store.create("p", allowed_tools=False)
+        assert result["status"] == "error"
+        assert "p" not in store._policies
+        store._save.assert_not_called()
 
     def test_create_rejects_duplicate_policy_id(self):
         store = _make_store()

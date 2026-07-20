@@ -875,12 +875,15 @@ async def policy_create(policy_id: str, description: str = "",
     if not store:
         return {"status": "error", "message": "Policy Store non configuré (S3 requis)"}
 
+    # `is None` STRICT (round 1 diff review #86 Lot 3) — jamais `x or []` : une
+    # valeur falsy invalide (ex. False au lieu d'une liste) doit REMONTER jusqu'au
+    # validateur du store (qui la rejette), pas être blanchie en [] avant.
     result = store.create(
         policy_id=policy_id,
         description=description,
-        allowed_tools=allowed_tools or [],
-        denied_tools=denied_tools or [],
-        path_rules=path_rules or [],
+        allowed_tools=[] if allowed_tools is None else allowed_tools,
+        denied_tools=[] if denied_tools is None else denied_tools,
+        path_rules=[] if path_rules is None else path_rules,
         created_by=get_current_client_name(),
     )
     return _r("policy_create", result, detail=f"policy={policy_id}")
