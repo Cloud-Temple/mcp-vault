@@ -24,7 +24,7 @@ async function loadTokens() {
         html += '<div class="empty-state">Aucun token configuré</div>';
     } else {
         html += '<div class="card" style="padding:0;overflow-x:auto"><table>';
-        html += '<thead><tr><th>Client</th><th>Permissions</th><th>Vaults</th><th>Policy</th><th>Créé le</th><th>Hash</th><th>Statut</th><th>Actions</th></tr></thead><tbody>';
+        html += '<thead><tr><th>Client</th><th>Permissions</th><th>Vaults</th><th>Policy</th><th>Créé le</th><th title="Empreinte du token (hash), non utilisable pour se connecter">Hash</th><th>Statut</th><th>Actions</th></tr></thead><tbody>';
         for (const t of tokens) {
             const policyBadge = t.policy_id
                 ? `<span class="badge badge-info" title="Policy : ${esc(t.policy_id)}" style="cursor:pointer" onclick="event.stopPropagation();navigate('policies');setTimeout(()=>selectPolicy('${esc(t.policy_id)}'),300)">${esc(t.policy_id)}</span>`
