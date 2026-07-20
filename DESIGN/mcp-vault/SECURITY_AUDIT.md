@@ -77,7 +77,15 @@ L'audit V2.1 valide explicitement les éléments suivants comme **conformes** :
 - `_MAX_BODY_SIZE` 10 MB (fix E4 confirmé)
 - LFI fixé : `Path.resolve()` + `startswith()` robuste
 - CSRF mitigé par Bearer token en header (pas de cookies)
-- `esc()` appliquée sur toutes les valeurs user-controlled
+- `esc()` appliquée sur toutes les valeurs user-controlled — **nuance (2026-07-20)** :
+  `esc()` protège contre l'injection HTML/JS (XSS), pas contre l'exposition en clair
+  dans le DOM. C'est une classe de bug distincte, corrigée séparément pour la fiche
+  détail des secrets (`toggleSecret()`, `vaults.js`) — voir `CHANGELOG.md`
+  ([Unreleased], « masquage réel des secrets sensibles dans la console Admin »,
+  bug remonté par Agentic Platform). Les valeurs sensibles y sont désormais
+  masquées par défaut et rendues par nœuds DOM (`textContent`), plus par `innerHTML`,
+  ce qui rend la protection anti-XSS de ces champs structurelle plutôt que
+  dépendante de `esc()`.
 
 ---
 

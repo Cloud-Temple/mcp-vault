@@ -33,6 +33,7 @@ async function doLogin(token) {
 
         buildSidebar();
         navigate('dashboard');
+        document.getElementById('loginToken').value = '';
         return true;
     } catch (e) {
         STATE.token = '';

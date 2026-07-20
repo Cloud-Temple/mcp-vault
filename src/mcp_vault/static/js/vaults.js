@@ -396,31 +396,163 @@ async function selectVault(vaultId) {
     el.innerHTML = html;
 }
 
-/* ─── Toggle secret detail (read value) ─── */
+/* ═══════════════════════════════════════════════════════════════════════
+   Masquage des champs sensibles (issue agentic-platform, console Admin)
+   Détection centralisée + rendu par nœuds DOM réels (jamais innerHTML) pour
+   les valeurs de secrets — testable sous Node, voir
+   tests/js/secret_visibility_contract.test.js
+   ═══════════════════════════════════════════════════════════════════════ */
+
+const MASKED_PLACEHOLDER = '••••••••';
+
+// Noms de champs EXACTS (insensible à la casse) toujours considérés sensibles.
+// 'key' est volontairement une correspondance EXACTE (jamais un suffixe générique
+// "_key") : ça couvre le champ `key` du type api_key sans jamais matcher public_key
+// ("public_key" !== "key").
+const SENSITIVE_FIELD_NAMES = new Set([
+    'password', 'secret', 'private_key', 'passphrase', 'token', 'access_token',
+    'api_key', 'totp_secret', 'cvv', 'seed_phrase', 'connection_string', 'key',
+]);
+// Suffixes couvrant les variantes préfixées (ex: db_password, smtp_connection_string).
+const SENSITIVE_FIELD_SUFFIXES = [
+    '_password', '_secret', '_private_key', '_passphrase', '_token',
+    '_access_token', '_api_key', '_totp_secret', '_connection_string',
+    '_cvv', '_seed_phrase',
+];
+// Champs génériques dont le NOM SEUL ne suffit pas (ex: "content"/"number" existent
+// aussi sur des types non sensibles, comme identity) — sensibles UNIQUEMENT pour
+// le _type indiqué (métadonnée déjà renvoyée par l'API de lecture, cf. enrich_secret_data()).
+const SENSITIVE_FIELD_BY_TYPE = {
+    secure_note: new Set(['content']),
+    env_file: new Set(['content']),
+    credit_card: new Set(['number']),
+};
+
+function isSensitiveField(name, secretType) {
+    const k = String(name == null ? '' : name).toLowerCase();
+    if (SENSITIVE_FIELD_NAMES.has(k)) return true;
+    if (SENSITIVE_FIELD_SUFFIXES.some(suf => k.endsWith(suf))) return true;
+    const byType = secretType ? SENSITIVE_FIELD_BY_TYPE[secretType] : null;
+    return !!(byType && byType.has(k));
+}
+
+/* Construit les lignes clé/valeur d'un secret DANS le conteneur DOM fourni.
+   - Ne place JAMAIS une valeur sensible en clair : ni par défaut, ni dans un
+     attribut DOM, ni dans du HTML — aucun innerHTML n'est utilisé ici, uniquement
+     des nœuds DOM + textContent (structurellement immunisé contre l'injection
+     HTML/JS, pas besoin de faire confiance à esc() pour ces valeurs précises).
+   - La valeur brute ne vit QUE dans la fermeture (closure) capturée par les
+     listeners Afficher/Copier — jamais dans un attribut DOM.
+   - container : élément DOM où injecter les lignes (déjà vidé par l'appelant).
+   - secretData : objet renvoyé par l'API de lecture, inclut aussi _type/_tags/
+     _favorite (ajoutés par enrich_secret_data() côté backend). */
+function renderSecretFieldsInto(container, secretData) {
+    const data = secretData || {};
+    const secretType = data._type;
+
+    for (const [key, value] of Object.entries(data)) {
+        const sensitive = isSensitiveField(key, secretType);
+        const rawValue = value === null || value === undefined ? '' : String(value);
+
+        const row = document.createElement('div');
+        row.className = 'secret-field-row';
+
+        const keyEl = document.createElement('span');
+        keyEl.className = 'secret-field-key';
+        keyEl.style.color = 'var(--muted)';
+        keyEl.textContent = key;
+
+        const valueEl = document.createElement('span');
+        valueEl.className = 'secret-field-value';
+        valueEl.style.color = sensitive ? 'var(--warning)' : 'var(--text)';
+        valueEl.textContent = sensitive ? MASKED_PLACEHOLDER : rawValue;
+        valueEl.dataset.revealed = sensitive ? '0' : '1';
+
+        row.appendChild(keyEl);
+        row.appendChild(document.createTextNode(': '));
+        row.appendChild(valueEl);
+
+        if (sensitive) {
+            const revealBtn = document.createElement('button');
+            revealBtn.type = 'button';
+            revealBtn.className = 'btn-field-action';
+            revealBtn.textContent = '👁️';
+            revealBtn.title = 'Afficher';
+            revealBtn.setAttribute('aria-label', 'Afficher');
+            revealBtn.addEventListener('click', () => {
+                const nowRevealed = valueEl.dataset.revealed !== '1';
+                valueEl.textContent = nowRevealed ? rawValue : MASKED_PLACEHOLDER;
+                valueEl.dataset.revealed = nowRevealed ? '1' : '0';
+                const label = nowRevealed ? 'Masquer' : 'Afficher';
+                revealBtn.title = label;
+                revealBtn.setAttribute('aria-label', label);
+            });
+
+            const copyBtn = document.createElement('button');
+            copyBtn.type = 'button';
+            copyBtn.className = 'btn-field-action';
+            copyBtn.textContent = '📋';
+            copyBtn.title = 'Copier';
+            copyBtn.setAttribute('aria-label', 'Copier');
+            copyBtn.addEventListener('click', () => {
+                if (typeof navigator !== 'undefined' && navigator.clipboard) {
+                    navigator.clipboard.writeText(rawValue);
+                }
+            });
+
+            row.appendChild(revealBtn);
+            row.appendChild(copyBtn);
+        }
+
+        container.appendChild(row);
+    }
+}
+
+/* ─── Toggle secret detail (read value) ───
+   Compteur de génération par élément : une requête api() encore en vol quand
+   l'utilisateur replie (ou rouvre) la fiche ne doit JAMAIS repeupler un
+   conteneur déjà refermé/rouvert entre-temps (sinon la réponse tardive
+   réintroduit exactement l'exposition qu'on vient de corriger). */
+const _toggleGenerations = new Map();
+
 async function toggleSecret(vaultId, secretPath, elId) {
     const el = document.getElementById(elId);
     if (!el) return;
-    if (!el.classList.contains('hidden')) { el.classList.add('hidden'); return; }
+
+    if (!el.classList.contains('hidden')) {
+        el.classList.add('hidden');
+        el.replaceChildren();
+        _toggleGenerations.set(elId, (_toggleGenerations.get(elId) || 0) + 1);
+        return;
+    }
+
+    const myGeneration = (_toggleGenerations.get(elId) || 0) + 1;
+    _toggleGenerations.set(elId, myGeneration);
 
     el.innerHTML = '<div class="secret-detail">Chargement…</div>';
     el.classList.remove('hidden');
 
     const data = await api(`/vaults/${vaultId}/secrets/${secretPath}`);
+    if (_toggleGenerations.get(elId) !== myGeneration) return;  // réponse tardive obsolète
+
     if (data.status !== 'ok') {
         el.innerHTML = `<div class="secret-detail" style="color:var(--danger)">Erreur : ${esc(data.message)}</div>`;
         return;
     }
 
-    const secretData = data.data || {};
-    const lines = Object.entries(secretData).map(([k, v]) => {
-        const isHidden = k === 'password' || k === 'private_key' || k === 'secret' || k === 'cvv' || k === 'seed_phrase';
-        return `<span style="color:var(--muted)">${esc(k)}</span>: <span style="color:${isHidden ? 'var(--warning)' : 'var(--text)'}">${esc(String(v))}</span>`;
-    });
+    const detail = document.createElement('div');
+    detail.className = 'secret-detail';
 
-    el.innerHTML = `<div class="secret-detail">
-        <div style="margin-bottom:0.4rem;font-size:0.7rem;color:var(--muted)">Version ${data.version} — ${fmtDate(data.created_time)}</div>
-        ${lines.join('\n')}
-    </div>`;
+    const header = document.createElement('div');
+    header.style.marginBottom = '0.4rem';
+    header.style.fontSize = '0.7rem';
+    header.style.color = 'var(--muted)';
+    header.textContent = `Version ${data.version} — ${fmtDate(data.created_time)}`;
+    detail.appendChild(header);
+
+    renderSecretFieldsInto(detail, data.data || {});
+
+    el.replaceChildren(detail);
 }
 
 /* ─── #81 : rendu d'une liste d'entrées (dossiers + feuilles), réutilisé à la racine et dans un dossier déplié ─── */
@@ -734,4 +866,15 @@ async function showRoleInfo(vaultId, roleName, elId) {
         <span style="color:var(--muted)">user_certs</span>: <span>${data.allow_user_certificates ? '✅' : '❌'}</span>
         <span style="color:var(--muted)">host_certs</span>: <span>${data.allow_host_certificates ? '✅' : '❌'}</span>
     </div>`;
+}
+
+/* Export pour les tests Node (tests/js/secret_visibility_contract.test.js) ;
+   ignoré dans le navigateur (module y est undefined), même pattern que expires.js. */
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+        isSensitiveField,
+        renderSecretFieldsInto,
+        toggleSecret,
+        MASKED_PLACEHOLDER,
+    };
 }
