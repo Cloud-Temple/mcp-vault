@@ -115,7 +115,11 @@ def _validate_and_normalize_policy(policy) -> dict:
         raise ValueError("policy doit être un objet")
 
     policy_id = policy.get("policy_id")
-    if not isinstance(policy_id, str) or not policy_id:
+    # round 3 diff review : même contrainte de format/longueur que create()
+    # (alphanum + tirets/underscores, max 64) — la validation partagée
+    # load()/create() doit être RÉELLEMENT la même, pas seulement le type.
+    if (not isinstance(policy_id, str) or not policy_id or len(policy_id) > 64
+            or not policy_id.replace("-", "").replace("_", "").isalnum()):
         raise ValueError(f"policy_id invalide : {policy_id!r}")
 
     for key in ("allowed_tools", "denied_tools", "path_rules"):
@@ -474,7 +478,10 @@ class PolicyStore:
         self._maybe_refresh()
         if not self._available:
             return "policy_store_unavailable"
-        if policy_id not in self._policies:
+        # policy_id non-str (donc jamais une clé réelle) : "introuvable", jamais
+        # un crash — `in` sur un dict lève TypeError pour une valeur non hachable
+        # (round 3 diff review).
+        if not isinstance(policy_id, str) or policy_id not in self._policies:
             return False
         policy_backup = self._policies.pop(policy_id)
         if not self._save():

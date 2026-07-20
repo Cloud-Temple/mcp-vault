@@ -813,3 +813,116 @@ class TestRawExceptionsOnMalformedInput:
             _run(api._api_create_policy(send, body))
         assert _asgi_statuses(send) == [400]
         pstore.create.assert_not_called()
+
+    def test_api_create_token_top_level_array_returns_400_not_crash(self):
+        from mcp_vault.admin import api
+        send = AsyncMock()
+        tstore = MagicMock()
+        with patch.object(api, "get_token_store", return_value=tstore):
+            _run(api._api_create_token(send, json.dumps([1, 2, 3]).encode()))
+        assert _asgi_statuses(send) == [400]
+        tstore.create.assert_not_called()
+
+    def test_api_update_token_top_level_array_returns_400_not_crash(self):
+        from mcp_vault.admin import api
+        send = AsyncMock()
+        tstore = MagicMock()
+        with patch.object(api, "get_token_store", return_value=tstore):
+            _run(api._api_update_token(send, "abc123def456", json.dumps([1, 2, 3]).encode()))
+        assert _asgi_statuses(send) == [400]
+        tstore.update.assert_not_called()
+
+    def test_api_create_mission_binding_top_level_array_returns_400_not_crash(self):
+        from mcp_vault.admin import api
+        send = AsyncMock()
+        bstore = MagicMock()
+        with patch("mcp_vault.auth.mission_bindings.get_mission_binding_store", return_value=bstore):
+            _run(api._api_create_mission_binding(send, json.dumps([1, 2, 3]).encode()))
+        assert _asgi_statuses(send) == [400]
+        bstore.create.assert_not_called()
+
+    def test_policy_store_delete_non_string_policy_id_returns_false_not_crash(self):
+        store = _make_store()
+        store._cache_time = time.time()
+        assert store.delete(["not", "hashable"]) is False
+        store._save.assert_not_called()
+
+    def test_load_rejects_policy_id_out_of_format_or_length(self):
+        """Alignement round 3 : load() applique désormais la MÊME contrainte de
+        format/longueur que create() (pas seulement le type) — cohérence réelle
+        de la « validation partagée » annoncée."""
+        store = PolicyStore(SimpleNamespace(s3_bucket_name="b"))
+        too_long = _policy(policy_id="x" * 65)
+        store._get_s3_data = MagicMock(return_value=_fake_s3(get_return=_file_bytes([too_long])))
+        store.load()
+        assert store.available is False
+
+
+# =============================================================================
+# Round 3 diff review : le PEP runtime doit fail-close sur un token_info corrompu
+# =============================================================================
+
+class TestCorruptedTokenPolicyIdFailsClosedAtPEP:
+    """BLOQUANT PRINCIPAL round 3 : les gardes de création (round 2) protègent
+    la CRÉATION de nouvelles entrées, mais PAS un token_info DÉJÀ EN MÉMOIRE
+    (chargé depuis S3 sans validation de type dans TokenStore, ou corrompu
+    d'une autre façon) portant un policy_id falsy non-str. check_policy()/
+    check_path_policy()/can_read_vault_content() DOIVENT fail-close sur cette
+    donnée corrompue au dernier point de décision, indépendamment de la façon
+    dont elle serait arrivée là — c'est le vrai rempart, pas seulement la
+    création."""
+
+    def _token(self, **over):
+        tok = {"permissions": ["read"], "policy_id": False, "client_name": "c"}
+        tok.update(over)
+        return tok
+
+    def test_check_policy_fails_closed_on_boolean_policy_id(self):
+        """POC EXACT round 3 : un token_info avec policy_id=False (donnée
+        corrompue) ne doit PAS être traité comme "pas de policy" (autorisé)."""
+        from mcp_vault.auth import context as ctx
+        h = ctx.current_token_info.set(self._token())
+        try:
+            with patch("mcp_vault.auth.policies.get_policy_store") as mock_gps:
+                result = ctx.check_policy("vault_delete")
+                mock_gps.assert_not_called()  # ne doit même pas consulter le store
+        finally:
+            ctx.current_token_info.reset(h)
+        assert result is not None
+        assert result["status"] == "error"
+
+    def test_check_path_policy_fails_closed_on_boolean_policy_id(self):
+        from mcp_vault.auth import context as ctx
+        h = ctx.current_token_info.set(self._token())
+        try:
+            with patch("mcp_vault.auth.policies.get_policy_store") as mock_gps:
+                result = ctx.check_path_policy("v", "secret/x", "read")
+                mock_gps.assert_not_called()
+        finally:
+            ctx.current_token_info.reset(h)
+        assert result is not None
+        assert result["status"] == "error"
+
+    def test_can_read_vault_content_fails_closed_on_boolean_policy_id(self):
+        from mcp_vault.auth import context as ctx
+        h = ctx.current_token_info.set(self._token())
+        try:
+            with patch("mcp_vault.auth.policies.get_policy_store") as mock_gps:
+                result = ctx.can_read_vault_content("v")
+                mock_gps.assert_not_called()
+        finally:
+            ctx.current_token_info.reset(h)
+        assert result is False
+
+    def test_legitimate_empty_policy_id_still_means_no_restriction(self):
+        """Non-régression : policy_id absent/"" reste le sentinel légitime
+        "pas de policy" (tout autorisé) — la garde ne doit fermer QUE le cas
+        type invalide, pas le cas légitime."""
+        from mcp_vault.auth import context as ctx
+        h = ctx.current_token_info.set(self._token(policy_id=""))
+        try:
+            assert ctx.check_policy("vault_delete") is None
+            assert ctx.check_path_policy("v", "secret/x", "read") is None
+            assert ctx.can_read_vault_content("v") is True
+        finally:
+            ctx.current_token_info.reset(h)

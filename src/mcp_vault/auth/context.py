@@ -268,8 +268,17 @@ def check_policy(tool_name: str) -> Optional[dict]:
     if mission_err:
         return mission_err
 
-    # Pas de policy_id assignée → tout autorisé
     policy_id = token_info.get("policy_id", "")
+    # issue #86 Lot 3 (round 3 diff review) : un policy_id de type invalide dans
+    # le TOKEN LUI-MÊME (donnée corrompue — au chargement TokenStore, pas
+    # seulement à la création) est falsy comme une chaîne vide et serait sinon
+    # traité comme "pas de policy" (tout autorisé) au lieu d'un refus fail-close.
+    # Défense en profondeur au dernier point de décision, indépendamment de la
+    # façon dont la donnée corrompue serait arrivée jusqu'ici.
+    if not isinstance(policy_id, str):
+        return {"status": "error",
+                "message": "Token corrompu (policy_id invalide) — accès refusé"}
+    # Pas de policy_id assignée → tout autorisé
     if not policy_id:
         return None
 
@@ -358,6 +367,11 @@ def check_path_policy(vault_id: str, path: str,
         return None  # Admin → tout autorisé
 
     policy_id = token_info.get("policy_id", "")
+    # issue #86 Lot 3 (round 3 diff review) : voir check_policy() — même défense
+    # en profondeur contre un policy_id de type invalide dans le token.
+    if not isinstance(policy_id, str):
+        return {"status": "error",
+                "message": "Token corrompu (policy_id invalide) — accès refusé"}
     if not policy_id:
         return None  # Pas de policy → pas de restriction
 
@@ -450,6 +464,10 @@ def can_read_vault_content(vault_id: str) -> bool:
                 or "secret_list" in MISSION_JWT_PUBLIC_TOOLS):
             return False
     policy_id = token_info.get("policy_id", "")
+    # issue #86 Lot 3 (round 3 diff review) : même défense en profondeur que
+    # check_policy()/check_path_policy() contre un policy_id de type invalide.
+    if not isinstance(policy_id, str):
+        return False
     if not policy_id:
         return True
     from .policies import get_policy_store, PolicyStoreUnavailable

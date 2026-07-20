@@ -489,6 +489,10 @@ async def _api_create_token(send, body):
         data = json.loads(body) if body else {}
     except (json.JSONDecodeError, ValueError):
         return await _json_response(send, 400, {"status": "error", "message": "JSON invalide"})
+    # issue #86 Lot 3 (round 3 diff review) : un JSON valide mais non-objet
+    # (ex. `[]`) lèverait AttributeError sur data.get() sans ce garde.
+    if not isinstance(data, dict):
+        return await _json_response(send, 400, {"status": "error", "message": "JSON invalide (objet attendu)"})
 
     client_name = data.get("client_name", "")
     permissions = data.get("permissions", ["read"])
@@ -563,6 +567,8 @@ async def _api_update_token(send, hash_prefix, body):
         data = json.loads(body) if body else {}
     except (json.JSONDecodeError, ValueError):
         return await _json_response(send, 400, {"status": "error", "message": "JSON invalide"})
+    if not isinstance(data, dict):
+        return await _json_response(send, 400, {"status": "error", "message": "JSON invalide (objet attendu)"})
 
     # Préparer les champs (None = pas de changement)
     policy_id = data.get("policy_id")  # None si absent
@@ -1066,6 +1072,8 @@ async def _api_create_mission_binding(send, body):
         data = json.loads(body) if body else {}
     except (json.JSONDecodeError, ValueError):
         return await _json_response(send, 400, {"status": "error", "message": "JSON invalide"})
+    if not isinstance(data, dict):
+        return await _json_response(send, 400, {"status": "error", "message": "JSON invalide (objet attendu)"})
 
     # tenant_id/policy_id passés TELS QUELS : le store valide le format (non-str
     # compris) et refuse proprement. issue #86 Lot 3 (round 2 diff review) :
