@@ -1,6 +1,6 @@
 # Changelog — MCP Vault
 
-## [Unreleased]
+## [0.8.4] — 2026-07-20
 
 ### Correction sécurité — masquage réel des secrets sensibles dans la console Admin
 
