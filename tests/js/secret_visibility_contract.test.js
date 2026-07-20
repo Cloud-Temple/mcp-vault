@@ -23,6 +23,7 @@
 const path = require('path');
 const fs = require('fs');
 const vm = require('vm');
+const crypto = require('crypto');
 
 /* ═══════════════════════════════════════════════════════════════════════
    Faux DOM minimal
@@ -116,6 +117,33 @@ function findFirst(root, predicate) {
         if (found) return found;
     }
     return null;
+}
+
+// Marche récursivement le sous-arbre et collecte TOUTE chaîne posée dans un
+// attribut DOM (setAttribute classique OU dataset) — pas seulement le texte
+// visible. Trouvé en revue de diff Codex : un sabotage adversarial a posé la
+// valeur brute dans un attribut (`data-review-secret-leak`) et les 46 cas
+// d'origine sont restés verts, car aucune assertion ne parcourait les attributs.
+function collectAttributeStrings(root, acc) {
+    acc = acc || [];
+    if (root._attrs) {
+        for (const v of Object.values(root._attrs)) acc.push(String(v));
+    }
+    if (root.dataset) {
+        for (const v of Object.values(root.dataset)) acc.push(String(v));
+    }
+    if (root._children) {
+        for (const c of root._children) collectAttributeStrings(c, acc);
+    }
+    return acc;
+}
+
+function assertNoRawValueInAttributes(root, rawValue, label) {
+    const attrs = collectAttributeStrings(root);
+    assert(
+        !attrs.some((v) => v.includes(rawValue)),
+        `${label} : la valeur brute ne doit apparaître dans AUCUN attribut DOM (setAttribute ou dataset)`
+    );
 }
 
 function deferred() {
@@ -240,6 +268,7 @@ async function main() {
         assert(text.includes(MASKED_PLACEHOLDER), 'le placeholder fixe doit être affiché');
         assert(!text.includes('hunter2-le-vrai-secret'), 'la valeur brute ne doit apparaître nulle part par défaut');
         assert(!INNER_HTML_WRITES.some((w) => w.includes('hunter2-le-vrai-secret')), 'aucune écriture innerHTML ne doit contenir la valeur');
+        assertNoRawValueInAttributes(container, 'hunter2-le-vrai-secret', 'masqué par défaut');
     });
 
     await test('champ non sensible reste visible en clair', async () => {
@@ -255,11 +284,14 @@ async function main() {
         const passwordRow = container._children[0];
         const revealBtn = passwordRow._children.find((c) => c.tagName === 'button' && c.title === 'Afficher');
         assert(revealBtn, 'le bouton Afficher doit exister pour un champ sensible');
+        assert(revealBtn.getAttribute('aria-label') === 'Afficher', 'aria-label initial doit valoir Afficher');
         revealBtn.click();
         const textAfterReveal = container.subtreeText();
         assert(textAfterReveal.includes('SECRET-A'), 'le clic sur Afficher doit révéler la valeur RÉELLE et COMPLÈTE');
         assert(textAfterReveal.includes('texte libre'), 'les autres champs restent inchangés');
         assert(revealBtn.title === 'Masquer', 'le libellé du bouton doit basculer sur Masquer');
+        assert(revealBtn.getAttribute('aria-label') === 'Masquer', 'aria-label doit basculer sur Masquer après révélation');
+        assertNoRawValueInAttributes(container, 'SECRET-A', 'après révélation ciblée');
     });
 
     await test('masquer retire à nouveau la valeur du DOM', async () => {
@@ -272,6 +304,8 @@ async function main() {
         revealBtn.click();
         assert(!container.subtreeText().includes('SECRET-B'), 'un second clic doit remasquer la valeur');
         assert(revealBtn.title === 'Afficher', 'le libellé doit revenir à Afficher');
+        assert(revealBtn.getAttribute('aria-label') === 'Afficher', 'aria-label doit revenir à Afficher après remasquage');
+        assertNoRawValueInAttributes(container, 'SECRET-B', 'après remasquage');
     });
 
     await test('copier nécessite une action explicite et copie uniquement la valeur ciblée', async () => {
@@ -295,6 +329,7 @@ async function main() {
         revealBtn.click();
         const valueEl = row._children.find((c) => c.className === 'secret-field-value');
         assert(valueEl.textContent === payload, 'textContent doit restituer la chaîne EXACTE, verbatim, jamais interprétée');
+        assertNoRawValueInAttributes(container, payload, 'valeur HTML/JS révélée');
     });
 
     /* ═══════════════════════════════════════════════════════════════════
@@ -312,6 +347,7 @@ async function main() {
         assert(!el.classList.contains('hidden'), 'la fiche doit être ouverte');
         assert(!el.subtreeText().includes('OUVERTURE-NORMALE'), 'valeur masquée par défaut');
         assert(!INNER_HTML_WRITES.some((w) => w.includes('OUVERTURE-NORMALE')), 'jamais via innerHTML');
+        assertNoRawValueInAttributes(el, 'OUVERTURE-NORMALE', 'toggleSecret() ouverture normale');
     });
 
     await test('toggleSecret() : repli purge complètement le contenu rendu', async () => {
@@ -332,6 +368,7 @@ async function main() {
         assert(el.classList.contains('hidden'), 'la fiche doit être repliée');
         assert(el._children.length === 0, 'replaceChildren() doit vider tout le sous-arbre au repli');
         assert(!el.subtreeText().includes('A-PURGER'), 'aucune trace de la valeur, même précédemment révélée');
+        assertNoRawValueInAttributes(el, 'A-PURGER', 'toggleSecret() après repli');
     });
 
     await test('toggleSecret() : réponse tardive après repli ne doit JAMAIS repeupler la fiche (course confirmée par Codex)', async () => {
@@ -355,6 +392,7 @@ async function main() {
         assert(el._children.length === 0, 'la réponse tardive ne doit rien avoir réinséré');
         assert(!el.subtreeText().includes('REPONSE-TARDIVE'), 'la valeur tardive ne doit apparaître nulle part');
         assert(!INNER_HTML_WRITES.some((w) => w.includes('REPONSE-TARDIVE')), 'jamais via innerHTML non plus');
+        assertNoRawValueInAttributes(el, 'REPONSE-TARDIVE', 'réponse tardive après repli');
     });
 
     await test('toggleSecret() : ouverture A puis repli/réouverture B, résolution tardive de A ne doit jamais écraser B', async () => {
@@ -387,6 +425,8 @@ async function main() {
         assert(el.subtreeText().includes('VIENT-DE-B'), 'le contenu de B doit être bien rendu (A ne l\'a pas écrasé)');
         assert(!el.subtreeText().includes('VIENT-DE-A'), 'A ne doit jamais coexister avec B dans le DOM final');
         assert(!el.subtreeText().includes('CONTENU-B-VALIDE'), 'le champ sensible de B reste masqué par défaut');
+        assertNoRawValueInAttributes(el, 'CONTENU-A-PERIME', 'A périmé, valeur sensible');
+        assertNoRawValueInAttributes(el, 'CONTENU-B-VALIDE', 'B rendu, valeur sensible encore masquée');
     });
 
     await test('toggleSecret() : erreur API ne fuite rien et ne casse pas la garde de génération', async () => {
@@ -412,7 +452,21 @@ async function main() {
 
     await test('[preuve historique] l\'ancien toggleSecret() (figé, pré-correctif) FUITAIT la valeur en clair via innerHTML', async () => {
         const legacySource = fs.readFileSync(path.join(__dirname, 'fixtures', 'legacy_toggle_secret_snippet.js'), 'utf8');
-        const legacyInnerHtmlWrites = [];
+
+        // Intégrité de la fixture (trouvé en revue de diff Codex) : sans ce contrôle, rien
+        // n'empêche la fixture de dériver silencieusement au fil du temps tout en continuant
+        // à faire passer ce test (tant qu'elle fuite ENCORE d'une façon ou d'une autre). Le
+        // hash fige la preuve : toute modification du fichier doit être délibérée et re-
+        // validée manuellement contre `git show 4039a59:src/mcp_vault/static/js/vaults.js`
+        // (le commit juste avant ce correctif) avant de mettre à jour la constante ci-dessous.
+        const EXPECTED_LEGACY_SHA256 = '4121f51536a513620dc38780e20def5a4ed04e73fd8823d648378e62233f027a';
+        const actualHash = crypto.createHash('sha256').update(legacySource, 'utf8').digest('hex');
+        assert(
+            actualHash === EXPECTED_LEGACY_SHA256,
+            `la fixture legacy a changé (sha256 ${actualHash} != ${EXPECTED_LEGACY_SHA256}) — ` +
+            're-vérifier manuellement sa fidélité à 4039a59 avant de mettre à jour ce hash'
+        );
+
         const legacyDoc = new FakeDocument();
         // Contexte vm minimal reproduisant exactement l'environnement navigateur attendu
         // par l'ancien code (document/api/esc/fmtDate en portée libre, comme dans un <script>).
@@ -423,12 +477,8 @@ async function main() {
             fmtDate: () => 'DATE_TEST',
             console,
         };
-        // L'espion doit voir les écritures innerHTML du contexte vm : on intercepte via
-        // un FakeNode dont le setter innerHTML pousse dans legacyInnerHtmlWrites au lieu
-        // du tableau global (le contexte vm est isolé, mais partage la même classe FakeNode
-        // par closure — on redéfinit temporairement le setter pour cette instance seule
-        // n'est pas nécessaire : FakeNode pousse déjà dans INNER_HTML_WRITES module-level,
-        // qu'on lit directement après exécution).
+        // L'espion doit voir les écritures innerHTML du contexte vm : FakeNode pousse déjà
+        // dans INNER_HTML_WRITES module-level, qu'on lit directement après exécution.
         INNER_HTML_WRITES = [];
         vm.createContext(ctx);
         vm.runInContext(legacySource, ctx);
