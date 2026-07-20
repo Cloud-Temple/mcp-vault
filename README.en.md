@@ -119,6 +119,10 @@ Policies restrict the tools accessible per token, with support for **wildcards**
 | `policy_delete(policy_id, confirm)`                                                  | admin | Deletes a policy ⚠️                                |
 
 > 📋 6 ready-to-use policies documented in [ARCHITECTURE.md §6.4.1](DESIGN/mcp-vault/ARCHITECTURE.md): `readonly`, `ssh-operator`, `developer`, `prod-reader-dev-writer`, `ci-cd-agent`, `security-auditor`
+>
+> 🔒 **Fail-close on S3 outage** *(v0.8.3, #86)*: once the cache expires (5 min), a
+> detected S3 outage or corruption now causes policy decisions to be explicitly
+> refused, instead of silently continuing to serve stale rules.
 
 ### Token Management (1)
 
@@ -127,6 +131,10 @@ Policies restrict the tools accessible per token, with support for **wildcards**
 | `token_update(hash_prefix, policy_id?, permissions?, vaults?)` | admin | Modifies an existing token (policy, permissions, vaults) |
 
 > **Revoked-token purge** *(v0.7.0 — **admin** operation, exposed via REST / CLI / SPA; this is NOT an MCP tool)*: permanently deletes tokens revoked more than N days ago (retention, default 30). **Fail-close** (never an active token nor an expired-but-not-revoked one), **dry-run + confirmation**, rollback if S3 is unavailable, every purge **audited**. Via `POST /admin/api/tokens/purge`, the CLI command `token purge-revoked`, or the « 🧹 Purge revoked » button in the `/admin` console.
+>
+> 🔒 **Strict validation** *(v0.8.3, #86)*: `permissions`/`allowed_resources` are now
+> strictly validated on create, update and load — never permissive by default on a
+> malformed value (fixes a possible privilege escalation via a wrong-typed value).
 
 ### Internal PKI — CA + ACME (8) *(v0.5.0)*
 

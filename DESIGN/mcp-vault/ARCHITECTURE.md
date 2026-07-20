@@ -1565,6 +1565,16 @@ vault_ids) dans un `contextvars.ContextVar`. Chaque outil MCP appelle ensuite
 Un cache mémoire avec TTL de 5 minutes évite de relire S3 à chaque requête.
 Les opérations admin (create/revoke) invalident le cache immédiatement.
 
+**Validation stricte `permissions`/`allowed_resources`** *(issue #86)* :
+`create()`, `update()` et `load()` partagent la même validation — jamais permissive
+par défaut. Corrige une élévation de privilège : un `dict`/une chaîne malformés
+(ex. `{"admin": true}`) pouvaient auparavant passer une validation par simple
+itération et rendre un token admin total. `load()` est atomique (tout-ou-rien) :
+un seul token non conforme invalide tout le chargement, cache précédent conservé.
+⚠️ Limite assumée : `available`/`last_error` sont diagnostiques dans cette version —
+l'authentification bearer continue de servir le cache après une panne S3 détectée
+(pas de fail-close complet, contrairement à `PolicyStore`/`MissionBindingStore`).
+
 **CORS preflight** — L'AdminMiddleware gère les requêtes OPTIONS pour permettre
 les appels AJAX cross-origin depuis la console admin SPA. Les headers
 `Access-Control-Allow-*` sont injectés.

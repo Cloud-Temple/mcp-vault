@@ -1,6 +1,6 @@
 # Changelog — MCP Vault
 
-## [Unreleased]
+## [0.8.3] — 2026-07-20
 
 ### Correction critique — élévation de privilège via le Token Store (issue #86, extension Lot 3)
 
