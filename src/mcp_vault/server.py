@@ -1335,6 +1335,11 @@ async def token_update(hash_prefix: str, policy_id: str = "",
     new_perms = None
     new_resources = None
 
+    # issue #86 Lot 3 (round 2 diff review) : garde de type AVANT le test falsy —
+    # défense en profondeur si un appelant contourne le typage de signature.
+    if policy_id is not None and not isinstance(policy_id, str):
+        return {"status": "error", "message": "policy_id doit être une chaîne"}
+
     if policy_id:
         if policy_id == "_remove":
             new_policy = ""  # Retirer la policy

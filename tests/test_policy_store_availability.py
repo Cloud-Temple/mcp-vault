@@ -21,6 +21,17 @@ Non-complaisant — on prouve les invariants de sécurité, pas la couverture :
     acceptait SILENCIEUSEMENT un policy_id non vérifié quand pstore était None
     (admin/api.py token create/update, server.py token_update,
     mission_bindings.py create).
+  - Round 1 diff review (2 bloquants) : `permissions` non hachable (TypeError
+    non capturé par load()) ; `allowed_tools or []` masquait toute valeur
+    falsy non-None (ex. False) en policy permissive.
+  - Round 2 diff review (garde de type policy_id + exceptions brutes) :
+    `policy_id` falsy non-str (ex. False) sautait la vérification de référence
+    aux 5 sites qui la font (admin/api.py token create/update + mission
+    binding, server.py token_update, mission_bindings.py create) — un token/
+    binding était créé avec une référence jamais vérifiée. `PolicyStore.create()`
+    crashait (AttributeError) sur un policy_id non-str ; get()/is_tool_allowed()/
+    is_path_allowed() crashaient (TypeError) sur un policy_id non hachable ;
+    `_api_create_policy()` laissait remonter JSON invalide/top-level non-objet.
 
   HORS SCOPE explicite (documenté, PAS fermé par ce lot) : la race d'écriture
   multi-instance générale (issue #51/#13) — deux instances qui écrivent
@@ -674,3 +685,131 @@ class TestPolicyIdReferenceGuards:
                                    permissions=["read"], policy_id="p")
         assert result["status"] == "error"
         assert result["error_type"] == "policy_store_unavailable"
+
+
+# =============================================================================
+# Round 2 diff review : policy_id falsy non-str = référence sautée silencieusement
+# =============================================================================
+
+class TestPolicyIdFalsyNonStringRejected:
+    """BLOQUANT round 2 : `if policy_id:` traite `False` comme "pas de policy" —
+    la vérification de référence est sautée, mais la valeur malformée est quand
+    même persistée/utilisée, produisant un token/binding SANS restriction alors
+    qu'une référence (même invalide) avait été fournie. Les 5 sites doivent
+    REJETER explicitement un policy_id non-str plutôt que de le traiter comme
+    absent."""
+
+    def test_api_create_token_rejects_boolean_policy_id(self):
+        from mcp_vault.admin import api
+        send = AsyncMock()
+        body = json.dumps({"client_name": "c", "policy_id": False})
+        tstore = MagicMock()
+        with patch.object(api, "get_token_store", return_value=tstore):
+            _run(api._api_create_token(send, body))
+        assert _asgi_statuses(send) == [400]
+        tstore.create.assert_not_called()
+
+    def test_api_update_token_rejects_boolean_policy_id(self):
+        from mcp_vault.admin import api
+        send = AsyncMock()
+        body = json.dumps({"policy_id": False})
+        tstore = MagicMock()
+        with patch.object(api, "get_token_store", return_value=tstore):
+            _run(api._api_update_token(send, "abc123def456", body))
+        assert _asgi_statuses(send) == [400]
+        tstore.update.assert_not_called()
+
+    def test_mcp_token_update_rejects_boolean_policy_id(self):
+        import mcp_vault.server as server
+        tstore = MagicMock()
+        with patch("mcp_vault.auth.token_store.get_token_store", return_value=tstore), \
+             patch("mcp_vault.auth.context.check_admin_permission", return_value=None):
+            result = _run(server.token_update("abc123def456", policy_id=False))
+        assert result["status"] == "error"
+        tstore.update.assert_not_called()
+
+    def test_mission_binding_create_rejects_boolean_policy_id(self):
+        from mcp_vault.auth.mission_bindings import MissionBindingStore
+        store = MissionBindingStore(SimpleNamespace(
+            s3_endpoint_url="http://x", s3_bucket_name="b", resolved_mission_aud="inst"))
+        store._maybe_refresh = MagicMock()
+        store._available = True
+        store._save = MagicMock(return_value=True)
+        result = store.create(tenant_id="acme", allowed_resources=["prod"],
+                               permissions=["read"], policy_id=False)
+        assert result["status"] == "error"
+        store._save.assert_not_called()
+
+    def test_api_create_mission_binding_rejects_boolean_policy_id_not_silently_empty(self):
+        """Round 2 : l'ancien `data.get("policy_id", "") or ""` transformait
+        `false` en "" (binding créé SANS policy). Doit désormais rejeter."""
+        from mcp_vault.admin import api
+        send = AsyncMock()
+        body = json.dumps({"tenant_id": "acme", "allowed_resources": ["prod"],
+                            "permissions": ["read"], "policy_id": False})
+        bstore = MagicMock()
+        with patch("mcp_vault.auth.mission_bindings.get_mission_binding_store", return_value=bstore):
+            _run(api._api_create_mission_binding(send, body))
+        bstore.create.assert_called_once()
+        assert bstore.create.call_args.kwargs["policy_id"] is False, \
+            "la valeur brute doit être transmise au store (qui la validera), pas blanchie en '' silencieusement"
+
+
+# =============================================================================
+# Round 2 diff review : exceptions brutes sur entrée malformée (policy_id, JSON)
+# =============================================================================
+
+class TestRawExceptionsOnMalformedInput:
+    """BLOQUANT round 2 (finding 5) : une entrée malformée (policy_id non-str/
+    non hachable, JSON invalide/non-objet) ne doit JAMAIS crasher avec une
+    exception Python brute — toujours un refus structuré (ValueError capturé,
+    dict d'erreur, ou fail-close silencieux cohérent)."""
+
+    def test_get_non_string_policy_id_returns_none_not_crash(self):
+        store = _make_store()
+        store._cache_time = time.time()
+        assert store.get(["not", "hashable"]) is None
+
+    def test_is_tool_allowed_non_string_policy_id_returns_false_not_crash(self):
+        store = _make_store()
+        store._cache_time = time.time()
+        assert store.is_tool_allowed(["not", "hashable"], "vault_delete") is False
+
+    def test_is_path_allowed_non_string_policy_id_returns_false_not_crash(self):
+        store = _make_store()
+        store._cache_time = time.time()
+        assert store.is_path_allowed({"not": "hashable"}, "v", "p", "read") is False
+
+    def test_store_create_non_string_policy_id_rejected_not_crash(self):
+        store = _make_store()
+        result = store.create(123)
+        assert result["status"] == "error"
+        store._save.assert_not_called()
+
+    def test_api_create_policy_invalid_json_returns_400_not_crash(self):
+        from mcp_vault.admin import api
+        send = AsyncMock()
+        pstore = MagicMock()
+        with patch("mcp_vault.auth.policies.get_policy_store", return_value=pstore):
+            _run(api._api_create_policy(send, b"not json"))
+        assert _asgi_statuses(send) == [400]
+        pstore.create.assert_not_called()
+
+    def test_api_create_policy_top_level_array_returns_400_not_crash(self):
+        from mcp_vault.admin import api
+        send = AsyncMock()
+        pstore = MagicMock()
+        with patch("mcp_vault.auth.policies.get_policy_store", return_value=pstore):
+            _run(api._api_create_policy(send, json.dumps([1, 2, 3]).encode()))
+        assert _asgi_statuses(send) == [400]
+        pstore.create.assert_not_called()
+
+    def test_api_create_policy_non_string_policy_id_returns_400_not_crash(self):
+        from mcp_vault.admin import api
+        send = AsyncMock()
+        pstore = MagicMock()
+        body = json.dumps({"policy_id": 123})
+        with patch("mcp_vault.auth.policies.get_policy_store", return_value=pstore):
+            _run(api._api_create_policy(send, body))
+        assert _asgi_statuses(send) == [400]
+        pstore.create.assert_not_called()

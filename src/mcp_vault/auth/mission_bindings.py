@@ -495,6 +495,11 @@ class MissionBindingStore:
         if resources is None:
             return {"status": "error", "message": res_msg}
 
+        # issue #86 Lot 3 (round 2 diff review) : garde de type AVANT le test
+        # falsy — un policy_id non-str (ex. False) est falsy comme une chaîne
+        # vide et sauterait sinon silencieusement toute vérification.
+        if policy_id is not None and not isinstance(policy_id, str):
+            return {"status": "error", "message": "policy_id doit être une chaîne"}
         if policy_id:
             # issue #86 Lot 3 : référence policy_id non vérifiable (store absent OU
             # indisponible) → refus explicite, aucun binding créé sur une référence

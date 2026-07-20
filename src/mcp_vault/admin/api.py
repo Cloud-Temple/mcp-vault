@@ -514,6 +514,13 @@ async def _api_create_token(send, body):
         return await _json_response(send, 400, {"status": "error", "message": exp_err})
 
     # Valider que la policy existe (cohérent avec l'outil MCP token_update).
+    # issue #86 Lot 3 (round 2 diff review) : un policy_id de type invalide (ex.
+    # `false`) est FALSY comme une chaîne vide — sans cette garde de type, le bloc
+    # entier serait sauté et un token serait créé avec policy_id=False stocké tel
+    # quel, jamais vérifié, alors qu'une valeur (même malformée) avait été fournie.
+    if policy_id is not None and not isinstance(policy_id, str):
+        return await _json_response(send, 400, {"status": "error",
+                "message": "policy_id doit être une chaîne"})
     # issue #86 Lot 3 : un policy_id fourni DOIT être vérifiable — store absent OU
     # indisponible = référence NON vérifiable → refus explicite (bug historique
     # corrigé : `if pstore and ...` acceptait silencieusement tout policy_id
@@ -552,7 +559,10 @@ async def _api_update_token(send, hash_prefix, body):
     if not store:
         return await _json_response(send, 400, {"status": "error", "message": "S3 non configuré"})
 
-    data = json.loads(body) if body else {}
+    try:
+        data = json.loads(body) if body else {}
+    except (json.JSONDecodeError, ValueError):
+        return await _json_response(send, 400, {"status": "error", "message": "JSON invalide"})
 
     # Préparer les champs (None = pas de changement)
     policy_id = data.get("policy_id")  # None si absent
@@ -560,6 +570,12 @@ async def _api_update_token(send, hash_prefix, body):
     allowed_resources = data.get("allowed_resources")  # None si absent
 
     # Valider que la policy existe si fournie et non vide (cohérent avec l'outil MCP).
+    # issue #86 Lot 3 (round 2 diff review) : garde de type AVANT le test falsy —
+    # même raison que _api_create_token (policy_id=false sauterait sinon la
+    # vérification silencieusement).
+    if policy_id is not None and not isinstance(policy_id, str):
+        return await _json_response(send, 400, {"status": "error",
+                "message": "policy_id doit être une chaîne"})
     # issue #86 Lot 3 : même correction que _api_create_token (fail-close explicite).
     if policy_id and policy_id != "_remove":
         from ..auth.policies import get_policy_store, PolicyStoreUnavailable
@@ -933,8 +949,20 @@ async def _api_create_policy(send, body):
     if not store:
         return await _json_response(send, 400, {"status": "error", "message": "S3 non configuré"})
 
-    data = json.loads(body) if body else {}
-    policy_id = data.get("policy_id", "").strip()
+    # issue #86 Lot 3 (round 2 diff review) : JSON invalide, top-level non-objet,
+    # et policy_id non-str (crash `.strip()`) laissaient remonter une exception
+    # brute (500) au lieu d'un refus propre (400).
+    try:
+        data = json.loads(body) if body else {}
+    except (json.JSONDecodeError, ValueError):
+        return await _json_response(send, 400, {"status": "error", "message": "JSON invalide"})
+    if not isinstance(data, dict):
+        return await _json_response(send, 400, {"status": "error", "message": "JSON invalide (objet attendu)"})
+
+    policy_id = data.get("policy_id", "")
+    if not isinstance(policy_id, str):
+        return await _json_response(send, 400, {"status": "error", "message": "policy_id doit être une chaîne"})
+    policy_id = policy_id.strip()
     if not policy_id:
         return await _json_response(send, 400, {"status": "error", "message": "policy_id requis"})
 
@@ -1039,12 +1067,16 @@ async def _api_create_mission_binding(send, body):
     except (json.JSONDecodeError, ValueError):
         return await _json_response(send, 400, {"status": "error", "message": "JSON invalide"})
 
-    # tenant_id passé tel quel : le store valide le format (non-str compris) et refuse proprement.
+    # tenant_id/policy_id passés TELS QUELS : le store valide le format (non-str
+    # compris) et refuse proprement. issue #86 Lot 3 (round 2 diff review) :
+    # l'ancien `data.get("policy_id", "") or ""` blanchissait silencieusement
+    # toute valeur falsy (ex. `false`) en "" — un binding SANS policy était créé
+    # alors qu'une référence (même malformée) avait été fournie.
     result = store.create(
         tenant_id=data.get("tenant_id", ""),
         allowed_resources=data.get("allowed_resources", []),
         permissions=data.get("permissions", []),
-        policy_id=data.get("policy_id", "") or "",
+        policy_id=data.get("policy_id", ""),
         expires_at=data.get("expires_at"),
         # enabled : passé brut (défaut True si absent) — le store exige un booléen STRICT et
         # renvoie 400 si non-bool. Ne PAS coercer ici (bool("false") == True).

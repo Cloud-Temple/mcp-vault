@@ -386,7 +386,10 @@ class PolicyStore:
                     "message": f"Policy Store indisponible ({self._last_error})"}
 
         # ── Validation ──
-        if not policy_id or not policy_id.replace("-", "").replace("_", "").isalnum():
+        # isinstance() D'ABORD (round 2 diff review) : un policy_id non-str (ex.
+        # 123) ferait lever AttributeError via .replace() avant ce garde.
+        if (not isinstance(policy_id, str) or not policy_id
+                or not policy_id.replace("-", "").replace("_", "").isalnum()):
             return {"status": "error", "message": "policy_id invalide (alphanum, tirets, underscores)"}
 
         if len(policy_id) > 64:
@@ -430,6 +433,11 @@ class PolicyStore:
             détectée après TTL) — issue #86 Lot 3.
         """
         self._ensure_available()
+        # policy_id non-str (donc jamais une clé réelle) : traité comme absent,
+        # jamais un crash — un dict.get() sur une valeur non hachable (liste,
+        # dict) lève TypeError sans ce garde (round 2 diff review).
+        if not isinstance(policy_id, str):
+            return None
         return self._policies.get(policy_id)
 
     def list_all(self) -> list:
@@ -503,6 +511,10 @@ class PolicyStore:
             servir une décision basée sur un cache périmé (issue #86 Lot 3).
         """
         self._ensure_available()
+        # policy_id non-str : jamais une clé réelle, traité comme "introuvable"
+        # (fail-close) plutôt qu'un TypeError sur dict.get() (round 2 diff review).
+        if not isinstance(policy_id, str):
+            return False
         policy = self._policies.get(policy_id)
         if not policy:
             return False  # SÉCURITÉ : fail-close — policy supprimée = tout bloqué
@@ -580,6 +592,10 @@ class PolicyStore:
             PolicyStoreUnavailable si le store est indisponible (idem is_tool_allowed).
         """
         self._ensure_available()
+        # policy_id non-str : jamais une clé réelle, traité comme "introuvable"
+        # (fail-close) plutôt qu'un TypeError sur dict.get() (round 2 diff review).
+        if not isinstance(policy_id, str):
+            return False
         policy = self._policies.get(policy_id)
         if not policy:
             return False  # SÉCURITÉ V2-02 : fail-close cohérent avec is_tool_allowed()
