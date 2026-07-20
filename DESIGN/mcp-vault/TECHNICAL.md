@@ -227,6 +227,25 @@ d'autres tokens. La sémantique est désormais "vide = mes vaults".
 - `count()` → Nombre de tokens actifs
 - `purge_revoked(older_than_days=30, dry_run=False)` → Supprime définitivement les tokens **révoqués** depuis plus de N jours (rétention). Fail-close si `revoked_at` absent/corrompu/sans fuseau ; rollback si `_save()` échoue ; `dry_run` retourne les candidats sans rien supprimer. N'affecte jamais un token actif ni un token expiré non révoqué. *(v0.7.0)*
 
+**Validation stricte partagée (issue #86, extension Lot 3)** : `create()`, `update()` et
+`load()` valident désormais `permissions`/`allowed_resources` via les MÊMES helpers
+(`_validate_permissions`/`_validate_allowed_resources`), jamais une resaisie locale
+divergente. Corrige un bug d'élévation de privilège : `update()` validait `permissions`
+par simple itération (`all(isinstance(p,str) and p in VALID_PERMISSIONS for p in
+permissions)`) SANS vérifier que c'était une liste — un `dict` `{"admin": true}` itéré
+donne ses CLÉS (`"admin"`, une chaîne valide), passait donc la validation et était stocké
+tel quel ; au moment de la décision (`context.py`, `"admin" in permissions`), tester
+l'appartenance d'une clé de dict retournait `True` → le token devenait admin total. Même
+bypass via un `tokens.json` corrompu chargé avec `permissions: "admin"` (string → test de
+sous-chaîne). `load()` valide désormais chaque token (tout-ou-rien, cohérent avec
+`PolicyStore.load()`), avec état observable `available`/`last_error`.
+
+⚠️ **LIMITE EXPLICITE** : `available`/`last_error` sont **diagnostiques seulement** dans ce
+lot — `get_by_hash()` ne les consulte pas. Une panne S3 détectée après TTL continue de
+servir le cache bearer périmé (y compris après une révocation distante). Un fail-close
+complet de l'authentification bearer (comme `PolicyStore`/`MissionBindingStore`) reste un
+chantier séparé, à impact opérationnel plus large (deny-all bearer pendant une panne S3).
+
 ### 3.7 `vault/types.py` — Types de secrets
 
 **14 types** avec validation des champs requis :
@@ -402,6 +421,28 @@ Même pattern que `token_store.py` : singleton + cache mémoire TTL 5 min + stoc
 - `policy_id` : alphanum + tirets + underscores, max 64 chars
 - `path_rules` : chaque règle doit avoir `vault_pattern`, permissions ∈ {read, write, admin}
 - Doublon interdit (policy_id unique)
+- `_validate_and_normalize_policy()` (interne) : validation stricte partagée par `load()`
+  (chaque policy du blob S3) et `create()` — champs `allowed_tools`/`denied_tools`/`path_rules`
+  OBLIGATOIREMENT présents, `vault_pattern` non vide, `permissions` normalisée à `["read"]`
+  si absente (JAMAIS un défaut admin/write). Une seule policy non conforme invalide TOUT le
+  chargement (tout-ou-rien, jamais un chargement partiel).
+
+**Fail-close sur panne/corruption S3 détectée après TTL** *(issue #86 Lot 3, finding 3)* :
+même pattern `available`/`last_error` que `MissionBindingStore` (§3.12b). `_ensure_available()`
+lève `PolicyStoreUnavailable` (jamais un fail-open silencieux sur cache périmé) — consommée par
+`get()`, `list_all()`, `get_vault_permissions()`, `is_tool_allowed()`, `is_path_allowed()`.
+`create()`/`delete()` retournent `{"status":"error","error_type":"policy_store_unavailable"}` /
+`"policy_store_unavailable"` (refus AVANT toute écriture si déjà indisponible). Retry accéléré
+10s (borné par processus) si invalide, TTL normal 300s sinon. Côté admin REST, un helper
+centralisé (`_policy_error_response`) mappe `error_type=="policy_store_unavailable"` en HTTP 503
+sur les ~18 sites `check_policy()`/`check_path_policy()`, distinct d'un refus de policy ordinaire
+(403).
+
+⚠️ **LIMITATION HORS SCOPE (non fermée par ce lot)** : ce mécanisme ferme le sous-cas
+« panne/corruption détectée », PAS la race d'écriture multi-instance générale (deux instances
+qui écrivent concurremment SANS aucune panne — last-write-wins structurel sur le fichier unique
+partagé `_system/policies.json`, cf. #13/#51, nécessite un vrai CAS/ETag S3). `TokenStore`
+partage la même limitation non traitée (résidu tracé séparément).
 
 ### 3.12b `auth/mission_bindings.py` — Mission Binding Store S3 *(#69, v0.8.0)*
 

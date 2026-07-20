@@ -37,6 +37,21 @@ def _query_param(scope, name: str, default: str = "") -> str:
     return values[0] if values else default
 
 
+async def _policy_error_response(send, err: dict):
+    """
+    Traduit un refus de check_policy()/check_path_policy() en réponse HTTP.
+
+    issue #86 Lot 3 : distingue un refus de policy ORDINAIRE (403, l'identité
+    n'a pas le droit) d'un refus dû à l'indisponibilité du PolicyStore (503,
+    error_type="policy_store_unavailable" — panne/corruption S3 détectée après
+    TTL). Centralisé : les ~18 sites REST qui consomment check_policy()/
+    check_path_policy() passent tous par ce même helper, pour un mapping
+    homogène (pas un traitement ad hoc par site).
+    """
+    status = 503 if err.get("error_type") == "policy_store_unavailable" else 403
+    return await _json_response(send, status, err)
+
+
 async def handle_admin_api(scope, receive, send, mcp):
     """Routeur principal de l'API admin."""
     path = scope.get("path", "")
@@ -112,7 +127,7 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
     if path == "/admin/api/vaults" and method == "GET":
         policy_err = check_policy("vault_list")
         if policy_err:
-            return await _json_response(send, 403, policy_err)
+            return await _policy_error_response(send, policy_err)
         if is_admin:
             return await _api_list_vaults(send)
         elif allowed_vaults:
@@ -132,7 +147,7 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
             return await _json_response(send, 403, {"status": "error", "message": "Permission write requise"})
         policy_err = check_policy("vault_create")
         if policy_err:
-            return await _json_response(send, 403, policy_err)
+            return await _policy_error_response(send, policy_err)
         body = await _read_body(receive)
         return await _api_create_vault(send, body, token_info)
 
@@ -146,14 +161,14 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
             if method == "GET":
                 policy_err = check_policy("vault_info")
                 if policy_err:
-                    return await _json_response(send, 403, policy_err)
+                    return await _policy_error_response(send, policy_err)
                 return await _api_vault_detail(send, vault_id)
             if method == "PUT":
                 if not can_write:
                     return await _json_response(send, 403, {"status": "error", "message": "Permission write requise"})
                 policy_err = check_policy("vault_update")
                 if policy_err:
-                    return await _json_response(send, 403, policy_err)
+                    return await _policy_error_response(send, policy_err)
                 body = await _read_body(receive)
                 return await _api_update_vault(send, vault_id, body)
             if method == "DELETE":
@@ -161,7 +176,7 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
                     return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
                 policy_err = check_policy("vault_delete")
                 if policy_err:
-                    return await _json_response(send, 403, policy_err)
+                    return await _policy_error_response(send, policy_err)
                 return await _api_delete_vault(send, vault_id)
 
     # --- Routes SSH CA (write = setup/sign, read = ca-key/roles/role-info) ---
@@ -180,7 +195,7 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
                 return await _json_response(send, 403, {"status": "error", "message": "Permission write requise"})
             policy_err = check_policy("ssh_ca_setup")
             if policy_err:
-                return await _json_response(send, 403, policy_err)
+                return await _policy_error_response(send, policy_err)
             body = await _read_body(receive)
             return await _api_ssh_setup(send, vault_id, body)
 
@@ -189,20 +204,20 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
                 return await _json_response(send, 403, {"status": "error", "message": "Permission write requise"})
             policy_err = check_policy("ssh_sign_key")
             if policy_err:
-                return await _json_response(send, 403, policy_err)
+                return await _policy_error_response(send, policy_err)
             body = await _read_body(receive)
             return await _api_ssh_sign(send, vault_id, body)
 
         if method == "GET" and ssh_path == "ca-key":
             policy_err = check_policy("ssh_ca_public_key")
             if policy_err:
-                return await _json_response(send, 403, policy_err)
+                return await _policy_error_response(send, policy_err)
             return await _api_ssh_ca_key(send, vault_id)
 
         if method == "GET" and ssh_path == "roles":
             policy_err = check_policy("ssh_ca_list_roles")
             if policy_err:
-                return await _json_response(send, 403, policy_err)
+                return await _policy_error_response(send, policy_err)
             return await _api_ssh_roles(send, vault_id)
 
         if method == "GET" and ssh_path.startswith("roles/"):
@@ -210,7 +225,7 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
             if role_name:
                 policy_err = check_policy("ssh_ca_role_info")
                 if policy_err:
-                    return await _json_response(send, 403, policy_err)
+                    return await _policy_error_response(send, policy_err)
                 return await _api_ssh_role_info(send, vault_id, role_name)
 
     # --- Routes secrets (read = list/get, write = create, admin = delete) ---
@@ -240,7 +255,7 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
             # autorisé sur vault_info mais interdit sur secret_list.
             policy_err = check_policy("secret_list")
             if policy_err:
-                return await _json_response(send, 403, policy_err)
+                return await _policy_error_response(send, policy_err)
             # SÉCURITÉ #81 : canonicaliser le préfixe AVANT le contrôle de policy,
             # pour que le PDP (check_path_policy) et l'appel OpenBao portent sur la
             # MÊME valeur canonique. Sinon `?prefix=%2F` (→ "/") est autorisé par une
@@ -252,22 +267,22 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
                         {"status": "error", "message": "Préfixe de listing invalide"})
             path_err = check_path_policy(vault_id, prefix, "read")
             if path_err:
-                return await _json_response(send, 403, path_err)
+                return await _policy_error_response(send, path_err)
             return await _api_list_secrets(send, vault_id, prefix)
         if method == "GET" and secret_path:
             policy_err = check_policy("secret_read")
             if policy_err:
-                return await _json_response(send, 403, policy_err)
+                return await _policy_error_response(send, policy_err)
             path_err = check_path_policy(vault_id, secret_path, "read")
             if path_err:
-                return await _json_response(send, 403, path_err)
+                return await _policy_error_response(send, path_err)
             return await _api_read_secret(send, vault_id, secret_path)
         if method == "POST":
             if not can_write:
                 return await _json_response(send, 403, {"status": "error", "message": "Permission write requise"})
             policy_err = check_policy("secret_write")
             if policy_err:
-                return await _json_response(send, 403, policy_err)
+                return await _policy_error_response(send, policy_err)
             body = await _read_body(receive)
             try:
                 data = json.loads(body) if body else {}
@@ -275,17 +290,17 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
                 return await _json_response(send, 400, {"status": "error", "message": "JSON invalide"})
             path_err = check_path_policy(vault_id, data.get("path", "").strip(), "write")
             if path_err:
-                return await _json_response(send, 403, path_err)
+                return await _policy_error_response(send, path_err)
             return await _api_write_secret(send, vault_id, body)
         if method == "DELETE" and secret_path:
             if not can_write:
                 return await _json_response(send, 403, {"status": "error", "message": "Permission write requise"})
             policy_err = check_policy("secret_delete")
             if policy_err:
-                return await _json_response(send, 403, policy_err)
+                return await _policy_error_response(send, policy_err)
             path_err = check_path_policy(vault_id, secret_path, "write")
             if path_err:
-                return await _json_response(send, 403, path_err)
+                return await _policy_error_response(send, path_err)
             return await _api_delete_secret(send, vault_id, secret_path)
 
     # --- Routes policies (admin only) ---
@@ -474,6 +489,10 @@ async def _api_create_token(send, body):
         data = json.loads(body) if body else {}
     except (json.JSONDecodeError, ValueError):
         return await _json_response(send, 400, {"status": "error", "message": "JSON invalide"})
+    # issue #86 Lot 3 (round 3 diff review) : un JSON valide mais non-objet
+    # (ex. `[]`) lèverait AttributeError sur data.get() sans ce garde.
+    if not isinstance(data, dict):
+        return await _json_response(send, 400, {"status": "error", "message": "JSON invalide (objet attendu)"})
 
     client_name = data.get("client_name", "")
     permissions = data.get("permissions", ["read"])
@@ -498,11 +517,31 @@ async def _api_create_token(send, body):
     if exp_err:
         return await _json_response(send, 400, {"status": "error", "message": exp_err})
 
-    # Valider que la policy existe (cohérent avec l'outil MCP token_update)
+    # Valider que la policy existe (cohérent avec l'outil MCP token_update).
+    # issue #86 Lot 3 (round 2 diff review) : un policy_id de type invalide (ex.
+    # `false`) est FALSY comme une chaîne vide — sans cette garde de type, le bloc
+    # entier serait sauté et un token serait créé avec policy_id=False stocké tel
+    # quel, jamais vérifié, alors qu'une valeur (même malformée) avait été fournie.
+    if policy_id is not None and not isinstance(policy_id, str):
+        return await _json_response(send, 400, {"status": "error",
+                "message": "policy_id doit être une chaîne"})
+    # issue #86 Lot 3 : un policy_id fourni DOIT être vérifiable — store absent OU
+    # indisponible = référence NON vérifiable → refus explicite (bug historique
+    # corrigé : `if pstore and ...` acceptait silencieusement tout policy_id
+    # quand pstore était None).
     if policy_id:
-        from ..auth.policies import get_policy_store
+        from ..auth.policies import get_policy_store, PolicyStoreUnavailable
         pstore = get_policy_store()
-        if pstore and not pstore.get(policy_id):
+        if not pstore:
+            return await _json_response(send, 400, {"status": "error",
+                    "message": "Policy Store non configuré — policy_id ne peut être vérifié"})
+        try:
+            policy_found = pstore.get(policy_id)
+        except PolicyStoreUnavailable as e:
+            return await _json_response(send, 503, {"status": "error",
+                    "error_type": "policy_store_unavailable",
+                    "message": f"Policy Store indisponible — policy_id ne peut être vérifié ({e})"})
+        if not policy_found:
             return await _json_response(send, 400, {"status": "error", "message": f"Policy '{policy_id}' non trouvée"})
 
     result = store.create(client_name, permissions, allowed_resources,
@@ -524,18 +563,39 @@ async def _api_update_token(send, hash_prefix, body):
     if not store:
         return await _json_response(send, 400, {"status": "error", "message": "S3 non configuré"})
 
-    data = json.loads(body) if body else {}
+    try:
+        data = json.loads(body) if body else {}
+    except (json.JSONDecodeError, ValueError):
+        return await _json_response(send, 400, {"status": "error", "message": "JSON invalide"})
+    if not isinstance(data, dict):
+        return await _json_response(send, 400, {"status": "error", "message": "JSON invalide (objet attendu)"})
 
     # Préparer les champs (None = pas de changement)
     policy_id = data.get("policy_id")  # None si absent
     permissions = data.get("permissions")  # None si absent
     allowed_resources = data.get("allowed_resources")  # None si absent
 
-    # Valider que la policy existe si fournie et non vide (cohérent avec l'outil MCP)
+    # Valider que la policy existe si fournie et non vide (cohérent avec l'outil MCP).
+    # issue #86 Lot 3 (round 2 diff review) : garde de type AVANT le test falsy —
+    # même raison que _api_create_token (policy_id=false sauterait sinon la
+    # vérification silencieusement).
+    if policy_id is not None and not isinstance(policy_id, str):
+        return await _json_response(send, 400, {"status": "error",
+                "message": "policy_id doit être une chaîne"})
+    # issue #86 Lot 3 : même correction que _api_create_token (fail-close explicite).
     if policy_id and policy_id != "_remove":
-        from ..auth.policies import get_policy_store
+        from ..auth.policies import get_policy_store, PolicyStoreUnavailable
         pstore = get_policy_store()
-        if pstore and not pstore.get(policy_id):
+        if not pstore:
+            return await _json_response(send, 400, {"status": "error",
+                    "message": "Policy Store non configuré — policy_id ne peut être vérifié"})
+        try:
+            policy_found = pstore.get(policy_id)
+        except PolicyStoreUnavailable as e:
+            return await _json_response(send, 503, {"status": "error",
+                    "error_type": "policy_store_unavailable",
+                    "message": f"Policy Store indisponible — policy_id ne peut être vérifié ({e})"})
+        if not policy_found:
             return await _json_response(send, 400, {"status": "error", "message": f"Policy '{policy_id}' non trouvée"})
 
     result = store.update(
@@ -875,11 +935,15 @@ async def _api_audit(send, scope):
 
 async def _api_list_policies(send):
     """GET /admin/api/policies — Liste des policies."""
-    from ..auth.policies import get_policy_store
+    from ..auth.policies import get_policy_store, PolicyStoreUnavailable
     store = get_policy_store()
     if not store:
         return await _json_response(send, 200, {"status": "ok", "policies": [], "message": "S3 non configuré"})
-    policies = store.list_all()
+    try:
+        policies = store.list_all()
+    except PolicyStoreUnavailable as e:
+        return await _json_response(send, 503, {"status": "error", "error_type": "policy_store_unavailable",
+                "message": f"Policy Store indisponible ({e})"})
     await _json_response(send, 200, {"status": "ok", "policies": policies, "count": len(policies)})
 
 
@@ -891,8 +955,20 @@ async def _api_create_policy(send, body):
     if not store:
         return await _json_response(send, 400, {"status": "error", "message": "S3 non configuré"})
 
-    data = json.loads(body) if body else {}
-    policy_id = data.get("policy_id", "").strip()
+    # issue #86 Lot 3 (round 2 diff review) : JSON invalide, top-level non-objet,
+    # et policy_id non-str (crash `.strip()`) laissaient remonter une exception
+    # brute (500) au lieu d'un refus propre (400).
+    try:
+        data = json.loads(body) if body else {}
+    except (json.JSONDecodeError, ValueError):
+        return await _json_response(send, 400, {"status": "error", "message": "JSON invalide"})
+    if not isinstance(data, dict):
+        return await _json_response(send, 400, {"status": "error", "message": "JSON invalide (objet attendu)"})
+
+    policy_id = data.get("policy_id", "")
+    if not isinstance(policy_id, str):
+        return await _json_response(send, 400, {"status": "error", "message": "policy_id doit être une chaîne"})
+    policy_id = policy_id.strip()
     if not policy_id:
         return await _json_response(send, 400, {"status": "error", "message": "policy_id requis"})
 
@@ -907,7 +983,7 @@ async def _api_create_policy(send, body):
     if result.get("status") == "created":
         status_code = 201
         log_audit("policy_create", "created", detail=f"policy={policy_id}")
-    elif result.get("error_type") == "storage_unavailable":
+    elif result.get("error_type") == "policy_store_unavailable":
         status_code = 503
     else:
         status_code = 400
@@ -916,12 +992,16 @@ async def _api_create_policy(send, body):
 
 async def _api_get_policy(send, policy_id):
     """GET /admin/api/policies/{policy_id} — Détail d'une policy."""
-    from ..auth.policies import get_policy_store
+    from ..auth.policies import get_policy_store, PolicyStoreUnavailable
     store = get_policy_store()
     if not store:
         return await _json_response(send, 400, {"status": "error", "message": "S3 non configuré"})
 
-    policy = store.get(policy_id)
+    try:
+        policy = store.get(policy_id)
+    except PolicyStoreUnavailable as e:
+        return await _json_response(send, 503, {"status": "error", "error_type": "policy_store_unavailable",
+                "message": f"Policy Store indisponible ({e})"})
     if not policy:
         return await _json_response(send, 404, {"status": "error", "message": f"Policy '{policy_id}' non trouvée"})
 
@@ -939,9 +1019,10 @@ async def _api_delete_policy(send, policy_id):
     if result is True:
         log_audit("policy_delete", "deleted", detail=f"policy={policy_id}")
         await _json_response(send, 200, {"status": "deleted", "policy_id": policy_id})
-    elif result == "storage_error":
-        log_audit("policy_delete", "error", detail=f"policy={policy_id} NON PERSISTÉE (S3 indisponible)")
-        await _json_response(send, 503, {"status": "error", "message": "Suppression non persistée (S3 indisponible)"})
+    elif result in ("storage_error", "policy_store_unavailable"):
+        log_audit("policy_delete", "error", detail=f"policy={policy_id} NON PERSISTÉE (Policy Store indisponible)")
+        await _json_response(send, 503, {"status": "error", "error_type": "policy_store_unavailable",
+                "message": "Suppression non persistée (Policy Store indisponible)"})
     else:
         await _json_response(send, 404, {"status": "error", "message": f"Policy '{policy_id}' non trouvée"})
 
@@ -991,13 +1072,19 @@ async def _api_create_mission_binding(send, body):
         data = json.loads(body) if body else {}
     except (json.JSONDecodeError, ValueError):
         return await _json_response(send, 400, {"status": "error", "message": "JSON invalide"})
+    if not isinstance(data, dict):
+        return await _json_response(send, 400, {"status": "error", "message": "JSON invalide (objet attendu)"})
 
-    # tenant_id passé tel quel : le store valide le format (non-str compris) et refuse proprement.
+    # tenant_id/policy_id passés TELS QUELS : le store valide le format (non-str
+    # compris) et refuse proprement. issue #86 Lot 3 (round 2 diff review) :
+    # l'ancien `data.get("policy_id", "") or ""` blanchissait silencieusement
+    # toute valeur falsy (ex. `false`) en "" — un binding SANS policy était créé
+    # alors qu'une référence (même malformée) avait été fournie.
     result = store.create(
         tenant_id=data.get("tenant_id", ""),
         allowed_resources=data.get("allowed_resources", []),
         permissions=data.get("permissions", []),
-        policy_id=data.get("policy_id", "") or "",
+        policy_id=data.get("policy_id", ""),
         expires_at=data.get("expires_at"),
         # enabled : passé brut (défaut True si absent) — le store exige un booléen STRICT et
         # renvoie 400 si non-bool. Ne PAS coercer ici (bool("false") == True).
@@ -1012,7 +1099,9 @@ async def _api_create_mission_binding(send, body):
                          f"permissions={','.join(result.get('permissions', []))} "
                          f"policy_id={result.get('policy_id', '')}")
         return await _json_response(send, 201, result)
-    if result.get("error_type") == "storage_unavailable":
+    if result.get("error_type") in ("storage_unavailable", "policy_store_unavailable"):
+        # issue #86 Lot 3 : policy_store_unavailable ajouté — le PolicyStore référencé
+        # par policy_id peut désormais être indisponible (panne/corruption détectée).
         return await _json_response(send, 503, result)
     return await _json_response(send, 400, result)
 

@@ -875,12 +875,15 @@ async def policy_create(policy_id: str, description: str = "",
     if not store:
         return {"status": "error", "message": "Policy Store non configuré (S3 requis)"}
 
+    # `is None` STRICT (round 1 diff review #86 Lot 3) — jamais `x or []` : une
+    # valeur falsy invalide (ex. False au lieu d'une liste) doit REMONTER jusqu'au
+    # validateur du store (qui la rejette), pas être blanchie en [] avant.
     result = store.create(
         policy_id=policy_id,
         description=description,
-        allowed_tools=allowed_tools or [],
-        denied_tools=denied_tools or [],
-        path_rules=path_rules or [],
+        allowed_tools=[] if allowed_tools is None else allowed_tools,
+        denied_tools=[] if denied_tools is None else denied_tools,
+        path_rules=[] if path_rules is None else path_rules,
         created_by=get_current_client_name(),
     )
     return _r("policy_create", result, detail=f"policy={policy_id}")
@@ -895,7 +898,7 @@ async def policy_list() -> dict:
     Requiert la permission admin.
     """
     from .auth.context import check_admin_permission
-    from .auth.policies import get_policy_store
+    from .auth.policies import get_policy_store, PolicyStoreUnavailable
 
     admin_err = check_admin_permission()
     if admin_err:
@@ -905,7 +908,11 @@ async def policy_list() -> dict:
     if not store:
         return {"status": "error", "message": "Policy Store non configuré (S3 requis)"}
 
-    policies = store.list_all()
+    try:
+        policies = store.list_all()
+    except PolicyStoreUnavailable as e:
+        return {"status": "error", "error_type": "policy_store_unavailable",
+                "message": f"Policy Store indisponible ({e})"}
     return {"status": "ok", "policies": policies, "count": len(policies)}
 
 
@@ -921,7 +928,7 @@ async def policy_get(policy_id: str) -> dict:
         policy_id: Identifiant de la policy
     """
     from .auth.context import check_admin_permission
-    from .auth.policies import get_policy_store
+    from .auth.policies import get_policy_store, PolicyStoreUnavailable
 
     admin_err = check_admin_permission()
     if admin_err:
@@ -931,7 +938,11 @@ async def policy_get(policy_id: str) -> dict:
     if not store:
         return {"status": "error", "message": "Policy Store non configuré (S3 requis)"}
 
-    policy = store.get(policy_id)
+    try:
+        policy = store.get(policy_id)
+    except PolicyStoreUnavailable as e:
+        return {"status": "error", "error_type": "policy_store_unavailable",
+                "message": f"Policy Store indisponible ({e})"}
     if not policy:
         return {"status": "error", "message": f"Policy '{policy_id}' non trouvée"}
 
@@ -943,7 +954,9 @@ async def policy_delete(policy_id: str, confirm: bool = False) -> dict:
     """
     Supprime une policy MCP (irréversible).
 
-    ⚠️ Les tokens qui référencent cette policy perdront leur restriction.
+    ⚠️ Les tokens qui référencent cette policy seront BLOQUÉS sur tout outil
+    soumis à policy (fail-close, cf. is_tool_allowed()) — ils ne deviennent
+    PAS non-restreints. Réassigner une autre policy si un accès doit persister.
     Le paramètre confirm doit être True pour confirmer.
 
     Args:
@@ -968,12 +981,14 @@ async def policy_delete(policy_id: str, confirm: bool = False) -> dict:
     if result is True:
         return _r("policy_delete", {"status": "deleted", "policy_id": policy_id},
                   detail=f"policy={policy_id}")
-    elif result == "storage_error":
-        # Suppression non persistée = la policy reste active → événement critique à tracer
+    elif result in ("storage_error", "policy_store_unavailable"):
+        # Suppression non persistée = la policy reste active → événement critique à tracer.
+        # issue #86 Lot 3 : les deux sentinelles (échec PUT pendant l'écriture, ou store
+        # déjà connu indisponible) sont unifiées côté client sous le même contrat d'erreur.
         return _r("policy_delete",
-                  {"status": "error", "error_type": "storage_unavailable",
-                   "message": "Suppression non persistée (S3 indisponible)"},
-                  detail=f"policy={policy_id} NON PERSISTÉE (S3 indisponible)")
+                  {"status": "error", "error_type": "policy_store_unavailable",
+                   "message": "Suppression non persistée (Policy Store indisponible)"},
+                  detail=f"policy={policy_id} NON PERSISTÉE (Policy Store indisponible)")
     else:
         return {"status": "error", "message": f"Policy '{policy_id}' non trouvée"}
 
@@ -1320,14 +1335,30 @@ async def token_update(hash_prefix: str, policy_id: str = "",
     new_perms = None
     new_resources = None
 
+    # issue #86 Lot 3 (round 2 diff review) : garde de type AVANT le test falsy —
+    # défense en profondeur si un appelant contourne le typage de signature.
+    if policy_id is not None and not isinstance(policy_id, str):
+        return {"status": "error", "message": "policy_id doit être une chaîne"}
+
     if policy_id:
         if policy_id == "_remove":
             new_policy = ""  # Retirer la policy
         else:
-            # Vérifier que la policy existe
-            from .auth.policies import get_policy_store
+            # Vérifier que la policy existe.
+            # issue #86 Lot 3 : référence non vérifiable (store absent OU indisponible)
+            # → refus explicite (bug historique corrigé : `if pstore and ...` acceptait
+            # silencieusement tout policy_id quand pstore était None).
+            from .auth.policies import get_policy_store, PolicyStoreUnavailable
             pstore = get_policy_store()
-            if pstore and not pstore.get(policy_id):
+            if not pstore:
+                return {"status": "error",
+                        "message": "Policy Store non configuré — policy_id ne peut être vérifié"}
+            try:
+                policy_found = pstore.get(policy_id)
+            except PolicyStoreUnavailable as e:
+                return {"status": "error", "error_type": "policy_store_unavailable",
+                        "message": f"Policy Store indisponible — policy_id ne peut être vérifié ({e})"}
+            if not policy_found:
                 return {"status": "error", "message": f"Policy '{policy_id}' non trouvée"}
             new_policy = policy_id
 

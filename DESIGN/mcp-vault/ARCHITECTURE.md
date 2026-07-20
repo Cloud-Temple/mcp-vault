@@ -856,6 +856,13 @@ les rôles SSH) sans pouvoir modifier quoi que ce soit.
 └──────────────────────────────────────────────────────────────┘
 ```
 
+**Fail-close sur panne/corruption S3 détectée après TTL** *(issue #86 Lot 3)* : même état
+observable `available`/`last_error` que le MissionBindingStore (§2.3 ci-dessus) — après TTL,
+une indisponibilité ou corruption détectée ne sert plus une policy périmée ; le PEP refuse de
+manière observable (`PolicyStoreUnavailable` → dict d'erreur MCP structuré / HTTP 503 REST),
+jamais un fail-open silencieux. Ferme UNIQUEMENT ce sous-cas — pas la race d'écriture
+multi-instance générale (#51/#13, hors scope, cf. §3.12 TECHNICAL.md).
+
 ### 6.5 Tokens MCP
 
 | Outil                                                                        | Perm  | Description                |
@@ -1557,6 +1564,16 @@ vault_ids) dans un `contextvars.ContextVar`. Chaque outil MCP appelle ensuite
 (`_system/tokens.json`). Au démarrage, `init_token_store()` charge tous les tokens.
 Un cache mémoire avec TTL de 5 minutes évite de relire S3 à chaque requête.
 Les opérations admin (create/revoke) invalident le cache immédiatement.
+
+**Validation stricte `permissions`/`allowed_resources`** *(issue #86)* :
+`create()`, `update()` et `load()` partagent la même validation — jamais permissive
+par défaut. Corrige une élévation de privilège : un `dict`/une chaîne malformés
+(ex. `{"admin": true}`) pouvaient auparavant passer une validation par simple
+itération et rendre un token admin total. `load()` est atomique (tout-ou-rien) :
+un seul token non conforme invalide tout le chargement, cache précédent conservé.
+⚠️ Limite assumée : `available`/`last_error` sont diagnostiques dans cette version —
+l'authentification bearer continue de servir le cache après une panne S3 détectée
+(pas de fail-close complet, contrairement à `PolicyStore`/`MissionBindingStore`).
 
 **CORS preflight** — L'AdminMiddleware gère les requêtes OPTIONS pour permettre
 les appels AJAX cross-origin depuis la console admin SPA. Les headers
