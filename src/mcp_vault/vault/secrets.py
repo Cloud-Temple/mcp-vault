@@ -10,6 +10,8 @@ import logging
 import re
 from typing import Optional
 
+import hvac
+
 from ..openbao.manager import get_hvac_client
 from .spaces import VAULT_META_PATH
 from .types import validate_secret, enrich_secret_data, list_types, generate_password, SECRET_TYPES
@@ -26,6 +28,19 @@ RESERVED_PATHS = {VAULT_META_PATH}
 # (anti-traversal), '\', caractères de contrôle et séparateurs exotiques.
 _MAX_PATH_LEN = 256
 _SEGMENT_PATTERN = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9_.\-]*')
+_CAS_CONFLICT_FRAGMENT = "check-and-set parameter did not match"
+
+
+def _is_cas_conflict(error: hvac.exceptions.InvalidRequest) -> bool:
+    """Reconnaît uniquement le conflit CAS KV v2, jamais un 400 générique."""
+    raw_errors = error.errors or []
+    candidates = list(raw_errors) if isinstance(raw_errors, (list, tuple)) else [raw_errors]
+    candidates.extend(item for item in error.args if isinstance(item, str))
+    return any(
+        _CAS_CONFLICT_FRAGMENT in candidate.lower()
+        for candidate in candidates
+        if isinstance(candidate, str)
+    )
 
 
 def _validate_secret_path(path: str) -> Optional[dict]:
@@ -90,7 +105,8 @@ def _is_reserved_path(path: str) -> bool:
 
 async def write_secret(vault_id: str, path: str, data: dict,
                        secret_type: str = "custom", tags: str = "",
-                       favorite: bool = False) -> dict:
+                       favorite: bool = False,
+                       create_only: bool = False) -> dict:
     """
     Écrit ou met à jour un secret typé.
 
@@ -101,6 +117,7 @@ async def write_secret(vault_id: str, path: str, data: dict,
         secret_type: Type de secret (login, password, api_key, etc.)
         tags: Tags séparés par des virgules
         favorite: Marquer comme favori
+        create_only: Créer uniquement si le chemin n'existe pas (CAS 0)
     """
     # SÉCURITÉ V3-23 : validation du chemin
     path_err = _validate_secret_path(path)
@@ -118,7 +135,11 @@ async def write_secret(vault_id: str, path: str, data: dict,
 
     client = get_hvac_client()
     if not client:
-        return {"status": "error", "message": "OpenBao non connecté"}
+        return {
+            "status": "error",
+            "error_type": "backend",
+            "message": "OpenBao non connecté",
+        }
 
     # Enrichir les données avec type + métadonnées
     enriched = enrich_secret_data(secret_type, data)
@@ -128,10 +149,18 @@ async def write_secret(vault_id: str, path: str, data: dict,
         enriched["_favorite"] = "true"
 
     try:
+        write_options = {
+            "path": path,
+            "secret": enriched,
+            "mount_point": vault_id,
+        }
+        if create_only:
+            # OpenBao KV v2 garantit atomiquement que la version courante est
+            # absente. Un contrôle GET puis POST ne fournirait pas cette
+            # garantie (fenêtre TOCTOU entre les deux appels).
+            write_options["cas"] = 0
         response = client.secrets.kv.v2.create_or_update_secret(
-            path=path,
-            secret=enriched,
-            mount_point=vault_id,
+            **write_options,
         )
         version = response.get("data", {}).get("version", 0) if isinstance(response, dict) else 0
         icon = SECRET_TYPES.get(secret_type, {}).get("icon", "⚙️")
@@ -140,9 +169,28 @@ async def write_secret(vault_id: str, path: str, data: dict,
             "status": "ok", "vault_id": vault_id, "path": path,
             "type": secret_type, "version": version,
         }
-    except Exception as e:
-        logger.error(f"❌ Erreur écriture secret {vault_id}/{path}: {e}")
-        return {"status": "error", "message": str(e)}
+    except hvac.exceptions.InvalidRequest as exc:
+        if create_only and _is_cas_conflict(exc):
+            logger.info("Conflit create-only sur %s/%s", vault_id, path)
+            return {"status": "conflict", "message": "Secret déjà présent"}
+        logger.error("Erreur de requête OpenBao pendant l'écriture de %s/%s", vault_id, path)
+        return {
+            "status": "error",
+            "error_type": "backend",
+            "message": "Écriture OpenBao refusée",
+        }
+    except Exception as exc:
+        logger.error(
+            "Erreur backend pendant l'écriture de %s/%s; type=%s",
+            vault_id,
+            path,
+            type(exc).__name__,
+        )
+        return {
+            "status": "error",
+            "error_type": "backend",
+            "message": "Écriture OpenBao impossible",
+        }
 
 
 async def read_secret(vault_id: str, path: str, version: int = 0) -> dict:
@@ -158,7 +206,11 @@ async def read_secret(vault_id: str, path: str, version: int = 0) -> dict:
 
     client = get_hvac_client()
     if not client:
-        return {"status": "error", "message": "OpenBao non connecté"}
+        return {
+            "status": "error",
+            "error_type": "backend",
+            "message": "OpenBao non connecté",
+        }
 
     try:
         kwargs: dict = {"path": path, "mount_point": vault_id}
@@ -177,11 +229,52 @@ async def read_secret(vault_id: str, path: str, version: int = 0) -> dict:
             "version": metadata.get("version", 0),
             "created_time": metadata.get("created_time", ""),
         }
-    except Exception as e:
-        if "InvalidPath" in str(type(e).__name__) or "404" in str(e):
-            return {"status": "error", "message": f"Secret '{vault_id}/{path}' non trouvé"}
-        logger.error(f"❌ Erreur lecture secret {vault_id}/{path}: {e}")
-        return {"status": "error", "message": str(e)}
+    except hvac.exceptions.InvalidPath:
+        # InvalidPath signifie aussi « mount absent ». On ne publie 404 que si
+        # l'autorité OpenBao atteste que le mount KV v2 demandé existe encore.
+        # Toute erreur de cette contre-preuve reste ambiguë et fail-close.
+        try:
+            mounts_response = client.sys.list_mounted_secrets_engines()
+            mounts = mounts_response.get("data", mounts_response)
+            mount = mounts.get(f"{vault_id}/") if isinstance(mounts, dict) else None
+            mount_is_kv_v2 = (
+                isinstance(mount, dict)
+                and mount.get("type") == "kv"
+                and isinstance(mount.get("options"), dict)
+                and str(mount["options"].get("version")) == "2"
+            )
+        except Exception as exc:
+            logger.error(
+                "Contre-preuve du mount impossible pour %s; type=%s",
+                vault_id,
+                type(exc).__name__,
+            )
+            mount_is_kv_v2 = False
+        if not mount_is_kv_v2:
+            return {
+                "status": "error",
+                "error_type": "backend",
+                "message": "Lecture OpenBao impossible",
+            }
+        # Compatibilité du contrat MCP historique : une absence reste une
+        # erreur applicative, enrichie d'un type stable pour que REST puisse
+        # lui attribuer 404 sans confondre les autres erreurs.
+        return {"status": "error", "error_type": "not_found", "message": "Secret absent"}
+    except Exception as exc:
+        # Une panne ou un refus OpenBao n'est jamais une preuve d'absence. Le
+        # message reste constant afin de ne pas relayer un détail sensible de
+        # la réponse backend dans l'API ou les journaux opérateur.
+        logger.error(
+            "Erreur backend pendant la lecture de %s/%s; type=%s",
+            vault_id,
+            path,
+            type(exc).__name__,
+        )
+        return {
+            "status": "error",
+            "error_type": "backend",
+            "message": "Lecture OpenBao impossible",
+        }
 
 
 async def list_secrets(vault_id: str, path: str = "") -> dict:

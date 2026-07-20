@@ -288,7 +288,12 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
                 data = json.loads(body) if body else {}
             except (json.JSONDecodeError, ValueError):
                 return await _json_response(send, 400, {"status": "error", "message": "JSON invalide"})
-            path_err = check_path_policy(vault_id, data.get("path", "").strip(), "write")
+            if not isinstance(data, dict):
+                return await _json_response(send, 400, {"status": "error", "message": "JSON objet requis"})
+            raw_path = data.get("path", "")
+            if not isinstance(raw_path, str):
+                return await _json_response(send, 400, {"status": "error", "message": "path doit être une chaîne"})
+            path_err = check_path_policy(vault_id, raw_path.strip(), "write")
             if path_err:
                 return await _policy_error_response(send, path_err)
             return await _api_write_secret(send, vault_id, body)
@@ -743,24 +748,58 @@ async def _api_read_secret(send, vault_id, secret_path):
     """GET /admin/api/vaults/{vault_id}/secrets/{path} — Lire un secret."""
     from ..vault.secrets import read_secret
     result = await read_secret(vault_id, secret_path)
-    status = 200 if result.get("status") == "ok" else 404
+    if result.get("status") == "ok":
+        status = 200
+    elif result.get("status") == "error" and result.get("error_type") == "not_found":
+        status = 404
+    else:
+        # Fail-close : une panne OpenBao ou une réponse ambiguë ne doit jamais
+        # être présentée comme une absence exploitable par un migrateur.
+        status = 503
     await _json_response(send, status, result)
 
 
 async def _api_write_secret(send, vault_id, body):
     """POST /admin/api/vaults/{vault_id}/secrets — Écrire un secret."""
     from ..vault.secrets import write_secret
-    data = json.loads(body) if body else {}
-    path = data.get("path", "").strip()
+    try:
+        data = json.loads(body) if body else {}
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return await _json_response(send, 400, {"status": "error", "message": "JSON invalide"})
+    if not isinstance(data, dict):
+        return await _json_response(send, 400, {"status": "error", "message": "JSON objet requis"})
+    raw_path = data.get("path", "")
+    if not isinstance(raw_path, str):
+        return await _json_response(send, 400, {"status": "error", "message": "path doit être une chaîne"})
+    path = raw_path.strip()
     secret_data = data.get("data", {})
     secret_type = data.get("type", "custom")
     tags = data.get("tags", "")
+    create_only = data.get("create_only", False)
     if not path:
         return await _json_response(send, 400, {"status": "error", "message": "path requis"})
-    if not secret_data:
+    if not isinstance(secret_data, dict) or not secret_data:
         return await _json_response(send, 400, {"status": "error", "message": "data requis"})
-    result = await write_secret(vault_id, path, secret_data, secret_type, tags)
-    status = 200 if result.get("status") == "ok" else 400
+    if not isinstance(secret_type, str) or not isinstance(tags, str):
+        return await _json_response(send, 400, {"status": "error", "message": "type ou tags invalide"})
+    if not isinstance(create_only, bool):
+        return await _json_response(send, 400, {"status": "error", "message": "create_only doit être booléen"})
+    result = await write_secret(
+        vault_id,
+        path,
+        secret_data,
+        secret_type,
+        tags,
+        create_only=create_only,
+    )
+    if result.get("status") == "ok":
+        status = 200
+    elif result.get("status") == "conflict":
+        status = 409
+    elif result.get("status") == "error" and result.get("error_type") == "backend":
+        status = 503
+    else:
+        status = 400
     await _json_response(send, status, result)
 
 
@@ -1319,6 +1358,9 @@ def _get_token_info(token: str) -> dict | None:
                 "permissions": info.get("permissions", ["read"]),
                 "allowed_resources": info.get("allowed_resources", []),
                 "policy_id": info.get("policy_id", ""),
+                # Métadonnée non secrète nécessaire aux clients qui doivent
+                # attester qu'un token temporaire est réellement expirant.
+                "expires_at": info.get("expires_at"),
                 "auth_type": "token",
             }
     return None
