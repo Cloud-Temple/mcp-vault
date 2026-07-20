@@ -257,6 +257,17 @@ class TestLoad:
         store.load()
         assert store.available is False
 
+    def test_deeply_nested_json_marks_invalid_not_crash(self):
+        """BLOQUANT round diff review : un JSON profondément imbriqué (`[`×2000
+        `]`×2000) lève RecursionError, PAS ValueError — un except trop étroit
+        laisse cette exception non gérée remonter jusqu'à get_by_hash()/
+        l'authentification bearer au lieu de fail-close proprement."""
+        store = TokenStore(SimpleNamespace(s3_bucket_name="b"))
+        pathological = ("[" * 2000 + "]" * 2000).encode()
+        store._get_s3_data = MagicMock(return_value=_fake_s3(get_return=pathological))
+        store.load()  # ne doit lever AUCUNE exception
+        assert store.available is False
+
     def test_one_corrupted_token_invalidates_whole_load(self):
         """Tout-ou-rien : un token avec permissions="admin" invalide TOUT le
         chargement — jamais un token corrompu chargé, même partiellement."""

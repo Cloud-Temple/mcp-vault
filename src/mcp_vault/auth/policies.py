@@ -276,8 +276,13 @@ class PolicyStore:
 
         try:
             data = json.loads(raw)
-        except ValueError:
-            self._mark_invalid("JSON invalide")
+        except Exception as e:
+            # Cohérent avec le fix TokenStore (issue #86) : json.loads() peut
+            # lever bien plus qu'un ValueError sur une entrée pathologique
+            # (ex. RecursionError sur un JSON profondément imbriqué) — un
+            # except trop étroit laisserait cette exception non gérée
+            # remonter au lieu de fail-close.
+            self._mark_invalid(f"JSON invalide ({type(e).__name__})")
             return
 
         if not isinstance(data, dict) or not isinstance(data.get("policies"), list):

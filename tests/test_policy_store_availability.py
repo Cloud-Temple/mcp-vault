@@ -251,6 +251,16 @@ class TestLoad:
         store.load()
         assert store.available is False
 
+    def test_deeply_nested_json_marks_invalid_not_crash(self):
+        """Cohérent avec le fix TokenStore (issue #86) : un JSON profondément
+        imbriqué (`[`×2000 `]`×2000) lève RecursionError, PAS ValueError — un
+        except trop étroit laisserait cette exception non gérée remonter."""
+        store = PolicyStore(SimpleNamespace(s3_bucket_name="b"))
+        pathological = ("[" * 2000 + "]" * 2000).encode()
+        store._get_s3_data = MagicMock(return_value=_fake_s3(get_return=pathological))
+        store.load()  # ne doit lever AUCUNE exception
+        assert store.available is False
+
     def test_top_level_empty_object_is_invalid_not_empty_store(self):
         """Contre-exemple round 4 : {} ne doit PAS être traité comme store vide —
         seul NoSuchKey l'est."""

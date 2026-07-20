@@ -315,8 +315,13 @@ class TokenStore:
 
         try:
             data = json.loads(raw)
-        except ValueError:
-            self._mark_invalid("JSON invalide")
+        except Exception as e:
+            # round diff review : json.loads() peut lever bien plus qu'un
+            # ValueError sur une entrée pathologique (ex. RecursionError sur un
+            # JSON profondément imbriqué, `[`×2000 `]`×2000) — un except trop
+            # étroit laissait cette exception non gérée remonter jusqu'à
+            # get_by_hash()/l'authentification bearer au lieu de fail-close.
+            self._mark_invalid(f"JSON invalide ({type(e).__name__})")
             return
 
         if not isinstance(data, dict) or not isinstance(data.get("tokens"), list):
