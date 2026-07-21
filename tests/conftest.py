@@ -17,7 +17,7 @@ présent), rouges sinon (`ModuleNotFoundError: hvac`).
 On centralise ici un stub **déterministe** de `hvac`, installé AVANT toute collecte de test,
 quel que soit l'ordre. L'injection cachée de `test_pki.py` est retirée. Ce stub :
 - ne remplace **jamais** un vrai `hvac` (si installé — cas Docker — on l'utilise) ;
-- expose `exceptions.Forbidden` / `.InvalidRequest` comme de vraies classes d'exception
+- expose `exceptions.Forbidden` / `.InvalidRequest` / `.InvalidPath` comme de vraies classes d'exception
   (catchables par le code de production, contrairement à un attribut MagicMock).
 
 Ce n'est pas une fixture de complaisance : les tests unitaires ne doivent pas dépendre d'un
@@ -54,6 +54,7 @@ def _install_hvac_stub_if_absent():
     # `except hvac.exceptions.Forbidden`).
     stub.exceptions.Forbidden = type("Forbidden", (Exception,), {})
     stub.exceptions.InvalidRequest = type("InvalidRequest", (Exception,), {})
+    stub.exceptions.InvalidPath = type("InvalidPath", (Exception,), {})
 
     # FAIL-CLOSE (issue #64, reco red team). `hvac.Client(...)` LÈVE au lieu de renvoyer un
     # MagicMock complaisant : sinon un health_check()/check_vault_owner() non patché renverrait

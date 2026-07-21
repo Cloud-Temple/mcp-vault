@@ -458,10 +458,10 @@ mcp-vault/
 ├── Dockerfile                # Multi-stage (OpenBao 2.5.1 + Python 3.12)
 ├── requirements.txt          # Python dependencies
 ├── requirements.lock         # Pinned dependencies (exact versions)
-├── VERSION                   # 0.8.2
+├── VERSION                   # current service version
 ├── DESIGN/mcp-vault/
-│   ├── ARCHITECTURE.md       # Detailed specification (v0.8.2)
-│   ├── TECHNICAL.md          # Technical documentation (v0.8.2)
+│   ├── ARCHITECTURE.md       # Detailed specification (v0.8.5)
+│   ├── TECHNICAL.md          # Technical documentation (v0.8.5)
 │   └── SECURITY_AUDIT.md     # Consolidated audit report (60 V2.1 findings)
 ├── scripts/
 │   ├── mcp_cli.py            # CLI entry point
@@ -520,4 +520,4 @@ mcp-vault/
 
 ---
 
-**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.8.2
+**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.8.5

@@ -1,5 +1,19 @@
 # Changelog — MCP Vault
 
+## [0.8.5] — 2026-07-20
+
+### Migration de custody — écriture create-only atomique et erreurs REST fiables
+
+Prérequis de la migration des credentials Agentic Platform vers son Vault interne : le POST Admin historique effectuait un upsert. Un migrateur faisant d'abord un GET puis un POST pouvait donc écraser un secret créé dans l'intervalle ; de plus, toute erreur de lecture OpenBao était exposée comme un 404, impossible à distinguer d'une vraie absence.
+
+- **Création atomique opt-in** : `POST /admin/api/vaults/{id}/secrets` accepte `create_only: true`. MCP Vault transmet alors `cas=0` à OpenBao KV v2 ; une première création réussit et un chemin déjà présent retourne HTTP **409**, sans retry ni écrasement.
+- **Compatibilité préservée** : `create_only` vaut `false` par défaut. Les appels existants continuent d'effectuer l'upsert historique et aucun paramètre CAS ne leur est ajouté. Le contrat de l'outil MCP `secret_write` ne change pas.
+- **404 fiable et fail-close** : un `InvalidPath` n'est classé `not_found` que si le mount demandé est attesté comme KV v2. Mount absent, preuve impossible, refus ou panne backend retournent HTTP **503**, jamais un faux 404 exploitable par un migrateur.
+- **Validation stricte du POST** : JSON objet obligatoire ; `path`, `data`, `type`, `tags` et `create_only` sont typés avant tout appel OpenBao. Les erreurs backend d'écriture retournent également 503.
+- **Attestation du token source** : `GET /admin/api/whoami` expose désormais l'horodatage non secret `expires_at` des tokens S3. Un migrateur peut donc exiger un token read-only, limité à un coffre et réellement temporaire, sans disposer d'un droit admin de listing des tokens.
+- **Pas de fuite de diagnostic** : les réponses et logs n'exposent plus le message brut d'une exception OpenBao ; seuls le contexte non secret et le nom de classe sont journalisés.
+- **Tests** : 21 régressions ciblées couvrent CAS, conflit strict, upsert historique, 404/503, validation du payload, absence de fuite et exposition de l'expiration. Suite complète : 860 tests passés, 43 ignorés. Revue indépendante : GO pré-commit, aucun finding P0/P1.
+
 ## [0.8.4] — 2026-07-20
 
 ### Correction sécurité — masquage réel des secrets sensibles dans la console Admin

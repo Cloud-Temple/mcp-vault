@@ -1,6 +1,6 @@
 # Architecture — MCP Vault
 
-> **Version** : 0.8.2 | **Date** : 2026-07-17 | **Auteur** : Cloud Temple  
+> **Version** : 0.8.5 | **Date** : 2026-07-20 | **Auteur** : Cloud Temple
 > **Projet** : mcp-vault | **Licence** : Apache 2.0  
 > **Statut** : ✅ Implémenté — Production-ready (PKI interne v0.5.x + C18 v0.6.x)
 
@@ -288,6 +288,7 @@ AdminMiddleware (ASGI, derrière PkiMiddleware)
             ├── POST /admin/api/vaults          → créer un vault
             ├── GET  /admin/api/vaults/{id}/secrets[?prefix=] → lister un niveau (nav dossier, #81)
             ├── GET  /admin/api/vaults/{id}/secrets/{path}    → lire un secret (feuille)
+            ├── POST /admin/api/vaults/{id}/secrets           → upsert ; `create_only: true` impose KV v2 CAS=0 (#92)
             ├── GET  /admin/api/tokens          → lister les tokens S3
             ├── POST /admin/api/tokens          → créer un token
             ├── PUT  /admin/api/tokens/{name}   → modifier un token (policy / permissions / vaults)
@@ -2195,4 +2196,4 @@ result = await vault_client.call("ssh_sign_key", {
 
 ---
 
-*Document mis à jour le 17 juillet 2026 — MCP Vault v0.8.2 (37 outils MCP, pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer)*
+*Document mis à jour le 20 juillet 2026 — MCP Vault v0.8.5 (37 outils MCP, pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer)*
