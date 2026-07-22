@@ -51,10 +51,10 @@ docker compose exec mcp-vault python tests/test_e2e.py
 
 Au démarrage, MCP Vault :
 1. Charge les tokens depuis S3
-2. Restaure les données OpenBao (volume Docker ou S3)
+2. Restaure les données OpenBao (volume Docker en priorité ; sinon S3 — un échec S3 ambigu, ex. réseau, refuse le démarrage plutôt que d'initialiser un coffre vide par-dessus une sauvegarde distante valide)
 3. Démarre OpenBao, l'initialise (1ère fois) et le déverrouille
 4. **Clés unseal** : chiffrées (AES-256-GCM) sur S3, jamais en clair sur disque — uniquement en mémoire
-5. Active le sync S3 périodique (60s)
+5. Active le sync S3 périodique (60s, **conditionnel** : un PUT n'est effectué que si l'état a changé depuis le dernier upload réussi — cf. `s3_sync.py`)
 
 À l'arrêt (`docker compose stop`) :
 1. Scelle OpenBao 🔒
@@ -376,9 +376,10 @@ PkiMiddleware → AdminMiddleware → HealthCheckMiddleware → AuthMiddleware �
 
 ### Lifecycle OpenBao
 ```
-STARTUP:  S3 download → bao server → init/unseal → periodic sync
-RUNTIME:  secrets via hvac → sync S3 toutes les 60s
-SHUTDOWN: seal → S3 upload final → stop process
+STARTUP:  S3 download (3 états : restauré / absence confirmée / échec ambigu —
+          un échec ambigu refuse le démarrage) → bao server → init/unseal → periodic sync
+RUNTIME:  secrets via hvac → sync S3 toutes les 60s, SEULEMENT si l'état a changé
+SHUTDOWN: seal → S3 upload final (sauté si le démarrage n'a pas abouti, pour ne pas écraser une sauvegarde valide) → stop process
 CRASH:    Docker volume local → redémarrage immédiat
 ```
 
@@ -463,8 +464,8 @@ mcp-vault/
 ├── requirements.lock         # Dépendances pinnées (versions exactes)
 ├── VERSION                   # version courante du service
 ├── DESIGN/mcp-vault/
-│   ├── ARCHITECTURE.md       # Spécification détaillée (v0.8.5)
-│   ├── TECHNICAL.md          # Documentation technique (v0.8.5)
+│   ├── ARCHITECTURE.md       # Spécification détaillée (v0.8.6)
+│   ├── TECHNICAL.md          # Documentation technique (v0.8.6)
 │   └── SECURITY_AUDIT.md     # Rapport d'audit consolidé (60 findings V2.1)
 ├── scripts/
 │   ├── mcp_cli.py            # CLI entry point
@@ -521,4 +522,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.8.5
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.8.6

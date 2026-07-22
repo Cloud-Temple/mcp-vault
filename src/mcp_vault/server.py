@@ -1557,6 +1557,11 @@ def main():
         from .lifecycle import vault_startup, vault_shutdown
 
         # ── STARTUP ──────────────────────────────────────────
+        # `ok` initialisé à False AVANT le try : si vault_startup() lève avant
+        # de retourner (plutôt que de retourner False), le shutdown doit quand
+        # même traiter ça comme un démarrage non abouti (fail-closed) — jamais
+        # un upload final par défaut sur une variable non définie.
+        ok = False
         try:
             ok = await vault_startup()
             if not ok:
@@ -1572,8 +1577,13 @@ def main():
             logger.error(f"❌ Erreur serveur : {e}")
 
         # ── SHUTDOWN ─────────────────────────────────────────
+        # skip_upload=not ok : un démarrage non abouti (dont restauration S3
+        # ambiguë, durcissement 2026-07) ne doit jamais déclencher l'upload
+        # final inconditionnel — il écraserait sinon une sauvegarde distante
+        # potentiellement valide avec un état local incomplet/non initialisé
+        # (trouvé en revue de diff adversariale).
         try:
-            await vault_shutdown()
+            await vault_shutdown(skip_upload=not ok)
         except Exception as e:
             logger.error(f"❌ Erreur au shutdown : {e}")
 

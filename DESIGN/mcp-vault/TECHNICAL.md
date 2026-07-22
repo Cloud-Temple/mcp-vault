@@ -1,6 +1,6 @@
 # Documentation Technique — MCP Vault
 
-> **Version** : 0.8.5 | **Date** : 2026-07-20 | **Auteur** : Cloud Temple
+> **Version** : 0.8.6 | **Date** : 2026-07-22 | **Auteur** : Cloud Temple
 > **Licence** : Apache 2.0 | **Statut** : ✅ Production-ready (audit V2.1 complété + PKI interne v0.5.1)
 
 ---
@@ -158,13 +158,94 @@ Config(signature_version="s3v4", s3={"addressing_style": "path", "payload_signin
 **Lifecycle** :
 
 ```
-STARTUP:  download_from_s3() → décompresse tar.gz → /openbao/file/
-RUNTIME:  start_periodic_sync() → upload tar.gz toutes les 60s
-SHUTDOWN: upload_to_s3() → tar.gz final
+STARTUP:  download_from_s3() → extrait dans un STAGING interne à data_dir →
+          promotion par renommages individuels (marqueur durable posé AVANT
+          tout, retiré SEULEMENT après promotion intégrale) → /openbao/file/
+          Retour à 3 états (RestoreResult) : RESTORED / CONFIRMED_ABSENT / FAILED.
+          FAILED (erreur ambiguë : réseau, archive corrompue...) fait échouer
+          vault_startup() — jamais traité comme une première exécution.
+RUNTIME:  start_periodic_sync() → upload CONDITIONNEL (skip_if_unchanged=True),
+          toutes les vault_s3_sync_interval secondes (défaut 60s)
+SHUTDOWN: upload_to_s3() → tar.gz final, SAUF si le démarrage n'a pas abouti
+          (vault_shutdown(skip_upload=not ok) — cf. ci-dessous)
 CRASH:    Docker volume local conservé → fallback
 ```
 
 **Format de transport** : `_storage/openbao-data.tar.gz` sur S3.
+
+**Sync conditionnelle (fix incident versions S3, 2026-07)** : le bucket de
+production a le versioning S3 activé sans lifecycle — un PUT inconditionnel
+toutes les 60s produisait une version par cycle (6000+ versions, 600+ Mo en
+quelques jours), même sans écriture OpenBao entre deux cycles. Durci en 4
+passes de revue adversariale (1 plan + 3 diff, ces dernières exécutées dans un
+worktree jetable où le reviewer a lui-même lancé la suite et ses propres
+reproductions à chaque round) : 6 bloquants trouvés en revue de plan, 5
+bloquants supplémentaires trouvés en revue de diff (TOCTOU intra-entrée,
+restauration extraite hors de data_dir, promotion non transactionnelle, purge
+manquante sur absence confirmée consécutive à une promotion partielle — 3
+rounds distincts sur la restauration, fail-closed contourné par l'upload
+inconditionnel du shutdown) — tous corrigés ci-dessous.
+
+`_snapshot_and_archive()` construit l'archive tar.gz ET une empreinte SHA-256 de
+l'état source **dans la même passe**. Pour un fichier régulier, contenu ET
+métadonnées archivés viennent du MÊME descripteur ouvert (`open()`+`fstat(fd)`+
+`read()`), jamais d'un second stat par CHEMIN séparé — ferme la divergence
+trouvée en revue de diff (une version intermédiaire combinait `lstat()` +
+`tar.gettarinfo(chemin)` + `read_bytes()`, trois observations séparées capables
+de diverger si l'entité changeait de type entre elles ; résidu assumé et non
+exploitable avec l'usage réel du file backend OpenBao : la décision de
+branchement fichier/répertoire/symlink repose sur un seul `lstat()` initial).
+L'empreinte porte sur les chemins relatifs triés, le contenu (fichiers), le
+type et la cible (symlinks), la présence (répertoires) — PAS sur le tar.gz
+généré (mtime/permissions/métadonnées gzip varient sans changement métier).
+
+`upload_to_s3(skip_if_unchanged: bool = False)` :
+- Défaut `False` (comportement historique inchangé) pour TOUS les appelants
+  existants : arrêt (`lifecycle.py`) et opérations PKI (`pki_ca.py`, "sync S3
+  forcée"). Seule la boucle périodique (`_periodic_sync_tick`) passe `True`.
+- Le PUT n'est sauté que si l'empreinte égale la référence **ET** qu'aucun échec
+  ambigu n'est en attente (`_s3_state_uncertain`). La référence n'avance
+  QU'APRÈS un PUT confirmé réussi — un échec (y compris un timeout après envoi,
+  où l'objet a pu être écrit côté S3 malgré l'exception locale) la laisse
+  inchangée et marque l'état incertain : le cycle suivant retente un vrai PUT,
+  jamais un skip. La référence vit en mémoire process uniquement (jamais
+  persistée) : un redémarrage force toujours un premier PUT réel.
+
+`download_from_s3()` extrait dans un répertoire de staging **interne à
+data_dir** (garanti même filesystem — le volume Docker est monté exactement
+sur data_dir, pas sur son parent, un rename atomique entre les deux échouerait
+avec `EXDEV`), puis promeut par renommages individuels UNIQUEMENT après une
+extraction intégralement réussie. Sans ce staging, une extraction qui échoue
+après avoir déjà écrit certains membres (archive corrompue, ou membre rejeté
+par `filter='data'` après des membres valides) laissait ces membres dans
+data_dir malgré l'échec global — le prochain démarrage les aurait pris pour
+une donnée locale valide.
+
+**La promotion elle-même N'EST PAS transactionnelle** (bloquant trouvé en
+2e revue de diff) : chaque `rename()` est atomique unitairement, mais la
+BOUCLE qui les enchaîne ne l'est pas — une erreur I/O ou un crash au milieu
+laisse `data_dir` dans un état MIXTE (certaines entrées promues, d'autres
+non), qu'aucun test de présence de fichiers ne peut distinguer d'une "vraie"
+donnée locale. Fermé par un **marqueur durable** `_RESTORE_MARKER_FILENAME`,
+posé AVANT tout nettoyage/extraction et retiré SEULEMENT après une promotion
+INTÉGRALEMENT réussie, ou une absence confirmée **après purge de tout résidu
+préexistant** (`_clear_data_dir_leftovers()`, helper partagé avec le nettoyage
+pré-promotion — un round de revue ultérieur a montré qu'une absence confirmée
+par S3 après une promotion partielle ratée ne rendait PAS ce résidu fiable :
+lever le marqueur sans purger le laissait réapparaître comme donnée locale
+« valide » au prochain calcul). `lifecycle.py::_check_local_data_status()`
+traite la seule PRÉSENCE de ce marqueur comme autoritaire : `data_dir` n'est
+jamais considéré fiable tant qu'il existe, quel que soit son contenu
+physique — force une nouvelle tentative de restauration complète (qui nettoie
+tout résidu avant de rejouer l'extraction+promotion, idempotent).
+
+`vault_shutdown(skip_upload: bool = False)` : `server.py` calcule
+`skip_upload=not ok` à partir du booléen déjà retourné par `vault_startup()`.
+Sans cette garde, le fail-closed de restauration ci-dessus était cosmétique :
+un `vault_startup()` en échec ne stoppe pas le processus (mode dégradé,
+comportement préexistant de `server.py`, non modifié ici), et l'ancien upload
+final inconditionnel à l'arrêt pouvait quand même écraser une sauvegarde S3
+valide avec l'état local incomplet issu de ce démarrage raté.
 
 ### 3.4 `auth/context.py` — Gestion des droits
 

@@ -51,10 +51,10 @@ docker compose exec mcp-vault python tests/test_e2e.py
 
 On startup, MCP Vault:
 1. Loads tokens from S3
-2. Restores OpenBao data (Docker volume or S3)
+2. Restores OpenBao data (Docker volume first; otherwise S3 — an ambiguous S3 failure, e.g. network, refuses startup rather than initializing an empty vault over a possibly-valid remote backup)
 3. Starts OpenBao, initializes it (first time) and unseals it
 4. **Unseal keys**: encrypted (AES-256-GCM) on S3, never in cleartext on disk — only in memory
-5. Enables periodic S3 sync (60s)
+5. Enables periodic S3 sync (60s, **conditional**: a PUT only happens if the state changed since the last successful upload — see `s3_sync.py`)
 
 On shutdown (`docker compose stop`):
 1. Seals OpenBao 🔒
@@ -373,9 +373,10 @@ PkiMiddleware → AdminMiddleware → HealthCheckMiddleware → AuthMiddleware �
 
 ### OpenBao lifecycle
 ```
-STARTUP:  S3 download → bao server → init/unseal → periodic sync
-RUNTIME:  secrets via hvac → S3 sync every 60s
-SHUTDOWN: seal → final S3 upload → stop process
+STARTUP:  S3 download (3-state result: restored / confirmed absent / ambiguous
+          failure — an ambiguous failure refuses startup) → bao server → init/unseal → periodic sync
+RUNTIME:  secrets via hvac → S3 sync every 60s, ONLY if the state changed
+SHUTDOWN: seal → final S3 upload (skipped if startup didn't complete, to avoid overwriting a valid backup) → stop process
 CRASH:    local Docker volume → immediate restart
 ```
 
@@ -460,8 +461,8 @@ mcp-vault/
 ├── requirements.lock         # Pinned dependencies (exact versions)
 ├── VERSION                   # current service version
 ├── DESIGN/mcp-vault/
-│   ├── ARCHITECTURE.md       # Detailed specification (v0.8.5)
-│   ├── TECHNICAL.md          # Technical documentation (v0.8.5)
+│   ├── ARCHITECTURE.md       # Detailed specification (v0.8.6)
+│   ├── TECHNICAL.md          # Technical documentation (v0.8.6)
 │   └── SECURITY_AUDIT.md     # Consolidated audit report (60 V2.1 findings)
 ├── scripts/
 │   ├── mcp_cli.py            # CLI entry point
@@ -520,4 +521,4 @@ mcp-vault/
 
 ---
 
-**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.8.5
+**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.8.6
