@@ -21,16 +21,22 @@ Docker) : injecté dans sys.modules AVANT tout import, comme
 test_vault_create_access.py.
 """
 
+import asyncio
+import json
 import os
 import sys
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 os.environ.setdefault("MCP_SERVER_NAME", "mcp-vault-test")
 os.environ.setdefault("ADMIN_BOOTSTRAP_KEY", "Test-Bootstrap-Key-2026-Pour-Tests!!")
+
+
+def _run(coro):
+    return asyncio.run(coro)
 
 
 def _mock_vault_spaces_module(check_vault_owner_return=True):
@@ -217,6 +223,50 @@ class TestAdminApiCheckVaultAccessDuplicateWasAlsoVulnerable:
         token_info = {"client_name": "admin", "permissions": ["admin", "read", "write"]}
         assert _check_vault_access(token_info, "agentic-platform/") is None
 
+    def test_asgi_level_rest_bypass_is_closed(self):
+        """Round 2 (revue Codex) : test permanent au niveau ROUTEUR ASGI, pas
+        seulement du helper _check_vault_access() — reproduit exactement
+        POST /admin/api/vaults/victim//ssh/sign avec un bearer owner-based
+        non propriétaire (client_name="attacker"). Un futur changement du
+        routeur qui casserait l'appel au garde serait détecté ici, pas
+        seulement un changement du helper lui-même.
+
+        check_vault_owner() est mocké à True (simule le comportement
+        qu'aurait un OpenBao réel confondu par le vault_id non canonique,
+        cf. round 1) : SANS ce mock, le stub hvac fail-close de
+        tests/conftest.py masquerait la disparition du garde et ferait
+        passer ce test à tort même si le correctif était retiré (piège
+        identifié en sabotageant ce test manuellement avant de le committer)."""
+        from mcp_vault.admin.api import handle_admin_api
+
+        token_info = _owner_based_token(client_name="attacker")
+        body = json.dumps({"public_key": "ssh-ed25519 AAAA", "role_name": "any-role"}).encode()
+        messages = []
+
+        async def receive():
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        async def send(message):
+            messages.append(message)
+
+        scope = {
+            "type": "http", "method": "POST",
+            "path": "/admin/api/vaults/victim//ssh/sign",
+            "headers": [(b"authorization", b"Bearer attacker-token")],
+            "query_string": b"",
+        }
+        fake_spaces = _mock_vault_spaces_module(check_vault_owner_return=True)
+        signer = AsyncMock()
+        with patch("mcp_vault.admin.api._get_token_info", return_value=token_info), \
+             patch.dict(sys.modules, {"mcp_vault.vault.spaces": fake_spaces}), \
+             patch("mcp_vault.vault.ssh_ca.sign_ssh_key", signer):
+            _run(handle_admin_api(scope, receive, send, mcp=None))
+
+        start = next(item for item in messages if item["type"] == "http.response.start")
+        assert start["status"] == 403
+        assert not signer.called
+        assert not fake_spaces.check_vault_owner.called
+
 
 class TestMissionBindingsThirdDuplicateAlsoConsolidated:
     """auth/mission_bindings.py avait une 3e copie du pattern, en `.match()`
@@ -238,12 +288,37 @@ class TestMissionBindingsThirdDuplicateAlsoConsolidated:
         assert message == ""
 
 
+class TestWrappingPyFourthDuplicateAlsoConsolidated:
+    """vault/wrapping.py (_validate_inputs, chemin critique secret_wrap/C18)
+    avait une 4e copie divergente : plus stricte que la canonique (refusait
+    les underscores et un tiret final). Pas un bypass actif (secret_wrap
+    passe par check_access() en amont), mais une source de dérive
+    fonctionnelle et sécurité réelle — découverte revue round 2."""
+
+    def test_underscore_vault_id_now_accepted_like_the_canonical_rule(self):
+        from mcp_vault.vault.wrapping import _validate_inputs
+
+        err = _validate_inputs("tenant_1", "some/path", "mission-1", "op-1")
+        assert err is None
+
+    def test_trailing_newline_still_rejected(self):
+        from mcp_vault.vault.wrapping import _validate_inputs
+
+        err = _validate_inputs("tenant\n", "some/path", "mission-1", "op-1")
+        assert err is not None
+
+
 class TestVaultIdsLeafModuleHasNoInternalDependency(unittest.TestCase):
     """vault_ids.py doit rester un module feuille : aucun import interne à
     mcp_vault, pour rester safe à importer depuis n'importe quel module sans
     risque de cycle (raison d'être de la consolidation)."""
 
     def test_vault_ids_module_imports_nothing_from_mcp_vault(self):
+        """Round 2 (revue Codex) : le premier test ne vérifiait ni les imports
+        relatifs (ImportFrom.level > 0, ex. `from .auth import context` a
+        `module="auth"` SANS point initial — le level porte l'information de
+        relativité, pas le nom du module) ni `ast.Import` (`import
+        mcp_vault.x`). Corrigé pour couvrir les deux."""
         import ast
         import inspect
 
@@ -252,8 +327,20 @@ class TestVaultIdsLeafModuleHasNoInternalDependency(unittest.TestCase):
         source = inspect.getsource(vault_ids_module)
         tree = ast.parse(source)
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module:
-                self.assertFalse(
-                    node.module.startswith(".") or node.module.startswith("mcp_vault"),
-                    f"vault_ids.py importe {node.module} — casse son statut de module feuille",
+            if isinstance(node, ast.ImportFrom):
+                self.assertEqual(
+                    node.level, 0,
+                    f"vault_ids.py a un import relatif ({node.module!r}, level="
+                    f"{node.level}) — casse son statut de module feuille",
                 )
+                if node.module:
+                    self.assertFalse(
+                        node.module == "mcp_vault" or node.module.startswith("mcp_vault."),
+                        f"vault_ids.py importe {node.module} — casse son statut de module feuille",
+                    )
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    self.assertFalse(
+                        alias.name == "mcp_vault" or alias.name.startswith("mcp_vault."),
+                        f"vault_ids.py importe {alias.name} — casse son statut de module feuille",
+                    )
