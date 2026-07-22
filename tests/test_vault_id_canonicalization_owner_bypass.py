@@ -287,6 +287,20 @@ class TestMissionBindingsThirdDuplicateAlsoConsolidated:
         assert result == ["agentic-platform", "another-vault"]
         assert message == ""
 
+    def test_trailing_newline_tenant_id_is_rejected(self):
+        """Round 3 (revue Codex) : validate_tenant_id() utilisait aussi
+        .match() (regex distincte de vault_id, mais même piège)."""
+        from mcp_vault.auth.mission_bindings import validate_tenant_id
+
+        ok, message = validate_tenant_id("tenant-1\n")
+        assert ok is False
+
+    def test_well_formed_tenant_id_still_accepted(self):
+        from mcp_vault.auth.mission_bindings import validate_tenant_id
+
+        ok, message = validate_tenant_id("tenant-1:sub.domain")
+        assert ok is True
+
 
 class TestWrappingPyFourthDuplicateAlsoConsolidated:
     """vault/wrapping.py (_validate_inputs, chemin critique secret_wrap/C18)
@@ -344,3 +358,28 @@ class TestVaultIdsLeafModuleHasNoInternalDependency(unittest.TestCase):
                         alias.name == "mcp_vault" or alias.name.startswith("mcp_vault."),
                         f"vault_ids.py importe {alias.name} — casse son statut de module feuille",
                     )
+
+
+class TestSshRoleNameFullmatchAlsoConsolidated:
+    """_validate_role_name() (vault/ssh_ca.py) répliquait textuellement le
+    même piège `.match()`+`$` — découvert par la revue round 3 (fix
+    critique) ET indépendamment par la revue round 4 (PR SSH #97)."""
+
+    def test_trailing_newline_role_name_is_rejected(self):
+        from mcp_vault.vault.ssh_ca import _validate_role_name
+
+        assert _validate_role_name("ordinary-role\n") is not None
+
+    def test_well_formed_role_name_still_accepted(self):
+        from mcp_vault.vault.ssh_ca import _validate_role_name
+
+        assert _validate_role_name("bastion-operator") is None
+
+    def test_error_message_does_not_echo_raw_value(self):
+        """Round 4 (revue Codex) : le message ne doit pas refléter la valeur
+        brute (cohérent avec sign_ssh_key/setup_ssh_ca)."""
+        from mcp_vault.vault.ssh_ca import _validate_role_name
+
+        result = _validate_role_name("bad\nrole")
+        assert result is not None
+        assert "bad" not in result["message"]

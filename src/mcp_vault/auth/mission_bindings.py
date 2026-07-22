@@ -186,7 +186,10 @@ def validate_tenant_id(tenant_id) -> tuple[bool, str]:
         return False, "tenant_id requis (chaîne non vide)"
     if tenant_id in _RESERVED_TENANT_IDS:
         return False, f"tenant_id réservé : {tenant_id!r}"
-    if not _TENANT_ID_PATTERN.match(tenant_id):
+    # fullmatch (pas match) : round 3 revue fix critique vault_id — même
+    # piège `$` accepte un `\n` final, ici sur un identifiant utilisé comme
+    # clé de binding C18 (tenant_id).
+    if not _TENANT_ID_PATTERN.fullmatch(tenant_id):
         return False, (
             f"tenant_id invalide : {tenant_id!r} — format URL-safe attendu "
             "(alphanum, '.', '_', ':', '-', 1-128 caractères)"
