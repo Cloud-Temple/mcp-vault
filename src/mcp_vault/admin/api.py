@@ -13,10 +13,8 @@ import platform
 from pathlib import Path
 
 from ..config import get_settings
-from ..auth.context import (
-    current_token_info, check_policy, check_path_policy, can_read_vault_content,
-    is_valid_vault_id,
-)
+from ..auth.context import current_token_info, check_policy, check_path_policy, can_read_vault_content
+from ..vault_ids import is_valid_vault_id
 from ..auth.token_store import get_token_store, TokenStore
 from ..auth.middleware import get_activity_log
 from ..audit import log_audit

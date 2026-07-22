@@ -23,6 +23,7 @@ test_vault_create_access.py.
 
 import os
 import sys
+import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -215,3 +216,44 @@ class TestAdminApiCheckVaultAccessDuplicateWasAlsoVulnerable:
 
         token_info = {"client_name": "admin", "permissions": ["admin", "read", "write"]}
         assert _check_vault_access(token_info, "agentic-platform/") is None
+
+
+class TestMissionBindingsThirdDuplicateAlsoConsolidated:
+    """auth/mission_bindings.py avait une 3e copie du pattern, en `.match()`
+    (accepte un `\\n` final) — découverte par la revue Codex sur le premier
+    correctif. Consolidée dans vault_ids.is_valid_vault_id()."""
+
+    def test_trailing_newline_in_allowed_resources_is_rejected(self):
+        from mcp_vault.auth.mission_bindings import validate_allowed_resources
+
+        result, message = validate_allowed_resources(["agentic-platform\n"])
+        assert result is None
+        assert "invalide" in message
+
+    def test_well_formed_allowed_resources_still_accepted(self):
+        from mcp_vault.auth.mission_bindings import validate_allowed_resources
+
+        result, message = validate_allowed_resources(["agentic-platform", "another-vault"])
+        assert result == ["agentic-platform", "another-vault"]
+        assert message == ""
+
+
+class TestVaultIdsLeafModuleHasNoInternalDependency(unittest.TestCase):
+    """vault_ids.py doit rester un module feuille : aucun import interne à
+    mcp_vault, pour rester safe à importer depuis n'importe quel module sans
+    risque de cycle (raison d'être de la consolidation)."""
+
+    def test_vault_ids_module_imports_nothing_from_mcp_vault(self):
+        import ast
+        import inspect
+
+        import mcp_vault.vault_ids as vault_ids_module
+
+        source = inspect.getsource(vault_ids_module)
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                self.assertFalse(
+                    node.module.startswith(".") or node.module.startswith("mcp_vault"),
+                    f"vault_ids.py importe {node.module} — casse son statut de module feuille",
+                )

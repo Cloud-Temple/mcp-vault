@@ -17,6 +17,7 @@ from typing import Optional
 
 from ..auth.context import get_current_client_name
 from ..openbao.manager import get_hvac_client
+from ..vault_ids import is_valid_vault_id
 
 logger = logging.getLogger("mcp-vault.spaces")
 
@@ -99,12 +100,6 @@ def check_vault_owner(vault_id: str, client_name: str) -> bool:
 # CRUD — Create
 # ═══════════════════════════════════════════════════════════════════════
 
-import re
-
-# Regex de validation vault_id : alphanumérique + tirets, 1-64 caractères
-_VAULT_ID_PATTERN = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$')
-
-
 def _validate_vault_id(vault_id: str) -> Optional[str]:
     """
     Valide le format du vault_id.
@@ -118,9 +113,7 @@ def _validate_vault_id(vault_id: str) -> Optional[str]:
     """
     if not vault_id:
         return "vault_id est requis"
-    # fullmatch (pas match) : `match` + `$` accepte aussi une position juste
-    # avant un `\n` final — durci en cohérence avec auth/context.py.
-    if not _VAULT_ID_PATTERN.fullmatch(vault_id):
+    if not is_valid_vault_id(vault_id):
         return (
             f"vault_id '{vault_id}' invalide — "
             "seuls les caractères alphanumériques, tirets et underscores sont autorisés "

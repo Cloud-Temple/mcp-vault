@@ -7,32 +7,13 @@ Les outils MCP appellent check_access() et check_write_permission()
 pour vérifier les permissions sans dépendre du framework HTTP.
 """
 
-import re
 from contextvars import ContextVar
 from typing import Optional
 
+from ..vault_ids import is_valid_vault_id
+
 # --- Context variables injectées par le middleware ---
 current_token_info: ContextVar[Optional[dict]] = ContextVar("current_token_info", default=None)
-
-# Équivalent de vault/spaces._VAULT_ID_PATTERN (pas importé : spaces.py
-# importe déjà auth.context, un import inverse créerait un cycle). Les deux
-# DOIVENT rester équivalentes. fullmatch (pas match) : évite la particularité
-# de `$` qui accepte aussi une position juste avant un `\n` final (cf. pattern
-# is_safe_id déjà établi ailleurs dans ce projet, ex. ssh_operator.py).
-_VAULT_ID_PATTERN = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$')
-
-
-def is_valid_vault_id(value) -> bool:
-    """Valide le format canonique d'un vault_id (source unique, réutilisable).
-
-    check_access() (ce module) l'utilise en interne. admin/api.py l'importe
-    pour _check_vault_access() — duplication de logique fermée par un import
-    direct plutôt qu'un second pattern maintenu séparément (découverte round
-    3 PR #97/issue #96 : _check_vault_access() dupliquait la logique de
-    check_access() en Python, y compris l'appel direct à check_vault_owner(),
-    sans jamais bénéficier de cette validation).
-    """
-    return isinstance(value, str) and bool(_VAULT_ID_PATTERN.fullmatch(value))
 
 
 def check_access(resource_id: str) -> Optional[dict]:
