@@ -176,3 +176,42 @@ class TestValidateVaultIdFullmatch:
 
         assert _validate_vault_id("agentic-platform") is None
         assert _validate_vault_id("agentic-plateform") is None
+
+
+class TestAdminApiCheckVaultAccessDuplicateWasAlsoVulnerable:
+    """_check_vault_access() (admin/api.py) DUPLIQUE la logique de
+    check_access() en Python natif — y compris l'appel direct à
+    check_vault_owner() — SANS jamais bénéficier de la validation ajoutée
+    dans check_access(). Découvert en continuant l'investigation après le
+    premier correctif : la surface REST Admin (vault_info, secrets,
+    vault_create — au moins 4 sites d'appel) restait exploitable par le même
+    slash final tant que cette fonction n'était pas corrigée séparément."""
+
+    def test_trailing_slash_vault_id_is_rejected_before_reaching_owner_check(self):
+        from mcp_vault.admin.api import _check_vault_access
+
+        fake_spaces = _mock_vault_spaces_module(check_vault_owner_return=True)
+        token_info = _owner_based_token()
+        with patch.dict(sys.modules, {"mcp_vault.vault.spaces": fake_spaces}):
+            result = _check_vault_access(token_info, "agentic-platform/")
+
+        assert result is not None
+        assert result["status"] == "error"
+        assert not fake_spaces.check_vault_owner.called
+
+    def test_canonical_vault_id_still_reaches_owner_check_unchanged(self):
+        from mcp_vault.admin.api import _check_vault_access
+
+        fake_spaces = _mock_vault_spaces_module(check_vault_owner_return=True)
+        token_info = _owner_based_token()
+        with patch.dict(sys.modules, {"mcp_vault.vault.spaces": fake_spaces}):
+            result = _check_vault_access(token_info, "agentic-platform")
+
+        assert result is None
+        fake_spaces.check_vault_owner.assert_called_once_with("agentic-platform", "attacker")
+
+    def test_admin_bypasses_validation_unaffected(self):
+        from mcp_vault.admin.api import _check_vault_access
+
+        token_info = {"client_name": "admin", "permissions": ["admin", "read", "write"]}
+        assert _check_vault_access(token_info, "agentic-platform/") is None
