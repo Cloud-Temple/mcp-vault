@@ -5,11 +5,14 @@ Lifecycle Orchestrator — Séquence complète de démarrage et d'arrêt.
 STARTUP :
     1. Token Store S3 (charge les tokens)
     2. Check données locales (Docker volume = crash recovery)
-    3. Si pas de local → download depuis S3
+    3. Si pas de local → download depuis S3 (résultat à 3 états : restauré /
+       absence confirmée / échec ambigu — un échec ambigu refuse le démarrage
+       plutôt que d'initialiser un coffre vide, cf. `s3_sync.RestoreResult`)
     4. Démarrer OpenBao (bao server)
     5. Init si première fois (Shamir shares=1, threshold=1)
     6. Unseal (déverrouiller)
-    7. Démarrer le sync S3 périodique
+    7. Démarrer le sync S3 périodique (conditionnel — n'uploade que si l'état a
+       changé, cf. `s3_sync.py`)
 
 SHUTDOWN (SIGTERM) :
     1. Arrêter le sync périodique
@@ -24,6 +27,62 @@ from pathlib import Path
 from .config import get_settings
 
 logger = logging.getLogger("mcp-vault.lifecycle")
+
+
+def _check_local_data_status(data_dir: Path) -> bool:
+    """
+    Détermine si `data_dir` contient une donnée locale FIABLE (crash recovery),
+    par opposition à une absence ou à un résultat de restauration S3 incomplet.
+
+    Effectue aussi le nettoyage défensif d'un résidu de staging de restauration
+    (cf. `s3_sync.py::download_from_s3`).
+
+    Extrait de `vault_startup()` en fonction pure et directement testable
+    (durcissement 2026-07, revue de diff round 2) : la logique elle-même ne
+    change pas, seul le fait qu'elle soit isolable sans mocker toute la
+    séquence de démarrage (Token Store, OpenBao, PKI...) change.
+
+    Le marqueur `_RESTORE_MARKER_FILENAME` (posé par `download_from_s3` AVANT
+    tout nettoyage/extraction, retiré SEULEMENT après une promotion
+    intégralement réussie ou une absence confirmée) invalide `data_dir` comme
+    source de vérité locale, quel que soit son contenu physique, tant qu'il est
+    présent : la promotion par renommages individuels n'est pas
+    transactionnelle — un crash ou une erreur I/O au milieu peut laisser
+    data_dir dans un état MIXTE (certaines entrées promues, d'autres non), et
+    rien d'autre ne distingue cet état d'une "vraie" donnée locale légitime.
+
+    Le répertoire de staging (`_RESTORE_STAGING_DIRNAME`) est TOUJOURS exclu
+    du test de "contenu réel" ci-dessous, indépendamment du succès du
+    nettoyage défensif — bloquant round 4 : un staging durablement non
+    supprimable (permission, erreur I/O persistante) pouvait sinon survivre au
+    retrait du marqueur et être ensuite compté comme donnée locale "valide",
+    alors qu'il ne s'agit que d'un artefact de bookkeeping interne. Cette
+    exclusion est la protection PRINCIPALE (elle tient même si le nettoyage
+    échoue) ; le nettoyage lui-même reste un best-effort de hygiène.
+    """
+    from .s3_sync import _RESTORE_STAGING_DIRNAME, _RESTORE_MARKER_FILENAME
+
+    stray_staging = data_dir / _RESTORE_STAGING_DIRNAME
+    if stray_staging.exists():
+        import shutil
+        logger.warning("⚠️ Résidu de staging de restauration détecté — nettoyage")
+        shutil.rmtree(stray_staging, ignore_errors=True)
+
+    restore_incomplete = (data_dir / _RESTORE_MARKER_FILENAME).exists()
+    if restore_incomplete:
+        logger.warning(
+            "⚠️ Marqueur de restauration incomplète détecté — contenu local NON "
+            "fiable, nouvelle tentative de restauration S3 forcée"
+        )
+
+    return (
+        not restore_incomplete
+        and data_dir.exists()
+        and any(
+            f for f in data_dir.iterdir()
+            if f.name not in (".gitkeep", _RESTORE_MARKER_FILENAME, _RESTORE_STAGING_DIRNAME)
+        )
+    )
 
 
 async def vault_startup() -> bool:
@@ -135,25 +194,39 @@ async def vault_startup() -> bool:
     # ── 2. Vérifier les données locales (Docker volume) ───────────
     data_dir = Path(settings.openbao_data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
-    has_local_data = data_dir.exists() and any(
-        f for f in data_dir.iterdir() if f.name != ".gitkeep"
-    )
+    has_local_data = _check_local_data_status(data_dir)
 
     if has_local_data:
-        logger.info(f"📁 Données locales trouvées dans {data_dir} (crash recovery)")
+        logger.info("📁 Données locales trouvées (crash recovery)")
     else:
         # ── 3. Download depuis S3 si pas de données locales ───────
         logger.info("📥 Pas de données locales — tentative de restauration depuis S3...")
+        from .s3_sync import download_from_s3, RestoreResult
         try:
-            from .s3_sync import download_from_s3
-            downloaded = await download_from_s3()
-            if downloaded:
-                logger.info("✅ Données restaurées depuis S3")
-                has_local_data = True
-            else:
-                logger.info("📦 Pas de données sur S3 non plus — première exécution")
+            restore_result = await download_from_s3()
         except Exception as e:
-            logger.warning(f"⚠️ Download S3 échoué : {e}")
+            # Défensif : download_from_s3() catche déjà ses propres erreurs et
+            # renvoie FAILED — un raise ici serait un bug interne, traité de la
+            # même façon (fail-closed) plutôt que de tomber en "première exécution".
+            logger.error(f"❌ Restauration S3 : échec inattendu ({type(e).__name__})")
+            restore_result = RestoreResult.FAILED
+
+        if restore_result is RestoreResult.RESTORED:
+            logger.info("✅ Données restaurées depuis S3")
+            has_local_data = True
+        elif restore_result is RestoreResult.CONFIRMED_ABSENT:
+            logger.info("📦 Pas de données sur S3 non plus — première exécution")
+        else:
+            # FAILED = erreur AMBIGUË (réseau, permission, archive corrompue...).
+            # On refuse de démarrer plutôt que d'initialiser un coffre vide qui
+            # écraserait ensuite une sauvegarde distante potentiellement valide
+            # (cf. incident versions S3 — durcissement restauration, 2026-07).
+            logger.error(
+                "❌ Restauration S3 ambiguë — démarrage refusé pour ne pas risquer "
+                "d'initialiser un coffre vide par-dessus une sauvegarde distante "
+                "potentiellement valide. Réessayez une fois S3 de nouveau joignable."
+            )
+            return False
 
     # ── 4. Démarrer OpenBao ───────────────────────────────────────
     logger.info("🚀 Démarrage d'OpenBao...")
@@ -206,15 +279,29 @@ async def vault_startup() -> bool:
     return True
 
 
-async def vault_shutdown():
+async def vault_shutdown(skip_upload: bool = False):
     """
     Séquence complète d'arrêt du vault.
 
     Ordre important :
     1. Arrêter le sync (plus d'uploads en parallèle)
     2. Seal OpenBao (protéger les données en mémoire)
-    3. Upload final S3 (sauvegarder l'état le plus récent)
+    3. Upload final S3 (sauvegarder l'état le plus récent) — SAUF si
+       `skip_upload=True`
     4. Arrêter le processus (cleanup)
+
+    Args:
+        skip_upload: à passer à `True` quand `vault_startup()` n'a PAS
+            complété avec succès (durcissement 2026-07, revue de diff). Sans
+            cette garde, un démarrage en échec (ex. restauration S3 ambiguë,
+            OpenBao qui ne démarre pas) laisse le serveur tourner en "mode
+            dégradé" (comportement existant de `server.py`, inchangé ici) puis,
+            à l'arrêt, cet upload FINAL était jusqu'ici TOUJOURS inconditionnel
+            — il pouvait donc écraser une sauvegarde S3 valide avec l'état
+            local incomplet/non initialisé issu d'un démarrage qui n'a jamais
+            correctement abouti. `skip_upload=True` retire spécifiquement CET
+            upload, sans changer la politique de "mode dégradé" elle-même
+            (hors périmètre de ce fix).
     """
     logger.info("🛑 Arrêt de MCP Vault...")
 
@@ -243,13 +330,20 @@ async def vault_shutdown():
             pass
 
     # ── 3. Upload final S3 ────────────────────────────────────────
-    try:
-        from .s3_sync import upload_to_s3
-        uploaded = await upload_to_s3()
-        if uploaded:
-            logger.info("📤 Upload S3 final réussi")
-    except Exception as e:
-        logger.warning(f"⚠️ Erreur upload S3 final : {e}")
+    if skip_upload:
+        logger.warning(
+            "⚠️ Upload S3 final SAUTÉ (le démarrage n'a pas abouti — éviter "
+            "d'écraser une sauvegarde distante potentiellement valide avec un "
+            "état local incomplet ou non initialisé)"
+        )
+    else:
+        try:
+            from .s3_sync import upload_to_s3
+            uploaded = await upload_to_s3()
+            if uploaded:
+                logger.info("📤 Upload S3 final réussi")
+        except Exception as e:
+            logger.warning(f"⚠️ Erreur upload S3 final : {e}")
 
     # ── 4. Arrêter le processus OpenBao ───────────────────────────
     try:

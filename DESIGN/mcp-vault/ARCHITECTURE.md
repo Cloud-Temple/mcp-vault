@@ -1,6 +1,6 @@
 # Architecture — MCP Vault
 
-> **Version** : 0.8.5 | **Date** : 2026-07-20 | **Auteur** : Cloud Temple
+> **Version** : 0.8.6 | **Date** : 2026-07-22 | **Auteur** : Cloud Temple  
 > **Projet** : mcp-vault | **Licence** : Apache 2.0  
 > **Statut** : ✅ Implémenté — Production-ready (PKI interne v0.5.x + C18 v0.6.x)
 
@@ -401,7 +401,7 @@ la donnee la plus recente et elle serait perdue si on n'utilisait que /tmp.
 |  S3 (vault-bucket/_storage/)                                      |
 |  = Persistance DISTANTE (3AZ)                                     |
 |  = Survit a tout (perte machine, perte disque, panne DC)          |
-|  = Sync periodique (toutes les N secondes apres chaque ecriture)  |
+|  = Sync periodique (toutes les N secondes, SEULEMENT si change)   |
 +-------------------------------------------------------------------+
 ```
 
@@ -415,59 +415,108 @@ Trois niveaux de protection, configurables :
 | Strategie             | Quand                                   | Perte max en cas de crash | Cout                             |
 | --------------------- | --------------------------------------- | ------------------------- | -------------------------------- |
 | **write-through**     | Apres chaque secret_store/rotate/delete | 0                         | Eleve (1 upload S3 par ecriture) |
-| **periodic** (defaut) | Toutes les N secondes (defaut 60s)      | N secondes                | Modere                           |
+| **periodic** (defaut) | Toutes les N secondes, SI l'etat a change (defaut 60s) | N secondes | Faible a l'idle, modere sinon |
 | **lazy**              | Toutes les N minutes (defaut 5min)      | N minutes                 | Faible                           |
 
 Recommandation : **periodic** a 60 secondes pour un bon compromis.
 
+**Detection de changement (2026-07)** : le PUT periodique est conditionne a une
+empreinte de l'etat source (chemins, contenu, type — jamais le tar.gz genere,
+dont les metadonnees varient sans changement metier). Sans cette garde, un
+bucket avec versioning S3 active et sans lifecycle accumule une version par
+cycle indefiniment (incident constate en production : 6000+ versions, 600+ Mo
+en quelques jours). Voir `s3_sync.py` (`TECHNICAL.md` §3.3) pour le mecanisme.
+
 ### 4.4 Cycle de vie complet
 
 ```
-DEMARRAGE (startup)
+DEMARRAGE (startup) — cf. `lifecycle.py::vault_startup()`
   |
-  +-- 1. Verifier si le volume Docker /data/openbao/ contient des donnees
-  |     -> Si oui : le volume local EST la source de verite (crash precedent)
-  |        Comparer le timestamp local vs S3 (sync_meta.json)
-  |        Si local plus recent -> utiliser le local (le S3 est en retard)
-  |        Si S3 plus recent   -> telecharger S3 (cas rare : restore manuel)
-  |     -> Si non (volume vide) : telecharger depuis S3 si disponible
-  |     -> Si rien nulle part  : premiere fois, repertoire vide
+  +-- 1. Charger le Token Store depuis S3
   |
-  +-- 2. Ecrire la config OpenBao (openbao.hcl)
-  |     -> File storage pointant sur /data/openbao/
-  |     -> Listener TCP localhost:8200 (pas de TLS interne)
-  |     -> Audit file device
+  +-- 2. Verifier si le volume Docker /openbao/file/ contient des donnees
+  |     FIABLES (`_check_local_data_status()`) : la seule PRESENCE du
+  |     marqueur `_RESTORE_MARKER_FILENAME` (cf. encadre ci-dessous) invalide
+  |     tout contenu physique, quel qu'il soit — pas de comparaison de
+  |     timestamp, juste local-fiable vs pas-encore-restaure-avec-certitude
+  |     -> Si oui (fiable) : le volume local EST la source de verite (crash
+  |        recovery)
+  |     -> Si non (vide, ou marqueur present) : tentative de restauration
+  |        depuis S3 (`download_from_s3()`, resultat a 3 etats — voir
+  |        encadre ci-dessous)
+  |        -> RESTORED         : extraction dans un STAGING interne a data_dir
+  |           (meme filesystem que data_dir — le volume Docker est monte
+  |           EXACTEMENT sur data_dir, pas sur son parent), PUIS promotion par
+  |           renommages INDIVIDUELS (chacun atomique, la BOUCLE ne l'est PAS)
+  |           uniquement si l'extraction est INTEGRALE. Une extraction qui
+  |           echoue apres avoir deja ecrit certains membres ne laisse alors
+  |           RIEN dans data_dir (1er bloquant "restauration non atomique").
+  |           Un marqueur durable, pose AVANT tout nettoyage/extraction et
+  |           retire SEULEMENT ici (promotion integralement reussie), protege
+  |           contre le residu d'une promotion PARTIELLE (crash/erreur I/O
+  |           au milieu de la boucle de renommages — 2e bloquant distinct,
+  |           trouve dans un round de revue de diff ULTERIEUR au premier)
+  |        -> CONFIRMED_ABSENT : premiere execution legitime (S3 confirme
+  |           l'absence, 404/NoSuchKey) — on continue, coffre vide
+  |        -> FAILED           : erreur AMBIGUE (reseau, archive corrompue...)
+  |           — DEMARRAGE REFUSE (vault_startup retourne False). On ne risque
+  |           jamais d'initialiser un coffre vide par-dessus une sauvegarde
+  |           distante potentiellement valide (durcissement 2026-07, cf.
+  |           incident versions S3 ci-dessous). Ce refus n'est effectif que
+  |           combine a la garde du shutdown ci-dessous (ARRET PROPRE, pt. 3)
   |
-  +-- 3. Demarrer le process OpenBao (subprocess)
-  |     -> bao server -config=/data/openbao.hcl
+  +-- 3. Demarrer le process OpenBao (subprocess, bao server)
   |
-  +-- 4. Attendre que OpenBao soit pret (health check)
+  +-- 4. Initialiser si premiere fois (Shamir shares=1, threshold=1)
   |
   +-- 5. Unseal
-  |     -> Si premiere fois : bao operator init + bao operator unseal
-  |     -> Si existant : bao operator unseal (avec les shares stockees en env)
   |
-  +-- 6. MCP Vault est pret a servir
+  +-- 6. Demarrer le sync S3 periodique (conditionnel, voir OPERATIONS NORMALES)
+  |
+  +-- 7. MCP Vault est pret a servir
 
 OPERATIONS NORMALES
   |
   +-- Les outils MCP appellent OpenBao via hvac
   |
-  +-- Apres chaque ecriture (secret_store, rotate, delete, vault_create/delete) :
-  |   -> Mettre a jour le timestamp local dans /data/openbao/sync_marker
+  +-- Certaines operations PKI (setup CA, emission/revoke/rotate certificat)
+  |   forcent un upload S3 IMMEDIAT (`upload_to_s3()` sans argument, TOUJOURS
+  |   inconditionnel) — les autres ecritures (secret_store, rotate, delete,
+  |   vault_create/delete) ne forcent RIEN : elles s'appuient sur le sync
+  |   periodique ci-dessous.
   |
-  +-- Sync S3 periodique (boucle asyncio, toutes les S3_SYNC_INTERVAL secondes) :
-      -> Si sync_marker change depuis le dernier sync :
-         tar + gzip /data/openbao/ -> upload S3
-         Mettre a jour sync_meta.json sur S3
-         Log : "S3 sync completed (delta: Xs)"
-      -> Si pas de changement : skip (pas d'upload inutile)
+  +-- Sync S3 periodique (boucle asyncio, toutes les VAULT_S3_SYNC_INTERVAL
+      secondes, defaut 60s) — `_periodic_sync_tick()` appelle
+      `upload_to_s3(skip_if_unchanged=True)` :
+      -> Construit l'archive tar.gz ET une empreinte de l'etat source DANS LA
+         MEME PASSE (`_snapshot_and_archive`) — chemins relatifs tries, contenu
+         des fichiers, type (fichier/repertoire/symlink). PAS le tar.gz lui-meme
+         (ses metadonnees varient sans changement metier).
+      -> Si l'empreinte est IDENTIQUE a celle du dernier PUT CONFIRME reussi ET
+         qu'aucun echec ambigu n'est en attente : skip (pas d'upload inutile).
+      -> Sinon : PUT reel. La reference n'avance QU'APRES un PUT confirme
+         reussi — un echec (y compris un timeout apres envoi) la laisse
+         inchangee et interdit tout skip jusqu'au prochain PUT reussi.
 
-ARRET PROPRE (SIGTERM)
+  ENCADRE — Incident versions S3 (2026-07) : le bucket de production a le
+  versioning S3 active SANS lifecycle. Avant ce durcissement, le PUT etait
+  INCONDITIONNEL a chaque cycle -> 6000+ versions, 600+ Mo accumules en
+  quelques jours sans aucune ecriture OpenBao reelle. Voir `TECHNICAL.md` §3.3.
+
+ARRET PROPRE (SIGTERM) — cf. `lifecycle.py::vault_shutdown(skip_upload=...)`
   |
-  +-- 1. Arreter d'accepter les requetes MCP
-  +-- 2. Sync S3 final (upload)
-  +-- 3. Seal OpenBao : bao operator seal
+  +-- 1. Arreter le sync periodique (plus d'upload en parallele)
+  +-- 2. Seal OpenBao + effacer les cles unseal en memoire
+  +-- 3. Upload S3 final (`upload_to_s3()` sans argument, TOUJOURS incondi-
+  |      tionnel par rapport a l'etat inchange/change — SAUF si le demarrage
+  |      n'a PAS abouti : `server.py` calcule skip_upload=not ok a partir du
+  |      booleen deja retourne par vault_startup(). Sans cette garde, le
+  |      refus de demarrer (DEMARRAGE, pt. 2, cas FAILED) etait cosmetique :
+  |      `server.py` continue en "mode degrade" meme apres un vault_startup
+  |      en echec (comportement preexistant, non modifie ici), et cet upload
+  |      final aurait quand meme pu ecraser une sauvegarde S3 valide avec
+  |      l'etat local incomplet/jamais initialise (bloquant ferme en revue
+  |      de diff — le plus serieux des 3 trouves a ce stade)
   +-- 4. Arreter le process OpenBao
   +-- 5. Le volume Docker reste intact (pour le prochain demarrage)
   +-- 6. Shutdown MCP Vault
@@ -567,8 +616,10 @@ vault-bucket/
 │   └── tokens.json              # Tokens d'auth MCP Vault (starter-kit standard)
 │
 ├── _storage/
-│   ├── openbao-data.tar.gz      # Storage OpenBao compressé (tout le File backend)
-│   └── sync_meta.json           # {last_sync: "2026-03-04T09:30:00Z", size_bytes: 12345}
+│   └── openbao-data.tar.gz      # Storage OpenBao compressé (tout le File backend).
+│                                 # Aucun fichier de métadonnées séparé : la
+│                                 # détection de changement (empreinte d'état,
+│                                 # cf. §4.4) vit en mémoire process, pas sur S3.
 │
 ├── _init/
 │   └── init_keys.json.enc       # Clés unseal + root token (chiffrées)
@@ -2196,4 +2247,4 @@ result = await vault_client.call("ssh_sign_key", {
 
 ---
 
-*Document mis à jour le 20 juillet 2026 — MCP Vault v0.8.5 (37 outils MCP, pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer)*
+*Document mis à jour le 22 juillet 2026 — MCP Vault v0.8.6 (37 outils MCP, pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer, écriture create-only atomique (CAS), sync S3 conditionnelle)*
