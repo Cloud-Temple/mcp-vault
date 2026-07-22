@@ -7,11 +7,22 @@ Les outils MCP appellent check_access() et check_write_permission()
 pour vérifier les permissions sans dépendre du framework HTTP.
 """
 
+import re
 from contextvars import ContextVar
 from typing import Optional
 
 # --- Context variables injectées par le middleware ---
 current_token_info: ContextVar[Optional[dict]] = ContextVar("current_token_info", default=None)
+
+# Équivalent de vault/spaces._VAULT_ID_PATTERN (pas importé : spaces.py
+# importe déjà auth.context, un import inverse créerait un cycle). Les deux
+# DOIVENT rester équivalentes — ce module est le SEUL point de passage de
+# check_access(), donc le seul endroit qui protège réellement l'isolation
+# owner-based (cf. commentaire sur check_vault_owner() ci-dessous).
+# fullmatch (pas match) : évite la particularité de `$` qui accepte aussi une
+# position juste avant un `\n` final (cf. pattern is_safe_id déjà établi
+# ailleurs dans ce projet, ex. ssh_operator.py).
+_VAULT_ID_PATTERN = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$')
 
 
 def check_access(resource_id: str) -> Optional[dict]:
@@ -21,8 +32,9 @@ def check_access(resource_id: str) -> Optional[dict]:
     Logique d'autorisation :
     1. Pas de token → refusé
     2. Admin → accès total
-    3. allowed_resources non vide → la ressource doit être dans la liste
-    4. allowed_resources vide → owner-based isolation :
+    3. resource_id non canonique → refusé (cf. sécurité ci-dessous)
+    4. allowed_resources non vide → la ressource doit être dans la liste
+    5. allowed_resources vide → owner-based isolation :
        seul le créateur du vault y a accès (via _vault_meta.created_by)
 
     Args:
@@ -40,6 +52,23 @@ def check_access(resource_id: str) -> Optional[dict]:
     # Admin → accès total
     if "admin" in token_info.get("permissions", []):
         return None
+
+    # SÉCURITÉ (découverte en revue adversariale round 3, PR #97/issue #96,
+    # 2026-07-22) : valider resource_id AVANT toute décision d'autorisation.
+    # check_vault_owner() (vault/spaces.py) teste l'existence du mount via
+    # `f"{vault_id}/" not in mounts` puis AUTORISE si absent (cas "vault pas
+    # encore créé"). Un resource_id non canonique (ex. slash final,
+    # "agentic-platform/") fait chercher un mount qui ne matchera jamais un
+    # mount réel ("agentic-platform//" au lieu de "agentic-platform/") : le
+    # vault EXISTANT est alors traité comme absent, et l'appelant — même non
+    # propriétaire, même sans allowed_resources — se voit autorisé. Bloquer
+    # ici, avant le branchement liste/owner-based, ferme les deux chemins
+    # d'un coup, y compris pour un futur appelant qui oublierait de valider.
+    if not isinstance(resource_id, str) or not _VAULT_ID_PATTERN.fullmatch(resource_id):
+        return {
+            "status": "error",
+            "message": f"Identifiant de coffre invalide : '{resource_id}'",
+        }
 
     # Liste explicite de vaults autorisés → vérifier l'appartenance.
     # Typage défensif : un allowed_resources non-liste (token mal formé) est

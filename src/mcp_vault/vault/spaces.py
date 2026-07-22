@@ -118,7 +118,9 @@ def _validate_vault_id(vault_id: str) -> Optional[str]:
     """
     if not vault_id:
         return "vault_id est requis"
-    if not _VAULT_ID_PATTERN.match(vault_id):
+    # fullmatch (pas match) : `match` + `$` accepte aussi une position juste
+    # avant un `\n` final — durci en cohérence avec auth/context.py.
+    if not _VAULT_ID_PATTERN.fullmatch(vault_id):
         return (
             f"vault_id '{vault_id}' invalide — "
             "seuls les caractères alphanumériques, tirets et underscores sont autorisés "
