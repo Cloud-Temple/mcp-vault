@@ -268,6 +268,17 @@ def show_ssh_result(result: dict):
         show_error(result.get("message", "Erreur"))
         return
 
+    profiles = result.get("profiles")
+    if isinstance(profiles, list):
+        console.print(f"\n✅ [bold]{result.get('count', len(profiles))} profil(s) SSH JIT disponible(s)[/bold]")
+        for profile in profiles:
+            console.print(
+                f"  🔐 [cyan]{profile.get('profile_id', '?')}[/cyan] → "
+                f"{profile.get('target', '?')} / {profile.get('principal', '?')} "
+                f"({profile.get('ttl_seconds', '?')}s)"
+            )
+        return
+
     # CA Setup (setup retourne vault_id + role_name + mount_point)
     if "role_name" in result and "mount_point" in result:
         show_success(
@@ -283,9 +294,15 @@ def show_ssh_result(result: dict):
     # Sign key
     signed = result.get("signed_key")
     if signed:
-        show_success(f"Clé signée (TTL: {result.get('ttl', '?')}, serial: {result.get('serial_number', '?')})")
+        context = ""
+        if result.get("profile_id"):
+            context = f" — {result.get('target', '?')} / {result.get('principal', '?')}"
+        show_success(f"Clé signée (TTL: {result.get('ttl', '?')}, serial: {result.get('serial_number', '?')}){context}")
+        displayed = signed if result.get("profile_id") else (
+            signed[:200] + "..." if len(signed) > 200 else signed
+        )
         console.print(Panel(
-            signed[:200] + "..." if len(signed) > 200 else signed,
+            displayed,
             title="Certificat SSH",
             border_style="green",
         ))

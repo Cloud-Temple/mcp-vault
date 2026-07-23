@@ -362,6 +362,35 @@
     </div>
 </div>
 
+<!-- ═══════════════ MODAL — SSH Operator JIT Access ═══════════════ -->
+<div id="modalOperatorSshAccess" class="modal-overlay">
+    <div class="modal modal-lg">
+        <h2>🔐 Demander un accès SSH JIT</h2>
+        <input type="hidden" id="ojProfileId">
+        <div class="card" style="padding:0.8rem;margin-bottom:0.8rem">
+            <table>
+                <tr><td style="color:var(--muted)">Cible imposée</td><td id="ojTarget">—</td></tr>
+                <tr><td style="color:var(--muted)">Principal imposé</td><td id="ojPrincipal">—</td></tr>
+                <tr><td style="color:var(--muted)">Durée imposée</td><td id="ojTtl">—</td></tr>
+            </table>
+        </div>
+        <div class="form-group">
+            <label for="ojPublicKey">Clé publique SSH <span class="field-required">*</span></label>
+            <textarea id="ojPublicKey" rows="4" class="mono-textarea" placeholder="ssh-ed25519 AAAA..."></textarea>
+            <div class="help-text">Seule une clé publique pré-enrôlée est acceptée. Aucune clé privée n'est envoyée.</div>
+        </div>
+        <div class="form-group">
+            <label for="ojReason">Motif opérationnel <span class="field-required">*</span></label>
+            <textarea id="ojReason" rows="3" placeholder="Ticket, incident ou opération justifiant l'accès"></textarea>
+        </div>
+        <div id="ojResult"></div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeModal('modalOperatorSshAccess')">Fermer</button>
+            <button class="btn btn-primary" onclick="doOperatorSshAccess()">🔐 Demander l'accès</button>
+        </div>
+    </div>
+</div>
+
 <!-- ═══════════════ SCRIPTS ═══════════════ -->
 <script src="/admin/static/js/config.js"></script>
 <script src="/admin/static/js/api.js"></script>

@@ -1,6 +1,6 @@
 # Documentation Technique — MCP Vault
 
-> **Version** : 0.8.7 | **Date** : 2026-07-23 | **Auteur** : Cloud Temple
+> **Version** : 0.9.0 | **Date** : 2026-07-23 | **Auteur** : Cloud Temple
 > **Licence** : Apache 2.0 | **Statut** : ✅ Production-ready (audit V2.1 complété + PKI interne v0.5.1)
 
 ---
@@ -49,7 +49,7 @@ MCP Vault est un serveur MCP (Model Context Protocol) qui fournit une gestion s�
 │  │  HealthCheckMiddleware → /health, /healthz, /ready       │  │
 │  │  AuthMiddleware     → Bearer token → contextvars         │  │
 │  │  LoggingMiddleware  → stderr + ring buffer (200 entrées) │  │
-│  │  FastMCP            → /mcp (Streamable HTTP, 37 outils)  │  │
+│  │  FastMCP            → /mcp (Streamable HTTP, 39 outils)  │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │                                                                │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
@@ -98,6 +98,15 @@ Utilise `pydantic-settings` pour charger la configuration depuis les variables d
 | `MCP_SERVER_NAME`        | `mcp-vault`               | Nom du service              |
 | `MCP_SERVER_PORT`        | `8030`                    | Port d'écoute               |
 | `ADMIN_BOOTSTRAP_KEY`    | `change_me_in_production` | Clé admin initiale          |
+| `SSH_OPERATOR_PROFILES_JSON` | *(vide)* | Profils JIT opérateur ; vide = fonctionnalité désactivée |
+| `SSH_OPERATOR_PROFILES_B64` | *(vide)* | Même JSON en Base64 URL-safe pour renderer `.env` strict ; exclusif du JSON direct |
+| `SSH_OPERATOR_JIT_MAX_CONFIG_CHARS` | `65536` | Taille maximale de la source encodée et du JSON décodé |
+| `SSH_OPERATOR_JIT_MIN_TTL_SECONDS` | `60` | TTL minimal accepté dans un profil opérateur |
+| `SSH_OPERATOR_JIT_MAX_TTL_SECONDS` | `900` | TTL maximal accepté dans un profil opérateur |
+| `SSH_OPERATOR_JIT_MAX_REASON_CHARS` | `512` | Taille maximale du motif opérateur |
+| `SSH_OPERATOR_JIT_MAX_PUBLIC_KEY_CHARS` | `16384` | Taille maximale de la clé publique reçue |
+| `SSH_OPERATOR_JIT_MAX_PROFILES` | `32` | Nombre maximal de profils configurés |
+| `SSH_OPERATOR_JIT_MAX_BEARER_EXPIRES_DAYS` | `1` | Plafond de durée de vie restante du bearer pour être utilisable sur ce parcours ; refusé si absent ou dépassé |
 | `S3_ENDPOINT_URL`        | *(vide)*                  | Endpoint S3 Dell ECS        |
 | `S3_ACCESS_KEY_ID`       | *(vide)*                  | Access key S3               |
 | `S3_SECRET_ACCESS_KEY`   | *(vide)*                  | Secret key S3               |
@@ -424,6 +433,49 @@ configurés pour un autre vault.
 
 **Suppression** : quand un vault est supprimé (`vault_delete`), le mount SSH CA
 est également supprimé. Les certificats déjà émis restent valides jusqu'à expiration.
+
+### 3.10b `ssh_operator.py` — Accès SSH JIT opérateur
+
+Ce module résout un profil fermé à partir du bearer courant, valide le wire
+format d'une clé publique OpenSSH standard (`ssh-ed25519`/
+`ecdsa-sha2-nistp256` — pas de dispositif matériel FIDO2, décision produit
+2026-07-22, cf. §6.3b ARCHITECTURE.md) et appelle `sign_ssh_key()` avec les
+seuls attributs serveur. Il refuse bootstrap, admin, Mission JWT, policy
+absente ou trop large, coffre non autorisé, PolicyStore indisponible et Token
+Store diagnostiqué indisponible (fail-close spécifique à ce parcours, cf.
+§6.3b ARCHITECTURE.md). La configuration est validée au démarrage par
+`Settings.check_operator_ssh_jit_config()`.
+
+`reserved_operator_vaults()`/`check_not_reserved_for_operator()` exposent
+l'ensemble des `vault_id` réservés par les profils configurés — au niveau du
+**coffre entier**, pas du couple `(vault_id, role_name)` : un premier garde
+limité au rôle exact s'est révélé contournable (créer un rôle alternatif dans
+le même mount CA OpenBao, cf. §6.3b ARCHITECTURE.md). Les tools/routes
+génériques `ssh_sign_key`/`ssh_ca_setup` (MCP et REST Admin) le consultent
+avant tout appel à `sign_ssh_key()`/`setup_ssh_ca()` — jamais l'inverse : ces
+deux fonctions internes restent partagées et inchangées, le garde vit aux
+points d'entrée génériques pour éviter un paramètre de confiance fragile.
+`sign_ssh_key()`/`setup_ssh_ca()` ainsi que les trois fonctions de lecture
+(`get_ca_public_key`, `list_ssh_roles`, `get_ssh_role_info`) ne
+retournent/ne journalisent plus le message brut d'une exception OpenBao (type
+d'exception seul en log, message constant au client).
+
+Les surfaces MCP, REST, Click, shell et Web délèguent toutes à
+`request_operator_ssh_access()` ; aucune ne possède sa propre logique
+d'autorisation. L'audit conserve l'empreinte, la cible, le principal, le motif
+et le résultat, jamais la clé publique complète.
+
+`target` est un attribut logique audité. OpenSSH n'encode pas l'hôte de
+destination dans un certificat utilisateur : l'isolation réelle dépend du
+couple CA/principal distribué sur les seules cibles autorisées.
+
+`_current_operator_identity()` refuse aussi tout bearer sans `expires_at`
+(`expires_in_days=0`, jamais expirer) ou dont le temps restant dépasse
+`SSH_OPERATOR_JIT_MAX_BEARER_EXPIRES_DAYS` (défaut 1 jour) — le bearer étant
+la seule autorité d'émission depuis le retrait de FIDO2, sa durée de vie doit
+être bornée (2026-07-23, suite revue round 8, cf. §6.3b ARCHITECTURE.md).
+Contrôlé au point d'usage plutôt qu'à la création, puisque
+`TokenStore.update()` ne peut pas modifier l'expiration d'un token existant.
 
 ### 3.11b `vault/pki_ca.py` — PKI Certificate Authority *(v0.5.1)*
 
@@ -869,6 +921,14 @@ ADMIN_BOOTSTRAP_KEY          → Variable d'environnement uniquement
 - Les tokens MCP contrôlent l'accès aux outils SSH via `vault_ids`
 - Les rôles SSH contrôlent quels utilisateurs peuvent être certifiés et avec quel TTL
 - Suppression d'un vault = suppression de sa CA (aucune CA orpheline)
+
+Le parcours humain JIT ajoute une barrière distincte : bearer nominatif à
+expiration bornée, policy exacte limitée aux deux outils JIT, clé publique
+standard (`ssh-ed25519`/`ecdsa-sha2-nistp256`) pré-enrôlée par empreinte
+(plus d'exigence FIDO2/`verify-required`, décision produit 2026-07-22 — cf.
+§6.3b ARCHITECTURE.md). L'IHM et les CLI restent de simples canaux de
+demande. Le credential breaking-glass externe n'est jamais lu par ce
+parcours.
 
 ### 6.7 SSH CA — Checklist de mise en production
 

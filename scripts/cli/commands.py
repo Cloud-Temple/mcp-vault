@@ -541,9 +541,60 @@ def ssh_group(ctx):
     """🔏 SSH Certificate Authority (signature de clés éphémères).
 
     \b
-    Sous-commandes : setup, sign, ca-key.
+    Sous-commandes : profiles, request, setup, sign, ca-key, roles, role-info.
     """
     pass
+
+
+@ssh_group.command("profiles")
+@click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
+@click.pass_context
+def ssh_profiles_cmd(ctx, output_json):
+    """Lister les profils JIT disponibles pour le bearer courant."""
+    async def _run():
+        client = MCPClient(ctx.obj["url"], ctx.obj["token"])
+        result = await client.call_tool("ssh_operator_access_profiles", {})
+        if output_json:
+            show_json(result)
+        else:
+            show_ssh_result(result)
+    asyncio.run(_run())
+
+
+@ssh_group.command("request")
+@click.argument("profile_id")
+@click.option("--key", "-k", "public_key_file", type=click.Path(exists=True, dir_okay=False),
+              help="Fichier de clé publique OpenSSH pré-enrôlée")
+@click.option("--key-data", default=None, help="Clé publique OpenSSH pré-enrôlée (texte)")
+@click.option("--reason", required=True, help="Motif opérationnel obligatoire")
+@click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
+@click.pass_context
+def ssh_request_cmd(ctx, profile_id, public_key_file, key_data, reason, output_json):
+    """Demander un certificat SSH JIT sur un profil préautorisé.
+
+    Le rôle, le principal, la cible et le TTL sont imposés côté serveur.
+    """
+    if public_key_file:
+        with open(public_key_file, "r", encoding="utf-8") as handle:
+            public_key = handle.read().strip()
+    elif key_data:
+        public_key = key_data.strip()
+    else:
+        show_error("Spécifiez --key (fichier) ou --key-data (texte)")
+        return
+
+    async def _run():
+        client = MCPClient(ctx.obj["url"], ctx.obj["token"])
+        result = await client.call_tool("ssh_request_operator_access", {
+            "profile_id": profile_id,
+            "public_key": public_key,
+            "reason": reason,
+        })
+        if output_json:
+            show_json(result)
+        else:
+            show_ssh_result(result)
+    asyncio.run(_run())
 
 
 @ssh_group.command("setup")

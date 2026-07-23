@@ -335,6 +335,15 @@ async function selectVault(vaultId) {
     const keys = (listing && listing.status === 'ok') ? (listing.keys || []) : [];
     const listErr = (listing && listing.status !== 'ok') ? (listing.message || 'listing non autorisé') : '';
     const roles = data.ssh_ca_roles || [];
+    // Un utilisateur Vault standard n'a volontairement pas la policy JIT.
+    // Ce 403 ne doit pas casser la fiche du coffre : il signifie simplement
+    // qu'aucun bouton opérateur ne doit être présenté.
+    const operatorProfilesData = await api('/ssh/operator-profiles')
+        .catch(() => ({ profiles: [] }));
+    const operatorProfiles = (operatorProfilesData && operatorProfilesData.status === 'ok')
+        ? (operatorProfilesData.profiles || []).filter((p) => p.vault_id === vaultId)
+        : [];
+    const hasOperatorJit = operatorProfiles.length > 0;
 
     let html = `<div class="card mt-1">
         <div class="flex-between">
@@ -356,10 +365,11 @@ async function selectVault(vaultId) {
 
     // SSH CA section
     html += '<div class="flex-between mt-1"><h2>🔏 SSH Certificate Authority</h2>';
-    if (canWrite()) html += `<div style="display:flex;gap:0.3rem">
-        <button class="btn btn-ghost btn-sm" onclick="promptSshSetup('${esc(vaultId)}')">+ Ajouter un rôle</button>
+    if (canWrite()) html += `<div style="display:flex;gap:0.3rem;flex-wrap:wrap">
+        ${!hasOperatorJit ? `<button class="btn btn-ghost btn-sm" onclick="promptSshSetup('${esc(vaultId)}')">+ Ajouter un rôle</button>` : ''}
         ${data.has_ssh_ca ? `<button class="btn btn-ghost btn-sm" onclick="showCaKey('${esc(vaultId)}')">🔑 Clé publique CA</button>` : ''}
-        ${data.has_ssh_ca ? `<button class="btn btn-primary btn-sm" onclick="promptSshSign('${esc(vaultId)}')">✍️ Signer une clé</button>` : ''}
+        ${data.has_ssh_ca && !hasOperatorJit ? `<button class="btn btn-primary btn-sm" onclick="promptSshSign('${esc(vaultId)}')">✍️ Signer une clé</button>` : ''}
+        ${operatorProfiles.map((p) => `<button class="btn btn-primary btn-sm" onclick="promptOperatorSshAccess('${esc(p.profile_id)}')">🔐 Accès JIT ${esc(p.target)}</button>`).join('')}
     </div>`;
     html += '</div>';
 
@@ -817,6 +827,57 @@ async function doSshSign() {
     }
 }
 
+/* ─── SSH Operator JIT Access ─── */
+async function promptOperatorSshAccess(profileId) {
+    const data = await api('/ssh/operator-profiles');
+    const profile = data && data.status === 'ok'
+        ? (data.profiles || []).find((item) => item.profile_id === profileId)
+        : null;
+    if (!profile) {
+        alert('Profil SSH JIT indisponible ou non autorisé');
+        return;
+    }
+    document.getElementById('ojProfileId').value = profile.profile_id;
+    document.getElementById('ojTarget').textContent = profile.target || '—';
+    document.getElementById('ojPrincipal').textContent = profile.principal || '—';
+    document.getElementById('ojTtl').textContent = `${profile.ttl_seconds || '?'} s`;
+    document.getElementById('ojPublicKey').value = '';
+    document.getElementById('ojReason').value = '';
+    document.getElementById('ojResult').innerHTML = '';
+    openModal('modalOperatorSshAccess');
+}
+
+async function doOperatorSshAccess() {
+    const profileId = document.getElementById('ojProfileId').value;
+    const publicKey = document.getElementById('ojPublicKey').value.trim();
+    const reason = document.getElementById('ojReason').value.trim();
+    const resultEl = document.getElementById('ojResult');
+    if (!publicKey || !reason) {
+        alert('La clé publique et le motif sont obligatoires');
+        return;
+    }
+    resultEl.innerHTML = '<div class="empty-state">Émission du certificat JIT…</div>';
+    const data = await api('/ssh/operator-access', {
+        method: 'POST',
+        body: JSON.stringify({ profile_id: profileId, public_key: publicKey, reason: reason }),
+    });
+    if (data.status === 'ok') {
+        resultEl.innerHTML = `<div class="card" style="border-color:var(--success);margin-top:0.8rem">
+            <h2 style="color:var(--success)">✅ Accès JIT émis</h2>
+            <p style="font-size:0.75rem;color:var(--text2)">Cible : ${esc(data.target || '—')} — Principal : ${esc(data.principal || '—')} — Serial : ${esc(data.serial_number || '—')}</p>
+            <div class="token-display" style="border-color:var(--success)">
+                <span id="operatorSignedKeyValue">${esc(data.signed_key || '')}</span>
+                <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('operatorSignedKeyValue').textContent)">📋</button>
+            </div>
+            <div class="help-text">Seule la clé publique pré-enrôlée a été transmise ; la clé privée reste chez vous.</div>
+        </div>`;
+    } else {
+        resultEl.innerHTML = `<div class="card" style="border-color:var(--danger);margin-top:0.8rem">
+            <p style="color:var(--danger)">❌ Erreur : ${esc(data.message || 'Échec de la demande JIT')}</p>
+        </div>`;
+    }
+}
+
 /* ─── SSH CA Public Key ─── */
 async function showCaKey(vaultId) {
     const el = document.getElementById('sshCaKeyDisplay');
@@ -875,6 +936,9 @@ if (typeof module !== 'undefined' && module.exports) {
         isSensitiveField,
         renderSecretFieldsInto,
         toggleSecret,
+        selectVault,
+        promptOperatorSshAccess,
+        doOperatorSshAccess,
         MASKED_PLACEHOLDER,
     };
 }

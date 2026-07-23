@@ -33,6 +33,26 @@ class Settings(BaseSettings):
     # --- Auth ---
     admin_bootstrap_key: str = "change_me_in_production"
 
+    # --- Accès SSH JIT opérateur ---
+    # Objet JSON profile_id -> profil nominatif. Vide = fonctionnalité désactivée.
+    # Les profils contiennent uniquement des données publiques/de policy : identité
+    # bearer, policy_id, empreinte(s) de clé pré-enrôlée, vault/role/principal/cible et TTL.
+    ssh_operator_profiles_json: str = ""
+    # Variante Base64 URL-safe du même JSON pour les renderers .env qui refusent
+    # volontairement les accolades et guillemets. Mutuellement exclusive du JSON.
+    ssh_operator_profiles_b64: str = ""
+    ssh_operator_jit_max_config_chars: int = 65536
+    ssh_operator_jit_min_ttl_seconds: int = 60
+    ssh_operator_jit_max_ttl_seconds: int = 900
+    ssh_operator_jit_max_reason_chars: int = 512
+    ssh_operator_jit_max_public_key_chars: int = 16384
+    ssh_operator_jit_max_profiles: int = 32
+    # Plafond de durée de vie RESTANTE d'un bearer pour être utilisable sur ce
+    # parcours (jours, granularité de TokenStore.create()). Un bearer sans
+    # expiration (expires_in_days=0) ou dont l'expiration dépasse ce plafond
+    # est refusé — cf. décision produit dans la docstring de ssh_operator.py.
+    ssh_operator_jit_max_bearer_expires_days: int = 1
+
     # --- S3 Token Store (optionnel — si vide, tokens en mémoire uniquement) ---
     s3_endpoint_url: str = ""
     s3_access_key_id: str = ""
@@ -213,6 +233,15 @@ class Settings(BaseSettings):
                     "mission abortée."
                 )
 
+        return True, ""
+
+    def check_operator_ssh_jit_config(self) -> tuple[bool, str]:
+        """Valide les profils SSH opérateur au démarrage (fail-fast)."""
+        try:
+            from .ssh_operator import parse_operator_profiles
+            parse_operator_profiles(self)
+        except (ValueError, TypeError) as exc:
+            return False, str(exc)
         return True, ""
 
     @property

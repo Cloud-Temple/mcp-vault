@@ -1,6 +1,6 @@
 # Architecture — MCP Vault
 
-> **Version** : 0.8.7 | **Date** : 2026-07-23 | **Auteur** : Cloud Temple  
+> **Version** : 0.9.0 | **Date** : 2026-07-23 | **Auteur** : Cloud Temple  
 > **Projet** : mcp-vault | **Licence** : Apache 2.0  
 > **Statut** : ✅ Implémenté — Production-ready (PKI interne v0.5.x + C18 v0.6.x)
 
@@ -140,7 +140,7 @@
 | **HealthCheckMiddleware** | Health check HTTP (/health, /healthz, /ready)    | ASGI middleware               |
 | **AuthMiddleware**        | Auth Bearer Token + **PEP mission JWT** (#47) + **octroi périmètre vault** (MissionBindingStore, #69) + ContextVar | ASGI middleware (starter-kit) |
 | **LoggingMiddleware**     | Logging requêtes + ring buffer mémoire           | ASGI middleware (starter-kit) |
-| **Outils MCP**            | Façade MCP (37 outils)                           | FastMCP (starter-kit)         |
+| **Outils MCP**            | Façade MCP (39 outils)                           | FastMCP (starter-kit)         |
 | **hvac client**           | Client Python vers OpenBao                       | `hvac` library                |
 | **OpenBao process**       | Moteur de secrets (chiffrement, policies, audit) | Binaire `bao` (Go, embedded)  |
 | **S3 Sync Manager**       | Synchronisation storage local ↔ S3               | boto3 + tar/gzip              |
@@ -698,6 +698,184 @@ légitime inclus). Voir CHANGELOG.md pour le détail complet.
 | `ssh_ca_list_roles(vault_id)`                                            | read  | Liste les rôles SSH CA configurés dans un vault                             |
 | `ssh_ca_role_info(vault_id, role_name)`                                  | read  | Détails d'un rôle (TTL, allowed_users, extensions, etc.)                    |
 
+### 6.3b Accès SSH JIT opérateur
+
+Le parcours opérateur nominal ne réutilise pas `ssh_sign_key`, car cet outil
+générique laisse le client choisir le coffre, le rôle et le TTL. Il expose deux
+outils spécialisés :
+
+| Outil | Perm | Contrat |
+| --- | --- | --- |
+| `ssh_operator_access_profiles()` | read | Retourne uniquement le profil, le coffre, la cible, le principal et le TTL autorisés |
+| `ssh_request_operator_access(profile_id, public_key, reason)` | write | Accepte une clé publique pré-enrôlée et un motif, puis émet avec les attributs du profil |
+
+Le profil serveur contient exactement `client_name`, `policy_id`,
+`key_fingerprints`, `vault_id`, `role_name`, `principal`, `target` et
+`ttl_seconds`. Il ne contient aucun token ni matériau privé. Le bearer doit
+être nominatif, non-admin, disposer de `read,write`, être limité au coffre CA
+et porter la policy exacte du profil. Bootstrap et Mission JWT sont refusés.
+
+La policy dédiée doit autoriser uniquement les deux outils ci-dessus. MCP Vault
+refuse l'émission si cette même policy autorise `ssh_sign_key` ou
+`ssh_ca_setup`, même si le client appelle le bon endpoint. La clé est parsée au
+format wire OpenSSH, limitée aux algorithmes `ssh-ed25519`/`ecdsa-sha2-nistp256`
+(clés SSH standard, pas de RSA pour l'instant), comparée par son empreinte
+SHA-256 enrôlée puis canonicalisée avant OpenBao. Le certificat fixe
+`valid_principals` et un `key_id` unique.
+
+> **Décision produit (2026-07-22)** : ce parcours n'exige PAS de dispositif
+> matériel (clé de sécurité FIDO2/`sk-ssh-ed25519@openssh.com`, avec
+> `verify-required` imposé sur le certificat) — c'était le design initial de
+> l'issue #96/PR #97, décrit comme tel dans l'historique de durcissement
+> ci-dessous ; ces mentions restent exactes pour l'époque où elles ont été
+> écrites, mais ne décrivent plus le format de clé actuel. MCP Vault est
+> avant tout un serveur MCP : l'identité de l'opérateur repose désormais
+> uniquement sur le même mécanisme que le reste du système — un bearer
+> token nominatif, scopé par une policy dédiée — sans cérémonie matérielle
+> par personne. Un HSM Thales Luna, prévu ultérieurement, répond à un
+> problème différent : protéger la clé privée de la CA elle-même au niveau
+> infrastructure, pas prouver la présence physique d'un opérateur — les deux
+> ne sont pas substituables. Le reste du modèle de sécurité décrit dans
+> cette section (réservation de coffre, frontière structurelle, garde
+> admin, test AST) est inchangé et reste pleinement d'actualité. Voir
+> CHANGELOG.md pour le détail de la décision.
+
+> **Bearer à durée bornée (2026-07-23, suite revue round 8)** : le bearer
+> étant désormais la seule autorité d'émission, sa durée de vie doit être
+> bornée. `SSH_OPERATOR_JIT_MAX_BEARER_EXPIRES_DAYS` (défaut 1 jour) refuse
+> tout bearer sans expiration ou dont le temps restant dépasse ce plafond,
+> contrôlé au point d'usage (`_current_operator_identity()`) — pas
+> seulement à la création, puisque `TokenStore.update()` ne peut de toute
+> façon pas modifier l'expiration d'un token existant. **Révocation
+> multi-instance** : le cache TokenStore (300s) peut retarder la visibilité
+> d'une révocation entre instances ; ce projet traite déjà ce type de race
+> comme une limitation connue et différée pour PolicyStore/TokenStore
+> (#51/#13) plutôt que de construire une synchronisation distribuée —
+> même doctrine ici, assumée pour une première mise en production
+> **mono-instance**. **Confirmé par Christophe (2026-07-23) : cette instance
+> tourne en mono-instance à ce jour** — le compromis est donc valide
+> aujourd'hui, mais devra être réévalué avant tout passage à plusieurs
+> réplicas, blue/green ou rolling update avec chevauchement (aucun verrou de
+> topologie technique dans le dépôt à ce jour, avis de revue Codex round 9).
+> Voir CHANGELOG.md pour le détail complet.
+
+**Fermeture du contournement par le signer générique** (durcissement post-revue
+adversariale, 2 rounds) : la protection ci-dessus porte sur la policy
+attachée au bearer opérateur lui-même — elle ne suffisait pas. Un bearer
+*différent*, disposant légitimement d'un droit d'écriture générique sur le
+même coffre (par exemple pour signer d'autres rôles SSH), pouvait obtenir via
+`ssh_sign_key` ou `ssh_ca_setup` le même rôle OpenBao réservé (ex.
+`bastion-operator`), avec une clé logicielle et sans `verify-required` — le
+parcours FIDO2 dédié restait fermé, mais contournable par la porte à côté
+(round 1). Un premier correctif limité au couple exact `(vault_id,
+role_name)` s'est révélé **insuffisant** (round 2) : la CA SSH OpenBao est
+partagée par *mount* (un seul mount par `vault_id`), donc le même bearer
+pouvait créer un rôle **alternatif** (ex. `shadow-operator`, via
+`ssh_ca_setup`) dans le même mount puis le signer génériquement — réserver un
+nom de rôle n'est pas une frontière de sécurité tant que la CA elle-même
+reste partagée et généralement inscriptible.
+
+Le garde bloque désormais le **coffre entier** : les deux outils génériques
+(tool MCP et route REST Admin `/admin/api/vaults/{vault_id}/ssh/{sign,setup}`)
+refusent tout appel — quel que soit le rôle, existant ou à créer — sur tout
+`vault_id` référencé par au moins un profil opérateur JIT configuré. Seul
+`ssh_request_operator_access` peut émettre pour ces coffres.
+
+Round 3 a trouvé un TROISIÈME contournement, encore différent : un `vault_id`
+non canonique (`"agentic-platform/"`, slash final) échappait au garde par
+comparaison de chaîne exacte, tout en désignant le MÊME mount OpenBao après
+normalisation par `hvac`. Ce n'était pas un défaut spécifique à ce garde SSH :
+c'était un bug pré-existant, plus large, dans `check_vault_owner()`
+(`vault/spaces.py`) et sa duplication dans `_check_vault_access()`
+(`admin/api.py`), affectant potentiellement TOUT outil vault-scoped pour un
+bearer owner-based, pas seulement SSH. Corrigé à la racine (`vault_ids.py`,
+validation centralisée de `vault_id` avant toute décision d'autorisation,
+cf. section Isolation owner-based) plutôt que rapiécé localement dans
+`ssh_operator.py`.
+
+**Frontière structurelle** (durcissement supplémentaire, rounds 3-5) : après
+trois contournements trouvés sur un garde placé uniquement aux points
+d'entrée, l'invariant a été déplacé dans la primitive elle-même.
+`sign_ssh_key_generic()`/`setup_ssh_ca_generic()` (`vault/ssh_ca.py`)
+appliquent le garde de réservation AVANT de déléguer à
+`sign_ssh_key()`/`setup_ssh_ca()`. Round 3 n'avait migré que les 2 tools
+MCP (`server.py`) vers ces wrappers ; les 2 routes REST Admin
+(`admin/api.py`) continuaient d'appeler les primitives brutes avec un garde
+dupliqué en ligne — la revue round 4 a jugé, à raison, que ça invalidait la
+prétention structurelle (« le commit ne modifie pas admin/api.py, malgré
+son message »). Corrigé round 4 : les 4 points d'entrée génériques (tool
+MCP ×2, route REST ×2) appellent désormais tous les wrappers `_generic`.
+
+**BLOQUANT round 5** : `check_access()`/`_check_vault_access()` autorisent
+un bearer ADMIN *avant* toute validation de format de `vault_id`
+(court-circuit légitime pour leurs autres usages — un admin a accès total
+par conception). Un admin fournissant `"agentic-platform/"` (slash final)
+atteignait donc `check_not_reserved_for_operator()` avec un `vault_id` non
+canonique que la comparaison stricte de l'ensemble réservé ne reconnaissait
+pas — contournement complet de FIDO2/`verify-required` par un bearer admin
+LÉGITIME, sans exécution de code, directement contraire au contrat non
+négociable de l'issue #96 (« un token admin ne doit jamais contourner le
+contrôle d'identité opérateur »). Corrigé : `check_not_reserved_for_operator()`
+valide désormais lui-même `vault_id` (via `is_valid_vault_id()`), sans
+dépendre de ce que `check_access()` a ou n'a pas déjà validé pour l'appelant
+— le garde de réservation devient robuste indépendamment de qui l'appelle.
+
+Un test structurel (analyse AST du code source) vérifie aussi qu'aucun
+module en dehors de `vault/ssh_ca.py` et `ssh_operator.py` n'appelle
+directement `sign_ssh_key()`/`setup_ssh_ca()` — une violation future serait
+détectée en CI plutôt que silencieuse. Round 5 a montré que la première
+version de ce test se contournait par aliasing d'import
+(`from ... import sign_ssh_key as x`) ; corrigé en résolvant les alias vers
+leur nom d'origine avant comparaison. Ce test ne protège que contre un
+nouvel appelant Python involontaire, pas contre une exécution de code
+arbitraire dans le processus (RCE) : à ce niveau de compromission, aucun
+garde applicatif ne tient — c'est un changement de modèle de menace, pas une
+faille de ce parcours. Une séparation encore plus forte (CA/mount dédié
+exclusivement à l'usage opérateur, avec ACL OpenBao propres) reste une
+piste de durcissement future, non nécessaire pour fermer les contournements
+démontrés mais plus robuste structurellement si l'infrastructure le permet.
+
+**Store d'identité indisponible** : si le Token Store est diagnostiqué
+indisponible (panne/corruption S3 détectée après TTL — cf. Token Store,
+`auth/token_store.py`), ce parcours refuse explicitement plutôt que de servir
+un bearer depuis un cache potentiellement périmé (y compris après une
+révocation distante non encore rechargée). Ce fail-close est spécifique à ce
+parcours ; il ne modifie pas le comportement diagnostique du Token Store pour
+les autres usages (chantier séparé et plus large — deny-all bearer pendant une
+panne S3 — volontairement hors périmètre ici).
+
+**Diagnostics backend** : cinq fonctions de `vault/ssh_ca.py` qui parlent à
+OpenBao (`setup_ssh_ca`, `sign_ssh_key`, `get_ca_public_key`,
+`list_ssh_roles`, `get_ssh_role_info`) ne journalisent ni ne retournent plus
+jamais le message brut d'une exception — seul le type d'exception est loggé
+côté serveur, le client reçoit un message constant. Round 1 n'avait couvert
+que les deux premières (chemin d'écriture) ; round 2 a étendu le même
+correctif aux trois fonctions de lecture, qui présentaient exactement le même
+défaut sur des routes tout aussi publiques. `cleanup_ssh_ca` conserve un
+`logger.warning` avec le message brut, mais ne le retourne à aucun appelant
+(opération admin-only, appelée uniquement par `vault_delete`) — non traité
+dans ce lot, signalé comme amélioration mineure possible.
+
+**Enrôlement des empreintes de clé** : décision assumée — l'enrôlement ou le
+retrait d'une empreinte se fait par modification de
+`SSH_OPERATOR_PROFILES_JSON`/`_B64` puis redéploiement, pas par une action
+d'administration à chaud. Choix cohérent avec le modèle déjà statique de
+`MissionBindingStore`, qui réduit la surface de mutation à sécuriser. Une
+vraie surface d'administration live (ajout/retrait d'empreinte sans
+redéploiement) reste un suivi séparé, à ouvrir explicitement si le besoin
+opérationnel le justifie — ce n'est pas un oubli, c'est un choix de périmètre.
+
+La console Web, le REST Admin, Click et le shell sont quatre canaux vers cette
+même décision ; ils ne sont jamais l'autorité. Le vrai breaking-glass reste un
+credential humain externe et indépendant de cette instance Vault.
+
+Le champ `target` est une cible logique de policy et d'audit, pas une extension
+native du certificat utilisateur SSH. Le confinement de destination doit être
+assuré par une CA ou un principal distinct et par la distribution de
+`TrustedUserCAKeys`/`AuthorizedPrincipalsFile` uniquement aux hôtes du profil.
+Réutiliser la même CA et le même principal sur plusieurs hôtes élargirait
+réellement la portée du certificat, même si le profil affiche une seule cible.
+
 ### 6.4 Policies MCP (contrôle d'accès granulaire)
 
 Les policies MCP permettent de restreindre les outils accessibles et les
@@ -776,25 +954,23 @@ les modifier. Idéal pour les agents d'audit, de monitoring ou de documentation.
 }
 ```
 
-##### 🔑 `ssh-operator` — Opérateur SSH CA uniquement
+##### 🔑 `operator-ssh-jit` — Opérateur humain au moindre privilège
 
-Pour les agents SRE/DevOps qui doivent signer des clés SSH mais n'ont pas besoin
-d'accéder aux secrets KV. Combine l'accès SSH avec la lecture des secrets de base.
+Pour un opérateur humain qui demande exceptionnellement un certificat sur un
+profil pré-enrôlé. Cette policy ne donne aucun accès à la signature générique
+ni aux secrets KV.
 
 ```json
 {
-  "policy_id": "ssh-operator",
-  "description": "Signature SSH CA + lecture secrets — pas de modification",
+  "policy_id": "operator-ssh-jit",
+  "description": "Demande SSH JIT sur profils serveur fermés",
   "allowed_tools": [
-    "system_*",
-    "vault_list", "vault_info",
-    "secret_read", "secret_list",
-    "ssh_ca_setup", "ssh_sign_key", "ssh_ca_public_key",
-    "ssh_ca_list_roles", "ssh_ca_role_info"
+    "ssh_operator_access_profiles",
+    "ssh_request_operator_access"
   ],
   "denied_tools": [
-    "vault_delete",
-    "secret_delete",
+    "ssh_sign_key", "ssh_ca_setup",
+    "vault_*", "secret_*",
     "policy_*"
   ],
   "path_rules": []
@@ -971,7 +1147,7 @@ multi-instance générale (#51/#13, hors scope, cf. §3.12 TECHNICAL.md).
 
 > 💡 **Introspection** : l'endpoint `/admin/api/whoami` et la commande CLI `whoami` permettent de vérifier l'identité et les permissions du token courant (client_name, auth_type, permissions, vaults autorisés).
 
-**Total : 37 outils MCP** (5 vaults + 6 secrets + 5 wrap/broker C18 + 5 SSH CA + 8 PKI + 4 policies + 1 token + 1 audit + 2 system)
+**Total : 39 outils MCP** (5 vaults + 6 secrets + 5 wrap/broker C18 + 5 SSH CA + 2 SSH JIT opérateur + 8 PKI + 4 policies + 1 token + 1 audit + 2 system)
 
 #### 6.7.1 Architecture du journal d'audit
 
@@ -1482,6 +1658,19 @@ WAF_PORT=8085                    # Port d'écoute externe du WAF Caddy+Coraza
 # --- Auth MCP ---
 ADMIN_BOOTSTRAP_KEY=change_me_to_a_strong_random_key_64chars
 
+# --- SSH JIT opérateur (optionnel ; sources exclusives) ---
+SSH_OPERATOR_PROFILES_JSON={"bastion-prod":{"client_name":"operator-christophe","policy_id":"operator-ssh-jit","key_fingerprints":["SHA256:EMP_REINTE_BASE64"],"vault_id":"agentic-platform","role_name":"bastion-operator","principal":"ctadmin","target":"bastion-01","ttl_seconds":900}}
+# Pour un renderer .env strict, laisser JSON vide et fournir le même document
+# en Base64 URL-safe sans retour ligne :
+# SSH_OPERATOR_PROFILES_B64=BASE64_URLSAFE_DU_JSON
+SSH_OPERATOR_JIT_MAX_CONFIG_CHARS=65536
+SSH_OPERATOR_JIT_MIN_TTL_SECONDS=60
+SSH_OPERATOR_JIT_MAX_TTL_SECONDS=900
+SSH_OPERATOR_JIT_MAX_REASON_CHARS=512
+SSH_OPERATOR_JIT_MAX_PUBLIC_KEY_CHARS=16384
+SSH_OPERATOR_JIT_MAX_PROFILES=32
+SSH_OPERATOR_JIT_MAX_BEARER_EXPIRES_DAYS=1
+
 # --- OpenBao ---
 OPENBAO_BINARY=/usr/local/bin/bao
 OPENBAO_DATA_DIR=/data/openbao        # Volume Docker persistant
@@ -1515,7 +1704,7 @@ mcp-vault/
 ├── src/mcp_vault/
 │   ├── __init__.py
 │   ├── __main__.py            # python -m mcp_vault
-│   ├── server.py              # 37 outils MCP + create_app() + middlewares + bannière
+│   ├── server.py              # 39 outils MCP + create_app() + middlewares + bannière
 │   ├── config.py              # Config Pydantic-settings (S3, OpenBao, sync, WAF)
 │   ├── admin/                 # Console d'administration web (/admin)
 │   │   ├── __init__.py
@@ -2278,4 +2467,4 @@ result = await vault_client.call("ssh_sign_key", {
 
 ---
 
-*Document mis à jour le 23 juillet 2026 — MCP Vault v0.8.7 (37 outils MCP, pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer, écriture create-only atomique (CAS), sync S3 conditionnelle)*
+*Document mis à jour le 23 juillet 2026 — MCP Vault v0.9.0 (39 outils MCP, accès SSH JIT opérateur (bearer nominatif + policy dédiée, clé publique pré-enrôlée), pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer, écriture create-only atomique (CAS), sync S3 conditionnelle)*

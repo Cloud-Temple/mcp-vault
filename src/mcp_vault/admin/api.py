@@ -106,6 +106,16 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
     if path == "/admin/api/generate-password" and method == "GET":
         return await _api_generate_password(send)
 
+    # --- Accès SSH JIT opérateur (bearer nominatif + profil serveur) ---
+    if path == "/admin/api/ssh/operator-profiles" and method == "GET":
+        from ..ssh_operator import list_operator_access_profiles
+        result = list_operator_access_profiles()
+        return await _json_response(send, _operator_ssh_http_status(result), result)
+
+    if path == "/admin/api/ssh/operator-access" and method == "POST":
+        body = await _read_body(receive)
+        return await _api_ssh_operator_access(send, body)
+
     # SÉCURITÉ V3-02 : audit/logs requièrent admin (données sensibles de tous les clients)
     if path == "/admin/api/logs" and method == "GET":
         if not is_admin:
@@ -1245,25 +1255,80 @@ async def _api_purge_mission_bindings(send, body):
 
 async def _api_ssh_setup(send, vault_id, body):
     """POST /admin/api/vaults/{vault_id}/ssh/setup — Configurer SSH CA + rôle."""
-    from ..vault.ssh_ca import setup_ssh_ca
+    from ..vault.ssh_ca import setup_ssh_ca_generic
     data = json.loads(body) if body else {}
     role_name = data.get("role_name", "").strip()
     if not role_name:
         return await _json_response(send, 400, {"status": "error", "message": "role_name requis"})
-    result = await setup_ssh_ca(
+    # setup_ssh_ca_generic() applique le garde de réservation opérateur JIT en
+    # interne (round 4 : cette route appelait auparavant le garde puis la
+    # primitive brute séparément — deux points à maintenir en synchronisation
+    # au lieu d'un seul point d'application structurel).
+    result = await setup_ssh_ca_generic(
         vault_id=vault_id,
         role_name=role_name,
         allowed_users=data.get("allowed_users", "*"),
         default_user=data.get("default_user", "ubuntu"),
         ttl=data.get("ttl", "30m"),
     )
-    status = 200 if result.get("status") == "ok" else 400
-    await _json_response(send, status, result)
+    await _json_response(send, _generic_ssh_http_status(result), result)
+
+
+def _operator_ssh_http_status(result: dict) -> int:
+    if result.get("status") == "ok":
+        return 200
+    if result.get("error_type") in {"policy_store_unavailable", "configuration_error"}:
+        return 503
+    if result.get("error_type") == "invalid_request":
+        return 400
+    return 403
+
+
+def _generic_ssh_http_status(result: dict) -> int:
+    """Mapping HTTP pour les routes SSH génériques (setup/sign).
+
+    Préserve le comportement historique (400) pour les erreurs backend
+    génériques (ex. "OpenBao non connecté", role_name invalide) — seuls les
+    deux error_type introduits par le garde de réservation opérateur JIT
+    (round 1-4, cf. ssh_operator.check_not_reserved_for_operator) obtiennent
+    un code dédié. Ne pas réutiliser _operator_ssh_http_status() ici : son
+    défaut à 403 changerait silencieusement le contrat REST existant pour
+    toute erreur backend générique sans error_type.
+    """
+    if result.get("status") == "ok":
+        return 200
+    if result.get("error_type") == "configuration_error":
+        return 503
+    if result.get("error_type") == "reserved_for_operator_jit":
+        return 403
+    return 400
+
+
+async def _api_ssh_operator_access(send, body):
+    """POST /admin/api/ssh/operator-access — demande JIT au contrat fermé."""
+    from ..ssh_operator import request_operator_ssh_access
+    try:
+        data = json.loads(body) if body else {}
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return await _json_response(send, 400, {
+            "status": "error", "error_type": "invalid_request",
+            "message": "JSON invalide",
+        })
+    expected = {"profile_id", "public_key", "reason"}
+    if not isinstance(data, dict) or set(data) != expected:
+        return await _json_response(send, 400, {
+            "status": "error", "error_type": "invalid_request",
+            "message": "Champs requis exacts : profile_id, public_key, reason",
+        })
+    result = await request_operator_ssh_access(
+        data["profile_id"], data["public_key"], data["reason"]
+    )
+    await _json_response(send, _operator_ssh_http_status(result), result)
 
 
 async def _api_ssh_sign(send, vault_id, body):
     """POST /admin/api/vaults/{vault_id}/ssh/sign — Signer une clé publique SSH."""
-    from ..vault.ssh_ca import sign_ssh_key
+    from ..vault.ssh_ca import sign_ssh_key_generic
     data = json.loads(body) if body else {}
     public_key = data.get("public_key", "").strip()
     role_name = data.get("role_name", "").strip()
@@ -1271,14 +1336,15 @@ async def _api_ssh_sign(send, vault_id, body):
         return await _json_response(send, 400, {"status": "error", "message": "public_key requis"})
     if not role_name:
         return await _json_response(send, 400, {"status": "error", "message": "role_name requis"})
-    result = await sign_ssh_key(
+    # Cf. _api_ssh_setup() : garde de réservation appliqué DANS la primitive
+    # générique, pas dupliqué ici.
+    result = await sign_ssh_key_generic(
         vault_id=vault_id,
         role_name=role_name,
         public_key=public_key,
         ttl=data.get("ttl", "30m"),
     )
-    status = 200 if result.get("status") == "ok" else 400
-    await _json_response(send, status, result)
+    await _json_response(send, _generic_ssh_http_status(result), result)
 
 
 async def _api_ssh_ca_key(send, vault_id):

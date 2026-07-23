@@ -17,12 +17,15 @@ async function loadDashboard() {
     el.innerHTML = '<div class="empty-state">Chargement…</div>';
 
     const promises = [
-        api('/health'), api('/vaults'), api('/tokens').catch(() => ({ tokens: [] }))
+        api('/health'),
+        api('/vaults'),
+        api('/tokens').catch(() => ({ tokens: [] })),
+        api('/ssh/operator-profiles').catch(() => ({ profiles: [] })),
     ];
     // Charger les policies si admin
     if (isAdmin()) promises.push(api('/policies').catch(() => ({ policies: [] })));
 
-    const [health, vaults, tokens, policies] = await Promise.all(promises);
+    const [health, vaults, tokens, operatorProfilesData, policies] = await Promise.all(promises);
 
     const vc = vaults.count || 0;
     const tc = (tokens.tokens || []).filter(t => !t.revoked && !t.expired).length;
@@ -30,6 +33,9 @@ async function loadDashboard() {
     // backend indisponible) exclu, total partiel signalé par « + », jamais 0.
     const { sum: sc, partial: scPartial } = sumRootEntries(vaults.vaults);
     const pc = policies ? (policies.policies || []).length : 0;
+    const operatorProfiles = operatorProfilesData && operatorProfilesData.status === 'ok'
+        ? (operatorProfilesData.profiles || [])
+        : [];
 
     el.innerHTML = `
         <div class="stats-grid" style="margin-bottom:1.2rem">
@@ -41,6 +47,13 @@ async function loadDashboard() {
             <div class="stat-card"><div class="stat-value">${health.tools_count || 0}</div><div class="stat-label">Outils MCP</div></div>
             <div class="stat-card"><div class="stat-value">${health.s3_configured ? '✅' : '❌'}</div><div class="stat-label">S3</div></div>
         </div>
+        ${operatorProfiles.length ? `<div class="card" style="border-color:var(--accent)">
+            <h2>🔐 Accès SSH JIT opérateur</h2>
+            <p class="help-text">Les cibles, principals et durées sont imposés par la policy Vault.</p>
+            <div style="display:flex;flex-wrap:wrap;gap:0.4rem;margin-top:0.6rem">
+                ${operatorProfiles.map((profile) => `<button class="btn btn-primary" onclick="promptOperatorSshAccess('${esc(profile.profile_id)}')">${esc(profile.target)} · ${esc(profile.principal)} · ${esc(profile.ttl_seconds)}s</button>`).join('')}
+            </div>
+        </div>` : ''}
         <div class="card">
             <h2>🛠️ Outils MCP</h2>
             <div style="display:flex;flex-wrap:wrap;gap:0.4rem">
@@ -71,6 +84,11 @@ async function loadDashboard() {
                 ${_renderSecretTypesReference()}
             </div>
         </div>`;
+}
+
+/* Export Node pour les tests de contrat UI ; ignoré dans le navigateur. */
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { loadDashboard, sumRootEntries };
 }
 
 /* ─── Générateur standalone ─── */

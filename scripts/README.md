@@ -146,6 +146,31 @@ python scripts/mcp_cli.py ssh roles mon-vault
 python scripts/mcp_cli.py ssh role-info mon-vault sre-role
 ```
 
+#### Demande JIT opérateur *(v0.9.0)*
+
+Ces commandes utilisent le parcours fermé : le serveur fixe le coffre CA, le
+rôle, le principal, la cible et le TTL. Le token doit être nominatif,
+non-admin, limité au coffre du profil et porter une policy autorisant seulement
+les deux outils JIT.
+
+```bash
+# Voir les profils utilisables par l'identité courante
+python scripts/mcp_cli.py ssh profiles
+
+# Demander un certificat lié à la clé publique pré-enrôlée
+python scripts/mcp_cli.py ssh request bastion-prod \
+  --key ~/.ssh/id_ed25519.pub \
+  --reason "INC-230 maintenance bastion"
+
+# Même demande depuis le shell interactif
+ssh request bastion-prod --key-data 'ssh-ed25519 AAAA...' \
+  --reason 'INC-230 maintenance bastion'
+```
+
+La réponse contient le certificat public signé. Aucune clé privée n'est lue ou
+écrite par MCP Vault. `ssh sign` reste une commande d'administration générique
+et ne doit pas être accordée à la policy opérateur JIT.
+
 ### PKI — Autorité de Certification interne *(v0.5.0, admin)*
 
 ```bash

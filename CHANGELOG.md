@@ -1,5 +1,229 @@
 # Changelog — MCP Vault
 
+## [0.9.0] — 2026-07-23
+
+### Bearer opérateur SSH JIT à durée bornée (issue #96, 2026-07-23, suite revue round 8)
+
+Suite au retrait de l'exigence FIDO2 (entrée ci-dessous), le bearer token
+devient la SEULE autorité d'émission de ce parcours. La revue adversariale
+Codex a jugé, à raison, que rien ne bornait techniquement sa durée de vie —
+`TokenStore` supporte explicitement `expires_in_days=0` (jamais expirer,
+fonctionnalité assumée, issue #65), et aucun garde ne l'interdisait pour ce
+parcours privilégié. Décision de Christophe : une expiration bornée est un
+compromis acceptable, on reste simple pour la v1.
+
+- **Nouveau plafond** : `SSH_OPERATOR_JIT_MAX_BEARER_EXPIRES_DAYS` (défaut 1
+  jour — la plus petite granularité que `TokenStore.create()` puisse
+  exprimer, conforme à la recommandation de la revue). Un bearer sans
+  expiration, ou dont le temps restant avant expiration dépasse ce plafond,
+  est refusé sur ce parcours — quelles que soient ses autres permissions.
+  Contrôlé au point d'usage (`ssh_operator.py::_current_operator_identity()`),
+  pas seulement à la création : `TokenStore.update()` ne peut de toute façon
+  pas modifier l'expiration d'un token existant (immuable après création),
+  donc ce contrôle ferme le trou quel que soit le moment où la policy
+  `operator-ssh-jit` a été attachée au bearer.
+- **Révocation multi-instance — limitation assumée, pas fermée dans ce lot** :
+  la revue a aussi relevé que le cache TokenStore (300s) peut rendre une
+  révocation invisible sur une autre instance jusqu'au prochain rafraîchissement.
+  Ce projet a déjà, à deux reprises (PolicyStore Lot 3, TokenStore hardening),
+  traité les races multi-instance sur les stores S3 comme une limitation
+  connue et différée (#51/#13) plutôt que de construire une synchronisation
+  distribuée. Décision : même doctrine ici, pour une première mise en
+  production **mono-instance** — c'est explicitement l'alternative proposée
+  par la revue elle-même (« mono-instance stricte OU révocation distribuée
+  fiable »). Aucun nouveau code de cache-invalidation inter-instances n'est
+  ajouté ; ce choix est documenté ici et dans `ARCHITECTURE.md` §6.3b plutôt
+  que laissé implicite.
+- **Nettoyage** : 3 vestiges du format de clé FIDO2 (`sk-*@openssh.com`) que
+  le premier balayage terminologique avait ratés car ils ne contenaient pas
+  le mot « FIDO2 » — une section de `TECHNICAL.md` distincte de §3.10b,
+  un second message d'aide dans `scripts/cli/shell.py`, et les chaînes
+  d'exemple de `tests/js/operator_ssh_jit_contract.test.js` et
+  `tests/cli/test_ssh.py`.
+- **Tests** : 3 nouveaux tests non-complaisants (bearer sans expiration
+  refusé, bearer au-delà du plafond refusé, bearer exactement au plafond
+  accepté), 2 sabotages RED→GREEN.
+- **Revue Codex round 9 (commit `05b8240`) : GO**, avec 2 findings BASSE
+  corrigés dans la foulée :
+  - Le garde d'expiration ne se fiait qu'implicitement au fait que
+    `TokenStore.get_by_hash()` fail-close déjà sur un bearer expiré/à
+    l'horodatage naïf en amont — un `expires_at` sans fuseau levait
+    `TypeError` au lieu d'un refus propre, et une date déjà passée
+    n'était pas revalidée si un contexte était injecté directement (pas
+    de chemin d'exploitation distant identifié, mais défense en
+    profondeur incomplète). Corrigé : le garde revalide lui-même
+    `tzinfo` et la non-péremption, indépendamment de TokenStore.
+  - Le test « exactement au plafond » n'était PAS probant : il comparait
+    quelques microsecondes après avoir calculé l'échéance, donc le temps
+    restant au moment du contrôle était déjà légèrement inférieur au
+    plafond — un sabotage indépendant (`>` muté en `>=`) laissait les 3
+    tests verts, ce que Codex a démontré. Corrigé avec une horloge figée
+    (`datetime.now()` patché sur une référence fixe), qui distingue
+    réellement `>` (accepté) de `>=` (refusé) — reconfirmé par le même
+    sabotage, désormais rouge.
+  - **Avis de la revue sur le choix mono-instance** : « défendable pour
+    une v1 strictement mono-instance, mais seulement si cette contrainte
+    est réellement imposée en exploitation — le dépôt ne contient aucun
+    verrou de topologie ; un second replica, un HPA, un blue/green ou un
+    rolling update avec chevauchement réactive le problème. NO-GO si
+    multi-instance possible. » Conditions posées avant production :
+    imposer et auditer le mono-instance strict y compris pendant les
+    déploiements, documenter/runbooker la fenêtre résiduelle.
+  - **Décision Christophe (2026-07-23)** : condition notée, on avance —
+    cette instance de MCP Vault tourne en mono-instance à ce jour, le
+    compromis s'applique donc tel quel. À réévaluer explicitement avant
+    tout passage à plusieurs réplicas ou rolling update avec chevauchement.
+  - Suite complète après correctifs : 1013 passed/43 skipped/0 failed,
+    contrat JS inchangé (OK).
+
+### Retrait de l'exigence FIDO2 du parcours SSH JIT opérateur (issue #96, 2026-07-23)
+
+Décision produit, prise avant toute mise en production de ce parcours : plus
+de dispositif matériel (clé de sécurité FIDO2) exigé pour l'opérateur humain.
+MCP Vault est avant tout un serveur MCP — l'identité de l'opérateur repose
+désormais uniquement sur le même mécanisme que le reste du système (bearer
+token nominatif, scopé par une policy dédiée), sans cérémonie matérielle par
+personne. Un HSM Thales Luna, prévu ultérieurement pour cette instance,
+répond à un problème différent — protéger la clé privée de la CA elle-même
+au niveau infrastructure — et n'est pas substituable à une preuve de
+présence physique individuelle : les deux ne se remplacent pas l'un l'autre.
+
+- **Ce qui change** : les clés acceptées sont désormais des clés OpenSSH
+  standard (`ssh-ed25519`, `ecdsa-sha2-nistp256`) au lieu des variantes `-sk`
+  FIDO2 (`sk-ssh-ed25519@openssh.com`/`sk-ecdsa-sha2-nistp256@openssh.com`).
+  Le certificat émis n'impose plus l'option critique `verify-required`
+  (spécifique aux clés de sécurité matérielle — l'imposer sur une clé
+  standard aurait cassé la connexion côté client, qui ne peut pas la
+  satisfaire).
+- **Ce qui ne change PAS** : l'enrôlement par empreinte reste obligatoire
+  (seule une clé publique spécifiquement approuvée par profil est utilisable,
+  même avec un bearer valide) ; l'identité bearer nominative non-admin, la
+  policy exacte à 2 outils, le coffre/rôle/principal/cible/TTL imposés côté
+  serveur, la réservation de coffre entier contre le signer générique
+  (rounds 1-5 ci-dessous), l'absence de diagnostic OpenBao brut et l'audit
+  sans matériau de clé — tout ce modèle de sécurité, construit et vérifié sur
+  5 rounds de revue adversariale, reste intact et pleinement d'actualité. Les
+  mentions de FIDO2/`verify-required` dans les rounds ci-dessous restent
+  exactes pour l'époque où elles ont été écrites et ne sont pas réécrites :
+  elles documentent un travail de durcissement toujours valable, seul le
+  format de clé qu'elles décrivent a changé depuis.
+- **Tests** : fixtures et cas FIDO2-spécifiques remplacés par leurs
+  équivalents en clé standard ; nouveau test de non-régression prouvant
+  qu'une clé au format FIDO2 historique (`sk-*@openssh.com`) est désormais
+  rejetée comme type de clé inconnu (pas de réintroduction accidentelle par
+  élargissement futur de l'algorithme accepté).
+- **Documentation et terminologie** : `ARCHITECTURE.md` §6.3b et
+  `TECHNICAL.md` §3.10b mis à jour pour décrire le comportement actuel ;
+  `README.md`/`README.en.md`, `.env.example`, l'aide CLI (`scripts/`), la
+  console Admin (`static/admin.html`, `static/js/vaults.js`) et les
+  commentaires de code alignés sur le nouveau vocabulaire (« clé publique
+  pré-enrôlée » plutôt que FIDO2/clé matérielle).
+
+### Accès SSH JIT opérateur lié à une clé FIDO2
+
+- **Parcours dédié** : les outils MCP `ssh_operator_access_profiles` et
+  `ssh_request_operator_access` exposent une demande opérateur fermée. Le client
+  ne transmet que le profil, sa clé publique FIDO2 et un motif ; le coffre CA,
+  le rôle OpenBao, le principal, la cible et le TTL sont imposés côté serveur.
+- **Identité et moindre privilège** : seul un bearer nominatif non-admin, lié à
+  la policy exacte du profil et au coffre CA attendu, est admis. Bootstrap,
+  token admin et Mission JWT sont refusés. Une policy qui autorise également
+  `ssh_sign_key` ou `ssh_ca_setup` est rejetée comme trop large.
+- **MFA effectif à la connexion** : seules les clés OpenSSH
+  `sk-ssh-ed25519@openssh.com` et `sk-ecdsa-sha2-nistp256@openssh.com`
+  pré-enrôlées sont acceptées. Le certificat impose l'option critique
+  `verify-required`, le principal et un `key_id` unique ; la clé privée demeure
+  dans le dispositif FIDO2.
+- **Quatre canaux, une autorité** : le même contrat est disponible dans la
+  console Web, l'API REST, le CLI Click et le shell interactif. Ces surfaces ne
+  choisissent aucun attribut de sécurité et restent subordonnées à la policy
+  Vault.
+- **Fail-close** : profils JSON stricts, bornes de taille et de TTL validées au
+  démarrage, parsing du wire format FIDO2, contrôle du point ECDSA P-256,
+  canonicalisation avant OpenBao et refus explicite si le PolicyStore est
+  indisponible.
+- **Déploiement `.env` strict** : le même document de profils peut être fourni
+  en Base64 URL-safe via `SSH_OPERATOR_PROFILES_B64`, sans élargir l'alphabet
+  accepté par les renderers. JSON direct et Base64 sont exclusifs, bornés et
+  validés fail-fast.
+- **Audit sans matériau de clé** : identité, profil, cible, principal,
+  empreinte, motif et résultat sont corrélés ; la clé publique complète n'est
+  pas journalisée.
+- **Séparation du secours** : ce parcours nominal ne lit ni ne modifie le
+  credential breaking-glass externe.
+- **Base à jour** : `v0.9.0` inclut intégralement le correctif de synchronisation
+  S3 conditionnelle et de restauration fail-closed publié en `v0.8.6`.
+- **Durcissements post-revue adversariale, 3 rounds (4 + 2 + 1 findings
+  bloquants corrigés avant intégration)** :
+  - **Round 1** : `ssh_sign_key`/`ssh_ca_setup` génériques (MCP et REST Admin)
+    refusaient l'émission sur le rôle exact réservé par un profil opérateur
+    JIT — fermait un contournement du parcours FIDO2 par un bearer write
+    ordinaire scopé au même coffre.
+  - **Round 2 (le round 1 était insuffisant)** : la CA SSH OpenBao étant
+    partagée par mount (un seul mount par coffre), le même bearer pouvait
+    créer un rôle **alternatif** dans le même mount et le signer
+    génériquement, contournant toujours FIDO2. Le garde bloque désormais le
+    **coffre entier** dès qu'il héberge un profil opérateur JIT, quel que
+    soit le rôle (existant ou à créer) — pas seulement le rôle exact.
+  - Ce parcours refuse explicitement l'accès si le Token Store est
+    diagnostiqué indisponible, au lieu de servir un bearer depuis un cache
+    potentiellement périmé (spécifique à ce parcours, ne change pas le
+    comportement diagnostique global du Token Store).
+  - `sign_ssh_key()`/`setup_ssh_ca()` (round 1) puis `get_ca_public_key()`,
+    `list_ssh_roles()`, `get_ssh_role_info()` (round 2) ne journalisent/
+    retournent plus jamais le message brut d'une exception OpenBao — le
+    round 1 n'avait couvert que le chemin d'écriture, round 2 a étendu le
+    même correctif aux trois fonctions de lecture qui présentaient le même
+    défaut sur des routes tout aussi publiques.
+  - Garde d'identité (`auth_type`) désormais prouvé par des tests
+    mutationnels dédiés (bootstrap/mission JWT/absent, RED sans le garde).
+  - Audit de succès enrichi : `key_id` et `serial` OpenBao désormais
+    corrélés, en plus du profil/cible/principal/empreinte/motif déjà présents.
+  - Enrôlement des empreintes FIDO2 : reste volontairement statique (config +
+    redéploiement, cohérent avec `MissionBindingStore`) — décision assumée,
+    documentée, suivi séparé à ouvrir si une surface d'administration live est
+    souhaitée. Évaluée par la revue comme raisonnable pour une première
+    production sous conditions (config GitOps protégée, SLA de redéploiement
+    inférieur au TTL des certificats, révocation immédiate du bearer en cas
+    de compromission).
+  - **Round 3** : un `vault_id` non canonique (slash final) échappait au
+    garde par comparaison de chaîne exacte tout en désignant le même mount
+    OpenBao après normalisation `hvac` — bug pré-existant plus large que ce
+    parcours SSH (`check_vault_owner()`/`vault/spaces.py` et sa duplication
+    dans `_check_vault_access()`/`admin/api.py`, affectant potentiellement
+    tout outil vault-scoped pour un bearer owner-based). Corrigé à la racine
+    dans un module dédié (`vault_ids.py`, validation centralisée avant toute
+    décision d'autorisation) plutôt que rapiécé localement.
+  - **Frontière structurelle** : après 3 contournements sur un garde placé
+    uniquement aux points d'entrée, l'invariant vit désormais dans la
+    primitive elle-même (`sign_ssh_key_generic()`/`setup_ssh_ca_generic()`) —
+    un futur point d'entrée hérite du garde par construction.
+  - **Round 4** : la route REST Admin appelait encore les primitives brutes
+    avec un garde dupliqué en ligne (le round 3 n'avait migré que les tools
+    MCP vers les wrappers `_generic`, invalidant la prétention structurelle
+    pour cette surface). Corrigé : les 4 points d'entrée génériques (MCP ×2,
+    REST ×2) appellent tous les wrappers. Un test structurel (analyse AST)
+    vérifie qu'aucun autre module n'appelle directement les primitives
+    brutes. `role_name` durci en `fullmatch` (même piège `\n` final que
+    `vault_id`), message d'erreur sans écho de la valeur brute.
+  - **Round 5 (BLOQUANT)** : un bearer **admin légitime** contournait
+    complètement FIDO2/`verify-required` via le même slash final —
+    `check_access()`/`_check_vault_access()` autorisent l'admin avant toute
+    validation de `vault_id`, format que le garde de réservation ne
+    revalidait pas lui-même. Corrigé : le garde de réservation valide
+    désormais `vault_id` en toute autonomie, indépendamment de ce que
+    l'appelant a déjà validé. Le test structurel round 4 était lui-même
+    contournable par aliasing d'import (`import ... as x`) — corrigé en
+    résolvant les alias avant comparaison.
+- **Tests** : 1007 tests passés, 43 ignorés (964 + 43 nouveaux tests
+  mutation-proven sur les durcissements ci-dessus, chacun confirmé RED sans le
+  correctif puis GREEN avec — y compris la reproduction exacte des
+  contournements round 2 (rôle alternatif), round 3 (vault_id non
+  canonique, bout en bout), round 4 (test structurel) et round 5 (bypass
+  admin, MCP et REST). Le contrat UI
+  couvre notamment le refus de policy JIT sans casser la fiche Vault
+  standard (RED puis GREEN).
+
 ## [0.8.7] — 2026-07-23
 
 ### Correction critique — contournement de l'isolation owner-based par `vault_id` non canonique
