@@ -1,5 +1,43 @@
 # Changelog — MCP Vault
 
+## [0.8.7] — 2026-07-23
+
+### Correction critique — contournement de l'isolation owner-based par `vault_id` non canonique
+
+Découvert en cours de revue adversariale sur un chantier séparé (issue #96,
+accès SSH JIT opérateur), sans lien fonctionnel avec SSH — un bug transverse
+à tout outil vault-scoped pour un bearer owner-based.
+
+- **Vulnérabilité** : `check_vault_owner()` (`vault/spaces.py`) et sa
+  duplication dans `_check_vault_access()` (`admin/api.py`) traitent un
+  `vault_id` non canonique (ex. `"agentic-platform/"`, slash final) comme
+  « le vault n'existe pas » — la règle « vault inexistant → accès autorisé »
+  (pensée pour la création) se retrouve alors détournée pour donner accès à
+  un vault EXISTANT dont le bearer n'est PAS propriétaire, dès lors
+  qu'OpenBao/hvac normalisent ce même `vault_id` vers le même mount réel que
+  sa forme canonique. Contournement complet de l'isolation cross-tenant
+  owner-based, sans exécution de code, sur tout bearer `allowed_resources=[]`.
+- **Correctif** : nouveau module feuille sans dépendance `vault_ids.py`
+  (`is_valid_vault_id()`, ancré par `fullmatch` — pas `match`, pour fermer le
+  piège classique d'un `\n` final), consommé systématiquement avant toute
+  décision d'autorisation par `check_access()` (`auth/context.py`),
+  `_check_vault_access()` (`admin/api.py`), `_validate_vault_id()`
+  (`vault/spaces.py`), `validate_tenant_id()`/`validate_allowed_resources()`
+  (`auth/mission_bindings.py`), `_validate_inputs()` (`vault/wrapping.py`),
+  `_validate_role_name()` (`vault/ssh_ca.py`).
+- **Revue** : 4 rounds de revue adversariale indépendante (Codex, mandat
+  offensif) → **GO**. Chaque round a reproduit puis fermé une variante
+  distincte du contournement (slash final, double slash, encodage URL,
+  bearer admin légitime inclus — un token admin ne bénéficiait d'aucun
+  court-circuit protecteur ici, le bug touchait le chemin owner-based
+  générique quel que soit le niveau de permission).
+- **Tests** : 385 lignes de tests non-complaisants nouveaux
+  (`tests/test_vault_id_canonicalization_owner_bypass.py`), sabotages
+  RED→GREEN documentés. Suite complète : 939 passed / 43 skipped / 0 failed.
+- **Documentation** : `ARCHITECTURE.md` §6.1b (nouveau), `TECHNICAL.md` §3.4
+  mis à jour.
+- **Aucun changement de comportement** pour un `vault_id` déjà canonique.
+
 ## [0.8.6] — 2026-07-22
 
 ### Correction — explosion du nombre de versions S3 (sync périodique inconditionnelle)

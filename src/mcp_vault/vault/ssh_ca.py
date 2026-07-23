@@ -33,8 +33,12 @@ def _validate_role_name(role_name: str) -> Optional[dict]:
     """
     if not role_name:
         return {"status": "error", "message": "role_name est requis"}
-    if not _ROLE_NAME_PATTERN.match(role_name):
-        return {"status": "error", "message": f"role_name '{role_name}' invalide (alphanum, tirets, underscores, 1-64 chars)"}
+    # fullmatch (pas match) : round 3/4 revue — `match`+`$` acceptait un `\n`
+    # final, injecté ensuite dans les chemins OpenBao et les logs. Message
+    # constant, sans refléter la valeur brute (cohérent avec le reste du
+    # fichier — cf. sign_ssh_key()/setup_ssh_ca()).
+    if not isinstance(role_name, str) or not _ROLE_NAME_PATTERN.fullmatch(role_name):
+        return {"status": "error", "message": "role_name invalide (alphanum, tirets, underscores, 1-64 chars)"}
     return None
 
 

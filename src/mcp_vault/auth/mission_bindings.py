@@ -39,12 +39,7 @@ from typing import Optional
 logger = logging.getLogger("mcp-vault.mission-binding-store")
 
 from ..config import get_settings
-
-# Regex de validation d'un vault_id — DOIT rester synchronisée avec
-# vault.spaces._VAULT_ID_PATTERN. Dupliquée ici volontairement pour éviter d'importer
-# vault.spaces (qui charge hvac via openbao.manager, indisponible hors Docker → casserait
-# les tests unitaires). Alphanumérique + tirets/underscores, 1-64 caractères.
-_VAULT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+from ..vault_ids import is_valid_vault_id
 
 # Format défensif d'un tenant_id utilisé comme identité REST/CLI et clé de binding.
 # Le contrat mcp-mission garantit seulement « str non vide » ; on impose ici un format
@@ -177,7 +172,7 @@ def validate_allowed_resources(allowed_resources) -> tuple[Optional[list], str]:
         return None, f"allowed_resources trop long (max {_MAX_ALLOWED_RESOURCES})"
     seen = set()
     for vid in allowed_resources:
-        if not isinstance(vid, str) or not _VAULT_ID_PATTERN.match(vid):
+        if not is_valid_vault_id(vid):
             return None, f"vault_id invalide dans allowed_resources : {vid!r}"
         if vid in seen:
             return None, f"vault_id dupliqué dans allowed_resources : {vid!r}"
@@ -191,7 +186,10 @@ def validate_tenant_id(tenant_id) -> tuple[bool, str]:
         return False, "tenant_id requis (chaîne non vide)"
     if tenant_id in _RESERVED_TENANT_IDS:
         return False, f"tenant_id réservé : {tenant_id!r}"
-    if not _TENANT_ID_PATTERN.match(tenant_id):
+    # fullmatch (pas match) : round 3 revue fix critique vault_id — même
+    # piège `$` accepte un `\n` final, ici sur un identifiant utilisé comme
+    # clé de binding C18 (tenant_id).
+    if not _TENANT_ID_PATTERN.fullmatch(tenant_id):
         return False, (
             f"tenant_id invalide : {tenant_id!r} — format URL-safe attendu "
             "(alphanum, '.', '_', ':', '-', 1-128 caractères)"

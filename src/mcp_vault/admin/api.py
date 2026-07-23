@@ -14,6 +14,7 @@ from pathlib import Path
 
 from ..config import get_settings
 from ..auth.context import current_token_info, check_policy, check_path_policy, can_read_vault_content
+from ..vault_ids import is_valid_vault_id
 from ..auth.token_store import get_token_store, TokenStore
 from ..auth.middleware import get_activity_log
 from ..audit import log_audit
@@ -1383,6 +1384,15 @@ def _check_vault_access(token_info: dict, vault_id: str) -> dict | None:
     # Admin → accès total
     if "admin" in perms:
         return None
+
+    # SÉCURITÉ (round 3, PR #97/issue #96, 2026-07-22) : cette fonction
+    # dupliquait la logique de check_access() (auth/context.py) SANS jamais
+    # valider vault_id — check_vault_owner() (vault/spaces.py) ci-dessous
+    # traite un vault_id non canonique (ex. slash final) comme un vault
+    # absent et AUTORISE, alors que le vault existe et appartient à
+    # quelqu'un d'autre. Voir check_access() pour l'explication complète.
+    if not is_valid_vault_id(vault_id):
+        return {"status": "error", "message": f"Identifiant de coffre invalide : '{vault_id}'"}
 
     # Liste explicite de vaults autorisés.
     # Typage défensif (cohérent avec auth.context.check_access, #47) : un

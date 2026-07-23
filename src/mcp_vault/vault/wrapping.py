@@ -37,6 +37,8 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
+from ..vault_ids import is_valid_vault_id
+
 logger = logging.getLogger("mcp-vault.wrapping")
 
 # Chemins réservés non accessibles via wrap (cohérent avec secrets.py RESERVED_PATHS)
@@ -390,14 +392,13 @@ def _validate_inputs(vault_id: str, secret_path: str,
     critique wrap au listing admin) ; elle réutilise la liste de préfixes
     réservés via _is_reserved_path.
     """
-    # vault_id : alphanum + tirets, 1–64 chars (cohérent avec spaces.py)
-    # #78 : fullmatch (et non match) + type-safe — `.match`+`$` acceptait un `\n` final
-    # (le vault_id remonte ensuite dans l'audit via _r → injection de ligne).
-    if not isinstance(vault_id, str) or (
-        not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9\-]{0,62}[a-zA-Z0-9]', vault_id)
-        and not re.fullmatch(r'[a-zA-Z0-9]', vault_id)
-    ):
-        return "vault_id invalide (alphanum + tirets, 1-64 chars)"
+    # vault_id : source unique mcp_vault.vault_ids (découverte revue round 2
+    # du fix critique isolation owner-based, 2026-07-23 : cette regex locale
+    # divergeait de la canonique — plus stricte sur les underscores/tiret
+    # final, sans ouvrir de bypass ici puisque secret_wrap passe déjà par
+    # check_access() en amont, mais source de dérive future).
+    if not is_valid_vault_id(vault_id):
+        return "vault_id invalide (alphanum + tirets/underscores, 1-64 chars)"
 
     # secret_path : validation locale (proche de secrets.py _validate_secret_path
     # mais indépendante — le chemin critique wrap n'est pas couplé au listing admin).
