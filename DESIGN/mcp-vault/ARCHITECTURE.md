@@ -1,6 +1,6 @@
 # Architecture — MCP Vault
 
-> **Version** : 0.8.6 | **Date** : 2026-07-22 | **Auteur** : Cloud Temple  
+> **Version** : 0.8.7 | **Date** : 2026-07-23 | **Auteur** : Cloud Temple  
 > **Projet** : mcp-vault | **Licence** : Apache 2.0  
 > **Statut** : ✅ Implémenté — Production-ready (PKI interne v0.5.x + C18 v0.6.x)
 
@@ -646,6 +646,37 @@ vault-bucket/
 | `vault_info(vault_id)`                        | read  | Détails d'un vault (métadonnées, nombre de secrets, owner)    |
 | `vault_update(vault_id, description)`         | write | Met à jour la description d'un vault                          |
 | `vault_delete(vault_id)`                      | admin | Supprime un vault et tous ses secrets                         |
+
+### 6.1b Isolation owner-based — durcissement canonicalisation `vault_id` (2026-07-23)
+
+Quand `allowed_resources=[]` sur un token, l'accès retombe sur l'isolation
+**owner-based** : `check_vault_owner()` (`vault/spaces.py`) autorise
+uniquement si `_vault_meta.created_by == client_name` du bearer, et refuse
+sinon (fail-close si la métadonnée est absente).
+
+**Vulnérabilité fermée** : un `vault_id` **non canonique** (ex.
+`"agentic-platform/"`, slash final) faisait traiter `check_vault_owner()`
+comme « ce vault n'existe pas » — repli sur l'isolation owner-based, donc
+accès autorisé — alors qu'OpenBao/hvac **normalisent** ce même `vault_id`
+vers le **même mount réel** que sa forme canonique. Un bearer scopé sur un
+vault dont il n'est PAS propriétaire pouvait ainsi contourner intégralement
+l'isolation cross-tenant en présentant une variante non canonique du
+`vault_id` d'un autre tenant. Pas spécifique à un outil : affecte tout
+appelant vault-scoped en mode owner-based (`check_access()`,
+`_check_vault_access()` REST Admin, `mission_bindings`, `wrapping`, la
+réservation de coffre SSH JIT opérateur — cf. §6.3b).
+
+**Correctif** : nouveau module feuille sans dépendance
+`mcp_vault/vault_ids.py` (`is_valid_vault_id()`, ancré par `fullmatch` — pas
+`match`, pour fermer le piège classique d'un `\n` final), consommé
+systématiquement **avant** toute décision d'autorisation par
+`check_access()`, `_check_vault_access()`, `_validate_vault_id()`
+(`vault/spaces.py`), `validate_tenant_id()`/`validate_allowed_resources()`
+(`auth/mission_bindings.py`), `_validate_inputs()` (`vault/wrapping.py`),
+`_validate_role_name()` (`vault/ssh_ca.py`). Vérifié GO sur 4 rounds de
+revue adversariale Codex indépendants (chacun a reproduit puis fermé une
+variante distincte : slash final, double slash, encodage URL, bearer admin
+légitime inclus). Voir CHANGELOG.md pour le détail complet.
 
 ### 6.2 Secrets
 
@@ -2247,4 +2278,4 @@ result = await vault_client.call("ssh_sign_key", {
 
 ---
 
-*Document mis à jour le 22 juillet 2026 — MCP Vault v0.8.6 (37 outils MCP, pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer, écriture create-only atomique (CAS), sync S3 conditionnelle)*
+*Document mis à jour le 23 juillet 2026 — MCP Vault v0.8.7 (37 outils MCP, pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer, écriture create-only atomique (CAS), sync S3 conditionnelle)*

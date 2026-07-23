@@ -1,6 +1,6 @@
 # Documentation Technique — MCP Vault
 
-> **Version** : 0.8.6 | **Date** : 2026-07-22 | **Auteur** : Cloud Temple
+> **Version** : 0.8.7 | **Date** : 2026-07-23 | **Auteur** : Cloud Temple
 > **Licence** : Apache 2.0 | **Statut** : ✅ Production-ready (audit V2.1 complété + PKI interne v0.5.1)
 
 ---
@@ -284,6 +284,16 @@ Quand `allowed_resources` est vide (par défaut), `check_access()` vérifie la p
 du vault via `check_vault_owner(vault_id, client_name)` dans `spaces.py`. Ce mécanisme
 élimine le problème "vide = tous" qui permettait à un token d'accéder aux vaults créés par
 d'autres tokens. La sémantique est désormais "vide = mes vaults".
+
+**Durcissement canonicalisation `vault_id` (2026-07-23)** : un `vault_id` non canonique
+(ex. slash final) faisait traiter `check_vault_owner()` comme "vault inexistant" → accès
+autorisé (règle "si le vault n'existe pas encore → accès autorisé" ci-dessus, détournée),
+alors qu'OpenBao/hvac normalisent ce même `vault_id` vers le même mount réel — contournement
+complet de l'isolation owner-based. `check_access(resource_id)` valide désormais
+`is_valid_vault_id()` (`vault_ids.py`, module feuille sans dépendance, `fullmatch`) avant
+toute décision d'autorisation. Même correctif dans `_check_vault_access()` (admin/api.py),
+`_validate_vault_id()` (spaces.py), `mission_bindings.py`, `wrapping.py`, `ssh_ca.py`. Voir
+§6.1b ARCHITECTURE.md et CHANGELOG.md.
 
 ### 3.5 `auth/middleware.py` — Authentification HTTP
 
