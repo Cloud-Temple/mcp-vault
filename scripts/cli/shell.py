@@ -270,14 +270,21 @@ async def cmd_password(client, args="", json_output=False):
         show_password_result(result)
 
 
-SSH_OPS = ("setup", "sign", "ca-key", "roles", "role-info")
+SSH_OPS = ("profiles", "request", "setup", "sign", "ca-key", "roles", "role-info")
 
 
 async def cmd_ssh(client, args="", json_output=False):
-    parts = args.strip().split()
+    import shlex
+    try:
+        parts = shlex.split(args)
+    except ValueError as exc:
+        show_error(f"Arguments SSH invalides : {exc}")
+        return
     if not parts or parts[0] not in SSH_OPS:
-        show_warning("Usage: ssh <op> <vault> [args]")
+        show_warning("Usage: ssh <op> [args]")
         show_warning("")
+        show_warning("  ssh profiles")
+        show_warning("  ssh request bastion-prod --key-data 'ssh-ed25519 ...' --reason 'ticket 123'")
         show_warning("  ssh setup my-vault my-role --users deploy --ttl 15m")
         show_warning("  ssh sign my-vault my-role --key-data 'ssh-ed25519 ...'")
         show_warning("  ssh ca-key my-vault")
@@ -286,7 +293,32 @@ async def cmd_ssh(client, args="", json_output=False):
         return
 
     op = parts[0]
-    if op == "ca-key" and len(parts) >= 2:
+    if op == "profiles" and len(parts) == 1:
+        result = await client.call_tool("ssh_operator_access_profiles", {})
+    elif op == "request" and len(parts) >= 2:
+        key_data = ""
+        reason = ""
+        invalid = False
+        i = 2
+        while i < len(parts):
+            if parts[i] == "--key-data" and i + 1 < len(parts):
+                key_data = parts[i + 1]
+                i += 2
+            elif parts[i] == "--reason" and i + 1 < len(parts):
+                reason = parts[i + 1]
+                i += 2
+            else:
+                invalid = True
+                break
+        if invalid or not key_data or not reason:
+            show_error("Usage: ssh request <profile> --key-data '<clé publique>' --reason '<motif>'")
+            return
+        result = await client.call_tool("ssh_request_operator_access", {
+            "profile_id": parts[1],
+            "public_key": key_data,
+            "reason": reason,
+        })
+    elif op == "ca-key" and len(parts) >= 2:
         result = await client.call_tool("ssh_ca_public_key", {"vault_id": parts[1]})
     elif op == "roles" and len(parts) >= 2:
         result = await client.call_tool("ssh_ca_list_roles", {"vault_id": parts[1]})

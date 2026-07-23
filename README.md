@@ -63,7 +63,7 @@ Au démarrage, MCP Vault :
 
 ---
 
-## 🛠️ Outils MCP (37)
+## 🛠️ Outils MCP (39)
 
 ### System (2)
 
@@ -107,6 +107,23 @@ Chaque vault possède sa **propre CA SSH isolée** — les CA sont cryptographiq
 | `ssh_ca_list_roles(vault_id)`                        | read  | Liste les rôles SSH CA configurés dans un vault             |
 | `ssh_ca_role_info(vault_id, role)`                   | read  | Détails d'un rôle (TTL, allowed_users, extensions)          |
 
+### Accès SSH JIT opérateur (2) *(v0.9.0)*
+
+| Outil | Perm | Description |
+| --- | --- | --- |
+| `ssh_operator_access_profiles()` | read | Liste les profils fermés utilisables par le bearer nominatif courant |
+| `ssh_request_operator_access(profile_id, public_key, reason)` | write | Émet un certificat court lié à une clé publique pré-enrôlée |
+
+Le demandeur ne choisit jamais le coffre CA, le rôle, le principal, la cible
+ou le TTL. L'identité de l'opérateur repose sur un bearer token nominatif
+scopé par une policy dédiée (même mécanisme que le reste du système), plus
+une clé publique SSH standard (`ssh-ed25519`/`ecdsa-sha2-nistp256`)
+pré-enrôlée par empreinte. Ce parcours humain exceptionnel reste distinct du
+breaking-glass externe et du parcours agentique.
+Les profils peuvent être fournis par `SSH_OPERATOR_PROFILES_JSON` ou, pour un
+renderer `.env` strict, par son équivalent Base64 URL-safe
+`SSH_OPERATOR_PROFILES_B64` ; les deux sources sont mutuellement exclusives.
+
 ### Policies MCP — contrôle d'accès granulaire (4)
 
 Les policies permettent de restreindre finement les outils accessibles par token, avec support des **wildcards** (`system_*`, `ssh_*`...) et des **règles par vault** (`prod-*` → lecture seule).
@@ -118,7 +135,7 @@ Les policies permettent de restreindre finement les outils accessibles par token
 | `policy_get(policy_id)`                                                              | admin | Détails complets (allowed/denied tools, path_rules) |
 | `policy_delete(policy_id, confirm)`                                                  | admin | Supprime une policy ⚠️                            |
 
-> 📋 6 policies prêtes à l'emploi documentées dans [ARCHITECTURE.md §6.4.1](DESIGN/mcp-vault/ARCHITECTURE.md) : `readonly`, `ssh-operator`, `developer`, `prod-reader-dev-writer`, `ci-cd-agent`, `security-auditor`
+> 📋 6 policies prêtes à l'emploi documentées dans [ARCHITECTURE.md §6.4.1](DESIGN/mcp-vault/ARCHITECTURE.md) : `readonly`, `operator-ssh-jit`, `developer`, `prod-reader-dev-writer`, `ci-cd-agent`, `security-auditor`
 >
 > 🔒 **Fail-close sur panne S3** *(v0.8.3, #86)* : après expiration du cache (5 min),
 > une panne ou une corruption S3 détectée fait refuser explicitement les décisions
@@ -306,6 +323,11 @@ python scripts/mcp_cli.py policy create no-ssh -d "Pas de SSH" --denied "ssh_*"
 python scripts/mcp_cli.py policy create team-x --allowed "secret_*" --path-rules '[{"vault_pattern":"shared-*","allowed_paths":["shared/*"]}]'
 python scripts/mcp_cli.py audit --status denied --limit 10
 
+# Accès SSH JIT opérateur
+python scripts/mcp_cli.py ssh profiles
+python scripts/mcp_cli.py ssh request bastion-prod \
+  --key ~/.ssh/id_ed25519.pub --reason "INC-230 maintenance bastion"
+
 # PKI interne (v0.5.0)
 python scripts/mcp_cli.py pki setup --lab --domains '*.lesur.lan,lesur.lan'
 python scripts/mcp_cli.py pki ca-key
@@ -330,6 +352,7 @@ Copier `.env.example` → `.env` et adapter. Les variables sont groupées par do
 |--------|-----------|-------------|
 | **Serveur** | `MCP_SERVER_NAME`, `MCP_SERVER_PORT`, `MCP_ALLOWED_HOSTS` | Oui |
 | **Auth** | `ADMIN_BOOTSTRAP_KEY` | Oui |
+| **SSH JIT opérateur** *(v0.9.0)* | `SSH_OPERATOR_PROFILES_JSON` ou `SSH_OPERATOR_PROFILES_B64`, bornes `SSH_OPERATOR_JIT_*` | Non — vide = désactivé ; aucun secret dans le profil |
 | **S3** | `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET_NAME`, `S3_REGION_NAME` | Oui |
 | **OpenBao** | `OPENBAO_ADDR`, `OPENBAO_SHARES`, `OPENBAO_THRESHOLD` | Oui |
 | **Storage sync** | `VAULT_S3_PREFIX`, `VAULT_S3_SYNC_INTERVAL` | Non |
@@ -464,8 +487,8 @@ mcp-vault/
 ├── requirements.lock         # Dépendances pinnées (versions exactes)
 ├── VERSION                   # version courante du service
 ├── DESIGN/mcp-vault/
-│   ├── ARCHITECTURE.md       # Spécification détaillée (v0.8.7)
-│   ├── TECHNICAL.md          # Documentation technique (v0.8.7)
+│   ├── ARCHITECTURE.md       # Spécification détaillée (v0.9.0)
+│   ├── TECHNICAL.md          # Documentation technique (v0.9.0)
 │   └── SECURITY_AUDIT.md     # Rapport d'audit consolidé (60 findings V2.1)
 ├── scripts/
 │   ├── mcp_cli.py            # CLI entry point
@@ -478,7 +501,7 @@ mcp-vault/
 │       └── shell.py          # Shell interactif
 ├── src/mcp_vault/
 │   ├── config.py             # Configuration pydantic-settings
-│   ├── server.py             # FastMCP + 37 outils MCP + lifecycle + audit
+│   ├── server.py             # FastMCP + 39 outils MCP + lifecycle + audit
 │   ├── lifecycle.py          # Orchestrateur startup/shutdown
 │   ├── s3_client.py          # Client S3 hybride SigV2/SigV4
 │   ├── s3_sync.py            # Sync file backend ↔ S3
@@ -522,4 +545,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.8.7
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.9.0

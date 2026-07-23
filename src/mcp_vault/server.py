@@ -39,6 +39,8 @@ _TOOL_LABELS = {
     "secret_write": "Écriture secret", "secret_read": "Lecture secret",
     "secret_list": "Liste secrets", "secret_delete": "Suppression secret",
     "ssh_ca_setup": "Setup SSH CA", "ssh_sign_key": "Signature clé SSH",
+    "ssh_operator_access_profiles": "Profils accès SSH opérateur",
+    "ssh_request_operator_access": "Demande accès SSH opérateur",
     "ssh_ca_public_key": "Clé publique CA", "ssh_ca_list_roles": "Liste rôles SSH",
     "ssh_ca_role_info": "Détails rôle SSH",
     "policy_create": "Création policy", "policy_list": "Liste policies",
@@ -1011,7 +1013,7 @@ async def ssh_ca_setup(vault_id: str, role_name: str, allowed_users: str = "*",
         ttl: Durée de validité des certificats (ex: "30m", "1h")
     """
     from .auth.context import check_access, check_write_permission, check_policy
-    from .vault.ssh_ca import setup_ssh_ca
+    from .vault.ssh_ca import setup_ssh_ca_generic
 
     policy_err = check_policy("ssh_ca_setup")
     if policy_err:
@@ -1023,7 +1025,7 @@ async def ssh_ca_setup(vault_id: str, role_name: str, allowed_users: str = "*",
     if write_err:
         return write_err
 
-    return _r("ssh_ca_setup", await setup_ssh_ca(vault_id, role_name, allowed_users, default_user, ttl), vault_id, role_name)
+    return _r("ssh_ca_setup", await setup_ssh_ca_generic(vault_id, role_name, allowed_users, default_user, ttl), vault_id, role_name)
 
 
 @mcp.tool()
@@ -1039,7 +1041,7 @@ async def ssh_sign_key(vault_id: str, role_name: str, public_key: str,
         ttl: Durée de validité du certificat
     """
     from .auth.context import check_access, check_write_permission, check_policy
-    from .vault.ssh_ca import sign_ssh_key
+    from .vault.ssh_ca import sign_ssh_key_generic
 
     policy_err = check_policy("ssh_sign_key")
     if policy_err:
@@ -1051,7 +1053,36 @@ async def ssh_sign_key(vault_id: str, role_name: str, public_key: str,
     if write_err:
         return write_err
 
-    return _r("ssh_sign_key", await sign_ssh_key(vault_id, role_name, public_key, ttl), vault_id, role_name)
+    return _r("ssh_sign_key", await sign_ssh_key_generic(vault_id, role_name, public_key, ttl), vault_id, role_name)
+
+
+@mcp.tool()
+async def ssh_operator_access_profiles() -> dict:
+    """Liste les profils JIT utilisables par le bearer opérateur courant.
+
+    Les empreintes de clé pré-enrôlée, le rôle OpenBao et la policy interne
+    ne sont jamais exposés. Une identité bootstrap, admin ou mission est
+    refusée.
+    """
+    from .ssh_operator import list_operator_access_profiles
+    return list_operator_access_profiles()
+
+
+@mcp.tool()
+async def ssh_request_operator_access(profile_id: str, public_key: str,
+                                      reason: str) -> dict:
+    """Demande un certificat SSH JIT opérateur lié à une clé pré-enrôlée.
+
+    Args:
+        profile_id: Profil serveur préautorisé
+        public_key: Clé publique OpenSSH (``ssh-ed25519``/``ecdsa-sha2-nistp256``) pré-enrôlée
+        reason: Motif opérationnel obligatoire
+
+    Le coffre CA, le rôle, le principal, la cible et le TTL sont imposés par
+    le profil serveur et ne sont pas des paramètres de cette opération.
+    """
+    from .ssh_operator import request_operator_ssh_access
+    return await request_operator_ssh_access(profile_id, public_key, reason)
 
 
 @mcp.tool()
@@ -1475,6 +1506,12 @@ def create_app():
     if not pep_ok:
         raise RuntimeError(f"Config mission JWT invalide — démarrage refusé : {pep_msg}")
 
+    operator_ok, operator_msg = settings.check_operator_ssh_jit_config()
+    if not operator_ok:
+        raise RuntimeError(
+            f"Config SSH JIT opérateur invalide — démarrage refusé : {operator_msg}"
+        )
+
     from .auth.middleware import AuthMiddleware, LoggingMiddleware, HealthCheckMiddleware
     from .admin.middleware import AdminMiddleware
     from .pki_middleware import PkiMiddleware
@@ -1533,6 +1570,11 @@ def main():
     pep_ok, pep_msg = settings.check_mission_pep_config()
     if not pep_ok:
         logger.error(f"❌ Config mission JWT invalide : {pep_msg}")
+        logger.error("   Démarrage refusé (fail-fast sécurité).")
+        sys.exit(1)
+    operator_ok, operator_msg = settings.check_operator_ssh_jit_config()
+    if not operator_ok:
+        logger.error(f"❌ Config SSH JIT opérateur invalide : {operator_msg}")
         logger.error("   Démarrage refusé (fail-fast sécurité).")
         sys.exit(1)
     if settings.mcp_auth_mode != "bearer":

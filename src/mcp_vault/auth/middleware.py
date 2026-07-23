@@ -206,6 +206,7 @@ class AuthMiddleware:
         # (break-glass — jamais routée vers la validation JWT).
         if hmac.compare_digest(token, settings.admin_bootstrap_key):
             return {
+                "auth_type": "bootstrap",
                 "client_name": "admin",
                 "permissions": ["admin", "read", "write"],
                 "allowed_resources": [],
@@ -410,6 +411,7 @@ class AuthMiddleware:
         # Bootstrap key → admin total (comparaison constant-time contre timing attacks)
         if hmac.compare_digest(token, settings.admin_bootstrap_key):
             return {
+                "auth_type": "bootstrap",
                 "client_name": "admin",
                 "permissions": ["admin", "read", "write"],
                 "allowed_resources": [],
@@ -421,7 +423,9 @@ class AuthMiddleware:
             token_hash = hashlib.sha256(token.encode()).hexdigest()
             token_info = store.get_by_hash(token_hash)
             if token_info and not token_info.get("revoked", False):
-                return token_info
+                resolved = dict(token_info)
+                resolved["auth_type"] = "token"
+                return resolved
 
         return None
 

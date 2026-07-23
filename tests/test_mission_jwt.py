@@ -1072,7 +1072,7 @@ class TestAuthMiddlewareDualStack:
                    return_value=store):
             events = h.call(token="opaque-token-abc")
         assert h.status_of(events) == 200
-        assert h.captured["token_info"] == info
+        assert h.captured["token_info"] == {**info, "auth_type": "token"}
         expected_hash = hashlib.sha256(b"opaque-token-abc").hexdigest()
         store.get_by_hash.assert_called_once_with(expected_hash)
 

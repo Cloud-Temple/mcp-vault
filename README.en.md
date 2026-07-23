@@ -63,7 +63,7 @@ On shutdown (`docker compose stop`):
 
 ---
 
-## 🛠️ MCP tools (37)
+## 🛠️ MCP tools (39)
 
 ### System (2)
 
@@ -107,6 +107,23 @@ Each vault has its **own isolated SSH CA** — CAs are cryptographically distinc
 | `ssh_ca_list_roles(vault_id)`                        | read  | Lists SSH CA roles configured in a vault                  |
 | `ssh_ca_role_info(vault_id, role)`                   | read  | Role details (TTL, allowed_users, extensions)             |
 
+### Operator SSH JIT access (2) *(v0.9.0)*
+
+| Tool | Perm | Description |
+| --- | --- | --- |
+| `ssh_operator_access_profiles()` | read | Lists closed profiles available to the current named bearer |
+| `ssh_request_operator_access(profile_id, public_key, reason)` | write | Issues a short certificate bound to a pre-enrolled public key |
+
+The caller never selects the CA vault, OpenBao role, principal, target or TTL.
+The operator's identity relies on a named bearer token scoped by a dedicated
+policy (the same mechanism as the rest of the system), plus a standard SSH
+public key (`ssh-ed25519`/`ecdsa-sha2-nistp256`) pre-enrolled by fingerprint.
+This exceptional human path remains separate from the external break-glass
+path and from autonomous agents.
+Profiles may be supplied through `SSH_OPERATOR_PROFILES_JSON` or, for strict
+`.env` renderers, its URL-safe Base64 equivalent
+`SSH_OPERATOR_PROFILES_B64`; both sources are mutually exclusive.
+
 ### MCP Policies — granular access control (4)
 
 Policies restrict the tools accessible per token, with support for **wildcards** (`system_*`, `ssh_*`...) and **per-vault rules** (`prod-*` → read-only).
@@ -118,7 +135,7 @@ Policies restrict the tools accessible per token, with support for **wildcards**
 | `policy_get(policy_id)`                                                              | admin | Full details (allowed/denied tools, path_rules)     |
 | `policy_delete(policy_id, confirm)`                                                  | admin | Deletes a policy ⚠️                                |
 
-> 📋 6 ready-to-use policies documented in [ARCHITECTURE.md §6.4.1](DESIGN/mcp-vault/ARCHITECTURE.md): `readonly`, `ssh-operator`, `developer`, `prod-reader-dev-writer`, `ci-cd-agent`, `security-auditor`
+> 📋 6 ready-to-use policies documented in [ARCHITECTURE.md §6.4.1](DESIGN/mcp-vault/ARCHITECTURE.md): `readonly`, `operator-ssh-jit`, `developer`, `prod-reader-dev-writer`, `ci-cd-agent`, `security-auditor`
 >
 > 🔒 **Fail-close on S3 outage** *(v0.8.3, #86)*: once the cache expires (5 min), a
 > detected S3 outage or corruption now causes policy decisions to be explicitly
@@ -303,6 +320,11 @@ python scripts/mcp_cli.py policy create no-ssh -d "No SSH" --denied "ssh_*"
 python scripts/mcp_cli.py policy create team-x --allowed "secret_*" --path-rules '[{"vault_pattern":"shared-*","allowed_paths":["shared/*"]}]'
 python scripts/mcp_cli.py audit --status denied --limit 10
 
+# Operator SSH JIT
+python scripts/mcp_cli.py ssh profiles
+python scripts/mcp_cli.py ssh request bastion-prod \
+  --key ~/.ssh/id_ed25519.pub --reason "INC-230 bastion maintenance"
+
 # Internal PKI (v0.5.0)
 python scripts/mcp_cli.py pki setup --lab --domains '*.lesur.lan,lesur.lan'
 python scripts/mcp_cli.py pki ca-key
@@ -327,6 +349,7 @@ Copy `.env.example` → `.env` and adjust. Variables are grouped by domain:
 |--------|-----------|----------|
 | **Server** | `MCP_SERVER_NAME`, `MCP_SERVER_PORT`, `MCP_ALLOWED_HOSTS` | Yes |
 | **Auth** | `ADMIN_BOOTSTRAP_KEY` | Yes |
+| **Operator SSH JIT** *(v0.9.0)* | `SSH_OPERATOR_PROFILES_JSON` or `SSH_OPERATOR_PROFILES_B64`, `SSH_OPERATOR_JIT_*` bounds | No — empty disables it; the profile contains no secret |
 | **S3** | `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET_NAME`, `S3_REGION_NAME` | Yes |
 | **OpenBao** | `OPENBAO_ADDR`, `OPENBAO_SHARES`, `OPENBAO_THRESHOLD` | Yes |
 | **Storage sync** | `VAULT_S3_PREFIX`, `VAULT_S3_SYNC_INTERVAL` | No |
@@ -461,8 +484,8 @@ mcp-vault/
 ├── requirements.lock         # Pinned dependencies (exact versions)
 ├── VERSION                   # current service version
 ├── DESIGN/mcp-vault/
-│   ├── ARCHITECTURE.md       # Detailed specification (v0.8.7)
-│   ├── TECHNICAL.md          # Technical documentation (v0.8.7)
+│   ├── ARCHITECTURE.md       # Detailed specification (v0.9.0)
+│   ├── TECHNICAL.md          # Technical documentation (v0.9.0)
 │   └── SECURITY_AUDIT.md     # Consolidated audit report (60 V2.1 findings)
 ├── scripts/
 │   ├── mcp_cli.py            # CLI entry point
@@ -475,7 +498,7 @@ mcp-vault/
 │       └── shell.py          # Interactive shell
 ├── src/mcp_vault/
 │   ├── config.py             # pydantic-settings configuration
-│   ├── server.py             # FastMCP + 36 MCP tools + lifecycle + audit
+│   ├── server.py             # FastMCP + 39 MCP tools + lifecycle + audit
 │   ├── lifecycle.py          # startup/shutdown orchestrator
 │   ├── s3_client.py          # Hybrid SigV2/SigV4 S3 client
 │   ├── s3_sync.py            # File backend ↔ S3 sync
@@ -521,4 +544,4 @@ mcp-vault/
 
 ---
 
-**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.8.7
+**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.9.0

@@ -111,12 +111,17 @@ async def setup_ssh_ca(vault_id: str, role_name: str, allowed_users: str = "*",
             "ttl": ttl,
         }
     except Exception as e:
-        logger.error(f"❌ Erreur setup SSH CA {vault_id}: {e}")
-        return {"status": "error", "message": str(e)}
+        # Ne jamais refléter/logger le diagnostic OpenBao brut (peut contenir
+        # des détails backend sensibles) — seul le type d'exception est utile
+        # au diagnostic, le message retourné au client reste constant.
+        logger.error(f"❌ Erreur setup SSH CA {vault_id}: {type(e).__name__}")
+        return {"status": "error", "message": "Erreur backend OpenBao"}
 
 
 async def sign_ssh_key(vault_id: str, role_name: str, public_key: str,
-                       ttl: str = "30m") -> dict:
+                       ttl: str = "30m", *, key_id: str = "",
+                       valid_principals: str = "",
+                       critical_options: Optional[dict] = None) -> dict:
     """Signe une clé publique SSH avec la CA du vault."""
     # SÉCURITÉ V3-11 : validation de role_name
     role_err = _validate_role_name(role_name)
@@ -130,11 +135,14 @@ async def sign_ssh_key(vault_id: str, role_name: str, public_key: str,
     mount_point = _ssh_mount_point(vault_id)
 
     try:
-        response = client.write(
-            f"{mount_point}/sign/{role_name}",
-            public_key=public_key,
-            ttl=ttl,
-        )
+        payload = {"public_key": public_key, "ttl": ttl}
+        if key_id:
+            payload["key_id"] = key_id
+        if valid_principals:
+            payload["valid_principals"] = valid_principals
+        if critical_options is not None:
+            payload["critical_options"] = critical_options
+        response = client.write(f"{mount_point}/sign/{role_name}", **payload)
         signed_key = response.get("data", {}).get("signed_key", "")
         serial = response.get("data", {}).get("serial_number", "")
 
@@ -146,8 +154,56 @@ async def sign_ssh_key(vault_id: str, role_name: str, public_key: str,
             "ttl": ttl,
         }
     except Exception as e:
-        logger.error(f"❌ Erreur signature SSH {vault_id}/{role_name}: {e}")
-        return {"status": "error", "message": str(e)}
+        # Cf. setup_ssh_ca() : jamais de diagnostic OpenBao brut côté client/log.
+        logger.error(f"❌ Erreur signature SSH {vault_id}/{role_name}: {type(e).__name__}")
+        return {"status": "error", "message": "Erreur backend OpenBao"}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Frontière structurelle générique ↔ opérateur JIT (durcissement post-revue,
+# round 3 — issue #96/PR #97)
+#
+# Rounds 1 et 2 avaient placé le garde anti-contournement UNIQUEMENT aux
+# points d'entrée génériques (server.py, admin/api.py) : chaque appelant
+# devait se souvenir d'appeler check_not_reserved_for_operator() avant
+# sign_ssh_key()/setup_ssh_ca(). La revue round 3 a jugé ce choix
+# insuffisant pour une mise en production d'accès privilégié — un futur
+# point d'entrée pourrait réintroduire le contournement en oubliant le
+# garde. Ces deux wrappers déplacent l'invariant DANS la primitive
+# elle-même : toute nouvelle surface générique doit les appeler (pas
+# sign_ssh_key()/setup_ssh_ca() directement) pour hériter du garde
+# automatiquement, par construction plutôt que par discipline d'appelant.
+# Le parcours opérateur JIT (ssh_operator.py) continue d'appeler
+# sign_ssh_key() directement : c'est lui qui PORTE sa propre légitimité
+# (bearer nominatif + policy dédiée + empreinte pré-enrôlée), il ne doit
+# pas passer par son propre garde d'exclusion.
+# ═══════════════════════════════════════════════════════════════════════
+
+async def sign_ssh_key_generic(vault_id: str, role_name: str, public_key: str,
+                                ttl: str = "30m") -> dict:
+    """Point d'entrée générique gardé pour signer une clé SSH.
+
+    Refuse structurellement tout coffre réservé à un profil opérateur JIT,
+    quel que soit l'appelant. Voir le commentaire de section ci-dessus.
+    """
+    from ..ssh_operator import check_not_reserved_for_operator
+    reserved_err = check_not_reserved_for_operator(vault_id)
+    if reserved_err:
+        return reserved_err
+    return await sign_ssh_key(vault_id, role_name, public_key, ttl)
+
+
+async def setup_ssh_ca_generic(vault_id: str, role_name: str, allowed_users: str = "*",
+                                default_user: str = "ubuntu", ttl: str = "30m") -> dict:
+    """Point d'entrée générique gardé pour configurer un rôle SSH CA.
+
+    Cf. sign_ssh_key_generic() — même garde structurel.
+    """
+    from ..ssh_operator import check_not_reserved_for_operator
+    reserved_err = check_not_reserved_for_operator(vault_id)
+    if reserved_err:
+        return reserved_err
+    return await setup_ssh_ca(vault_id, role_name, allowed_users, default_user, ttl)
 
 
 async def get_ca_public_key(vault_id: str) -> dict:
@@ -169,8 +225,9 @@ async def get_ca_public_key(vault_id: str) -> dict:
             "usage": "Ajouter dans /etc/ssh/trusted-user-ca-keys.pem sur les serveurs cibles",
         }
     except Exception as e:
-        logger.error(f"❌ Erreur lecture CA publique {vault_id}: {e}")
-        return {"status": "error", "message": str(e)}
+        # Cf. sign_ssh_key()/setup_ssh_ca() : jamais de diagnostic OpenBao brut.
+        logger.error(f"❌ Erreur lecture CA publique {vault_id}: {type(e).__name__}")
+        return {"status": "error", "message": "Erreur backend OpenBao"}
 
 
 async def list_ssh_roles(vault_id: str) -> dict:
@@ -206,8 +263,8 @@ async def list_ssh_roles(vault_id: str) -> dict:
                 "roles": [],
                 "count": 0,
             }
-        logger.error(f"❌ Erreur listing rôles SSH {vault_id}: {e}")
-        return {"status": "error", "message": str(e)}
+        logger.error(f"❌ Erreur listing rôles SSH {vault_id}: {type(e).__name__}")
+        return {"status": "error", "message": "Erreur backend OpenBao"}
 
 
 async def get_ssh_role_info(vault_id: str, role_name: str) -> dict:
@@ -249,8 +306,8 @@ async def get_ssh_role_info(vault_id: str, role_name: str) -> dict:
             "allow_host_certificates": data.get("allow_host_certificates", False),
         }
     except Exception as e:
-        logger.error(f"❌ Erreur info rôle SSH {vault_id}/{role_name}: {e}")
-        return {"status": "error", "message": str(e)}
+        logger.error(f"❌ Erreur info rôle SSH {vault_id}/{role_name}: {type(e).__name__}")
+        return {"status": "error", "message": "Erreur backend OpenBao"}
 
 
 async def cleanup_ssh_ca(vault_id: str) -> bool:
