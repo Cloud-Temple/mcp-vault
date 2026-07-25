@@ -1,5 +1,189 @@
 # Changelog — MCP Vault
 
+## [0.9.1] — 2026-07-25
+
+### Contrat `.env.example` réparé et rendu déterministe (issue #100)
+
+La v0.9.0 publiait un `.env.example` dont la ligne 46 contenait littéralement
+`***REMOVED***` : séquelle d'une réécriture d'historique `git-filter-repo`
+(incident d'exposition de credentials) qui avait détruit l'assignation
+`ADMIN_BOOTSTRAP_KEY=` en laissant orphelin son bloc de documentation. Une
+plateforme de déploiement externe a refusé de builder la release — à juste titre,
+le fichier n'était pas un contrat dotenv exploitable.
+
+**Pourquoi le défaut a survécu huit versions.** Il ne produisait aucun crash
+visible : `python-dotenv` accepte `***REMOVED***` comme un *nom de clé* (son motif
+est `([^=\#\s]+)`, sans exigence POSIX) avec la valeur `None`, et
+`pydantic-settings` absorbe ensuite l'entrée via son filtre de valeurs falsy.
+Aucune `ValidationError` n'était donc levée en local. Côté consommateur, les deux
+rendus possibles cassent pourtant le déploiement : rendre l'entrée avec une valeur
+non vide déclenche `extra_forbidden` (`Settings` est en `extra="forbid"`), et ne
+pas la rendre laisse `ADMIN_BOOTSTRAP_KEY` à son défaut `change_me_in_production`,
+que `validate_bootstrap_key()` rejette — le service fait alors `sys.exit(1)`.
+
+- **`ADMIN_BOOTSTRAP_KEY=REQUIRED`** remplace la ligne détruite. L'identification
+  ne repose pas sur une supposition : c'est la seule variable du groupe
+  « Authentification », le seul champ de `Settings` dont le défaut interdit le
+  démarrage, et un blob `.env.example` d'avant la réécriture (encore présent dans
+  l'historique non atteignable) porte la ligne intacte avec le même bloc de
+  commentaire. Le marqueur `REQUIRED` échoue **volontairement** la validation : une
+  plateforme qui livrerait le contrat sans substitution obtient un refus de
+  démarrage explicite et actionnable, jamais une clé faible acceptée en silence.
+- **Contrat désormais exhaustif dans les deux sens** : 18 assignations actives
+  + 23 déclarations commentées = **41 clés, exactement les 41 champs de
+  `Settings`**. `MCP_SERVER_DEBUG`, qui n'avait jamais été documentée, est ajoutée.
+- **Déterminisme en clés ET en valeurs.** Le fichier était lu différemment selon
+  la permissivité de l'extracteur, et de deux façons distinctes.
+  - *Clés fantômes* : de la prose comme `# Vide = ...`, `# jwt = ...`,
+    `# true = ...` était lue comme une assignation par un extracteur tolérant
+    (clés inexistantes `Vide`, `jwt`, `true`) ; `(leeway=0)` et `ENFORCE=true` par
+    un extracteur naïf (`leeway`, `ENFORCE`). Rendues avec une valeur non vide,
+    ces clés font échouer le démarrage.
+  - *Valeurs contradictoires* — plus insidieux, car le jeu de clés restait
+    correct : de vraies clés apparaissaient aussi en milieu de phrase avec une
+    autre valeur. `ENFORCE_MISSION_TOKEN_VALIDATION=true` (2 occurrences) alors
+    que la déclaration documentée porte `false`, et `MCP_AUTH_MODE=jwt/dual-stack`
+    (2 occurrences), qui n'est même pas une valeur valide. Un extracteur
+    « dernier gagnant » **activait donc l'enforcement JWT au lieu du défaut**.
+  Les onze occurrences sont reformulées (citation d'une variable sans le signe
+  égal). Les trois variantes d'extracteur renvoient maintenant les mêmes 41 clés
+  **avec les mêmes valeurs**, chaque clé n'étant extractible qu'une seule fois.
+- **Variables CLI retirées du contrat.** `VAULT_WRAP_TOKEN` et
+  `VAULT_MISSION_TOKEN` ne sont pas des champs de `Settings` : les déclarer, même
+  commentées, exposait un extracteur à les activer et à casser le démarrage. Le
+  groupe 8 devient de la documentation pure, sans aucune assignation, et renvoie
+  vers `scripts/README.md`.
+- **En-tête corrigé** : il annonçait 7 groupes alors que le corps en comptait 8
+  depuis l'insertion du groupe WAF, avec une numérotation décalée d'un cran. Un
+  bloc « Contrat dotenv » documente désormais explicitement les conventions
+  (marqueur `REQUIRED`, sens des lignes commentées, effet de `extra="forbid"`).
+
+### Sécurité — valeur de bootstrap key exploitable publiée dans la documentation
+
+`DESIGN/mcp-vault/ARCHITECTURE.md` §9 proposait, pour `ADMIN_BOOTSTRAP_KEY`, une
+valeur d'exemple de 40 caractères (`change_me_to_a_strong_random_key_64chars`) qui
+**passe** `validate_bootstrap_key()` : un opérateur qui copiait le bloc démarrait
+un vault de production dont la clé de chiffrement des clés unseal est publiée dans
+le dépôt, sans que le fail-fast ne le protège. Le bloc §9 était
+par ailleurs un instantané périmé de 27 clés dont **9 inexistantes** dans
+`Settings` (`OPENBAO_BINARY`, `OPENBAO_LISTEN_ADDRESS`, `OPENBAO_LOG_LEVEL`,
+`S3_SYNC_INTERVAL`, `S3_SYNC_STRATEGY`, `S3_SYNC_ON_SHUTDOWN`, `SSH_CA_ENABLED`,
+`SSH_CA_DEFAULT_TTL`, `SSH_CA_MAX_TTL`) — le copier produisait un `.env` refusé au
+démarrage. C'est la même classe de défaut que la ligne 46, dans un autre fichier.
+
+- Bloc §9 remplacé par un exemple **minimal et correct** (17 clés, toutes
+  réelles, `ADMIN_BOOTSTRAP_KEY=REQUIRED`), précédé d'un encadré désignant
+  `.env.example` comme **source unique** du contrat. Le duplicata qui dérivait
+  est supprimé plutôt que resynchronisé.
+
+### `.dockerignore` — le contexte de build n'expose plus le `.env` de l'opérateur
+
+Le dépôt n'avait aucun `.dockerignore`. Le service `mcp-vault` construit avec
+`context: .` : l'intégralité du répertoire, **`.env` réel inclus**, était
+transmise au démon Docker. `.gitignore` ne protège que Git, pas le contexte de
+build.
+
+Ajout d'un `.dockerignore` construit en **allowlist** : tout est exclu par `*`,
+puis seuls les chemins réellement copiés par le Dockerfile sont ré-inclus
+nominativement. Une denylist aurait dû énumérer ce qui est dangereux et laissé
+passer tout l'imprévu — un `id_rsa`, un `.ssh/`, un `.aws/credentials`, un secret
+sans extension. Avec une allowlist, oublier une entrée fait échouer le build,
+bruyamment : c'est le bon sens de l'erreur. Un test verrouille cette forme, pas
+seulement la présence du fichier.
+
+Vérification du contexte réellement transmis au démon (et non du seul contenu de
+l'image, qui ne prouve pas la même chose) : il contient exactement les dix chemins
+de l'allowlist, et la recherche de `.env`, `*.pem`, `*.key`, `id_rsa*`, `.ssh`,
+`.aws` et `.git` y revient vide.
+
+### Tests — la classe de défaut est fermée, pas seulement le symptôme
+
+Nouveau fichier `tests/test_env_example_contract.py`, **25 tests non
+complaisants**. Aucun test n'exerçait `.env.example` jusqu'ici, ce qui explique
+que la dérive n'ait jamais été détectée.
+
+- parsabilité stricte intégrale (0 ligne malformée) ;
+- **validité du classificateur lui-même** — un classificateur laxiste rendrait le
+  test précédent vert à vide ; il doit rejeter `***REMOVED***`, `export KEY=x`,
+  `1BAD=x`, `KEY =x`, `CLÉ=x`, `"KEY"=x`, `=orphan`, `KEY : x` ;
+- bijection stricte entre clés documentées et champs de `Settings`, dans les deux
+  sens, avec vérification préalable de l'absence d'alias et d'`env_prefix` ;
+- ligne littérale `ADMIN_BOOTSTRAP_KEY=REQUIRED` épinglée, et refus de toute
+  double déclaration ;
+- **unicité d'extraction** : chaque clé n'apparaît qu'une fois sous une forme
+  extractible — y compris en milieu de phrase, angle que la première version de ce
+  fichier manquait puisque son motif était ancré en début de ligne ;
+- absence de clé fantôme sous extracteur tolérant **et** naïf ;
+- `validate_bootstrap_key("REQUIRED")` doit rester **False** avec un message
+  citant la longueur minimale, **et `create_app()` doit lever `RuntimeError`** sur
+  le marqueur non substitué — le validateur seul ne prouvait pas que le vrai point
+  d'entrée refuse de démarrer. Ce test porte sa contre-épreuve : avec une clé forte
+  substituée, `create_app()` doit réussir, sinon il passerait pour de mauvaises
+  raisons ;
+- absence de matière secrète : valeurs littérales des clés sensibles épinglées,
+  liste de préfixes fournisseur (`hvs.`, `hvb.`, `AKIA`, `ASIA`, `-----BEGIN`), et
+  heuristique de forme à trois motifs — casse mixte, hexadécimal long, et token
+  long à casse unique. Les deux derniers motifs viennent d'un constat de revue :
+  une clé hex de 64 caractères n'a que deux classes et échappait au premier. Le
+  test du détecteur épingle explicitement la **complémentarité** des mécanismes,
+  aucun ne suffisant seul ;
+- portabilité d'encodage (BOM, CRLF, tabulations, newline finale, espaces de fin) ;
+- **rendu exécutable** : le contrat est rendu depuis la sortie du classificateur
+  strict, le marqueur substitué, puis chargé dans `Settings` — et le test échoue
+  si une ligne malformée subsiste, pour que supprimer la ligne 46 ne suffise pas
+  à le rendre vert. Ce test prouve la *chargeabilité*, pas le démarrage : la
+  preuve de démarrage est le test Docker `/health` ;
+- refus d'une clé inconnue à valeur non vide — avec la nuance mesurée : une clé
+  inconnue à valeur **vide** passe, ce qui est précisément pourquoi
+  `***REMOVED***` restait invisible ;
+- aucun bloc de configuration de la documentation ne déclare de variable
+  inexistante, et aucune valeur de bootstrap key publiée dans la documentation ne
+  passe la validation. Le périmètre est dérivé de l'arborescence plutôt que d'une
+  liste codée en dur — est étranger tout `DESIGN/<service>/` dont le nom n'est pas
+  `mcp-vault` —, si bien qu'un nouveau document mcp-vault est couvert
+  automatiquement et qu'un nouveau service est exclu automatiquement ;
+- **forme du `.dockerignore`** : la première règle effective doit être `*` (donc
+  une allowlist), et chaque chemin copié par le Dockerfile — extrait du Dockerfile
+  lui-même, pour que la liste ne puisse pas se désynchroniser — doit être
+  ré-inclus ;
+- cohérence du `LABEL version` du Dockerfile avec `VERSION`, et présence d'une
+  section CHANGELOG non vide pour la version courante (la CI de release en extrait
+  les notes ; un en-tête mal formé produisait des notes dégradées en silence).
+
+### Corrections de cohérence de version et de documentation
+
+- **`Dockerfile`** : `LABEL version` était figé à `0.8.0` depuis sept versions —
+  les métadonnées de l'image de production mentaient sur la version livrée.
+  Désormais aligné sur `VERSION` et verrouillé par un test.
+- **Stage `test` du Dockerfile** : copie `.env.example` et `DESIGN/`, nécessaires
+  aux tests de contrat, pour qu'ils soient exécutables en conteneur comme sur
+  l'hôte.
+- **Tableaux des variables d'environnement des deux README** : ils omettaient 9
+  champs (`MCP_SERVER_HOST`, `MCP_SERVER_DEBUG`, `MCP_ALLOWED_ORIGINS`,
+  `WAF_PORT`, `OPENBAO_DATA_DIR`, `OPENBAO_CONFIG_DIR`,
+  `MISSION_JWKS_MAX_REFRESH_PER_MIN`, `MISSION_TOKEN_LEEWAY_SECONDS`,
+  `MISSION_STATUS_CACHE_TTL`) et qualifiaient S3 et OpenBao d'« obligatoires »
+  alors que toutes ces variables ont un défaut. Les 41 variables sont désormais
+  listées, et la seule réellement obligatoire au démarrage —
+  `ADMIN_BOOTSTRAP_KEY` — est identifiée comme telle. La ligne S3 énonce la
+  conséquence réelle, mesurée pendant la qualification de cette release : le
+  processus démarre sans S3, mais en **mode dégradé** — les stores restent en
+  mémoire et, sur un volume vierge, la tentative de restauration échoue de façon
+  ambiguë, ce qui empêche OpenBao de démarrer. S3 est donc requis pour un
+  déploiement fonctionnel, ce que la formulation précédente (« Obligatoire :
+  Oui », sans explication) n'expliquait pas et que la première rédaction de ce
+  correctif énonçait de façon incomplète.
+- **`TECHNICAL.md`** : l'entrée `ADMIN_BOOTSTRAP_KEY` du tableau annonçait
+  `change_me_in_production` comme défaut, sans dire que cette valeur est
+  explicitement rejetée au démarrage.
+
+**Périmètre du changement** : aucune modification de `src/`, donc **aucun
+changement de logique métier**. Changent en revanche — et il serait malhonnête de
+l'écrire autrement : la version exposée par `/health` et par la bannière de
+démarrage (`0.9.0` → `0.9.1`, lue depuis `VERSION` à l'exécution), les métadonnées
+`LABEL` de l'image, le périmètre du contexte de build, et le contenu de l'image de
+test.
+
 ## [0.9.0] — 2026-07-23
 
 ### Bearer opérateur SSH JIT à durée bornée (issue #96, 2026-07-23, suite revue round 8)

@@ -26,7 +26,7 @@ FROM python:3.12-slim@sha256:3d5ed973e45820f5ba5e46bd065bd88b3a504ff0724d85980dc
 # Metadata
 LABEL maintainer="Cloud Temple" \
       description="MCP Vault — Secure secrets management for AI agents" \
-      version="0.8.0"
+      version="0.9.1"
 
 # System deps for OpenBao
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -91,6 +91,16 @@ COPY tests/ ./tests/
 COPY scripts/ ./scripts/
 COPY pytest.ini ./
 COPY VERSION ./
+# Fixtures des tests de contrat de configuration (tests/test_env_example_contract.py) :
+# le contrat dotenv publié, la documentation qui en dérive, et les artefacts de
+# release dont ces tests vérifient la cohérence (LABEL du Dockerfile vs VERSION,
+# section CHANGELOG de la version courante). Sans eux, ces tests échoueraient en
+# conteneur — les rendre « skippables » masquerait au contraire la régression.
+COPY .env.example ./
+COPY DESIGN/ ./DESIGN/
+COPY CHANGELOG.md ./
+COPY Dockerfile ./
+COPY .dockerignore ./
 
 RUN useradd -r -s /bin/false mcp && chown -R mcp:mcp /app /openbao
 USER mcp
