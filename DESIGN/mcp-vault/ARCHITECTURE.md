@@ -1,6 +1,6 @@
 # Architecture — MCP Vault
 
-> **Version** : 0.9.0 | **Date** : 2026-07-23 | **Auteur** : Cloud Temple  
+> **Version** : 0.9.1 | **Date** : 2026-07-25 | **Auteur** : Cloud Temple  
 > **Projet** : mcp-vault | **Licence** : Apache 2.0  
 > **Statut** : ✅ Implémenté — Production-ready (PKI interne v0.5.x + C18 v0.6.x)
 
@@ -1647,53 +1647,51 @@ Un crash du processus efface automatiquement les clés de la mémoire.
 
 ## 9. Configuration (.env)
 
+> **Source unique du contrat de configuration** : [`.env.example`](../../.env.example)
+> à la racine du dépôt. Ce fichier documente les **41** variables réellement
+> consommées par `Settings` (`src/mcp_vault/config.py`), une par une, avec leur
+> défaut. Le bloc ci-dessous n'en montre que le **minimum viable** ; il ne le
+> remplace pas.
+>
+> `Settings` est en `extra="forbid"` : toute clé absente de `.env.example` portant
+> une valeur non vide dans un `.env` **fait échouer le démarrage**. Ne jamais
+> composer un `.env` depuis une autre source que `.env.example`.
+
 ```env
-# --- MCP Vault ---
+# --- Serveur MCP ---
 MCP_SERVER_NAME=mcp-vault
 MCP_SERVER_PORT=8030
+MCP_ALLOWED_HOSTS=vault.mcp.cloud-temple.app
 
-# --- WAF ---
-WAF_PORT=8085                    # Port d'écoute externe du WAF Caddy+Coraza
+# --- WAF (port d'écoute externe du WAF Caddy+Coraza) ---
+WAF_PORT=8085
 
 # --- Auth MCP ---
-ADMIN_BOOTSTRAP_KEY=change_me_to_a_strong_random_key_64chars
+# Aucune valeur par défaut utilisable : le serveur refuse de démarrer tant que
+# REQUIRED n'a pas été substitué par une clé forte (≥ 32 caractères, ≥ 3 classes
+# de caractères). Générer avec : secrets.token_urlsafe(48)
+ADMIN_BOOTSTRAP_KEY=REQUIRED
 
-# --- SSH JIT opérateur (optionnel ; sources exclusives) ---
-SSH_OPERATOR_PROFILES_JSON={"bastion-prod":{"client_name":"operator-christophe","policy_id":"operator-ssh-jit","key_fingerprints":["SHA256:EMP_REINTE_BASE64"],"vault_id":"agentic-platform","role_name":"bastion-operator","principal":"ctadmin","target":"bastion-01","ttl_seconds":900}}
-# Pour un renderer .env strict, laisser JSON vide et fournir le même document
-# en Base64 URL-safe sans retour ligne :
-# SSH_OPERATOR_PROFILES_B64=BASE64_URLSAFE_DU_JSON
-SSH_OPERATOR_JIT_MAX_CONFIG_CHARS=65536
-SSH_OPERATOR_JIT_MIN_TTL_SECONDS=60
-SSH_OPERATOR_JIT_MAX_TTL_SECONDS=900
-SSH_OPERATOR_JIT_MAX_REASON_CHARS=512
-SSH_OPERATOR_JIT_MAX_PUBLIC_KEY_CHARS=16384
-SSH_OPERATOR_JIT_MAX_PROFILES=32
-SSH_OPERATOR_JIT_MAX_BEARER_EXPIRES_DAYS=1
+# --- OpenBao embarqué ---
+OPENBAO_ADDR=http://127.0.0.1:8200
+OPENBAO_SHARES=1
+OPENBAO_THRESHOLD=1
+OPENBAO_DATA_DIR=/openbao/file
+OPENBAO_CONFIG_DIR=/openbao/config
 
-# --- OpenBao ---
-OPENBAO_BINARY=/usr/local/bin/bao
-OPENBAO_DATA_DIR=/data/openbao        # Volume Docker persistant
-OPENBAO_LISTEN_ADDRESS=127.0.0.1:8200
-OPENBAO_LOG_LEVEL=warn
-
-# --- S3 (stockage du File backend + tokens MCP) ---
-S3_ENDPOINT_URL=https://your-endpoint.s3.fr1.cloud-temple.com
-S3_ACCESS_KEY_ID=AKIA_YOUR_KEY
-S3_SECRET_ACCESS_KEY=your_secret
-S3_BUCKET_NAME=vault
+# --- S3 (token store + backup du file backend OpenBao) ---
+S3_ENDPOINT_URL=https://your-s3-endpoint.example.com
+S3_ACCESS_KEY_ID=your_access_key_here
+S3_SECRET_ACCESS_KEY=your_secret_key_here
+S3_BUCKET_NAME=your-bucket-name
 S3_REGION_NAME=fr1
-
-# --- S3 Sync ---
-S3_SYNC_INTERVAL=60              # Sync toutes les 60 secondes (periodic)
-S3_SYNC_STRATEGY=periodic        # periodic | write-through | lazy
-S3_SYNC_ON_SHUTDOWN=true         # Upload au shutdown (arret propre)
-
-# --- SSH CA ---
-SSH_CA_ENABLED=true
-SSH_CA_DEFAULT_TTL=5m
-SSH_CA_MAX_TTL=30m
+VAULT_S3_PREFIX=_storage
+VAULT_S3_SYNC_INTERVAL=60
 ```
+
+Variables optionnelles non montrées ici — PKI interne, PEP mission JWT, accès SSH
+JIT opérateur, bornes `SSH_OPERATOR_JIT_*` : voir les groupes 6 à 8 de
+[`.env.example`](../../.env.example).
 
 ---
 
@@ -2467,4 +2465,4 @@ result = await vault_client.call("ssh_sign_key", {
 
 ---
 
-*Document mis à jour le 23 juillet 2026 — MCP Vault v0.9.0 (39 outils MCP, accès SSH JIT opérateur (bearer nominatif + policy dédiée, clé publique pré-enrôlée), pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer, écriture create-only atomique (CAS), sync S3 conditionnelle)*
+*Document mis à jour le 25 juillet 2026 — MCP Vault v0.9.1 (39 outils MCP, accès SSH JIT opérateur (bearer nominatif + policy dédiée, clé publique pré-enrôlée), pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer, écriture create-only atomique (CAS), sync S3 conditionnelle, contrat de configuration `.env.example` déterministe et testé)*

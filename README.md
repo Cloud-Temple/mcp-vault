@@ -346,27 +346,45 @@ Voir [scripts/README.md](scripts/README.md) pour la documentation complète du C
 
 ## ⚙️ Variables d'environnement
 
-Copier `.env.example` → `.env` et adapter. Les variables sont groupées par domaine :
+Copier `.env.example` → `.env` et adapter. **`.env.example` est le contrat de
+configuration de référence** : il déclare exactement les **41** variables
+consommées par `Settings` ([`src/mcp_vault/config.py`](src/mcp_vault/config.py)),
+ni plus ni moins, et il est vérifié par
+[`tests/test_env_example_contract.py`](tests/test_env_example_contract.py).
+
+> ⚠️ **`extra="forbid"`** : une clé absente de ce contrat, portant une valeur non
+> vide dans votre `.env`, **fait échouer le démarrage**. Ne composez jamais un
+> `.env` depuis une autre source que `.env.example`.
+>
+> **Marqueur `REQUIRED`** : une variable dont la valeur d'exemple est `REQUIRED`
+> n'a **aucun défaut utilisable**. Le marqueur échoue volontairement la
+> validation — le service refuse de démarrer tant qu'un déploiement ne l'a pas
+> substitué par une vraie valeur.
 
 | Groupe | Variables | Obligatoire |
 |--------|-----------|-------------|
-| **Serveur** | `MCP_SERVER_NAME`, `MCP_SERVER_PORT`, `MCP_ALLOWED_HOSTS` | Oui |
-| **Auth** | `ADMIN_BOOTSTRAP_KEY` | Oui |
-| **SSH JIT opérateur** *(v0.9.0)* | `SSH_OPERATOR_PROFILES_JSON` ou `SSH_OPERATOR_PROFILES_B64`, bornes `SSH_OPERATOR_JIT_*` | Non — vide = désactivé ; aucun secret dans le profil |
-| **S3** | `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET_NAME`, `S3_REGION_NAME` | Oui |
-| **OpenBao** | `OPENBAO_ADDR`, `OPENBAO_SHARES`, `OPENBAO_THRESHOLD` | Oui |
+| **Serveur** | `MCP_SERVER_NAME`, `MCP_SERVER_HOST`, `MCP_SERVER_PORT`, `MCP_SERVER_DEBUG`, `MCP_ALLOWED_HOSTS`, `MCP_ALLOWED_ORIGINS` | Non — tous ont un défaut. Mais derrière un reverse-proxy, `MCP_ALLOWED_HOSTS` doit lister les FQDN publics, sinon le SDK rejette le header `Host` en HTTP 421 (issue #3) |
+| **WAF** | `WAF_PORT` | Non — défaut `8085` |
+| **Auth** | `ADMIN_BOOTSTRAP_KEY` | **Oui — seule variable sans défaut utilisable.** Chiffre les clés unseal et sert de credential admin de secours. Minimum 32 caractères, ≥ 3 classes de caractères ; démarrage refusé sinon |
+| **SSH JIT opérateur** *(v0.9.0)* | `SSH_OPERATOR_PROFILES_JSON` ou `SSH_OPERATOR_PROFILES_B64`, plus les 7 bornes `SSH_OPERATOR_JIT_*` | Non — vide = désactivé ; aucun secret dans le profil |
+| **S3** | `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET_NAME`, `S3_REGION_NAME` | **Oui pour un déploiement fonctionnel.** Le processus démarre sans S3, mais en **mode dégradé** : les stores restent en mémoire (tokens perdus à chaque redémarrage) et, sur un volume vierge, la tentative de restauration échoue de façon *ambiguë*, ce qui empêche OpenBao de démarrer (fail-close volontaire, cf. `lifecycle.py`) |
 | **Storage sync** | `VAULT_S3_PREFIX`, `VAULT_S3_SYNC_INTERVAL` | Non |
-| **PKI** *(v0.5.x)* | `PKI_BASE_URL` | Non — override URL ACME en test Docker |
-| **Mission JWT** *(v0.6.0)* | `ENFORCE_MISSION_TOKEN_VALIDATION`, `MISSION_JWKS_URL`, `MISSION_TOKEN_AUD`, `MISSION_JWKS_CACHE_TTL`, `MISSION_STATUS_URL` | Non — standalone sans mcp-mission |
-| **PEP mission JWT** *(v0.8.0)* | `MCP_AUTH_MODE` (`bearer`/`jwt`/`dual-stack`), `MCP_INSTANCE_ID`, `MCP_COMPONENT_KIND` | Non — défaut `bearer` = zéro impact. `jwt`/`dual-stack` exigent `MISSION_JWKS_URL` + `MCP_INSTANCE_ID` + `ENFORCE_MISSION_TOKEN_VALIDATION=true` + `MISSION_STATUS_URL` (fail-fast, #86) |
-| **CLI tokens** | `VAULT_WRAP_TOKEN`, `VAULT_MISSION_TOKEN` | Non — exporter avant la commande, jamais dans `.env` |
+| **OpenBao** | `OPENBAO_ADDR`, `OPENBAO_SHARES`, `OPENBAO_THRESHOLD`, `OPENBAO_DATA_DIR`, `OPENBAO_CONFIG_DIR` | Non |
+| **PKI** *(v0.5.x)* | `PKI_BASE_URL` | Non — vide = déduit du premier FQDN ; override de l'URL ACME en test Docker |
+| **Mission JWT** *(v0.6.0)* | `ENFORCE_MISSION_TOKEN_VALIDATION`, `MISSION_JWKS_URL`, `MISSION_TOKEN_AUD`, `MISSION_JWKS_CACHE_TTL`, `MISSION_JWKS_MAX_REFRESH_PER_MIN`, `MISSION_TOKEN_LEEWAY_SECONDS`, `MISSION_STATUS_URL`, `MISSION_STATUS_CACHE_TTL` | Non — standalone sans mcp-mission |
+| **PEP mission JWT** *(v0.8.0)* | `MCP_AUTH_MODE` (`bearer`/`jwt`/`dual-stack`), `MCP_INSTANCE_ID`, `MCP_COMPONENT_KIND` | Non — défaut `bearer` = zéro impact. `jwt`/`dual-stack` exigent `MISSION_JWKS_URL`, `MCP_INSTANCE_ID`, `MISSION_STATUS_URL` et `ENFORCE_MISSION_TOKEN_VALIDATION` à `true` (fail-fast au boot, #86) |
 
-> **Tokens sensibles CLI** : `VAULT_WRAP_TOKEN` et `VAULT_MISSION_TOKEN` ne doivent PAS être stockés dans `.env` — ils changent à chaque opération. Passer via `export` ou inline :
+> **Tokens sensibles du CLI — ce ne sont PAS des variables du serveur.**
+> `VAULT_WRAP_TOKEN` et `VAULT_MISSION_TOKEN` sont lus uniquement par le CLI
+> (`scripts/cli/`) et ne figurent pas dans `Settings` : les placer dans `.env`
+> ferait échouer le démarrage du serveur. Ils changent à chaque opération (usage
+> unique, TTL court) — les passer inline devant la commande, jamais dans un
+> fichier, sinon ils fuitent dans l'historique du shell :
 > ```bash
 > VAULT_WRAP_TOKEN=hvs.CAES... mcp-vault secret consume op-123
 > ```
 
-Voir `.env.example` pour la documentation complète de chaque variable.
+Voir `.env.example` pour la documentation détaillée de chaque variable.
 
 ---
 
@@ -487,8 +505,8 @@ mcp-vault/
 ├── requirements.lock         # Dépendances pinnées (versions exactes)
 ├── VERSION                   # version courante du service
 ├── DESIGN/mcp-vault/
-│   ├── ARCHITECTURE.md       # Spécification détaillée (v0.9.0)
-│   ├── TECHNICAL.md          # Documentation technique (v0.9.0)
+│   ├── ARCHITECTURE.md       # Spécification détaillée (v0.9.1)
+│   ├── TECHNICAL.md          # Documentation technique (v0.9.1)
 │   └── SECURITY_AUDIT.md     # Rapport d'audit consolidé (60 findings V2.1)
 ├── scripts/
 │   ├── mcp_cli.py            # CLI entry point
@@ -545,4 +563,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.9.0
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.9.1

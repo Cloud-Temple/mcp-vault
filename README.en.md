@@ -343,27 +343,43 @@ See [scripts/README.md](scripts/README.md) for the full CLI documentation.
 
 ## ⚙️ Environment variables
 
-Copy `.env.example` → `.env` and adjust. Variables are grouped by domain:
+Copy `.env.example` → `.env` and adjust. **`.env.example` is the authoritative
+configuration contract**: it declares exactly the **41** variables consumed by
+`Settings` ([`src/mcp_vault/config.py`](src/mcp_vault/config.py)), no more and no
+fewer, and it is enforced by
+[`tests/test_env_example_contract.py`](tests/test_env_example_contract.py).
+
+> ⚠️ **`extra="forbid"`**: a key that is absent from this contract and carries a
+> non-empty value in your `.env` **makes startup fail**. Never assemble a `.env`
+> from any source other than `.env.example`.
+>
+> **`REQUIRED` marker**: a variable whose example value is `REQUIRED` has **no
+> usable default**. The marker deliberately fails validation — the service
+> refuses to start until a deployment substitutes a real value.
 
 | Group | Variables | Required |
 |--------|-----------|----------|
-| **Server** | `MCP_SERVER_NAME`, `MCP_SERVER_PORT`, `MCP_ALLOWED_HOSTS` | Yes |
-| **Auth** | `ADMIN_BOOTSTRAP_KEY` | Yes |
-| **Operator SSH JIT** *(v0.9.0)* | `SSH_OPERATOR_PROFILES_JSON` or `SSH_OPERATOR_PROFILES_B64`, `SSH_OPERATOR_JIT_*` bounds | No — empty disables it; the profile contains no secret |
-| **S3** | `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET_NAME`, `S3_REGION_NAME` | Yes |
-| **OpenBao** | `OPENBAO_ADDR`, `OPENBAO_SHARES`, `OPENBAO_THRESHOLD` | Yes |
+| **Server** | `MCP_SERVER_NAME`, `MCP_SERVER_HOST`, `MCP_SERVER_PORT`, `MCP_SERVER_DEBUG`, `MCP_ALLOWED_HOSTS`, `MCP_ALLOWED_ORIGINS` | No — all have defaults. But behind a reverse proxy, `MCP_ALLOWED_HOSTS` must list the public FQDNs, otherwise the SDK rejects the `Host` header with HTTP 421 (issue #3) |
+| **WAF** | `WAF_PORT` | No — defaults to `8085` |
+| **Auth** | `ADMIN_BOOTSTRAP_KEY` | **Yes — the only variable with no usable default.** Encrypts the unseal keys and acts as the fallback admin credential. Minimum 32 characters, ≥ 3 character classes; startup is refused otherwise |
+| **Operator SSH JIT** *(v0.9.0)* | `SSH_OPERATOR_PROFILES_JSON` or `SSH_OPERATOR_PROFILES_B64`, plus the 7 `SSH_OPERATOR_JIT_*` bounds | No — empty disables it; the profile contains no secret |
+| **S3** | `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET_NAME`, `S3_REGION_NAME` | **Yes for a functional deployment.** The process starts without S3, but in **degraded mode**: stores stay in memory (tokens lost on every restart) and, on a fresh volume, the restore attempt fails *ambiguously*, which prevents OpenBao from starting (deliberate fail-close, see `lifecycle.py`) |
 | **Storage sync** | `VAULT_S3_PREFIX`, `VAULT_S3_SYNC_INTERVAL` | No |
-| **PKI** *(v0.5.x)* | `PKI_BASE_URL` | No — overrides ACME URL in Docker tests |
-| **Mission JWT** *(v0.6.x)* | `ENFORCE_MISSION_TOKEN_VALIDATION`, `MISSION_JWKS_URL`, `MISSION_TOKEN_AUD`, `MISSION_JWKS_CACHE_TTL`, `MISSION_STATUS_URL` | No — standalone without mcp-mission |
-| **Mission JWT PEP** *(v0.8.0)* | `MCP_AUTH_MODE` (`bearer`/`jwt`/`dual-stack`), `MCP_INSTANCE_ID`, `MCP_COMPONENT_KIND` | No — default `bearer` = zero impact. `jwt`/`dual-stack` require `MISSION_JWKS_URL` + `MCP_INSTANCE_ID` + `ENFORCE_MISSION_TOKEN_VALIDATION=true` + `MISSION_STATUS_URL` (fail-fast, #86) |
-| **CLI tokens** | `VAULT_WRAP_TOKEN`, `VAULT_MISSION_TOKEN` | No — export before the command, never in `.env` |
+| **OpenBao** | `OPENBAO_ADDR`, `OPENBAO_SHARES`, `OPENBAO_THRESHOLD`, `OPENBAO_DATA_DIR`, `OPENBAO_CONFIG_DIR` | No |
+| **PKI** *(v0.5.x)* | `PKI_BASE_URL` | No — empty derives it from the first FQDN; overrides the ACME URL in Docker tests |
+| **Mission JWT** *(v0.6.x)* | `ENFORCE_MISSION_TOKEN_VALIDATION`, `MISSION_JWKS_URL`, `MISSION_TOKEN_AUD`, `MISSION_JWKS_CACHE_TTL`, `MISSION_JWKS_MAX_REFRESH_PER_MIN`, `MISSION_TOKEN_LEEWAY_SECONDS`, `MISSION_STATUS_URL`, `MISSION_STATUS_CACHE_TTL` | No — standalone without mcp-mission |
+| **Mission JWT PEP** *(v0.8.0)* | `MCP_AUTH_MODE` (`bearer`/`jwt`/`dual-stack`), `MCP_INSTANCE_ID`, `MCP_COMPONENT_KIND` | No — default `bearer` = zero impact. `jwt`/`dual-stack` require `MISSION_JWKS_URL`, `MCP_INSTANCE_ID`, `MISSION_STATUS_URL` and `ENFORCE_MISSION_TOKEN_VALIDATION` set to `true` (fail-fast at boot, #86) |
 
-> **Sensitive CLI tokens**: `VAULT_WRAP_TOKEN` and `VAULT_MISSION_TOKEN` must NOT be stored in `.env` — they change on every operation. Pass them via `export` or inline:
+> **Sensitive CLI tokens — these are NOT server variables.** `VAULT_WRAP_TOKEN`
+> and `VAULT_MISSION_TOKEN` are read only by the CLI (`scripts/cli/`) and are not
+> `Settings` fields: putting them in `.env` would make the server fail to start.
+> They change on every operation (single-use, short TTL) — pass them inline in
+> front of the command, never in a file, or they leak into the shell history:
 > ```bash
 > VAULT_WRAP_TOKEN=hvs.CAES... mcp-vault secret consume op-123
 > ```
 
-See `.env.example` for the full documentation of each variable.
+See `.env.example` for the detailed documentation of each variable.
 
 ---
 
@@ -484,8 +500,8 @@ mcp-vault/
 ├── requirements.lock         # Pinned dependencies (exact versions)
 ├── VERSION                   # current service version
 ├── DESIGN/mcp-vault/
-│   ├── ARCHITECTURE.md       # Detailed specification (v0.9.0)
-│   ├── TECHNICAL.md          # Technical documentation (v0.9.0)
+│   ├── ARCHITECTURE.md       # Detailed specification (v0.9.1)
+│   ├── TECHNICAL.md          # Technical documentation (v0.9.1)
 │   └── SECURITY_AUDIT.md     # Consolidated audit report (60 V2.1 findings)
 ├── scripts/
 │   ├── mcp_cli.py            # CLI entry point
@@ -544,4 +560,4 @@ mcp-vault/
 
 ---
 
-**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.9.0
+**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.9.1

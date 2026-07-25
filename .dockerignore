@@ -1,0 +1,67 @@
+# =============================================================================
+# .dockerignore — périmètre du contexte de build envoyé au démon Docker
+# =============================================================================
+# Le service `mcp-vault` construit avec `context: .`. Sans ce fichier, TOUT le
+# répertoire est transmis au démon — y compris le `.env` de l'opérateur, qui
+# contient des credentials réels. `.gitignore` ne protège que Git, pas le
+# contexte Docker.
+#
+# CONSTRUIT EN ALLOWLIST, PAS EN DENYLIST. Une denylist doit énumérer ce qui est
+# dangereux et laisse donc passer tout ce qu'elle n'a pas prévu : un `id_rsa`, un
+# `.ssh/`, un `.aws/credentials`, un dump de base, un secret sans extension. On
+# exclut donc TOUT par défaut, puis on ré-inclut nominativement les seuls chemins
+# que le Dockerfile copie réellement. Ajouter une entrée ici est un acte
+# délibéré ; oublier d'en ajouter une fait échouer le build, bruyamment — c'est
+# le bon sens de l'erreur.
+#
+# Chemins réellement copiés par le Dockerfile :
+#   cible production : requirements.txt, src/, VERSION
+#   cible test       : + tests/, scripts/, pytest.ini, .env.example, DESIGN/,
+#                        CHANGELOG.md, Dockerfile
+# =============================================================================
+
+# --- 1. Tout est exclu par défaut ---
+*
+
+# --- 2. Ré-inclusions nominatives (cible production) ---
+!requirements.txt
+!src
+!VERSION
+
+# --- 3. Ré-inclusions nominatives (cible test) ---
+!tests
+!scripts
+!pytest.ini
+!.env.example
+!DESIGN
+!CHANGELOG.md
+!Dockerfile
+!.dockerignore
+
+# --- 4. Bruit à l'intérieur des répertoires ré-inclus ---
+# Les règles ci-dessus ré-incluent des arborescences entières ; on retire ensuite
+# les artefacts qui n'ont rien à faire dans une image.
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.DS_Store
+**/*.log
+
+# --- 5. Garde-fou explicite ---
+# Redondant avec l'exclusion globale de l'étape 1, mais conservé pour qu'une
+# future ré-inclusion large (par exemple `!.` ou `!*`) ne réexpose pas les
+# secrets en silence. Ces lignes doivent rester APRÈS toutes les ré-inclusions.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+.ssh
+.aws
+.git
