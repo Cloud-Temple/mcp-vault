@@ -1,6 +1,6 @@
 # Documentation Technique — MCP Vault
 
-> **Version** : 0.9.0 | **Date** : 2026-07-23 | **Auteur** : Cloud Temple
+> **Version** : 0.9.1 | **Date** : 2026-07-25 | **Auteur** : Cloud Temple
 > **Licence** : Apache 2.0 | **Statut** : ✅ Production-ready (audit V2.1 complété + PKI interne v0.5.1)
 
 ---
@@ -93,11 +93,24 @@ Les requêtes traversent 6 couches middleware dans cet ordre :
 
 Utilise `pydantic-settings` pour charger la configuration depuis les variables d'environnement ou le fichier `.env`.
 
+> **Source unique du contrat** : [`.env.example`](../../.env.example) déclare les
+> **41** champs de `Settings`, un par un, avec leur défaut. Le tableau ci-dessous
+> en documente les principaux ; il n'est pas exhaustif et ne doit pas servir à
+> composer un `.env`. `Settings` est en `extra="forbid"` : une clé inconnue portant
+> une valeur non vide fait échouer le démarrage. La correspondance exacte entre ce
+> contrat et les champs de `Settings` est verrouillée par
+> [`tests/test_env_example_contract.py`](../../tests/test_env_example_contract.py).
+
 | Variable                 | Défaut                    | Description                 |
 | ------------------------ | ------------------------- | --------------------------- |
 | `MCP_SERVER_NAME`        | `mcp-vault`               | Nom du service              |
+| `MCP_SERVER_HOST`        | `0.0.0.0`                 | Interface d'écoute          |
 | `MCP_SERVER_PORT`        | `8030`                    | Port d'écoute               |
-| `ADMIN_BOOTSTRAP_KEY`    | `change_me_in_production` | Clé admin initiale          |
+| `MCP_SERVER_DEBUG`       | `false`                   | Niveau de log ASGI : `false` → `info`, `true` → `debug` |
+| `MCP_ALLOWED_HOSTS`      | 2 FQDN Cloud Temple       | FQDN publics autorisés pour le header `Host` sur `/mcp` (anti-DNS-rebinding). Obligatoire derrière un reverse-proxy, sinon HTTP 421 (issue #3). Le loopback est toujours autorisé en plus |
+| `MCP_ALLOWED_ORIGINS`    | *(vide)*                  | Origins HTTP supplémentaires ; `https://<fqdn>` est déjà dérivé de chaque FQDN ci-dessus |
+| `WAF_PORT`               | `8085`                    | Port externe du WAF Caddy+Coraza. Champ de compatibilité : partagé avec `docker-compose.yml`, déclaré dans `Settings` uniquement pour que le `.env` mutualisé ne soit pas rejeté par `extra="forbid"` |
+| `ADMIN_BOOTSTRAP_KEY`    | *aucun défaut utilisable* | Clé admin initiale + chiffrement des clés unseal. `.env.example` porte le marqueur `REQUIRED` : le serveur refuse de démarrer tant qu'il n'est pas substitué (le défaut interne `change_me_in_production` est explicitement rejeté) |
 | `SSH_OPERATOR_PROFILES_JSON` | *(vide)* | Profils JIT opérateur ; vide = fonctionnalité désactivée |
 | `SSH_OPERATOR_PROFILES_B64` | *(vide)* | Même JSON en Base64 URL-safe pour renderer `.env` strict ; exclusif du JSON direct |
 | `SSH_OPERATOR_JIT_MAX_CONFIG_CHARS` | `65536` | Taille maximale de la source encodée et du JSON décodé |
