@@ -25,7 +25,7 @@ MCP Vault est un serveur [MCP](https://modelcontextprotocol.io/) qui fournit un 
 | [**SECURITY_AUDIT.md**](DESIGN/mcp-vault/SECURITY_AUDIT.md) | Rapport d'audit de sécurité consolidé — 60 findings V2.1, 28 corrigés, 13 résiduels documentés                                                                         |
 | [**scripts/README.md**](scripts/README.md)              | Guide CLI complet — 7 groupes de commandes, shell interactif, exemples                                                                                                       |
 | [**tests/README.md**](tests/README.md)                  | Guide d'exécution des tests — 4 niveaux, ~600 tests, commandes pour auditeurs                                                                                                |
-| [**TEST_CATALOG.md**](tests/TEST_CATALOG.md)            | Catalogue des tests e2e — 15 catégories, 312 assertions, objectif de chaque section (pour auditeurs)                                                                        |
+| [**TEST_CATALOG.md**](tests/TEST_CATALOG.md)            | Catalogue des tests e2e — 15 catégories, 348 assertions, objectif de chaque section (pour auditeurs)                                                                        |
 
 ---
 
@@ -43,7 +43,7 @@ docker compose up -d
 # 3. Vérifier (depuis le conteneur)
 docker compose exec mcp-vault python scripts/mcp_cli.py health
 
-# 4. Tester (312 tests e2e)
+# 4. Tester (348 tests e2e)
 docker compose exec mcp-vault python tests/test_e2e.py
 ```
 
@@ -401,10 +401,14 @@ Internet → WAF (Caddy + Coraza :8085) → MCP Vault (Python :8030) → OpenBao
 ### WAF — Caddy + Coraza (OWASP CRS v4)
 
 Le WAF protège l'API contre les attaques L7 (injections SQL, XSS, LFI, RCE, SSRF) :
-- **Caddy v2.11.2** compilé avec **coraza-caddy v2.2.0** via `xcaddy`
-- **24 règles OWASP CoreRuleSet v4.7.0** chargées
+- **Caddy v2.11.2** compilé avec **coraza-caddy v2.5.0** (coraza v3.7.0) via `xcaddy` — montée depuis v2.2.0/coraza 3.3.3 en v0.9.2, requise par `SecRequestBodyJsonDepthLimit` (cf. #107)
+- **23 fichiers de règles OWASP CoreRuleSet v4.7.0** chargés (décompte vérifiable : `grep -c '^Include /opt/crs/rules/' waf/coraza.conf`)
 - Mode **Blocking sur TOUS les endpoints** (health, `/mcp`, `/admin/api`)
-- **Exclusions ciblées** (faux positifs JSON-RPC : Unicode français 920540, noms PowerShell 932120 ; distribution CA/CRL `.pem` 920440) déclarées **avant l'Include CRS** (pattern « exclusions before CRS ») — requis pour neutraliser les règles CRS en phase:1
+- **Corps JSON-RPC réellement parsé** sur `POST /mcp` (`ctl:requestBodyProcessor=JSON`, v0.9.2). Sans ce réglage, Coraza traitait le **corps entier comme une variable unique** : toute chaîne d'une liste de phrases CRS présente n'importe où — y compris dans une **valeur de secret** — déclenchait un blocage, et aucun ciblage fin d'exclusion n'était possible
+- **Exclusions de RÈGLES** (`ctl:ruleRemoveById`) déclarées **avant l'Include CRS** — pattern « exclusions before CRS », requis pour neutraliser les règles évaluées en phase:1. Faux positifs couverts : Unicode français 920540, noms PowerShell 932120, distribution CA/CRL `.pem` 920440, Content-Type JOSE ACME 920420
+- **Exclusions de CIBLES** (`SecRuleUpdateTargetById`) déclarées **après l'Include CRS** — sémantique inverse : cette directive modifie la *définition* de la règle, qui doit donc être déjà chargée. Couvre le faux positif 930120 sur `.env` (v0.9.2) : les **noms** d'arguments sous l'enveloppe MCP `params._meta` et les **valeurs** de la charge opaque de `secret_write` (seul outil à en recevoir une — transmise à OpenBao, qui la chiffre au repos). Le reste demeure inspecté — chemin, nom de coffre, étiquettes, nom d'outil, et toutes les règles de path traversal
+- **Profondeur JSON bornée à 32** sur `POST /mcp` (`SecRequestBodyJsonDepthLimit`, v0.9.2). Sans elle, un corps de 15 Ko d'imbrication — JSON valide, 2 octets par niveau — faisait tomber le WAF en OOM. La limite **seule** créait toutefois une évasion silencieuse (au-delà du seuil, plus aucune inspection) : la règle **10011** refuse donc explicitement (400) tout corps déclaré non analysable par `REQBODY_ERROR`. ⚠️ **Limite de compatibilité** : un secret dont `data` dépasse ~28 niveaux d'imbrication interne est refusé — les types de secrets du produit sont des dictionnaires plats, aucun usage connu n'y touche
+- **Gardes anti-évasion 10009/10010** (v0.9.2). Ces exclusions sont des directives *globales* dont le sélecteur est un **nom** d'argument, donc une chaîne choisie par le client : `ARGS`/`ARGS_NAMES` agrègent aussi query string et formulaire. Avant ces gardes, `GET /health?json.params.arguments.data.x=.env` passait (200) là où `GET /health?legit=.env` était refusé (403) — soit une neutralisation globale de 930120 par simple choix du nom de paramètre. Les gardes **refusent** désormais tout nom préfixé `json.` hors du corps JSON MCP analysé, discriminé par un drapeau serveur non forgeable. La propriété est imposée, pas supposée
 - **Headers de sécurité** : CSP, X-Frame-Options DENY, X-XSS-Protection, nosniff
 - Méthodes autorisées adaptées au protocole MCP : GET, POST, DELETE, PUT, PATCH
 
@@ -459,7 +463,7 @@ python tests/test_cli_all.py
 # 2. Tests CLI LIVE — cycle complet (79 tests, serveur réel)
 MCP_URL=http://localhost:8085 MCP_TOKEN=<key> python tests/test_cli_live.py
 
-# 3. Tests e2e MCP (312 tests, dans Docker)
+# 3. Tests e2e MCP (348 tests, dans Docker)
 docker compose exec mcp-vault python tests/test_e2e.py
 
 # 4. Tests crypto (18 tests, SANS serveur — AES-256-GCM + AAD + validation entropie)
@@ -472,7 +476,7 @@ python tests/test_cli_all.py --only policy
 docker compose exec mcp-vault python tests/test_e2e.py --test enforcement
 ```
 
-### Couverture e2e (312 tests, 15 catégories)
+### Couverture e2e (348 tests, 15 catégories)
 
 | Catégorie              | Tests  | Description                                                                        |
 | ---------------------- | ------ | ---------------------------------------------------------------------------------- |
@@ -490,7 +494,7 @@ docker compose exec mcp-vault python tests/test_e2e.py --test enforcement
 | Policies MCP           | 43     | CRUD, validation, wildcards, path_rules, doublons, erreurs, Admin API REST         |
 | **Policy Enforcement** | **37** | check_policy, token_update, denied/allowed, changement policy, Admin API           |
 | **Audit Log**          | **31** | audit_log MCP, filtres (category/tool/status/since/limit), stats, Admin API /audit |
-| **WAF Security**       | **17** | LFI, SQLi, XSS, RCE, Scanner Detection → 403 + non-régression requêtes légitimes |
+| **WAF Security**       | **61** | LFI, SQLi, XSS, RCE, scanners → 403 ; faux positif 930120 ; anti-évasion `json.*` ; bornes taille/profondeur JSON ; grammaire Content-Type ; non-régression requêtes légitimes |
 
 ---
 
@@ -505,7 +509,7 @@ mcp-vault/
 ├── requirements.lock         # Dépendances pinnées (versions exactes)
 ├── VERSION                   # version courante du service
 ├── DESIGN/mcp-vault/
-│   ├── ARCHITECTURE.md       # Spécification détaillée (v0.9.1)
+│   ├── ARCHITECTURE.md       # Spécification détaillée (v0.9.2)
 │   ├── TECHNICAL.md          # Documentation technique (v0.9.1)
 │   └── SECURITY_AUDIT.md     # Rapport d'audit consolidé (60 findings V2.1)
 ├── scripts/
@@ -537,7 +541,7 @@ mcp-vault/
 │   ├── TEST_CATALOG.md       # Catalogue des tests pour auditeurs
 │   ├── test_cli_all.py       # 197 tests CLI parsing (sans serveur)
 │   ├── test_cli_live.py      # 79 tests CLI live (serveur réel)
-│   ├── test_e2e.py           # 312 tests MCP e2e (15 catégories)
+│   ├── test_e2e.py           # 348 tests MCP e2e (15 catégories)
 │   ├── test_crypto.py        # 18 tests AES-256-GCM + AAD
 │   ├── test_service.py       # 78 tests bas niveau
 │   ├── test_integration.py   # Tests pytest
@@ -563,4 +567,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.9.1
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.9.2

@@ -1,5 +1,246 @@
 # Changelog — MCP Vault
 
+## [0.9.2] — 2026-07-26
+
+### WAF : faux positif CRS 930120 sur `POST /mcp` (issue #107)
+
+Signalé en production sur la v0.8.6 (`ebcfd35`) : un `secret_write` légitime émis
+par un client Codex recevait `HTTP 403` **avant** le handler MCP. Aucune trace
+dans l'audit Vault, aucun refus d'authentification ni de policy — le blocage
+venait entièrement de Coraza, sur la règle CRS 930120 « OS File Access Attempt ».
+
+**La cause racine n'était pas celle supposée.** Le signalement initial attribuait
+le `.env` détecté dans `ARGS_NAMES` à l'aplatissement des métadonnées Codex
+(`params._meta.x-codex-turn-metadata`). L'observation était juste, l'explication
+non. Reproduction sur Coraza 3.3.3 / CRS 4.7.0 réel : **Coraza ne parsait pas du
+tout le corps JSON**. Faute de `ctl:requestBodyProcessor=JSON`, le processeur
+`URLENCODED` s'appliquait au JSON-RPC et le **corps entier** devenait **une seule
+variable**, à la fois nom et valeur :
+
+```
+ARGS_NAMES:{"jsonrpc": "2.0", "method": "tools/call", "params": {…}}
+```
+
+Mesuré à exactement **1** `ARGS_NAMES` et **1** `ARGS` pour tout le corps. Deux
+conséquences :
+
+1. **Faux positifs massifs.** Toute chaîne de `lfi-os-files.data` présente
+   *n'importe où* dans le corps — y compris dans une **valeur de secret** —
+   déclenchait 930120 (score 5) puis 949110. `.env` figure ligne 36 de ce
+   fichier. Le blocage n'avait donc rien à voir avec Codex : le déclencheur était
+   la note `« Bucket à confirmer avant matérialisation du .env. »` dans le
+   payload. Corollaire : le type de secret **`env_file`** (« Fichier .env ») était
+   structurellement inutilisable à travers le WAF.
+2. **Aucun scoping fin possible.** Avec une seule cible, on ne peut pas
+   distinguer un nom d'argument d'une valeur — toute exclusion aurait été large.
+
+**Correctifs (`waf/coraza.conf`)**
+
+- **Règle 10008** — active le parseur JSON, chaîné sur `POST` + chemin ancré
+  `^/mcp(?:[/?]|$)` + `Content-Type` `(?:^|,)[ \t]*application/json[ \t]*(?:[;,]|$)`, avec
+  `ctl:requestBodyLimit=65536` pour borner le coût du parseur. Restaure la granularité réelle
+  (`json.params.arguments.data.notes`, `json.params.arguments.path`, …) et
+  **renforce** la détection : 930100/930110 (path traversal) se déclenchent
+  désormais sur `path`, ce qui n'était pas le cas auparavant. `/admin/api`, PKI
+  et ACME conservent exactement leur comportement (corps non parsé).
+- **`SecRuleUpdateTargetById 930120 "!ARGS_NAMES:/^json\.params\._meta\./"`** —
+  l'aplatissement JSON de Coraza concatène les clés avec un point : une clé
+  `environment` produit donc `.env` dans le *nom* d'argument
+  (`…x-codex-turn-metadata.environment.cwd`). Ce faux positif n'existait pas
+  avant l'activation du parseur ; il est corrigé en même temps. Portée : les
+  **noms** seuls — les valeurs sous `_meta` restent inspectées.
+- **`SecRuleUpdateTargetById 930120 "!ARGS:/^json\.params\.arguments\.data\./"`** —
+  `secret_write(data: dict)` est aujourd'hui le seul outil MCP recevant une
+  charge opaque. Ce contenu est transmis à OpenBao, qui le chiffre **au repos** ;
+  mcp-vault ne l'interprète jamais comme chemin, requête SQL ou commande. Portée :
+  les **valeurs** de ce sous-arbre seulement.
+  *Honnêteté du scoping* : le WAF ne connaît pas le schéma des outils. Le
+  sélecteur porte sur le chemin JSON `params.arguments.data.*`, **pas** sur
+  `params.name == "secret_write"`. La propriété repose donc sur l'état actuel des
+  signatures d'outils, pas sur une garantie du WAF.
+
+**Sémantique de placement.** Les deux mécanismes sont inverses et les confondre
+rend l'exclusion silencieusement inopérante : `ctl:ruleRemoveById` agit sur la
+transaction et doit **précéder** l'Include CRS (leçon de #42) ;
+`SecRuleUpdateTargetById` modifie la définition de la règle et doit donc la
+**suivre**. `ctl:ruleRemoveTargetById`, qui aurait permis un scoping par URI, a
+été écarté : vérifié sur Coraza 3.3.3, sa forme **regex** de cible n'est pas
+supportée, et les clés de métadonnées client sont arbitraires.
+
+### Anti-évasion des exclusions `json.*` — corrigé après revue indépendante
+
+La première version de ce correctif affirmait que les exclusions statiques
+étaient « limitées à `POST /mcp` par construction, puisque les variables `json.*`
+n'existent que là où le parseur JSON a tourné ». **Cette affirmation était
+fausse**, et la revue adversariale l'a relevée comme bloquante.
+
+`ARGS` et `ARGS_NAMES` agrègent aussi les paramètres de **query string** et de
+**formulaire**, dont le nom est choisi par le client. Mesuré sur Coraza réel avant
+correction :
+
+```
+GET /health?json.params.arguments.data.x=.env   → 200   ← évasion
+GET /health?legit=.env                          → 403   ← témoin
+POST /admin/api (formulaire, nom forgé)         → 200   ← évasion
+```
+
+Autrement dit, n'importe qui pouvait neutraliser la règle 930120 **sur tous les
+endpoints** en nommant son paramètre `json.params.arguments.data.<quelconque>`.
+
+Deux gardes rendent désormais le préfixe **inatteignable** au lieu de le supposer :
+
+- **10009** refuse tout nom de paramètre préfixé `json.` en query string, sur
+  tous les endpoints — aucun client légitime n'en produit (le transport MCP
+  Streamable HTTP place tout dans le corps, et l'authentification est Bearer-only).
+- **10010** refuse tout nom `json.*` lorsque le corps n'a **pas** été analysé en
+  JSON, via un drapeau `tx.mcp_json_body` posé côté serveur — donc non forgeable.
+
+Deux pièges rencontrés et corrigés au passage :
+
+- une `SecRule TX:<var>` dont la variable **n'existe pas** ne s'évalue pas du tout
+  (aucune variable à tester → aucun match → la chaîne ne se termine jamais). Sans
+  initialisation explicite du drapeau à `0`, la garde 10010 était silencieusement
+  inopérante — constaté par mesure, pas par relecture ;
+- `@beginsWith /mcp` matcherait aussi `/mcpfoo`. Le déclencheur du parseur est
+  désormais ancré (`^/mcp(?:[/?]|$)`) et son `Content-Type` aligné sur ce que
+  FastMCP accepte réellement.
+
+`SecRequestBodyLimitAction Reject` est rendu explicite : un corps dépassant la
+limite est refusé, jamais analysé partiellement — une analyse partielle laisserait
+sa fin non inspectée, risque accru depuis l'activation du parseur.
+
+### Montée du WAF exigée par le correctif — coraza-caddy v2.2.0 → v2.5.0
+
+Le correctif ne peut pas être livré sur le WAF précédent. L'activation du parseur
+JSON — indispensable au scoping fin — exposait un **DoS critique non authentifié**
+sur `POST /mcp`. Le parseur de coraza 3.3.3
+(`internal/bodyprocessors/json.go`, `readItems()`) récurse **sans plafond de
+profondeur**, avec un « TODO add some anti DOS protection » en commentaire, et
+alloue une clé de map par niveau : coût quadratique.
+
+Mesures sur conteneur aux limites de production (512 Mo / 1 CPU), corps
+`[`×N + `0` + `]`×N — JSON valide, **2 octets par niveau** :
+
+| Corps | `HEAD` (sans parseur) | coraza 3.3.3 + parseur | coraza 3.7.0 + limites |
+| --- | --- | --- | --- |
+| 3,9 Ko (prof. 2 000) | 39 ms | **24 035 ms** | 400 en 11 ms |
+| 15,6 Ko (prof. 8 000) | 82 ms | **timeout > 60 s** | 400 en 6 ms |
+| 31,3 Ko (prof. 16 000) | 162 ms | connexion coupée | 400 en 5 ms |
+| 64,0 Ko (prof. 32 767) | 323 ms | connexion réinitialisée | 400 en 10 ms |
+| **État du WAF** | vivant | **`OOMKilled: true`** | vivant |
+
+Une requête **non authentifiée de 15 Ko** suffisait à éteindre le WAF — et quand
+le WAF tombe, le coffre devient inaccessible. Attribution vérifiée : le même
+vecteur coûte 39 à 323 ms sur `HEAD`, sans aucun OOM.
+
+Contre-mesures évaluées et écartées, toutes mesurées :
+
+- `ctl:requestBodyLimit=65536` (borne en **octets**, supportée en 3.3.3) :
+  inopérante, le vecteur tient intégralement sous 64 Ko ;
+- filtrage du corps **avant** le parseur : impossible en seclang, le corps n'est
+  disponible qu'en phase 2, après traitement ;
+- `ctl:ruleRemoveTargetById=930120;ARGS` + `;ARGS_NAMES` **sans** parseur JSON :
+  ne corrige pas le faux positif — la forme « collection nue » n'est pas prise en
+  compte, comme la forme regex.
+
+`SecRequestBodyJsonDepthLimit` n'existe qu'à partir de **coraza v3.4.0**. D'où la
+montée dans `waf/Dockerfile` : `coraza-caddy/v2@v2.2.0` → **`v2.5.0`**, qui
+embarque **coraza v3.7.0**. L'image de build épinglée fournit Go 1.26.1, au-delà
+du Go 1.25.0 requis. CRS reste en 4.7.0 pour borner le périmètre.
+
+### Le piège : la limite de profondeur seule crée une évasion silencieuse
+
+`SecRequestBodyJsonDepthLimit 32` supprime le DoS, mais **échange un défaut contre
+un autre** si elle est posée seule. Au-delà du seuil, coraza cesse d'alimenter
+`ARGS` et le corps n'est plus inspecté du tout. Mesuré avec la seule limite :
+
+| Charge enfouie à 40 niveaux | Sans la règle 10011 | Avec la règle 10011 |
+| --- | --- | --- |
+| LFI `../../etc/passwd` | **200 — passe** | 400 |
+| SQLi `1 OR 1=1 --` | **200 — passe** | 400 |
+| XSS `<script>alert(1)</script>` | **200 — passe** | 400 |
+| RCE `; cat /etc/passwd` | **200 — passe** | 400 |
+| Les mêmes à 31 niveaux | 403 | 403 |
+
+Autrement dit, la limite seule offrait à un attaquant une primitive d'évasion
+totale : imbriquer sa charge au-delà du seuil. coraza 3.7.0 expose heureusement la
+condition — `REQBODY_ERROR=1`, message « JSON: max recursion reached while reading
+json object ». La **règle 10011** refuse donc explicitement (400) tout corps que le
+WAF déclare non analysable, sur la seule surface concernée (`tx.mcp_json_body`).
+
+Un corps JSON qu'un WAF ne peut pas inspecter n'atteint pas l'application. Note
+d'honnêteté : cette règle avait été proposée dès le premier round de revue puis
+écartée sur mesure, parce que coraza 3.3.3 ne levait **jamais** `REQBODY_ERROR`.
+L'intuition était juste pour la configuration montée, pas pour l'ancienne.
+
+### ⚠️ Nouvelle limite de compatibilité — profondeur d'imbrication d'un secret
+
+Le seuil de 32 est très large au regard de l'enveloppe MCP : la plus profonde
+légitime atteint 5 niveaux (`params._meta.x-codex-turn-metadata.environment.cwd`)
+et le payload de secret 4 (`params.arguments.data.<champ>`).
+
+Il constitue néanmoins un **changement de contrat visible** : `secret_write(data: dict)`
+acceptait côté application une imbrication arbitraire. Un secret dont la valeur est
+elle-même une structure JSON dépassant ~28 niveaux d'imbrication interne reçoit
+désormais **HTTP 400** au niveau du WAF. Testé aux deux bords : `data` imbriqué à
+20 niveaux passe, à 60 niveaux est refusé.
+
+Aucun usage connu n'approche cette profondeur — les types de secrets du produit
+sont des dictionnaires plats de champs texte. La limite est documentée ici parce
+qu'elle est arbitrable : elle se règle par `SecRequestBodyJsonDepthLimit` dans
+`waf/coraza.conf`, et la relever réaugmente proportionnellement le coût plafond du
+parseur.
+
+`ctl:requestBodyLimit=65536` et `SecRequestBodyLimitAction Reject` sont conservés :
+ils bornent le coût de l'évaluation CRS sur les gros corps, indépendamment de la
+profondeur. Un corps MCP au-delà de 64 Ko reçoit un **413** en 1-3 ms. 64 Ko est
+généreux — un `secret_write` portant un certificat TLS avec sa chaîne et sa clé
+privée pèse ~10-15 Ko, un contenu `env_file` quelques Ko, une clé publique SSH
+moins d'1 Ko.
+
+### Défaut préexistant, tracé séparément
+
+Le DoS par **gros corps** est antérieur au correctif et concerne **toutes** les
+surfaces : sur la configuration actuellement en production, sans aucun parseur
+JSON, une seule requête de 2,9 Mo coûte **20,4 s** de CPU en évaluation CRS.
+`SecRequestBodyLimit` vaut 10 Mo, valeur inadaptée à ce produit. Hors périmètre de
+cette issue.
+
+**Ce qui reste bloqué** (vérifié par test, non par raisonnement) : `.env` dans
+`path`, dans `tags`, dans le nom d'outil, et dans une **valeur** sous `_meta` ;
+traversal dans une valeur **et** dans un nom sous `data.*` ; noms `json.*` forgés
+en query string ou en formulaire ; corps JSON tronqué ou très imbriqué contenant
+une LFI. Exclure 930120 des valeurs de `data.*` n'ouvre pas de LFI : 930100,
+930110 et 932160 y restent actives. En revanche un simple nom de fichier sensible
+**sans** traversal n'y est plus détecté : c'est l'effet recherché.
+
+**Constat contraire à une hypothèse de revue** : la revue suspectait qu'une erreur
+du parseur JSON crée un angle mort non bloquant (`REQBODY_ERROR`). Mesure sur
+Coraza 3.3.3 : aucune variable `REQBODY_ERROR` n'est levée sur JSON malformé. Le parseur est
+**permissif** (`gjson.Parse` ne remonte pas d'erreur de syntaxe) : un corps
+tronqué est partiellement extrait et la détection subsiste — un corps tronqué
+contenant `/etc/passwd` est toujours refusé (403). Le mécanisme redouté n'existe pas dans
+cette version ; aucune règle n'a été ajoutée pour une condition inatteignable, et
+la propriété qui compte est verrouillée par test.
+
+> **Note de comptage.** Les README annonçaient « 312 assertions e2e » ; le décompte
+> réel sur `HEAD` était de **304**. Le chiffre documenté était donc déjà inexact avant
+> ce correctif. Il est corrigé à **348** (304 + 44), et le total de la section 15 passe
+> de **17 à 61**. Méthode reproductible : comptage AST des appels à
+> `check` / `check_true` / `check_value` / `check_traversed` dans les fonctions `test_*`,
+> avec expansion des boucles littérales, les helpers locaux étant comptés à l'appel.
+
+**Tests** — 44 vérifications ajoutées au test WAF e2e (`test_15_waf_security`,
+sections 15a / 15h / 15h-bis / 15h-quater / 15h-quinquies / 15h-sexies /
+15h-septies / 15h-ter), portant la section de **17 à 61 assertions** — dont 57
+observables au niveau WAF et 4 reposant sur `call_tool`, toutes exécutées à travers Caddy + Coraza. Le cœur est un **test
+différentiel** : deux requêtes ne différant que par la présence de `.env` doivent
+recevoir un traitement identique, non-403, non-erreur réseau et non-5xx — la
+triple exclusion évite qu'une égalité obtenue par double échec ne soit prise pour
+un succès. Rejoué contre `HEAD` pré-correctif : 16 PASS / 2 FAIL. Après
+correctif : 18 PASS / 0 FAIL. Banc étendu : 33/33 sondes conformes, et les deux
+vecteurs d'évasion ci-dessus passés de 200 à 403.
+
 ## [0.9.1] — 2026-07-25
 
 ### Contrat `.env.example` réparé et rendu déterministe (issue #100)
