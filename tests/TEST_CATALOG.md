@@ -1,7 +1,8 @@
 # Catalogue des Tests E2E — MCP Vault
 
-> **Version** : v0.3.1 — Phase sécurité (audit + correctifs critiques + WAF Coraza)
-> **Dernière exécution** : ~295 assertions au total (14 catégories e2e + 16 tests crypto)
+> **Version** : v0.9.2 — Durcissement WAF (parsing JSON borné sur /mcp, anti-évasion, cf. #107)
+> **Dernière exécution** : 349 assertions e2e sur 15 catégories (+ 18 tests crypto)
+> **Décompte reproductible** : comptage AST des appels `check` / `check_true` / `check_value` / `check_traversed` dans les fonctions `test_*` de `tests/test_e2e.py`, boucles littérales expansées
 > **Durée** : ~5 secondes (e2e) + <1s (crypto)
 > **Environnement** : Docker (OpenBao embedded + S3 Dell ECS + WAF Caddy/Coraza CRS v4)
 
@@ -353,7 +354,7 @@
 
 ---
 
-## 15. Cryptographie et Sécurité — `test_crypto.py` (16 tests)
+## 15. Cryptographie et Sécurité — `test_crypto.py` (18 tests)
 
 > ⚠️ Ces tests sont dans un fichier séparé (`tests/test_crypto.py`), pas dans `test_e2e.py`.
 

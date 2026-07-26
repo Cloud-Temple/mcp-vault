@@ -200,8 +200,8 @@ Cette section documente chaque finding corrigé avec la remédiation appliquée.
 #### V2-16 — Plugins Caddy/Coraza non pinnés
 - **CVSS :** 5.3 | **CWE :** CWE-1104
 - **Problème :** `xcaddy build --with github.com/corazawaf/coraza-caddy/v2` sans version.
-- **Remédiation :** `coraza-caddy/v2@v2.2.0`, `caddy-ratelimit@v0.1.0`.
-- **Vérifié :** ✅ v0.4.5
+- **Remédiation :** `coraza-caddy/v2@v2.5.0` (coraza v3.7.0), `caddy-ratelimit@v0.1.0`.
+- **Vérifié :** ✅ v0.4.5 — pinnage relevé en v0.9.2 (issue #107), versions vérifiées dans l'image via `caddy build-info`.
 
 #### V3-11 — `role_name` SSH sans validation
 - **CVSS :** 5.3 | **CWE :** CWE-74
@@ -316,10 +316,10 @@ Cette section documente chaque finding corrigé avec la remédiation appliquée.
 
 #### V3-20 — CVE-2025-29914 : Coraza URI parser bypass (double-slash)
 - **CVSS :** 3.5 | **CWE :** CWE-706
-- **Localisation :** `waf/Dockerfile` (coraza-caddy v2.2.0)
+- **Localisation :** `waf/Dockerfile` (coraza-caddy v2.5.0 depuis v0.9.2, coraza v3.7.0)
 - **État :** Les URIs commençant par `//` pouvaient être mal parsées par `url.Parse()` (Go). Fix dans Coraza >= 3.3.3 (module v1) ou v2.0.2+ (module v2).
-- **Atténuation :** La version pinnée `coraza-caddy@v2.2.0` devrait inclure le fix. Les endpoints MCP/admin n'utilisent pas de double-slash.
-- **Recommandation future :** Vérifier via `docker run waf coraza --version` et ajouter un test de régression.
+- **Atténuation :** ✅ **Vérifiée en v0.9.2** — la version embarquée est confirmée par `caddy build-info` dans l'image (`corazawaf/coraza/v3 v3.7.0`), très au-delà du seuil de correction. Le déclencheur du parseur JSON sur `/mcp` utilise par ailleurs un chemin **ancré** (`^/mcp(?:[/?]|$)`) et non `@beginsWith`, ce qui ne dépend pas du parsing d'URI pour écarter `//mcp`.
+- **Recommandation future :** Ajouter un test de régression sur `//mcp` à la suite WAF.
 
 #### V2-14 — CSP `unsafe-inline`
 - **CVSS :** 3.0 | **CWE :** CWE-79

@@ -1,6 +1,6 @@
 # Architecture — MCP Vault
 
-> **Version** : 0.9.1 | **Date** : 2026-07-25 | **Auteur** : Cloud Temple  
+> **Version** : 0.9.2 | **Date** : 2026-07-26 | **Auteur** : Cloud Temple  
 > **Projet** : mcp-vault | **Licence** : Apache 2.0  
 > **Statut** : ✅ Implémenté — Production-ready (PKI interne v0.5.x + C18 v0.6.x)
 
@@ -2170,7 +2170,7 @@ l'application, bloquant les attaques L7 connues (injections, XSS, LFI, RCE...).
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │  Caddy v2.11.2 (compilé avec xcaddy)                       │  │
-│  │  └─ Plugin coraza-caddy v2.2.0                             │  │
+│  │  └─ Plugin coraza-caddy v2.5.0 (coraza v3.7.0)             │  │
 │  │     └─ OWASP CoreRuleSet (CRS) v4.7.0                     │  │
 │  └────────────────────────────────────────────────────────────┘  │
 │                                                                  │
@@ -2265,8 +2265,16 @@ endpoints** : `/health`, `/mcp` et `/admin/api`.
 #### 11.6.4 Exclusions ciblées (fine-tuning)
 
 Après activation du mode blocking, un fine-tuning a été réalisé en exécutant
-les 295 tests e2e via le WAF. Deux règles CRS généraient des **faux positifs**
-légitimes sur les payloads JSON-RPC et REST de MCP Vault :
+les 295 tests e2e via le WAF. Plusieurs règles CRS généraient des **faux
+positifs** légitimes sur les payloads JSON-RPC et REST de MCP Vault.
+
+Deux mécanismes d'exclusion coexistent, avec des **sémantiques inverses** — les
+confondre rend l'exclusion silencieusement inopérante :
+
+| Mécanisme                    | Agit sur          | Placement requis          |
+| ---------------------------- | ----------------- | ------------------------- |
+| `ctl:ruleRemoveById`         | la transaction    | **AVANT** l'Include CRS (cf. #42) |
+| `SecRuleUpdateTargetById`    | la définition     | **APRÈS** l'Include CRS (cf. #107) |
 
 ##### Faux positif 1 — Règle 920540 (Unicode bypass)
 
@@ -2300,14 +2308,179 @@ légitimes sur les payloads JSON-RPC et REST de MCP Vault :
 | **ID interne**| Règles 10003 et 10004 dans `coraza.conf`                                   |
 | **Note**      | La règle 932120 reste **active** sur `/health` pour sécurité maximale       |
 
+##### Faux positif 3 — Règle 930120 (OS File Access Attempt) — issue #107
+
+Signalé en production sur la v0.8.6 : un `secret_write` légitime émis par un
+client Codex recevait `HTTP 403` **avant** le handler MCP — aucune trace dans
+l'audit Vault, ni refus d'authentification ni refus de policy.
+
+| Aspect         | Détail                                                                       |
+| -------------- | ---------------------------------------------------------------------------- |
+| **Règle CRS**  | `REQUEST-930-APPLICATION-ATTACK-LFI` / ID 930120 (`phase:2`)                 |
+| **Opérateur**  | `@pmFromFile lfi-os-files.data` — `.env` y figure (ligne 36, CRS 4.7.0)       |
+| **Cibles**     | `REQUEST_COOKIES\|REQUEST_COOKIES_NAMES\|ARGS_NAMES\|ARGS\|XML:/*`           |
+| **Cause racine**| **Coraza ne parsait pas le corps JSON.** Faute de `ctl:requestBodyProcessor=JSON`, le processeur `URLENCODED` s'appliquait au JSON-RPC : le **corps entier** devenait **UNE** variable unique — `ARGS_NAMES:{"jsonrpc": "2.0", …}` — mesuré à exactement 1 `ARGS_NAMES` et 1 `ARGS`. |
+| **Impact 1**   | Toute chaîne de `lfi-os-files.data` présente **n'importe où** dans le corps — y compris dans une **valeur de secret** — déclenchait 930120 (score 5) puis 949110. Le type de secret `env_file` (« Fichier .env ») était donc structurellement inutilisable à travers le WAF. |
+| **Impact 2**   | **Aucun scoping fin n'était possible** : avec une seule cible, on ne peut pas distinguer un nom d'argument d'une valeur. |
+| **Correctif 1**| Règle interne **10008** : `ctl:requestBodyProcessor=JSON`, chaînée sur `POST` + chemin ancré `^/mcp(?:[/?]|$)` + `Content-Type` `(?:^|,)[ \t]*application/json[ \t]*(?:[;,]|$)` (grammaire alignée sur celle du handler, cf. §11.6.4-quater), avec `ctl:requestBodyLimit=65536` pour borner le coût du parseur (cf. §11.6.4-bis). Restaure la granularité (`json.params.arguments.data.notes`, …) et **renforce** la détection : 930100/930110 (path traversal) se déclenchent désormais sur `path`, ce qui n'était pas le cas avant. |
+| **Correctif 2**| `SecRuleUpdateTargetById 930120 "!ARGS_NAMES:/^json\.params\._meta\./"` — l'aplatissement JSON concatène les clés avec un point, donc une clé `environment` produit `.env` dans le **nom** d'argument (`…x-codex-turn-metadata.environment.cwd`). Portée : **noms seuls**, les valeurs sous `_meta` restent inspectées. |
+| **Correctif 3**| `SecRuleUpdateTargetById 930120 "!ARGS:/^json\.params\.arguments\.data\./"` — `secret_write(data: dict)` est aujourd'hui le seul outil MCP à recevoir une charge opaque. Ce contenu est transmis à OpenBao qui le chiffre **au repos** ; mcp-vault ne l'interprète jamais comme chemin, requête SQL ou commande. Portée : **valeurs** de ce sous-arbre seulement. **Honnêteté du scoping** : le sélecteur porte sur le chemin JSON `params.arguments.data.*`, **pas** sur `params.name == "secret_write"` — le WAF ne connaît pas le schéma des outils. La propriété repose sur l'état actuel des signatures, pas sur une garantie du WAF. |
+| **Correctif 4**| Gardes **10009** / **10010** (anti-évasion, cf. §11.6.4-bis) : les exclusions ci-dessus sont des directives GLOBALES dont le sélecteur est un NOM d'argument, donc une chaîne choisie par le client. Elles ne sont PAS inertes hors `/mcp` : `ARGS`/`ARGS_NAMES` agrègent aussi query string et formulaire. Les gardes refusent tout nom préfixé `json.` hors du corps JSON MCP analysé. |
+| **Étroitesse** | Restent bloqués et vérifiés par test : `.env` dans `path`, dans `tags`, dans le nom d'outil, dans une **valeur** sous `_meta` ; traversal dans une valeur **et** dans un nom sous `data.*` ; noms `json.*` forgés en query string ou en formulaire ; corps JSON tronqué ou très imbriqué contenant une LFI. |
+| **Risque**     | Faible — exclure 930120 des valeurs de `data.*` n'ouvre pas de LFI : une traversal y reste bloquée par **930100**, **930110** et **932160** (vérifié empiriquement). Un simple nom de fichier sensible **sans** traversal n'y est en revanche plus détecté : c'est l'effet recherché. |
+| **Pourquoi pas `ctl:ruleRemoveTargetById`** (qui serait scopable par URI) : vérifié, la forme **regex** de cible n'est pas supportée — seul un nom exact fonctionne. Les clés de métadonnées client étant arbitraires, une liste de noms exacts n'est pas tenable. |
+
+##### 11.6.4-bis Anti-évasion des exclusions `json.*` (gardes 10009 / 10010)
+
+La première version du correctif #107 supposait les exclusions statiques
+« limitées à `POST /mcp` par construction, puisque les variables `json.*`
+n'existent que là où le parseur JSON a tourné ». **Cette affirmation était
+fausse** ; la revue adversariale indépendante l'a qualifiée de bloquante.
+
+`ARGS` et `ARGS_NAMES` agrègent aussi les paramètres de **query string** et de
+**formulaire**, dont le nom est choisi par le client. Mesure sur Coraza réel avant
+correction :
+
+| Requête | Avant gardes | Après gardes |
+| --- | --- | --- |
+| `GET /health?json.params.arguments.data.x=.env` | **200** (évasion) | **403** |
+| `GET /health?legit=.env` (témoin) | 403 | 403 |
+| `POST /admin/api` formulaire, nom forgé | **200** (évasion) | **403** |
+
+Il suffisait donc de nommer un paramètre `json.params.arguments.data.<quelconque>`
+pour neutraliser 930120 **sur tous les endpoints**.
+
+| Garde | Cible | Justification |
+| ----- | ----- | ------------- |
+| **10009** | `ARGS_GET_NAMES` préfixés `json.`, tous endpoints | Aucun client légitime n'en produit : le transport MCP Streamable HTTP place tout dans le corps, et l'authentification est Bearer-only (pas de repli `?token=`). |
+| **10010** | `ARGS_NAMES` préfixés `json.` quand le corps n'a PAS été analysé en JSON | Discriminé par le drapeau `tx.mcp_json_body`, posé côté serveur donc **non forgeable**. |
+
+Deux pièges rencontrés, tous deux détectés par la mesure et non par la relecture :
+
+1. Une `SecRule TX:<var>` dont la variable **n'existe pas** ne s'évalue pas du tout
+   (aucune variable à tester → aucun match → la chaîne ne se termine jamais). Sans
+   l'initialisation explicite `setvar:'tx.mcp_json_body=0'` (règle 10007100,
+   phase 1, déclarée avant 10008), la garde 10010 était silencieusement inopérante.
+2. `@beginsWith /mcp` matcherait aussi `/mcpfoo`. Le déclencheur du parseur est
+   ancré (`^/mcp(?:[/?]|$)`) et son `Content-Type` aligné sur ce que FastMCP
+   accepte réellement.
+
+`SecRequestBodyLimitAction Reject` est rendu explicite plutôt que laissé au défaut :
+un corps dépassant `SecRequestBodyLimit` est refusé, jamais analysé partiellement —
+une analyse partielle laisserait sa fin non inspectée.
+
+**Hypothèse de revue non confirmée.** La revue suspectait qu'une erreur du parseur
+JSON crée un angle mort non bloquant (`REQBODY_ERROR`). Mesure sur Coraza 3.3.3 :
+aucune variable `REQBODY_ERROR` n'est levée sur JSON malformé. Le parseur est
+**permissif** (`gjson.Parse` ne remonte pas d'erreur de syntaxe) : un corps
+tronqué est partiellement extrait, et la détection subsiste — un corps tronqué
+contenant `/etc/passwd` reste refusé (403), mesuré. Aucune règle n'a donc été ajoutée pour une condition inatteignable ;
+la propriété qui compte est verrouillée par test.
+
+##### 11.6.4-ter Profondeur JSON — DoS borné sans créer d'évasion (#107)
+
+L'activation du parseur JSON exposait un **DoS critique non authentifié** sur
+`POST /mcp`. Le parseur de coraza 3.3.3 (`internal/bodyprocessors/json.go`,
+`readItems()`) récurse **sans plafond de profondeur** — « TODO add some anti DOS
+protection » en commentaire — et alloue une clé de map par niveau : coût
+quadratique. `SecRequestBodyLimit` borne les **octets**, jamais la **profondeur** ;
+un corps `[`×N + `0` + `]`×N coûte 2 octets par niveau.
+
+Mesures, conteneur aux limites de production (512 Mo / 1 CPU) :
+
+| Corps | Sans parseur | coraza 3.3.3 + parseur | coraza 3.7.0 + limites |
+| --- | --- | --- | --- |
+| 3,9 Ko (prof. 2 000) | 39 ms | **24 035 ms** | 400 en 11 ms |
+| 15,6 Ko (prof. 8 000) | 82 ms | **timeout > 60 s** | 400 en 6 ms |
+| 64,0 Ko (prof. 32 767) | 323 ms | connexion réinitialisée | 400 en 10 ms |
+| **État du WAF** | vivant | **`OOMKilled: true`** | vivant |
+
+`SecRequestBodyJsonDepthLimit` n'existe qu'à partir de **coraza v3.4.0** : c'est la
+raison exacte de la montée `coraza-caddy/v2@v2.2.0` → **v2.5.0** (coraza **v3.7.0**)
+dans `waf/Dockerfile`. Contre-mesures écartées, toutes mesurées : borne en octets
+(le vecteur tient sous 64 Ko), filtrage avant parseur (impossible en seclang — le
+corps n'existe qu'en phase 2), et `ctl:ruleRemoveTargetById` sur collection nue sans
+parseur (ne corrige pas le faux positif).
+
+**Le piège.** La limite de profondeur seule échange un défaut contre un autre :
+au-delà du seuil, coraza cesse d'alimenter `ARGS` et le corps n'est plus inspecté.
+
+| Charge enfouie à 40 niveaux | Limite seule | Limite + règle 10011 |
+| --- | --- | --- |
+| LFI, SQLi, XSS, RCE | **200 — passent toutes** | 400 |
+| Les mêmes à 31 niveaux | 403 | 403 |
+
+coraza 3.7.0 expose la condition (`REQBODY_ERROR=1`, « JSON: max recursion reached
+while reading json object »). La **règle 10011** refuse donc explicitement tout
+corps déclaré non analysable, sur la seule surface analysée en JSON
+(`tx.mcp_json_body`) : un corps qu'un WAF ne peut pas inspecter n'atteint pas
+l'application. Cette règle avait été proposée au 1er round de revue puis écartée
+sur mesure — coraza 3.3.3 ne levait jamais `REQBODY_ERROR`. L'intuition était juste
+pour la configuration montée, pas pour l'ancienne.
+
+Seuil retenu : **32**. L'enveloppe MCP la plus profonde légitime atteint 5 niveaux
+(`params._meta.x-codex-turn-metadata.environment.cwd`), le payload de secret 4.
+
+`ctl:requestBodyLimit=65536` et `SecRequestBodyLimitAction Reject` sont conservés :
+ils bornent le coût de l'évaluation CRS sur les gros corps, indépendamment de la
+profondeur (413 en 1-3 ms au-delà).
+
+> **Défaut préexistant, hors périmètre.** Le DoS par gros corps est antérieur et
+> concerne toutes les surfaces : sans aucun parseur JSON, une requête de 2,9 Mo
+> coûte **20,4 s** de CPU en évaluation CRS. `SecRequestBodyLimit` vaut 10 Mo.
+
+##### 11.6.4-quater Grammaire du `Content-Type` alignée sur le handler (#107)
+
+Le déclencheur du parseur JSON doit reconnaître **tout** ce que le handler accepte,
+sinon le POST atteint l'application en échappant aux quatre bornes (parseur,
+taille, profondeur, refus des corps non analysables).
+
+`mcp/server/streamable_http.py:415` (SDK 1.26) :
+
+```python
+content_type_parts = [part.strip() for part in content_type.split(";")[0].split(",")]
+return any(part == CONTENT_TYPE_JSON for part in content_type_parts)
+```
+
+Le handler accepte donc `text/plain, application/json`. Un ancrage WAF en
+`^application/json` laissait passer cette forme **sans aucune borne** — mesuré :
+
+| `Content-Type` | Ancrage `^application/json` | Grammaire alignée |
+| --- | --- | --- |
+| `application/json` | 400 | 400 |
+| `application/json; charset=utf-8` | 400 | 400 |
+| `text/plain, application/json` | **200 — contournait** | **400** |
+| `application/json, text/plain` | **200 — contournait** | **400** |
+
+D'où `@rx (?:^|,)[ \t]*application/json[ \t]*(?:[;,]|$)` : `application/json`
+reconnu comme jeton de média, en tête ou après une virgule. **Sur-couvrir est
+délibéré** (on borne davantage, l'application renvoie 415 le cas échéant) ;
+sous-couvrir rouvre le contournement. `application/jsonp` et
+`application/json-patch+json` ne matchent pas — le caractère suivant `json` doit
+être `;`, `,` ou la fin de chaîne. Vérifié : une LFI envoyée avec ces deux types
+reste bloquée (403), car un corps non structuré est inspecté en bloc.
+
 ##### Récapitulatif des exclusions
 
-| ID interne | Endpoint        | Règle CRS | Motif du faux positif                    |
-| ---------- | --------------- | --------- | ---------------------------------------- |
-| 10001      | `/mcp`          | 920540    | Unicode français dans les payloads JSON  |
-| 10002      | `/admin/api`    | 920540    | Unicode français dans les payloads JSON  |
-| 10003      | `/mcp`          | 932120    | `test-path` dans les noms de policies    |
-| 10004      | `/admin/api`    | 932120    | `test-path` dans les noms de policies    |
+| ID interne | Endpoint                    | Règle CRS        | Motif du faux positif                          |
+| ---------- | --------------------------- | ---------------- | ---------------------------------------------- |
+| 10001      | `/mcp`                      | 920540           | Unicode français dans les payloads JSON        |
+| 10002      | `/admin/api`                | 920540           | Unicode français dans les payloads JSON        |
+| 10003      | `/mcp`                      | 932120           | `test-path` dans les noms de policies          |
+| 10004      | `/admin/api`                | 932120           | `test-path` dans les noms de policies          |
+| 10005      | `/pki/ca/{root,chain,crl}.pem` | 920440, 920540, 932120 | Distribution CA/CRL publique (extension `.pem`) |
+| 10006      | `/acme/*`                   | 920420, 920540, 932120 | Content-Type `application/jose+json` (RFC 8555) |
+| 10007      | `/v1/_sys_pki_int/acme/*`   | 920420, 920540, 932120 | Paths ACME générés par OpenBao              |
+| 10007100   | *(toutes)*                  | *(aucune)*       | Initialise `tx.mcp_json_body=0` — sans quoi la garde 10010 est inopérante |
+| 10008      | `POST /mcp` (JSON)          | *(aucune)*       | Active le parseur JSON — prérequis du scoping fin |
+| 10009      | *(toutes)*                  | *(deny 403)*     | Refuse un nom de paramètre `json.*` forgé en query string |
+| 10010      | *(toutes)*                  | *(deny 403)*     | Refuse un nom `json.*` hors corps JSON MCP analysé |
+| 10011      | `POST /mcp` (JSON)          | *(deny 400)*     | Refuse un corps JSON non analysable (`REQBODY_ERROR`) — évite l'évasion par profondeur |
+
+| Exclusion de cible (après Include)                          | Règle CRS | Portée                                   |
+| ----------------------------------------------------------- | --------- | ---------------------------------------- |
+| `!ARGS_NAMES:/^json\.params\._meta\./`                      | 930120    | **Noms** sous l'enveloppe MCP `_meta`    |
+| `!ARGS:/^json\.params\.arguments\.data\./`                  | 930120    | **Valeurs** du payload opaque `secret_write` |
 
 #### 11.6.5 Headers de sécurité
 
@@ -2465,4 +2638,4 @@ result = await vault_client.call("ssh_sign_key", {
 
 ---
 
-*Document mis à jour le 25 juillet 2026 — MCP Vault v0.9.1 (39 outils MCP, accès SSH JIT opérateur (bearer nominatif + policy dédiée, clé publique pré-enrôlée), pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer, écriture create-only atomique (CAS), sync S3 conditionnelle, contrat de configuration `.env.example` déterministe et testé)*
+*Document mis à jour le 26 juillet 2026 — MCP Vault v0.9.2 (39 outils MCP, WAF Coraza v3.7.0 avec parsing JSON borné sur /mcp (profondeur, taille, refus des corps non analysables) et exclusions de cibles anti-évasion, accès SSH JIT opérateur (bearer nominatif + policy dédiée, clé publique pré-enrôlée), pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer, écriture create-only atomique (CAS), sync S3 conditionnelle, contrat de configuration `.env.example` déterministe et testé)*

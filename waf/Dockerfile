@@ -13,8 +13,20 @@
 FROM caddy:2-builder@sha256:84dfc3479309c690643ada9279b3e0b4352ce56b0ec8fd802c668f42b546e98f AS builder
 
 # SÉCURITÉ V2-16 : plugins pinnés en version exacte
+#
+# coraza-caddy v2.5.0 (embarque coraza v3.7.0) — REQUIS depuis l'issue #107.
+# La v2.2.0 embarquait coraza v3.3.3, dont le parseur JSON récurse SANS plafond
+# de profondeur (`internal/bodyprocessors/json.go`, `readItems()`, commentaire
+# « TODO add some anti DOS protection ») et alloue une clé de map par niveau.
+# Mesuré sur un conteneur aux limites de production (512 Mo / 1 CPU) : avec le
+# parseur JSON actif, un corps de 15 Ko `[`×8000 + `0` + `]`×8000 — JSON valide,
+# 2 octets par niveau — ne répondait plus après 60 s, et le WAF finissait
+# `OOMKilled`. `SecRequestBodyLimit` borne les OCTETS, jamais la PROFONDEUR.
+# `SecRequestBodyJsonDepthLimit` n'existe qu'à partir de coraza v3.4.0 : c'est la
+# raison exacte de cette montée de version, et elle est indissociable de
+# l'activation du parseur JSON dans `coraza.conf`.
 RUN xcaddy build \
-    --with github.com/corazawaf/coraza-caddy/v2@v2.2.0 \
+    --with github.com/corazawaf/coraza-caddy/v2@v2.5.0 \
     --with github.com/mholt/caddy-ratelimit@v0.1.0
 
 # ── Stage 2 : Télécharger OWASP CoreRuleSet v4 ───────────────────
