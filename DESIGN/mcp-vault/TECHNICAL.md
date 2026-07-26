@@ -1,6 +1,6 @@
 # Documentation Technique — MCP Vault
 
-> **Version** : 0.9.1 | **Date** : 2026-07-25 | **Auteur** : Cloud Temple
+> **Version** : 0.9.2 | **Date** : 2026-07-27 | **Auteur** : Cloud Temple
 > **Licence** : Apache 2.0 | **Statut** : ✅ Production-ready (audit V2.1 complété + PKI interne v0.5.1)
 
 ---
@@ -514,7 +514,7 @@ CA interne souveraine basée sur l'engine PKI d'OpenBao. CA globale (non par vau
 - `/v1/_sys_pki_int/acme/*` → idem (URL longue générée par OpenBao dans les réponses ACME directory)
 - `/pki/ca/*.pem` → endpoints CA/CRL OpenBao (lecture publique)
 
-Non-authentifié par design (RFC 8555 ACME + JWS). Anti-traversal sur acme_suffix et query_string. WAF Coraza : exclusions ciblées par regex sur les 3 paths PEM et endpoints ACME normalisés RFC 8555. **Ces exclusions `ctl:ruleRemoveById` sont déclarées AVANT l'`Include` du CRS** (pattern « exclusions before CRS ») — sinon les règles CRS en phase:1 (ex. 920440 sur l'extension `.pem`) s'évaluent et scorent avant le `ctl`, qui devient inopérant (issue #42, fix v0.6.8). Validé par test d'intégration à travers le WAF (`tests/pki/` T3d : `.pem` connus → 200, `.pem` arbitraire → 403).
+Non-authentifié par design (RFC 8555 ACME + JWS). Anti-traversal sur acme_suffix et query_string. WAF Coraza : exclusions ciblées par regex sur les 3 paths PEM et endpoints ACME normalisés RFC 8555. **Ces exclusions `ctl:ruleRemoveById` sont déclarées AVANT l'`Include` du CRS** (pattern « exclusions before CRS ») — sinon les règles CRS en phase:1 (ex. 920440 sur l'extension `.pem`) s'évaluent et scorent avant le `ctl`, qui devient inopérant (issue #42, fix v0.6.8). ⚠️ **Sémantique inverse pour `SecRuleUpdateTargetById`** (exclusions de CIBLES, ajoutées en v0.9.2 / issue #107) : cette directive réécrit la définition de la règle, qui doit donc être **déjà chargée** — elle se déclare APRÈS l'`Include`. Confondre les deux rend l'exclusion silencieusement inopérante. Validé par test d'intégration à travers le WAF (`tests/pki/` T3d : `.pem` connus → 200, `.pem` arbitraire → 403).
 
 **Cluster path** *(v0.5.1)* : requis par OpenBao 2.5.1 avant l'activation ACME. Configuré via `client._adapter.post("/v1/_sys_pki_int/config/cluster", json={"path": base_url + "/v1/_sys_pki_int"})` (collision paramètre `path` dans `hvac.write()`). URL déduite de `PKI_BASE_URL` (override) ou `MCP_ALLOWED_HOSTS`. **HTTPS requis pour la génération de nonces ACME** (OpenBao 2.5.1) — fonctionnel en production avec WAF TLS.
 
@@ -998,6 +998,16 @@ Voir `ARCHITECTURE.md §11.3` pour les diagrammes d'architecture et les étapes 
 | `hvac`              | ≥2.3.0  | Client Python pour OpenBao/Vault              |
 | `cryptography`      | ≥42.0   | Chiffrement clés unseal (AES-256-GCM, PBKDF2) |
 | `uvicorn[standard]` | ≥0.32.0 | Serveur ASGI                                  |
+
+### Composants du WAF (hors Python, cf. `waf/Dockerfile`)
+
+| Composant                    | Version | Rôle                                                            |
+| ---------------------------- | ------- | --------------------------------------------------------------- |
+| `caddy`                      | 2.x     | Reverse proxy, terminaison TLS, rate limiting                    |
+| `corazawaf/coraza-caddy/v2`  | v2.5.0  | Plugin WAF (embarque coraza v3.7.0)                             |
+| `corazawaf/coraza/v3`        | v3.7.0  | Moteur WAF — **relevé en v0.9.2** (issue #107) : `SecRequestBodyJsonDepthLimit` n'existe qu'à partir de v3.4.0, et sans plafond de profondeur le parseur JSON était vulnérable à un DoS par imbrication |
+| `mholt/caddy-ratelimit`      | v0.1.0  | Limitation de débit par IP                                      |
+| OWASP CoreRuleSet            | 4.7.0   | 23 fichiers de règles chargés                                   |
 | `pytest`            | ≥8.0    | Tests                                         |
 | `pytest-asyncio`    | ≥0.24.0 | Tests async                                   |
 

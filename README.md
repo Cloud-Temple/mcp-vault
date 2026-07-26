@@ -510,7 +510,7 @@ mcp-vault/
 ├── VERSION                   # version courante du service
 ├── DESIGN/mcp-vault/
 │   ├── ARCHITECTURE.md       # Spécification détaillée (v0.9.2)
-│   ├── TECHNICAL.md          # Documentation technique (v0.9.1)
+│   ├── TECHNICAL.md          # Documentation technique (v0.9.2)
 │   └── SECURITY_AUDIT.md     # Rapport d'audit consolidé (60 findings V2.1)
 ├── scripts/
 │   ├── mcp_cli.py            # CLI entry point

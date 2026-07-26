@@ -1,6 +1,6 @@
 # Changelog — MCP Vault
 
-## [0.9.2] — 2026-07-26
+## [0.9.2] — 2026-07-27
 
 ### WAF : faux positif CRS 930120 sur `POST /mcp` (issue #107)
 
