@@ -224,16 +224,44 @@ cette version ; aucune règle n'a été ajoutée pour une condition inatteignabl
 la propriété qui compte est verrouillée par test.
 
 > **Note de comptage.** Les README annonçaient « 312 assertions e2e » ; le décompte
-> réel sur `HEAD` était de **304**. Le chiffre documenté était donc déjà inexact avant
-> ce correctif. Il est corrigé à **348** (304 + 44), et le total de la section 15 passe
-> de **17 à 61**. Méthode reproductible : comptage AST des appels à
+> réel avant ce correctif était de **304** : le chiffre documenté était donc déjà inexact.
+> Il est corrigé à **349** (304 + 45), et le total de la section 15 passe de **17 à 62**. Méthode reproductible : comptage AST des appels à
 > `check` / `check_true` / `check_value` / `check_traversed` dans les fonctions `test_*`,
 > avec expansion des boucles littérales, les helpers locaux étant comptés à l'appel.
 
-**Tests** — 44 vérifications ajoutées au test WAF e2e (`test_15_waf_security`,
+### ⚠️ Correction d'un piège de conception dans les tests eux-mêmes
+
+Le premier jet de cette suite comportait un défaut que seule l'exécution sur la
+stack complète a révélé : trois assertions différentielles **passaient au vert sans
+rien vérifier**.
+
+Le mécanisme : sur la stack réelle, un `POST /mcp` hors session MCP reçoit **400**
+de l'application (« Missing session ID ») — et la nouvelle règle WAF 10011 refuse
+elle aussi en **400**. Comparer « déclencheur == référence » avec les deux à 400
+revenait donc à comparer deux échecs et à conclure au succès. L'exclusion des
+erreurs réseau et des 5xx ne couvrait pas ce cas, qui est précisément le cas réel.
+
+Correction : un discriminateur `waf_blocked(status, corps)` tranche sur le **corps**
+et non sur le code seul — un blocage Coraza renvoie un corps **vide** sans
+`Content-Type`, l'application répond toujours en JSON. Le même code 400 donne
+désormais deux verdicts opposés, ce qui prouve que l'assertion travaille :
+
+```
+Secret 'data' imbriqué à 20 niveaux : non bloqué par le WAF — status=400, bloqué WAF=False
+Secret 'data' imbriqué à 60 niveaux : bloqué par le WAF     — status=400, bloqué WAF=True
+```
+
+Deux autres assertions étaient fausses par hypothèse : elles attendaient **200** sur
+`/pki/ca/root.pem` et `/acme/directory`, alors qu'un coffre dont la PKI n'est pas
+initialisée renvoie légitimement **403** applicatif. Elles vérifient maintenant
+l'absence de blocage WAF, pas un code de retour.
+
+Enfin, la preuve du faux positif ne repose plus seulement sur des POST bruts : elle
+passe par une **vraie session MCP** reproduisant l'appel refusé en production.
+
+**Tests** — 45 vérifications ajoutées au test WAF e2e (`test_15_waf_security`,
 sections 15a / 15h / 15h-bis / 15h-quater / 15h-quinquies / 15h-sexies /
-15h-septies / 15h-ter), portant la section de **17 à 61 assertions** — dont 57
-observables au niveau WAF et 4 reposant sur `call_tool`, toutes exécutées à travers Caddy + Coraza. Le cœur est un **test
+15h-septies / 15h-ter), portant la section de **17 à 62 assertions**, toutes exécutées à travers Caddy + Coraza. Le cœur est un **test
 différentiel** : deux requêtes ne différant que par la présence de `.env` doivent
 recevoir un traitement identique, non-403, non-erreur réseau et non-5xx — la
 triple exclusion évite qu'une égalité obtenue par double échec ne soit prise pour

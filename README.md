@@ -25,7 +25,7 @@ MCP Vault est un serveur [MCP](https://modelcontextprotocol.io/) qui fournit un 
 | [**SECURITY_AUDIT.md**](DESIGN/mcp-vault/SECURITY_AUDIT.md) | Rapport d'audit de sécurité consolidé — 60 findings V2.1, 28 corrigés, 13 résiduels documentés                                                                         |
 | [**scripts/README.md**](scripts/README.md)              | Guide CLI complet — 7 groupes de commandes, shell interactif, exemples                                                                                                       |
 | [**tests/README.md**](tests/README.md)                  | Guide d'exécution des tests — 4 niveaux, ~600 tests, commandes pour auditeurs                                                                                                |
-| [**TEST_CATALOG.md**](tests/TEST_CATALOG.md)            | Catalogue des tests e2e — 15 catégories, 348 assertions, objectif de chaque section (pour auditeurs)                                                                        |
+| [**TEST_CATALOG.md**](tests/TEST_CATALOG.md)            | Catalogue des tests e2e — 15 catégories, 349 assertions, objectif de chaque section (pour auditeurs)                                                                        |
 
 ---
 
@@ -43,7 +43,7 @@ docker compose up -d
 # 3. Vérifier (depuis le conteneur)
 docker compose exec mcp-vault python scripts/mcp_cli.py health
 
-# 4. Tester (348 tests e2e)
+# 4. Tester (349 tests e2e)
 docker compose exec mcp-vault python tests/test_e2e.py
 ```
 
@@ -463,7 +463,7 @@ python tests/test_cli_all.py
 # 2. Tests CLI LIVE — cycle complet (79 tests, serveur réel)
 MCP_URL=http://localhost:8085 MCP_TOKEN=<key> python tests/test_cli_live.py
 
-# 3. Tests e2e MCP (348 tests, dans Docker)
+# 3. Tests e2e MCP (349 tests, dans Docker)
 docker compose exec mcp-vault python tests/test_e2e.py
 
 # 4. Tests crypto (18 tests, SANS serveur — AES-256-GCM + AAD + validation entropie)
@@ -476,7 +476,7 @@ python tests/test_cli_all.py --only policy
 docker compose exec mcp-vault python tests/test_e2e.py --test enforcement
 ```
 
-### Couverture e2e (348 tests, 15 catégories)
+### Couverture e2e (349 tests, 15 catégories)
 
 | Catégorie              | Tests  | Description                                                                        |
 | ---------------------- | ------ | ---------------------------------------------------------------------------------- |
@@ -494,7 +494,7 @@ docker compose exec mcp-vault python tests/test_e2e.py --test enforcement
 | Policies MCP           | 43     | CRUD, validation, wildcards, path_rules, doublons, erreurs, Admin API REST         |
 | **Policy Enforcement** | **37** | check_policy, token_update, denied/allowed, changement policy, Admin API           |
 | **Audit Log**          | **31** | audit_log MCP, filtres (category/tool/status/since/limit), stats, Admin API /audit |
-| **WAF Security**       | **61** | LFI, SQLi, XSS, RCE, scanners → 403 ; faux positif 930120 ; anti-évasion `json.*` ; bornes taille/profondeur JSON ; grammaire Content-Type ; non-régression requêtes légitimes |
+| **WAF Security**       | **62** | LFI, SQLi, XSS, RCE, scanners → 403 ; faux positif 930120 ; anti-évasion `json.*` ; bornes taille/profondeur JSON ; grammaire Content-Type ; non-régression requêtes légitimes |
 
 ---
 
@@ -541,7 +541,7 @@ mcp-vault/
 │   ├── TEST_CATALOG.md       # Catalogue des tests pour auditeurs
 │   ├── test_cli_all.py       # 197 tests CLI parsing (sans serveur)
 │   ├── test_cli_live.py      # 79 tests CLI live (serveur réel)
-│   ├── test_e2e.py           # 348 tests MCP e2e (15 catégories)
+│   ├── test_e2e.py           # 349 tests MCP e2e (15 catégories)
 │   ├── test_crypto.py        # 18 tests AES-256-GCM + AAD
 │   ├── test_service.py       # 78 tests bas niveau
 │   ├── test_integration.py   # Tests pytest
