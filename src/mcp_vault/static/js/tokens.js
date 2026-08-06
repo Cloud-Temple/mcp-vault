@@ -48,7 +48,7 @@ async function loadTokens() {
 
             html += `<tr>
                 <td><strong>${esc(t.client_name)}</strong>${t.email ? `<br><span style="color:var(--muted);font-size:0.75rem">${esc(t.email)}</span>` : ''}</td>
-                <td>${(t.permissions||[]).map(p => `<span class="badge ${p==='admin'?'badge-warn':p==='write'?'badge-info':'badge-ok'}">${p}</span>`).join(' ')}</td>
+                <td>${(t.permissions||[]).map(p => `<span class="badge ${p==='admin'?'badge-warn':p==='write'?'badge-info':p==='wrap'?'badge-warn':'badge-ok'}" ${p==='wrap'?'title="Broker JIT : limité aux 4 outils wrap"':''}>${p}</span>`).join(' ')}</td>
                 <td>${t.allowed_resources && t.allowed_resources.length ? t.allowed_resources.map(r => `<code style="font-size:0.75rem">${esc(r)}</code>`).join(', ') : '<span style="color:var(--muted);font-size:0.75rem" title="Accès uniquement aux vaults créés par ce token">owner</span>'}</td>
                 <td>${policyBadge}</td>
                 <td><span style="font-size:0.78rem">${createdAt}</span>${createdTime ? `<br><span style="color:var(--muted);font-size:0.68rem">${createdTime}</span>` : ''}</td>
@@ -70,8 +70,10 @@ async function openCreateTokenModal() {
     document.getElementById('ctEmail').value = '';
     document.getElementById('ctExpires').value = '90';
     document.getElementById('ctVaults').value = '';
+    document.getElementById('ctPermRead').checked = true;
     document.getElementById('ctPermWrite').checked = false;
     document.getElementById('ctPermAdmin').checked = false;
+    document.getElementById('ctPermWrap').checked = false;
 
     // Charger les policies disponibles
     if (isAdmin()) {
@@ -82,9 +84,26 @@ async function openCreateTokenModal() {
 }
 
 async function doCreateToken() {
-    const perms = ['read'];
+    // #115 : perms construit depuis les checkboxes — read n'est plus forcé,
+    // un token ["wrap"] seul (broker JIT) doit être possible.
+    const perms = [];
+    if (document.getElementById('ctPermRead').checked) perms.push('read');
     if (document.getElementById('ctPermWrite').checked) perms.push('write');
     if (document.getElementById('ctPermAdmin').checked) perms.push('admin');
+    if (document.getElementById('ctPermWrap').checked) perms.push('wrap');
+
+    if (perms.length === 0) {
+        alert('Sélectionner au moins une permission.');
+        return;
+    }
+    // Composite wrap+lecture : avertir explicitement — un broker JIT nominal
+    // n'a PAS besoin de lire les secrets (le wrap-only est verrouillé côté
+    // serveur ; un composite garde ses droits read/write).
+    if (perms.includes('wrap') && (perms.includes('read') || perms.includes('write') || perms.includes('admin'))) {
+        if (!confirm('⚠️ Ce token combine "wrap" avec d\'autres permissions : il pourra LIRE ou MODIFIER les secrets, pas seulement les wrapper.\n\nPour un broker JIT (mcp-mission), utilisez "wrap" SEUL (décochez read).\n\nCréer quand même ce token composite ?')) {
+            return;
+        }
+    }
 
     const vStr = document.getElementById('ctVaults').value.trim();
     const vList = vStr ? vStr.split(',').map(s => s.trim()).filter(Boolean) : [];
@@ -185,6 +204,7 @@ async function openEditToken(hashPrefix, permissions, vaults, policyId) {
     document.getElementById('etPermRead').checked = permissions.includes('read');
     document.getElementById('etPermWrite').checked = permissions.includes('write');
     document.getElementById('etPermAdmin').checked = permissions.includes('admin');
+    document.getElementById('etPermWrap').checked = permissions.includes('wrap');
     document.getElementById('etVaults').value = vaults || '';
 
     // Charger les policies disponibles
@@ -221,6 +241,18 @@ async function doUpdateToken() {
     if (document.getElementById('etPermRead').checked) perms.push('read');
     if (document.getElementById('etPermWrite').checked) perms.push('write');
     if (document.getElementById('etPermAdmin').checked) perms.push('admin');
+    if (document.getElementById('etPermWrap').checked) perms.push('wrap');
+
+    if (perms.length === 0) {
+        alert('Sélectionner au moins une permission.');
+        return;
+    }
+    // #115 : même avertissement composite qu'à la création.
+    if (perms.includes('wrap') && (perms.includes('read') || perms.includes('write') || perms.includes('admin'))) {
+        if (!confirm('⚠️ Ce token combine "wrap" avec d\'autres permissions : il pourra LIRE ou MODIFIER les secrets, pas seulement les wrapper.\n\nPour un broker JIT (mcp-mission), utilisez "wrap" SEUL.\n\nEnregistrer quand même ?')) {
+            return;
+        }
+    }
 
     const vStr = document.getElementById('etVaults').value.trim();
     const vList = vStr ? vStr.split(',').map(s => s.trim()).filter(Boolean) : [];

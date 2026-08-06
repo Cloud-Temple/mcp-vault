@@ -865,10 +865,12 @@ class TestSecretConsumeEndToEnd:
                         "secret_id": "s", "expires_at": "2026-01-01", "vault_url": "",
                         "intended_use": "password"}
 
+            # #115 : la garde de secret_wrap est check_policy + check_wrap_permission
+            # — une identité admin injectée passe tout (bypass), plus de patchs
+            # de check_admin/check_access/check_path_policy.
+            from tests.conftest import admin_auth_context
             with patch("mcp_vault.vault.wrapping.wrap_secret", side_effect=mock_wrap), \
-                 patch("mcp_vault.auth.context.check_admin_permission", return_value=None), \
-                 patch("mcp_vault.auth.context.check_access", return_value=None), \
-                 patch("mcp_vault.auth.context.check_path_policy", return_value=None):
+                 admin_auth_context():
                 from mcp_vault.server import secret_wrap
                 _run(secret_wrap(
                     vault_id="prod", secret_path="db/pass",

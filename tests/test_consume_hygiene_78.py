@@ -158,11 +158,14 @@ class TestRevokeWrapValidatesLeaseId:
             pytest.skip(f"server.py import échoue: {type(e).__name__}")
 
     def test_lease_id_with_newline_rejected(self):
-        # Admin patché pour ISOLER la validation lease_id (sinon "Authentification
-        # requise" masquerait le test → complaisance).
+        # Identité admin injectée pour ISOLER la validation lease_id (sinon
+        # "Authentification requise" masquerait le test → complaisance).
+        # #115 : la garde de l'outil est check_policy + check_wrap_permission —
+        # une identité admin passe les deux (plus de patch de check_admin).
+        from tests.conftest import admin_auth_context
         secret_revoke = self._import_revoke()
         mock_core = AsyncMock(return_value={"status": "ok", "state": "not_found"})
-        with patch("mcp_vault.auth.context.check_admin_permission", return_value=None), \
+        with admin_auth_context(), \
              patch("mcp_vault.vault.wrapping.revoke_wrap", new=mock_core):
             r = run(secret_revoke(lease_id="ACC-1\ninjected"))
         assert r["status"] == "error" and r.get("error_type") == "invalid_input", r
@@ -170,9 +173,10 @@ class TestRevokeWrapValidatesLeaseId:
 
     def test_realistic_accessor_accepted(self):
         """Non-complaisance : un accessor OpenBao réaliste doit passer la validation."""
+        from tests.conftest import admin_auth_context
         secret_revoke = self._import_revoke()
         mock_core = AsyncMock(return_value={"status": "ok", "state": "not_found"})
-        with patch("mcp_vault.auth.context.check_admin_permission", return_value=None), \
+        with admin_auth_context(), \
              patch("mcp_vault.vault.wrapping.revoke_wrap", new=mock_core):
             r = run(secret_revoke(lease_id="hvs.CAESIFooBar-1234.5678"))
         assert r["status"] == "ok", f"accessor réaliste rejeté à tort: {r}"

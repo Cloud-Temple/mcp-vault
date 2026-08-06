@@ -50,10 +50,26 @@ def _entry(status, op="op-1", accessor="ACC-SECRET-XYZ",
 
 
 def _registry_with(entries, last_load_ok=True):
+    # #115 : status_by_operation_id ne passe plus par find_by_operation_id —
+    # il fait un refresh puis une sélection défensive sur _wraps. Le mock
+    # expose donc _wraps directement ; MagicMock conserve les assertions de
+    # non-mutation (_save/mark_revoked/... jamais appelés).
     reg = MagicMock()
-    reg.find_by_operation_id.return_value = entries
+    reg._wraps = entries
     reg._last_load_ok = last_load_ok
     return reg
+
+
+from tests.conftest import admin_auth_context, auth_context  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _admin_identity():
+    """#115 : identité admin explicite — les primitives filtrent par identité
+    (fail-close sans contexte). Comportement pré-#115 préservé pour ces tests.
+    Les tests MCP plus bas posent leur propre identité PAR-DESSUS (set/reset)."""
+    with admin_auth_context():
+        yield
 
 
 # ── Classification des états ─────────────────────────────────────────────────
@@ -114,12 +130,13 @@ def test_status_backend_unavailable_on_s3_refresh_failure():
     assert res["status"] == "error" and res.get("error_type") == "backend_unavailable"
 
 
-def test_status_registry_inconsistent_on_find_exception():
-    """Une exception de find_by_operation_id (registre corrompu) → registry_inconsistent, pas d'exception MCP."""
+def test_status_registry_inconsistent_on_malformed_entry_anywhere():
+    """#115 : plus d'exception possible (sélection défensive) — une entrée
+    malformée N'IMPORTE OÙ dans le registre → registry_inconsistent pour un
+    admin (miroir du comportement historique où l'itération levait), sans
+    jamais crasher. Équivalent du test historique « find exception »."""
     from mcp_vault.vault import wrapping as w
-    reg = MagicMock()
-    reg._last_load_ok = True
-    reg.find_by_operation_id.side_effect = KeyError("operation_id")
+    reg = _registry_with([{"garbage": True}, _entry("active")])
     with patch.object(w, "get_wrap_registry", return_value=reg):
         res = _run(w.status_by_operation_id("op-1"))
     assert res["status"] == "ok" and res["state"] == "registry_inconsistent"
@@ -134,8 +151,9 @@ def test_status_registry_inconsistent_on_non_dict_entry():
 
 def test_status_survives_malformed_entry_via_real_registry():
     """
-    Chemin réel : une entrée `{}` dans le registre fait lever find_by_operation_id
-    (KeyError 'operation_id'). status doit renvoyer registry_inconsistent sans crasher.
+    Chemin réel : une entrée `{}` dans le registre (avant #115 : KeyError dans
+    find_by_operation_id ; depuis #115 : sélection défensive). status doit
+    renvoyer registry_inconsistent (identité admin) sans crasher.
     """
     from mcp_vault.vault import wrapping as w
     reg = w.WrapRegistry(MagicMock())
@@ -241,23 +259,28 @@ def test_status_expires_at_rejects_non_iso_value():
 
 
 # ── Outil MCP secret_wrap_status : autz + validation ─────────────────────────
+# #115 : la garde n'est plus check_admin_permission mais
+# check_policy("secret_wrap_status") + check_wrap_permission() — un token read
+# est refusé, un admin passe. La matrice complète (wrap/policy/scoping) est
+# dans tests/test_wrap_permission_115.py.
 
-def test_mcp_secret_wrap_status_admin_only():
-    """Sans permission admin → rejet, sans jamais toucher le registre."""
+def test_mcp_secret_wrap_status_denies_read_token():
+    """Sans permission wrap ni admin → rejet, sans jamais toucher le registre."""
     from mcp_vault.server import secret_wrap_status
-    deny = {"status": "error", "message": "Permission admin requise"}
-    with patch("mcp_vault.auth.context.check_admin_permission", return_value=deny), \
+    read_token = {"client_name": "reader", "permissions": ["read"],
+                  "allowed_resources": ["v"], "policy_id": ""}
+    with auth_context(read_token), \
          patch("mcp_vault.vault.wrapping.status_by_operation_id", new=AsyncMock()) as mock_status:
         res = _run(secret_wrap_status("op-1"))
-    assert res["status"] == "error"
+    assert res["status"] == "error" and "wrap" in res["message"]
     mock_status.assert_not_called()
 
 
 def test_mcp_secret_wrap_status_rejects_invalid_operation_id():
-    """operation_id invalide (newline) → rejet AVANT tout accès registre/audit (#78/D6)."""
+    """operation_id invalide (newline) → rejet AVANT tout accès registre/audit (#78/D6).
+    Identité admin (fixture) : les gardes d'autz passent, la validation refuse."""
     from mcp_vault.server import secret_wrap_status
-    with patch("mcp_vault.auth.context.check_admin_permission", return_value=None), \
-         patch("mcp_vault.vault.wrapping.status_by_operation_id", new=AsyncMock()) as mock_status:
+    with patch("mcp_vault.vault.wrapping.status_by_operation_id", new=AsyncMock()) as mock_status:
         res = _run(secret_wrap_status("bad\nop"))
     assert res["status"] == "error" and res.get("error_type") == "invalid_input"
     mock_status.assert_not_called()
@@ -266,8 +289,7 @@ def test_mcp_secret_wrap_status_rejects_invalid_operation_id():
 def test_mcp_secret_wrap_status_happy_path_calls_core():
     from mcp_vault.server import secret_wrap_status
     core_ret = {"status": "ok", "state": "active", "expires_at": "2099-01-01T00:00:00+00:00"}
-    with patch("mcp_vault.auth.context.check_admin_permission", return_value=None), \
-         patch("mcp_vault.vault.wrapping.status_by_operation_id",
+    with patch("mcp_vault.vault.wrapping.status_by_operation_id",
                new=AsyncMock(return_value=core_ret)) as mock_status:
         res = _run(secret_wrap_status("op-valid-1"))
     assert res["state"] == "active"

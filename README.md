@@ -179,12 +179,13 @@ Contrat pour le `CredentialBrokerService` de mcp-mission : livraison de credenti
 
 | Outil | Perm | Description |
 | --- | --- | --- |
-| `secret_wrap(vault_id, secret_path, mission_id, operation_id, ttl_seconds?, tenant_id?, expected_aud?)` | admin | Crée un wrap token single-use (write-ahead registry) |
-| `secret_revoke_wrap(lease_id)` | admin | Révocation idempotente d'un wrap token (introuvable = succès) |
-| `secret_wrap_lookup(operation_id)` | admin | Retrouve & **révoque** les wraps par operation_id (compensation orphelins #74) |
-| `secret_wrap_status(operation_id)` | admin | Consulte l'état d'un wrap **sans le révoquer** — lecture seule, instantané best-effort (#77) |
+| `secret_wrap(vault_id, secret_path, mission_id, operation_id, ttl_seconds?, tenant_id?, expected_aud?)` | wrap | Crée un wrap token single-use (write-ahead registry) |
+| `secret_revoke_wrap(lease_id)` | wrap | Révocation idempotente d'un wrap token (introuvable = succès), limitée au périmètre de l'appelant |
+| `secret_wrap_lookup(operation_id)` | wrap | Retrouve & **révoque** les wraps par operation_id (compensation orphelins #74), limité au périmètre de l'appelant |
+| `secret_wrap_status(operation_id)` | wrap | Consulte l'état d'un wrap **sans le révoquer** — lecture seule, instantané best-effort (#77), limité au périmètre de l'appelant |
 | `secret_consume(wrap_token, operation_id, mission_token)` | admin | Valide JWT ES256/JWKS (contrat PEP complet depuis *(#86)* : exp/iat/iss/aud/mission_id/jti/scope/tenant_id + `component_id`), vérifie binding complet (mission_id, tenant_id, aud), unwrap OpenBao (C18) |
 
+> *(#115)* Permission `wrap` (ou `admin`) : un jeton `wrap` non-admin doit porter `allowed_resources` non vide **et** une policy explicite (`allowed_tools` nommés, `path_rule` avec `allowed_paths` non vides — évaluation stricte). Un jeton wrap-only (sans read/write/admin) est confiné à ces 4 outils (MCP) et refusé sur tout `/admin/api/*`. ⚠️ Downgrade ≤ 0.9.2 : révoquer/purger les jetons `wrap` d'abord (sinon `tokens.json` rejeté en bloc, cf. CHANGELOG).
 > Activer la validation C18 avec `ENFORCE_MISSION_TOKEN_VALIDATION=true`. Par défaut (false) : log warning, continue — zéro impact standalone sans mcp-mission.
 > `tenant_id` et `expected_aud` dans `secret_wrap` alimentent le binding C18 complet côté `secret_consume` *(v0.6.8)*.
 > ⚠️ *(#86)* Dès que `ENFORCE_MISSION_TOKEN_VALIDATION=true` (seul, ou via le PEP `/mcp` ci-dessous), `MISSION_JWKS_URL`, `MCP_INSTANCE_ID`/`MISSION_TOKEN_AUD` **et** `MISSION_STATUS_URL` deviennent obligatoires (fail-fast au boot) — sans quoi une mission abortée conserverait l'accès jusqu'à expiration du `mission_token`.

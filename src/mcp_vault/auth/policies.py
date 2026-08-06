@@ -636,3 +636,68 @@ class PolicyStore:
                 return any(fnmatch.fnmatch(path, p) for p in allowed_paths)
 
         return True  # Aucune règle vault matchante = pas de restriction path
+
+    def has_explicit_allowed_tools(self, policy_id: str) -> bool:
+        """
+        Vérifie que la policy porte une allow-list d'outils EXPLICITE (non vide).
+
+        SÉCURITÉ #115 : `is_tool_allowed` traite `allowed_tools=[]` comme « tout
+        autorisé » (sémantique historique conservée pour les tokens read/write).
+        Pour un token `wrap`, ce défaut permissif est inacceptable : la policy du
+        broker doit NOMMER ses outils. Cette méthode rend l'invariant exécutable
+        au runtime (check_wrap_permission) au lieu de documentaire.
+
+        Raises:
+            PolicyStoreUnavailable si le store est indisponible (fail-close amont).
+        """
+        self._ensure_available()
+        if not isinstance(policy_id, str):
+            return False
+        policy = self._policies.get(policy_id)
+        if not policy:
+            return False  # fail-close, cohérent avec is_tool_allowed
+        allowed = policy.get("allowed_tools", [])
+        return isinstance(allowed, list) and bool(allowed)
+
+    def is_wrap_path_strictly_allowed(self, policy_id: str, vault_id: str,
+                                      path: str) -> bool:
+        """
+        Variante STRICTE de is_path_allowed pour les tokens `wrap` (issue #115).
+
+        MÊME parcours first-match-wins et même fnmatch que is_path_allowed —
+        aucune divergence PDP/PEP — mais les DEUX défauts permissifs sont
+        inversés :
+        1. AUCUNE path_rule ne matche le vault → REFUSÉ (pas de règle = pas de
+           droit, là où is_path_allowed autorise) ;
+        2. `allowed_paths` VIDE dans la règle matchante → REFUSÉ (chemins
+           explicites exigés, là où is_path_allowed autorise).
+        La permission requise est toujours "read" (secret_wrap lit le secret
+        pour le wrapper).
+
+        NB : une règle générique (vault_pattern "*", allowed_paths ["*"]) placée
+        avant une règle restrictive GAGNE — c'est le first-match existant,
+        reproduit à l'identique. Le durcissement porte sur l'EXPLICITENESS ;
+        le contenu des patterns relève du provisioning.
+
+        Raises:
+            PolicyStoreUnavailable si le store est indisponible (fail-close amont).
+        """
+        self._ensure_available()
+        if not isinstance(policy_id, str):
+            return False
+        policy = self._policies.get(policy_id)
+        if not policy:
+            return False  # fail-close, cohérent avec is_path_allowed
+
+        for rule in policy.get("path_rules", []):
+            if fnmatch.fnmatch(vault_id, rule["vault_pattern"]):
+                # Même mapping de permission que is_path_allowed pour "read".
+                rule_perms = set(rule.get("permissions", ["read"]))
+                if not (rule_perms & {"read", "write", "admin"}):
+                    return False
+                allowed_paths = rule.get("allowed_paths", [])
+                if not allowed_paths:
+                    return False  # STRICT : chemins explicites exigés
+                return any(fnmatch.fnmatch(path, p) for p in allowed_paths)
+
+        return False  # STRICT : aucune règle matchante = aucun droit

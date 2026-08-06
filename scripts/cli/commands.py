@@ -445,6 +445,8 @@ def secret_wrap_cmd(ctx, vault_id, secret_path, mission_id, operation_id,
     Outil machine-to-machine (CredentialBrokerService) — exposé au CLI pour le
     debug, les tests de contrat et l'exploitation. Le wrap_token retourné est
     SENSIBLE (single-use, à ne jamais logguer).
+    Permission requise : `wrap` (ou admin). Un token wrap non-admin doit porter
+    une allow-list de vaults ET une policy explicite (issue #115).
 
     \b
     Exemples :
@@ -1097,7 +1099,7 @@ _EXPIRES_DAYS = _ExpiresDaysType()
 
 @token_group.command("create")
 @click.argument("name")
-@click.option("--permissions", "-p", default="read,write", help="Permissions (virgule: read,write,admin)")
+@click.option("--permissions", "-p", default="read,write", help="Permissions (virgule: read,write,admin,wrap)")
 @click.option("--vaults", "-s", default="", help="Vaults autorisés (virgule, vide = owner-based)")
 @click.option("--policy", default="", help="Policy ID à assigner (contrôle outils + chemins)")
 @click.option("--expires", "-e", default=90, type=_EXPIRES_DAYS,
@@ -1114,11 +1116,18 @@ def token_create_cmd(ctx, name, permissions, vaults, policy, expires, email, out
     Utilisez --policy pour restreindre les outils et chemins de secrets.
 
     \b
+    La permission `wrap` (broker JIT mcp-mission) limite le token aux 4 outils
+    secret_wrap/revoke/lookup/status et EXIGE --vaults non vide + --policy
+    (allowed_tools et allowed_paths explicites). Utilisez `wrap` SEUL — un
+    composite (ex. read,wrap) garde ses droits de lecture.
+
+    \b
     Exemples :
       token create agent-sre --vaults serveurs-prod --permissions read
       token create admin-user --permissions admin --expires 365
       token create ci-cd --email ci@company.com --permissions read,write
       token create agent-deploy --policy readonly --vaults prod-app
+      token create mcp-mission-broker --permissions wrap --vaults mcp-mission --policy broker-jit
     """
     async def _run():
         perms = [p.strip() for p in permissions.split(",") if p.strip()]

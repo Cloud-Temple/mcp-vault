@@ -136,7 +136,7 @@ async def system_health() -> dict:
 
     Teste la connectivité OpenBao et S3, retourne le statut de chaque service.
     """
-    from .auth.context import enforce_mission_jwt_tool
+    from .auth.context import enforce_mission_jwt_tool, enforce_wrap_only_token
 
     # Refusé aux identités mission JWT : expose des métadonnées d'infrastructure
     # (détails OpenBao/S3, bucket, exceptions). La liveness reste disponible sans
@@ -145,6 +145,10 @@ async def system_health() -> dict:
     mission_err = enforce_mission_jwt_tool("system_health")
     if mission_err:
         return mission_err
+    # #115 : refusé aux tokens wrap-only (allowlist stricte des 4 outils wrap).
+    wrap_err = enforce_wrap_only_token("system_health")
+    if wrap_err:
+        return wrap_err
 
     from .openbao.lifecycle import get_vault_status
     from .s3_sync import check_s3_connectivity
@@ -170,13 +174,17 @@ async def system_about() -> dict:
     Retourne la version, les outils disponibles, et les infos système.
     """
     import platform
-    from .auth.context import enforce_mission_jwt_tool
+    from .auth.context import enforce_mission_jwt_tool, enforce_wrap_only_token
 
     # Refusé aux identités mission JWT : expose openbao_addr, platform, python,
     # tools_count (reconnaissance d'infrastructure).
     mission_err = enforce_mission_jwt_tool("system_about")
     if mission_err:
         return mission_err
+    # #115 : refusé aux tokens wrap-only (allowlist stricte des 4 outils wrap).
+    wrap_err = enforce_wrap_only_token("system_about")
+    if wrap_err:
+        return wrap_err
 
     return {
         "service": settings.mcp_server_name,
@@ -490,13 +498,22 @@ async def secret_wrap(
     Returns:
         {status, wrap_token (SENSIBLE), secret_id, accessor, vault_url, expires_at, intended_use}
     """
-    from .auth.context import check_admin_permission, check_access, check_path_policy
+    from .auth.context import (check_wrap_permission, check_access,
+                               check_path_policy, check_wrap_path_policy,
+                               check_policy, current_token_info)
     from .vault.wrapping import wrap_secret, is_safe_id
 
-    # check_admin assure que seul mcp-mission (token admin) peut créer des wraps
-    admin_err = check_admin_permission()
-    if admin_err:
-        return admin_err
+    # #115 : check_policy AVANT check_wrap_permission — la policy applicative
+    # (allowed_tools/denied_tools) peut scoper les outils wrap ; les identités
+    # mission restent refusées (deny-by-default) ; le verrou wrap-only s'applique.
+    policy_err = check_policy("secret_wrap")
+    if policy_err:
+        return policy_err
+    # #115 : permission wrap (ou admin). Pour un token wrap non-admin :
+    # allowed_resources + policy avec allowed_tools explicites OBLIGATOIRES.
+    wrap_perm_err = check_wrap_permission()
+    if wrap_perm_err:
+        return wrap_perm_err
 
     if ttl_seconds < 60 or ttl_seconds > 3600:
         return {"status": "error", "message": "ttl_seconds doit être entre 60 et 3600"}
@@ -525,11 +542,19 @@ async def secret_wrap(
                         "message": "expected_aud requis en mode ENFORCE=true "
                                    "(configurer MCP_INSTANCE_ID ou MISSION_TOKEN_AUD)"}
 
-    # Vérification d'accès au vault (owner/allowed_resources) + policy path
+    # Vérification d'accès au vault (owner/allowed_resources) + policy path.
     access_err = check_access(vault_id)
     if access_err:
         return access_err
-    path_err = check_path_policy(vault_id, secret_path, "read")
+    # #115 : pour une identité wrap non-admin, le chemin est évalué en mode
+    # STRICT (path_rule matchante + allowed_paths explicites exigés — une
+    # policy sans règle serait permissive via check_path_policy). Les admins
+    # conservent le comportement historique (check_path_policy, bypass admin).
+    _ti = current_token_info.get()
+    if _ti is not None and "admin" not in _ti.get("permissions", []):
+        path_err = check_wrap_path_policy(vault_id, secret_path)
+    else:
+        path_err = check_path_policy(vault_id, secret_path, "read")
     if path_err:
         return path_err
 
@@ -556,12 +581,17 @@ async def secret_revoke_wrap(lease_id: str) -> dict:
     Returns:
         {status: "ok", state: "revoked" | "already_revoked" | "not_found"}
     """
-    from .auth.context import check_admin_permission
+    from .auth.context import check_policy, check_wrap_permission
     from .vault.wrapping import revoke_wrap, is_safe_id
 
-    admin_err = check_admin_permission()
-    if admin_err:
-        return admin_err
+    # #115 : policy applicative puis permission wrap (ou admin). Le scoping des
+    # entrées visibles (vault + chemins) est appliqué DANS la primitive.
+    policy_err = check_policy("secret_revoke_wrap")
+    if policy_err:
+        return policy_err
+    wrap_perm_err = check_wrap_permission()
+    if wrap_perm_err:
+        return wrap_perm_err
 
     # #78/D5 (annexe) : lease_id validé avant d'être reflété (réponse + audit).
     if not is_safe_id(lease_id):
@@ -600,12 +630,17 @@ async def secret_wrap_lookup(operation_id: str) -> dict:
     Returns:
         {status, state, operation_id, count_revoked, entries_found}
     """
-    from .auth.context import check_admin_permission
+    from .auth.context import check_policy, check_wrap_permission
     from .vault.wrapping import lookup_and_revoke_by_operation_id, is_safe_id
 
-    admin_err = check_admin_permission()
-    if admin_err:
-        return admin_err
+    # #115 : policy applicative puis permission wrap (ou admin). Le scoping des
+    # entrées visibles (vault + chemins) est appliqué DANS la primitive.
+    policy_err = check_policy("secret_wrap_lookup")
+    if policy_err:
+        return policy_err
+    wrap_perm_err = check_wrap_permission()
+    if wrap_perm_err:
+        return wrap_perm_err
 
     # #78/D6 : validation stricte (fullmatch, via is_safe_id) AVANT tout audit.
     if not is_safe_id(operation_id):
@@ -639,12 +674,17 @@ async def secret_wrap_status(operation_id: str) -> dict:
     Returns:
         {status, state, expires_at?} — jamais d'accessor ni de wrap_token.
     """
-    from .auth.context import check_admin_permission
+    from .auth.context import check_policy, check_wrap_permission
     from .vault.wrapping import status_by_operation_id, is_safe_id
 
-    admin_err = check_admin_permission()
-    if admin_err:
-        return admin_err
+    # #115 : policy applicative puis permission wrap (ou admin). Le scoping des
+    # entrées visibles (vault + chemins) est appliqué DANS la primitive.
+    policy_err = check_policy("secret_wrap_status")
+    if policy_err:
+        return policy_err
+    wrap_perm_err = check_wrap_permission()
+    if wrap_perm_err:
+        return wrap_perm_err
 
     # #78/D6 : validation stricte (fullmatch, via is_safe_id) AVANT tout audit.
     if not is_safe_id(operation_id):
@@ -689,7 +729,15 @@ async def secret_consume(
         operation_id: Identifiant de l'opération (corrélation registry).
         mission_token: JWT mission compact ES256 (SENSIBLE — ne jamais loguer).
     """
+    from .auth.context import enforce_wrap_only_token
     from .vault.wrapping import consume_wrap_secret, is_safe_id
+
+    # #115 : un bearer wrap-only ne consomme pas (allowlist stricte des 4 outils
+    # wrap). L'autorité de secret_consume vient du mission_token + binding C18,
+    # pas du bearer de transport — inchangé pour les autres identités.
+    wrap_err = enforce_wrap_only_token("secret_consume")
+    if wrap_err:
+        return wrap_err
 
     # #78/D6 : valider operation_id AVANT toute logique/audit (anti-injection log).
     if not is_safe_id(operation_id):
@@ -802,7 +850,13 @@ async def secret_types() -> dict:
     login, password, secure_note, api_key, ssh_key, database, server,
     certificate, env_file, credit_card, identity, wifi, crypto_wallet, custom.
     """
+    from .auth.context import enforce_wrap_only_token
     from .vault.types import list_types
+
+    # #115 : refusé aux tokens wrap-only (allowlist stricte des 4 outils wrap).
+    wrap_err = enforce_wrap_only_token("secret_types")
+    if wrap_err:
+        return wrap_err
 
     types = list_types()
     return {"status": "ok", "types": types, "count": len(types)}
@@ -823,7 +877,13 @@ async def secret_generate_password(length: int = 24, uppercase: bool = True,
         symbols: Inclure des symboles !@#$%...
         exclude: Caractères à exclure (ex: "lI10O")
     """
+    from .auth.context import enforce_wrap_only_token
     from .vault.types import generate_password
+
+    # #115 : refusé aux tokens wrap-only (allowlist stricte des 4 outils wrap).
+    wrap_err = enforce_wrap_only_token("secret_generate_password")
+    if wrap_err:
+        return wrap_err
 
     password = generate_password(length, uppercase, lowercase, digits, symbols, exclude)
     return {
@@ -1064,6 +1124,15 @@ async def ssh_operator_access_profiles() -> dict:
     ne sont jamais exposés. Une identité bootstrap, admin ou mission est
     refusée.
     """
+    from .auth.context import enforce_wrap_only_token
+
+    # #115 : refusé aux tokens wrap-only AVANT tout import et toute lecture de
+    # configuration (la garde interne par identité opérateur refuse aussi,
+    # mais après entrée dans le handler — défense à la porte, revue pré-commit).
+    wrap_err = enforce_wrap_only_token("ssh_operator_access_profiles")
+    if wrap_err:
+        return wrap_err
+
     from .ssh_operator import list_operator_access_profiles
     return list_operator_access_profiles()
 
@@ -1081,6 +1150,14 @@ async def ssh_request_operator_access(profile_id: str, public_key: str,
     Le coffre CA, le rôle, le principal, la cible et le TTL sont imposés par
     le profil serveur et ne sont pas des paramètres de cette opération.
     """
+    from .auth.context import enforce_wrap_only_token
+
+    # #115 : refusé aux tokens wrap-only AVANT tout import et toute logique
+    # (défense à la porte — la garde interne par identité opérateur refuse aussi).
+    wrap_err = enforce_wrap_only_token("ssh_request_operator_access")
+    if wrap_err:
+        return wrap_err
+
     from .ssh_operator import request_operator_ssh_access
     return await request_operator_ssh_access(profile_id, public_key, reason)
 

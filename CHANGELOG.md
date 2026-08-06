@@ -1,5 +1,90 @@
 # Changelog — MCP Vault
 
+## [Non publié]
+
+### Sécurité : permission dédiée non-admin `wrap` pour le broker JIT mcp-mission (issue #115)
+
+En v0.9.2, les quatre outils du broker JIT (`secret_wrap`, `secret_revoke_wrap`,
+`secret_wrap_lookup`, `secret_wrap_status`) exigeaient la permission `admin`.
+Déployer le broker mcp-mission imposait donc soit un jeton administrateur global
+(le flag `admin` court-circuite policies et chemins partout), soit rien. Le
+correctif introduit un **quatrième flag de permission `wrap`**, non hiérarchique
+et à moindre privilège strict.
+
+**Modèle d'autorisation (nouveau)**
+
+- Les 4 outils wrap exigent `wrap` **ou** `admin` (rétrocompatibilité : les
+  jetons admin existants sont inchangés, y compris avec une policy qui ne liste
+  pas ces outils — bypass admin de `check_policy` préservé).
+- Chaque outil évalue désormais `check_policy(<tool>)` **avant** la permission :
+  une policy applicative peut scoper les outils wrap (`allowed_tools` /
+  `denied_tools`), et les identités mission JWT restent refusées
+  (deny-by-default matérialisé).
+- **Provisioning obligatoire pour un jeton `wrap` non-admin** (invariant
+  exécutable au runtime, pas documentaire) : `allowed_resources` **non vide**
+  (aucun fallback owner-based) **et** `policy_id` **non vide**, dont la policy
+  porte des `allowed_tools` **explicites**. Une policy « vide » (permissive par
+  défaut via `is_tool_allowed`) est refusée.
+- **Évaluation stricte des chemins** pour les identités wrap non-admin
+  (`PolicyStore.is_wrap_path_strictly_allowed`) : même parcours
+  first-match-wins que `is_path_allowed`, mais **pas de règle matchante = refus**
+  et **`allowed_paths` vide = refus**. `secret_wrap` conserve `check_access` +
+  cette évaluation stricte en lieu et place du contrôle lax.
+- **Verrou wrap-only** : un jeton portant `wrap` sans read/write/admin est
+  confiné aux 4 outils du broker — refus sur tous les autres outils MCP
+  (y compris `system_health`, `system_about`, `secret_types`,
+  `secret_generate_password` et `secret_consume`) et **403 uniforme sur tout
+  `/admin/api/*`** (y compris les routes historiquement « tout token » :
+  health, whoami, generate-password, pki/status, pki/roles). Un composite
+  (ex. `read,wrap`) n'est pas wrap-only et conserve ses droits — la SPA
+  avertit explicitement à la création/édition.
+- **Scoping du registre de wraps** (garde dans les primitives) :
+  `secret_revoke_wrap`/`secret_wrap_lookup`/`secret_wrap_status` ne voient,
+  ne comptent et ne révoquent que les entrées du périmètre de l'appelant
+  (vault **et** chemins, symétrique de la création). Hors scope = `not_found`
+  (aucune fuite d'existence inter-tenant), aucun appel OpenBao. La sélection
+  est défensive : une entrée de registre malformée ne produit jamais
+  d'exception, est invisible pour un non-admin, et n'est **jamais mutée** même
+  si elle partage un accessor avec une entrée visible
+  (`mark_entries_revoked` remplace `mark_revoked` sur ces chemins).
+- SPA admin : la permission `read` devient décochable à la création (un jeton
+  `["wrap"]` seul est créable) ; checkbox `wrap` + avertissement composite.
+  CLI : aides et docstrings alignées.
+
+**Provisioning cible du broker** (déploiement KOM-DOCKER01) :
+`token create mcp-mission-broker --permissions wrap --vaults mcp-mission
+--policy broker-jit`, avec une policy `broker-jit` déclarant
+`allowed_tools=["secret_wrap","secret_revoke_wrap","secret_wrap_lookup",
+"secret_wrap_status"]` et une `path_rule` `{vault_pattern:"mcp-mission",
+permissions:["read"], allowed_paths:[<chemins provisionnés>]}`.
+
+**⚠️ Migration / downgrade**
+
+- Migration montante : aucun impact — les `tokens.json` existants restent
+  valides, aucun jeton `wrap` n'existe avant cette version.
+- **Downgrade vers ≤ 0.9.2 : un `tokens.json` contenant un jeton `wrap` est
+  rejeté ATOMIQUEMENT** par la whitelist de l'ancienne version (fail-close) :
+  après redémarrage, **tous les bearers sont inutilisables** (seule la clé
+  bootstrap admin survit). Procédure de downgrade : **révoquer puis purger les
+  jetons `wrap`**, vérifier `_system/tokens.json`, et seulement ensuite
+  redéployer l'ancienne version. À chaud, l'ancienne version conserve son
+  cache mémoire précédent après invalidation (limitation existante,
+  documentée — pas un fail-close absolu).
+
+Complément (revue pré-commit) : **fail-close destructif du registre** — après
+un refresh S3 en échec, `secret_revoke_wrap`/`secret_wrap_lookup` refusent
+(`backend_unavailable`, le broker retente) au lieu d'opérer sur un cache
+ambigu dont le `_save` last-write-wins écraserait un état S3 plus récent
+(durcit un comportement préexistant) ; verrou wrap-only étendu aux deux outils
+SSH opérateur (`ssh_operator_access_profiles`, `ssh_request_operator_access`)
+en défense à la porte.
+
+Tests : `tests/test_wrap_permission_115.py` (matrice permissions × policy ×
+scoping registre × REST, 49 cas collectés), harnais historiques adaptés
+(identité admin explicite via ContextVar — un contexte absent n'est JAMAIS
+traité comme admin). Preuve RED rejouée : 41 cas échouent sur l'état
+pré-correctif, 8 tests de non-régression passent, 49/49 verts avec le fix.
+
 ## [0.9.2] — 2026-07-27
 
 ### WAF : faux positif CRS 930120 sur `POST /mcp` (issue #107)

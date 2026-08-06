@@ -1122,6 +1122,54 @@ manière observable (`PolicyStoreUnavailable` → dict d'erreur MCP structuré /
 jamais un fail-open silencieux. Ferme UNIQUEMENT ce sous-cas — pas la race d'écriture
 multi-instance générale (#51/#13, hors scope, cf. §3.12 TECHNICAL.md).
 
+### 6.4b Permission `wrap` — broker JIT non-admin *(issue #115)*
+
+Quatrième flag de permission (non hiérarchique, aux côtés de `read`/`write`/
+`admin`), destiné au jeton du `CredentialBrokerService` mcp-mission. Avant #115,
+les quatre outils wrap exigeaient `admin` — inacceptable en moindre privilège
+(le flag `admin` court-circuite policies et chemins partout).
+
+**Séquence de gardes des 4 outils** (`secret_wrap`, `secret_revoke_wrap`,
+`secret_wrap_lookup`, `secret_wrap_status`) :
+
+1. `check_policy(<tool>)` — policy applicative (`allowed_tools`/`denied_tools`),
+   deny-by-default mission JWT, verrou wrap-only ; bypass admin inchangé ;
+2. `check_wrap_permission()` — `wrap` ou `admin` requis. Pour un jeton `wrap`
+   non-admin, l'invariant de provisioning est **exécutable au runtime** :
+   `allowed_resources` non vide (pas de fallback owner-based), `policy_id` non
+   vide, `allowed_tools` **explicites** dans la policy (une policy « vide »,
+   permissive via `is_tool_allowed`, est refusée), fail-close si PolicyStore
+   indisponible ;
+3. (`secret_wrap` seul) `check_access(vault_id)` + **évaluation stricte** du
+   chemin (`is_wrap_path_strictly_allowed` : même first-match-wins que
+   `is_path_allowed`, mais *pas de règle matchante = refus* et *`allowed_paths`
+   vide = refus*).
+
+**Verrou wrap-only** (`enforce_wrap_only_token`) : un jeton portant `wrap` sans
+read/write/admin est confiné à ces 4 outils. Refus sur tous les autres outils
+MCP (appliqué dans `check_policy` + en première ligne des 5 outils sans
+check_policy : `system_health`, `system_about`, `secret_types`,
+`secret_generate_password`, `secret_consume`) et **403 uniforme sur tout
+`/admin/api/*`**. Un composite (`read,wrap`) n'est pas wrap-only — choix
+explicite, averti par la SPA.
+
+**Scoping du registre** (garde dans les primitives, pattern anti-contournement) :
+revoke/lookup/status opèrent sur une **sélection défensive** du registre
+(`_select_wrap_entries` — aucune clé lue sans garde de type) filtrée par
+l'identité courante (`_visible_entries` : `check_access` + évaluation stricte du
+chemin par entrée — symétrie création/visibilité). Hors scope = `not_found`
+(aucune fuite d'existence inter-tenant), aucun appel OpenBao, et les mutations
+(`mark_entries_revoked`) ne touchent **que** la sélection visible — jamais une
+entrée invisible partageant le même accessor. Contexte absent = fail-close
+(jamais traité admin). Le refresh du cache (`_maybe_refresh`) reste appelé une
+fois en tête de primitive ; `status` conserve la détection de panne S3
+(`_last_load_ok`).
+
+**⚠️ Downgrade ≤ 0.9.2** : la whitelist des anciennes versions rejette
+ATOMIQUEMENT un `tokens.json` contenant `wrap` (fail-close — seuls les
+bootstrap admin survivent au redémarrage). Révoquer puis purger les jetons
+`wrap` AVANT tout rollback (cf. CHANGELOG).
+
 ### 6.5 Tokens MCP
 
 | Outil                                                                        | Perm  | Description                |

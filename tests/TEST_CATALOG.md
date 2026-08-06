@@ -381,6 +381,74 @@
 
 ---
 
+## 16. Permission `wrap` & broker JIT non-admin — `test_wrap_permission_115.py` (49 cas collectés)
+
+Matrice de sécurité de l'issue #115 (critères d'acceptation de la revue de plan
+Codex, 4 rounds + revue pré-commit 2 rounds). Preuve RED rejouée : 41 cas
+échouent sur l'état pré-correctif, 8 passent (tests de non-régression pinnant
+le comportement inchangé), 49/49 verts avec le correctif.
+
+### 16a. check_wrap_permission (10 tests)
+- token absent / read / write refusés ; admin bypass ;
+- `allowed_resources` vide/absent/non-liste → refus (pas de fallback owner-based) ;
+- `policy_id` vide/absent/non-str → refus ;
+- policy « vide » (`allowed_tools=[]`) → refus (invariant exécutable) ;
+- policy introuvable / PolicyStore absent / PolicyStoreUnavailable → refus fail-close ;
+- provisioning complet → OK.
+
+### 16b. Évaluation stricte des chemins (6 tests)
+- pas de règle matchante → refus (vs LAX qui autorise — différence pinnée) ;
+- `allowed_paths=[]` → refus (vs LAX pinnée) ; chemin hors patterns → refus ;
+- first-match-wins identique à `is_path_allowed` (règle générique avant
+  restrictive GAGNE — divergence PDP/PEP interdite) ;
+- règle sans permission read → refus ; `has_explicit_allowed_tools`.
+
+### 16c. Verrou wrap-only (5 tests)
+- confinement aux 4 outils (20 outils refusés énumérés) ;
+- le verrou PRÉCÈDE la policy (une policy autorisant secret_read n'élargit pas) ;
+- composites read/write/admin+wrap non wrap-only ;
+- contexte absent : ni wrap-only ni admin ;
+- MUTATION-PROOF : les VRAIS handlers sans check_policy (system_health,
+  system_about, secret_types, secret_generate_password, secret_consume,
+  ssh_operator_access_profiles, ssh_request_operator_access) refusent un
+  wrap-only SANS invoquer leur délégué — supprimer un appel
+  enforce_wrap_only_token dans un handler fait échouer ce test.
+
+### 16d. Ordre des gardes MCP (8 tests)
+- token read refusé sur les 4 outils ; mission_jwt refusée sur les 4 outils ;
+- policy `allowed_tools` sans l'outil → refus PAR LA POLICY (ordre pinné) ;
+- `denied_tools` prioritaire ;
+- TEST PIVOT (RED pré-#115) : un token wrap provisionné wrappe dans son périmètre ;
+- refus hors vault (check_access) et hors chemin (strict) ;
+- policy sans path_rule → refus strict ; admin inchangé.
+
+### 16e. Scoping du registre (12 tests)
+- hors vault / cross-path même vault → not_found, AUCUN appel OpenBao, aucune mutation ;
+- dans le périmètre → révocable ;
+- accessor partagé visible/invisible → seule la visible mutée ;
+- entrées malformées (None/{}/types cassés) invisibles non-admin, sans crash ;
+- admin : registry_inconsistent préservé ; admin voit tout ;
+- contexte absent → fail-close ; refresh du cache + détection panne S3 conservés ;
+- FAIL-CLOSE destructif : refresh S3 en échec (_last_load_ok=False) → revoke et
+  lookup refusent (backend_unavailable), AUCUN appel OpenBao, AUCUN _save ;
+- accessor dupliqué : un seul appel OpenBao ; échec 5xx → count_revoked=0
+  (aucune entrée du groupe comptée), succès → toutes comptées et marquées ;
+- lookup ne compte que les entrées visibles (pas de fuite via entries_found).
+
+### 16f. REST admin-plane (8 tests)
+- 403 uniforme wrap-only sur /admin/api/{health,whoami,generate-password,
+  pki/status,pki/roles,tokens} ; token read inchangé (whoami 200) ;
+- POST ssh/operator-access : 403 AVANT toute lecture du body
+  (receive.assert_not_awaited()).
+
+Complété par : `test_token_permissions.py` (whitelist `wrap`, variantes refusées,
+chemin load S3 = preuve du fail-close de downgrade) ; harnais historiques
+(`test_wrap.py`, `test_wrap_status_77.py`, `test_wrap_status_openbao_77.py`,
+`test_consume_hygiene_78.py`, `test_jwt_validator.py`) adaptés : identité admin
+explicite via ContextVar (un contexte absent n'est JAMAIS traité comme admin).
+
+---
+
 ## Comment lancer les tests
 
 ```bash

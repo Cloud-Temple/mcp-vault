@@ -280,6 +280,9 @@ Utilise les `contextvars` Python pour injecter les infos du token sans dépendre
 | `check_access(resource_id)` | `None`            | `{"status": "error", "message": "..."}` |
 | `check_write_permission()`  | `None`            | `{"status": "error", "message": "..."}` |
 | `check_admin_permission()`  | `None`            | `{"status": "error", "message": "..."}` |
+| `check_wrap_permission()` *(#115)* | `None`     | `{"status": "error", ...}` — `wrap`/`admin` requis ; jeton `wrap` non-admin : allow-list + policy à `allowed_tools` explicites obligatoires (fail-close PolicyStore) |
+| `check_wrap_path_policy(vault_id, path, audit=True)` *(#115)* | `None` | évaluation STRICTE des chemins (pas de règle = refus, `allowed_paths` vide = refus) |
+| `enforce_wrap_only_token(tool)` *(#115)* | `None` | confinement d'un jeton wrap-only aux 4 outils du broker JIT |
 | `get_current_client_name()` | `"nom-du-client"` | `"anonymous"`                           |
 
 **Matrice de permissions** :

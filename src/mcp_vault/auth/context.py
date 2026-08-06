@@ -167,8 +167,10 @@ def get_listing_filter() -> dict:
 # NON listés (donc refusés aux mission_jwt) : vault_create/update/delete + ssh_*
 # (admin-plane), system_health/system_about (exposent openbao_addr/S3/platform — la
 # liveness reste publique via HTTP /health), pki_*, policy_*, token_update, audit_log,
-# secret_wrap/revoke/lookup (admin-gated). secret_consume n'appelle pas check_policy :
-# il s'auto-garde par la validation C18 de son paramètre mission_token.
+# secret_wrap/revoke/lookup/status (permission wrap ou admin requise depuis #115 ;
+# leurs check_policy matérialisent désormais ce deny-by-default pour les missions).
+# secret_consume n'appelle pas check_policy : il s'auto-garde par la validation C18
+# de son paramètre mission_token (+ refus des bearers wrap-only, #115).
 MISSION_JWT_ALLOWED_TOOLS = frozenset({
     "vault_list", "vault_info",
     "secret_read", "secret_list", "secret_write", "secret_delete",
@@ -253,6 +255,250 @@ def check_admin_permission() -> Optional[dict]:
     return None
 
 
+# ── Permission `wrap` — broker JIT non-admin (issue #115) ────────────────────
+# Un token `wrap` est destiné au broker de credentials mcp-mission : il ne doit
+# pouvoir QUE créer/révoquer/consulter des wraps, dans un périmètre vault+chemins
+# provisionné explicitement. Trois gardes coopèrent :
+#   - check_wrap_permission() : flag wrap (ou admin) + allow-list + policy
+#     explicite OBLIGATOIRES (pas de fallback owner-based, pas de « policy
+#     absente = tout permis ») ;
+#   - enforce_wrap_only_token() : un token wrap SANS read/write/admin est
+#     confiné aux 4 outils wrap (deny-by-default, comme les identités mission) ;
+#   - check_wrap_path_policy() : évaluation STRICTE des chemins (pas de règle =
+#     refus, allowed_paths vide = refus) via PolicyStore.
+
+WRAP_ONLY_ALLOWED_TOOLS = frozenset({
+    "secret_wrap", "secret_revoke_wrap", "secret_wrap_lookup", "secret_wrap_status",
+})
+
+
+def is_wrap_only_token(token_info) -> bool:
+    """Token portant `wrap` SANS aucun de read/write/admin.
+
+    Un composite (ex. ["read","wrap"]) n'est PAS wrap-only : il conserve ses
+    droits read — choix explicite, signalé par la SPA à la création. Le
+    déploiement broker nominal utilise ["wrap"] seul.
+    """
+    if not isinstance(token_info, dict):
+        return False
+    perms = token_info.get("permissions", [])
+    if not isinstance(perms, list):
+        return False
+    return "wrap" in perms and not ({"read", "write", "admin"} & set(
+        p for p in perms if isinstance(p, str)))
+
+
+def enforce_wrap_only_token(tool_name: str) -> Optional[dict]:
+    """
+    Refuse un outil hors WRAP_ONLY_ALLOWED_TOOLS à un token wrap-only.
+
+    Appelé par check_policy() (couvre tous les outils qui l'utilisent) ET en
+    première ligne des outils sans check_policy accessibles sans admin
+    (system_health, system_about, secret_types, secret_generate_password,
+    secret_consume). Sans effet pour les autres identités ; token absent →
+    None (déploiements sans auth inchangés — jamais traité comme wrap-only
+    NI comme admin).
+
+    Returns:
+        None si OK, dict {"status": "error", ...} si refusé.
+    """
+    token_info = current_token_info.get()
+    if not is_wrap_only_token(token_info):
+        return None
+
+    if tool_name in WRAP_ONLY_ALLOWED_TOOLS:
+        return None
+
+    # Audit : refus d'outil à un token wrap-only (événement de sécurité).
+    client = token_info.get("client_name", "?")
+    try:
+        from ..audit import log_audit
+        log_audit(
+            tool_name, "denied",
+            detail="Outil non autorisé pour un token wrap-only",
+            client_name=client,
+        )
+    except Exception:
+        pass
+
+    return {
+        "status": "error",
+        "message": f"Outil '{tool_name}' non autorisé pour un token wrap "
+                   "(périmètre limité au broker JIT)",
+    }
+
+
+def check_wrap_permission() -> Optional[dict]:
+    """
+    Vérifie que le token courant peut utiliser les outils du broker JIT.
+
+    Accepte `admin` (rétrocompat #115) ou `wrap`. Pour un usage NON-admin de
+    `wrap`, l'invariant de moindre privilège est EXÉCUTABLE, pas documentaire :
+    - allowed_resources non vide OBLIGATOIRE (pas de fallback owner-based) ;
+    - policy_id non vide OBLIGATOIRE ;
+    - la policy doit porter des allowed_tools EXPLICITES (une policy « vide »
+      serait permissive via is_tool_allowed — refusée ici) ;
+    - PolicyStore absent/indisponible → refus fail-close observable.
+
+    L'autorisation de l'outil lui-même (allowed_tools/denied_tools) est
+    vérifiée par check_policy(), appelé AVANT cette garde par les 4 outils.
+
+    Returns:
+        None si OK, dict {"status": "error", ...} si refusé
+    """
+    token_info = current_token_info.get()
+
+    if token_info is None:
+        return {"status": "error", "message": "Authentification requise"}
+
+    permissions = token_info.get("permissions", [])
+    if "admin" in permissions:
+        return None
+
+    if "wrap" not in permissions:
+        return {"status": "error", "message": "Permission wrap (ou admin) requise"}
+
+    client = token_info.get("client_name", "?")
+
+    allowed = token_info.get("allowed_resources", [])
+    if not isinstance(allowed, list) or not allowed:
+        return {
+            "status": "error",
+            "message": "Un token wrap exige une allow-list de vaults non vide "
+                       "(allowed_resources) — pas de fallback owner-based",
+        }
+
+    policy_id = token_info.get("policy_id", "")
+    if not isinstance(policy_id, str) or not policy_id:
+        return {
+            "status": "error",
+            "message": "Un token wrap exige une policy applicative explicite "
+                       "(policy_id)",
+        }
+
+    from .policies import get_policy_store, PolicyStoreUnavailable
+
+    store = get_policy_store()
+    if not store:
+        _audit_denied("secret_wrap", f"PolicyStore indisponible — policy "
+                      f"'{policy_id}' non vérifiable (token wrap)", client)
+        return {"status": "error", "error_type": "policy_store_unavailable",
+                "message": f"PolicyStore indisponible — policy '{policy_id}' "
+                           "ne peut être vérifiée"}
+
+    try:
+        explicit_tools = store.has_explicit_allowed_tools(policy_id)
+    except PolicyStoreUnavailable as e:
+        _audit_denied("secret_wrap", f"PolicyStore indisponible — policy "
+                      f"'{policy_id}' non vérifiable ({e})", client)
+        return {"status": "error", "error_type": "policy_store_unavailable",
+                "message": f"PolicyStore indisponible — policy '{policy_id}' "
+                           "ne peut être vérifiée"}
+
+    if not explicit_tools:
+        _audit_denied("secret_wrap", f"Policy '{policy_id}' sans allowed_tools "
+                      "explicites — requis pour un token wrap", client)
+        return {
+            "status": "error",
+            "message": f"La policy '{policy_id}' doit déclarer des allowed_tools "
+                       "explicites pour un token wrap (une policy sans allow-list "
+                       "d'outils serait permissive)",
+            "policy_id": policy_id,
+        }
+
+    return None
+
+
+def check_wrap_path_policy(vault_id: str, secret_path: str,
+                           audit: bool = True) -> Optional[dict]:
+    """
+    Évaluation STRICTE du chemin pour une identité wrap non-admin (issue #115).
+
+    Contrairement à check_path_policy (pas de règle matchante ou allowed_paths
+    vide = autorisé), la variante stricte exige une path_rule matchante avec
+    allowed_paths non vide (PolicyStore.is_wrap_path_strictly_allowed — même
+    first-match, même fnmatch : aucune divergence PDP/PEP). Admin → bypass
+    (comportement actuel). Utilisée par secret_wrap ET par le filtre de
+    visibilité du registre de wraps (symétrie création/visibilité).
+
+    Args:
+        audit: False pour une évaluation SILENCIEUSE (filtre de visibilité du
+            registre : une entrée hors scope est un cas nominal, pas un refus
+            d'opération — même précédent que can_read_vault_content).
+
+    Returns:
+        None si OK, dict {"status": "error", ...} si refusé
+    """
+    token_info = current_token_info.get()
+
+    if token_info is None:
+        return {"status": "error", "message": "Authentification requise"}
+
+    if "admin" in token_info.get("permissions", []):
+        return None
+
+    client = token_info.get("client_name", "?")
+    policy_id = token_info.get("policy_id", "")
+    if not isinstance(policy_id, str) or not policy_id:
+        # check_wrap_permission (appelée avant) refuse déjà ce cas ; garde
+        # conservée pour les appels directs (filtre registre) — fail-close.
+        return {"status": "error",
+                "message": "Un token wrap exige une policy applicative explicite"}
+
+    from .policies import get_policy_store, PolicyStoreUnavailable
+
+    store = get_policy_store()
+    if not store:
+        if audit:
+            _audit_denied("secret_wrap", f"PolicyStore indisponible — path policy "
+                          f"'{policy_id}' non vérifiable (strict)", client,
+                          vault_id=vault_id)
+        return {"status": "error", "error_type": "policy_store_unavailable",
+                "message": f"PolicyStore indisponible — policy '{policy_id}' "
+                           "ne peut être vérifiée"}
+
+    try:
+        allowed = store.is_wrap_path_strictly_allowed(policy_id, vault_id, secret_path)
+    except PolicyStoreUnavailable as e:
+        if audit:
+            _audit_denied("secret_wrap", f"PolicyStore indisponible — path policy "
+                          f"'{policy_id}' non vérifiable ({e})", client,
+                          vault_id=vault_id)
+        return {"status": "error", "error_type": "policy_store_unavailable",
+                "message": f"PolicyStore indisponible — policy '{policy_id}' "
+                           "ne peut être vérifiée"}
+
+    if allowed:
+        return None
+
+    if audit:
+        _audit_denied("secret_wrap",
+                      f"Chemin '{secret_path}' dans '{vault_id}' refusé par la "
+                      f"policy '{policy_id}' (évaluation stricte wrap)", client,
+                      vault_id=vault_id)
+    return {
+        "status": "error",
+        "message": f"Accès refusé au chemin '{secret_path}' dans '{vault_id}' "
+                   f"(policy '{policy_id}', évaluation stricte : une path_rule "
+                   "matchante avec allowed_paths explicites est requise)",
+        "policy_id": policy_id,
+    }
+
+
+def _audit_denied(tool_name: str, detail: str, client: str,
+                  vault_id: str = None) -> None:
+    """Journalise un refus d'autorisation sans jamais faire échouer la garde."""
+    try:
+        from ..audit import log_audit
+        if vault_id is not None:
+            log_audit(tool_name, "denied", detail=detail, client_name=client,
+                      vault_id=vault_id)
+        else:
+            log_audit(tool_name, "denied", detail=detail, client_name=client)
+    except Exception:
+        pass
+
+
 def check_policy(tool_name: str) -> Optional[dict]:
     """
     Vérifie que le token courant a le droit d'utiliser cet outil MCP.
@@ -287,6 +533,13 @@ def check_policy(tool_name: str) -> Optional[dict]:
     mission_err = enforce_mission_jwt_tool(tool_name)
     if mission_err:
         return mission_err
+
+    # Token wrap-only → confiné aux 4 outils du broker JIT (issue #115).
+    # PLACÉ AVANT l'évaluation de policy : une policy mal configurée qui
+    # autoriserait secret_read ne doit pas élargir le périmètre d'un wrap-only.
+    wrap_err = enforce_wrap_only_token(tool_name)
+    if wrap_err:
+        return wrap_err
 
     policy_id = token_info.get("policy_id", "")
     # issue #86 Lot 3 (round 3 diff review) : un policy_id de type invalide dans
