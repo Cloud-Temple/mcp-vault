@@ -4,7 +4,9 @@ JIT Wrap Broker — Response wrapping single-use pour mcp-mission.
 
 Expose un contrat VaultClient pour le CredentialBrokerService :
     wrap(vault_id, secret_path, mission_id, operation_id, ttl_seconds) → WrapTokenRef
-    revoke(lease_id)           → idempotent (introuvable = succès)
+    revoke(lease_id)           → idempotent (introuvable dans un registre
+                                 DISPONIBLE = succès ; registre non initialisé
+                                 = error/registry_unavailable, cf. #120)
     lookup_by_operation_id(op) → états : not_found | found_unattached | already_revoked
                                           | revoked | ambiguous | backend_unavailable
 
@@ -656,7 +658,10 @@ async def revoke_wrap(lease_id: str) -> dict:
     Révoque un wrap token de façon IDEMPOTENTE.
 
     lease_id = accessor du wrap token.
-    - Introuvable dans le registry → "not_found" (OK, idempotent).
+    - Introuvable DANS UN REGISTRE DISPONIBLE → "not_found" (OK, idempotent).
+    - Registre non initialisé (S3 absent) → status="error",
+      error_type="registry_unavailable" : aucune révocation n'a été tentée,
+      l'appelant ne doit PAS créditer un succès (#120).
     - Déjà révoqué → "already_revoked" (OK, idempotent).
     - OpenBao dit "bad accessor" / "404" → idempotent (+ mise à jour registry).
     - Erreur réseau / 5xx → erreur réelle (broker doit retenter).
@@ -666,15 +671,23 @@ async def revoke_wrap(lease_id: str) -> dict:
 
     Returns:
         {status: "ok", state: "revoked" | "already_revoked" | "not_found"}
+        ou {status: "error", error_type: "registry_unavailable" | "backend_unavailable"
+        | "backend_error"} — aucune révocation tentée/confirmée dans ces cas.
     """
     registry = get_wrap_registry()
 
-    # ── Fail-close si registry indisponible : ne pas appeler OpenBao ──
-    # Sans registry, on ne peut pas vérifier que l'accessor appartient au broker
-    # → refuser plutôt que de permettre la révocation d'un token hors scope.
+    # ── Fail-close si registry NON INITIALISÉ : erreur CONTRACTUELLE (#120) ──
+    # Sans registre, on ne peut pas vérifier que l'accessor appartient au broker
+    # → on ne touche pas à OpenBao. Mais ce cas ne doit PAS se présenter comme
+    # `ok/not_found` : le contrat documente « introuvable = succès idempotent »,
+    # donc un client (broker mcp-mission, leur #507) créditait une révocation
+    # qui n'a jamais été TENTÉE. La `note` n'est pas contractuelle et ne doit
+    # pas servir à désambiguïser. `registry_unavailable` est la même erreur que
+    # celle déjà renvoyée par wrap_secret/consume_wrap_secret dans ce cas.
     if registry is None:
-        return {"status": "ok", "state": "not_found", "accessor": lease_id[:12] + "...",
-                "note": "Registry indisponible — révocation impossible sans vérification de scope"}
+        return {"status": "error", "error_type": "registry_unavailable",
+                "message": "Registre des wraps non initialisé (S3 requis) — "
+                           "révocation impossible sans vérification de périmètre"}
 
     # ── Sélection défensive + visibilité (issue #115) ────────────────
     # UN SEUL refresh en tête, puis toutes les décisions, l'appel OpenBao ET

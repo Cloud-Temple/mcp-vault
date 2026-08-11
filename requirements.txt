@@ -6,7 +6,10 @@ mcp[cli]>=1.23.0
 pydantic-settings>=2.0
 
 # --- S3 (Token Store + Vault Storage Sync) ---
-boto3>=1.35.0
+# Plancher relevé (issue #121) : `PutObject.IfMatch` (écriture conditionnelle S3)
+# est requis par scripts/rotate_bootstrap_key.py et n'est pas exposé par toutes
+# les versions >=1.35. Présence vérifiée sur 1.38.43 (service model botocore).
+boto3>=1.38.43
 
 # --- OpenBao client (compatible Vault API) ---
 hvac>=2.3.0
@@ -21,7 +24,9 @@ PyJWT>=2.10.0
 httpx>=0.27.0
 
 # --- ASGI ---
-uvicorn[standard]>=0.32.0
+# Épinglé (issue #110) : le comportement de ré-émission du SIGTERM après
+# l'arrêt interne conditionne l'exécution du lifespan de shutdown du coffre.
+uvicorn[standard]==0.42.0
 
 # --- CLI (scripts/mcp_cli.py) ---
 click>=8.1

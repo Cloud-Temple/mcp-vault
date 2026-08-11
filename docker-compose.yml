@@ -51,6 +51,13 @@ services:
     # PAS de "ports:" — expose uniquement sur le réseau interne
     expose:
       - "8030"
+    # Délai de grâce à l'arrêt (issue #110). Le défaut Docker est 10 s : trop
+    # court depuis que l'arrêt du coffre s'exécute réellement (lifespan ASGI).
+    # Budget à couvrir : pré-drain uvicorn (UVICORN_GRACEFUL_TIMEOUT, 10 s)
+    # + arrêt de la sync + seal + effacement des clés + sauvegarde finale S3
+    # (bornée par S3_*: jusqu'à 2 tentatives × (5 s connexion + 30 s lecture))
+    # + arrêt d'OpenBao. Marge incluse ; à revoir si les bornes S3 changent.
+    stop_grace_period: 120s
     env_file: .env
     volumes:
       # Persistance locale du file backend OpenBao (cache crash recovery)

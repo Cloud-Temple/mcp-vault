@@ -485,15 +485,40 @@ def test_revoke_failclose_when_registry_none():
          patch("mcp_vault.vault.wrapping.get_wrap_registry", return_value=None):
         r = run(revoke_wrap("ACC-ARBITRARY"))
 
-    # Doit retourner ok/not_found sans appeler OpenBao
-    assert r["status"] == "ok" and r["state"] == "not_found"
+    # #120 : erreur CONTRACTUELLE (et non ok/not_found, qui faisait créditer au
+    # client une révocation jamais tentée), sans appeler OpenBao.
+    assert r["status"] == "error" and r["error_type"] == "registry_unavailable", r
     client.auth.token.revoke_accessor.assert_not_called()
-    print("  ✅ TEST 13 — revoke registry=None → not_found, OpenBao non appelé")
+    print("  ✅ TEST 13 — revoke registry=None → registry_unavailable, OpenBao non appelé")
 
 
 # =============================================================================
 # TEST 14 — register_pending rollback mémoire si S3 échoue
 # =============================================================================
+
+def test_revoke_registry_unavailable_is_not_a_success_120():
+    """#120 — `not_found` ne doit JAMAIS couvrir « registre non initialisé ».
+
+    NON-COMPLAISANCE : le contrat documente « introuvable = succès idempotent ».
+    Quand le registre est absent (S3 non configuré), aucune révocation n'est
+    tentée : renvoyer `ok/not_found` faisait créditer au broker mcp-mission
+    (leur #507) une révocation inexistante. On exige donc une erreur
+    contractuelle, alignée sur wrap_secret/consume_wrap_secret, et l'absence de
+    toute information non contractuelle (`note`) comme moyen de désambiguïser.
+    """
+    from mcp_vault.vault.wrapping import revoke_wrap
+
+    client = MagicMock()
+    with patch("mcp_vault.vault.wrapping._get_client", return_value=client), \
+         patch("mcp_vault.vault.wrapping.get_wrap_registry", return_value=None):
+        r = run(revoke_wrap("ACC-XYZ"))
+
+    assert r["status"] == "error", f"un succès ici ferait créditer une révocation : {r}"
+    assert r["error_type"] == "registry_unavailable", r
+    assert "state" not in r, "pas d'état idempotent sur une erreur d'indisponibilité"
+    client.auth.token.revoke_accessor.assert_not_called()
+    print("  ✅ TEST 13b — revoke registre absent → registry_unavailable (#120)")
+
 
 def test_register_pending_rollback_on_s3_failure():
     registry = _make_registry(save_ok=False)
@@ -841,6 +866,7 @@ if __name__ == "__main__":
         test_registry_none_blocks_wrap,
         test_mark_active_s3_failure_revokes,
         test_revoke_failclose_when_registry_none,
+        test_revoke_registry_unavailable_is_not_a_success_120,
         test_register_pending_rollback_on_s3_failure,
         test_server_lookup_validates_operation_id,
         test_s3_failure_blocks_wrap,

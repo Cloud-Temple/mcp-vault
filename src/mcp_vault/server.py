@@ -572,14 +572,21 @@ async def secret_revoke_wrap(lease_id: str) -> dict:
     Révoque un wrap token de façon IDEMPOTENTE.
 
     Contrat VaultClient pour mcp-mission : revoke(lease_id) → idempotent.
-    lease_id introuvable ou déjà révoqué = SUCCÈS (jamais une erreur dure).
+    lease_id introuvable DANS UN REGISTRE DISPONIBLE, ou déjà révoqué = SUCCÈS.
     Erreur réseau ou 5xx = erreur réelle (le broker doit retenter).
+
+    ⚠️ `not_found` n'est PAS une preuve de révocation universelle (#120) : quand
+    le registre n'est pas initialisé (S3 non configuré), l'outil renvoie
+    `status="error"`, `error_type="registry_unavailable"` — aucune révocation
+    n'a été tentée. Un client ne doit créditer une révocation que sur
+    `state ∈ {revoked, already_revoked}`.
 
     Args:
         lease_id: Accessor du wrap token (retourné par secret_wrap)
 
     Returns:
         {status: "ok", state: "revoked" | "already_revoked" | "not_found"}
+        ou {status: "error", error_type: "registry_unavailable" | ...}
     """
     from .auth.context import check_policy, check_wrap_permission
     from .vault.wrapping import revoke_wrap, is_safe_id
@@ -1552,6 +1559,65 @@ async def audit_log(limit: int = 50, client: str = "", vault_id: str = "",
 # ASGI MIDDLEWARE STACK + MAIN
 # ═══════════════════════════════════════════════════════════════════════
 
+def _install_vault_lifespan(inner_app) -> None:
+    """
+    Compose le lifecycle du coffre AUTOUR du lifespan FastMCP (issue #110, lot 1).
+
+    ⚠️ DÉFAUT CORRIGÉ : `vault_shutdown()` était appelé APRÈS `server.serve()`.
+    uvicorn ré-émet le SIGTERM qu'il a capturé une fois son arrêt interne
+    terminé — le code placé après l'`await` ne s'exécutait donc JAMAIS sur un
+    `docker stop`. Conséquence en production : aucune sauvegarde finale, aucun
+    seal explicite, aucun effacement des clés d'unseal au sens du lifecycle.
+    Placé dans le lifespan ASGI, l'arrêt s'exécute pendant la phase de shutdown
+    d'uvicorn, donc AVANT la ré-émission du signal.
+
+    ⚠️ Le lifespan de FastMCP (`session_manager.run()`) DOIT être conservé :
+    sans lui, toute requête MCP échoue sur « Task group is not initialized ».
+    D'où la composition (et non le remplacement), dans cet ordre :
+        vault_startup → lifespan FastMCP → service → arrêt FastMCP → vault_shutdown
+
+    Le mode dégradé est préservé à l'identique : `ok = False` par défaut et
+    capture de l'exception, pour que `skip_upload=not ok` reste fail-close
+    (invariant #94 : un démarrage non abouti n'écrase jamais la sauvegarde S3).
+    """
+    import contextlib
+
+    fastmcp_lifespan = inner_app.router.lifespan_context
+
+    @contextlib.asynccontextmanager
+    async def _combined_lifespan(app):
+        from .lifecycle import vault_startup, vault_shutdown
+
+        from .openbao.lifecycle import UnsealKeysUnrecoverable
+
+        ok = False
+        try:
+            try:
+                ok = await vault_startup()
+                if not ok:
+                    logger.warning("⚠️ Démarrage en mode dégradé (OpenBao indisponible)")
+            except UnsealKeysUnrecoverable as e:
+                # #121 : ÉCHEC BRUYANT — le service NE DOIT PAS servir avec un
+                # coffre inouvrable. L'exception remonte à uvicorn, qui refuse de
+                # démarrer (« Application startup failed »). Le message porte la
+                # cause probable et l'interdit de réinitialisation.
+                logger.critical(f"🚨 {e}")
+                raise
+            except Exception as e:
+                logger.error(f"❌ Erreur critique au démarrage : {e}")
+                logger.warning("⚠️ Démarrage en mode dégradé")
+
+            async with fastmcp_lifespan(app) as state:
+                yield state
+        finally:
+            try:
+                await vault_shutdown(skip_upload=not ok)
+            except Exception as e:
+                logger.error(f"❌ Erreur au shutdown : {e}")
+
+    inner_app.router.lifespan_context = _combined_lifespan
+
+
 def create_app():
     """
     Construit la stack ASGI complète.
@@ -1589,12 +1655,17 @@ def create_app():
             f"Config SSH JIT opérateur invalide — démarrage refusé : {operator_msg}"
         )
 
+    s3_ok, s3_msg = settings.check_s3_timeouts()
+    if not s3_ok:
+        raise RuntimeError(f"Bornes S3 invalides — démarrage refusé : {s3_msg}")
+
     from .auth.middleware import AuthMiddleware, LoggingMiddleware, HealthCheckMiddleware
     from .admin.middleware import AdminMiddleware
     from .pki_middleware import PkiMiddleware
 
     # Stack ASGI (ordre d'application : Pki → Admin → Health → Auth → Logging → MCP)
     app = mcp.streamable_http_app()
+    _install_vault_lifespan(app)
     app = LoggingMiddleware(app)
     app = AuthMiddleware(app, mcp)
     app = HealthCheckMiddleware(app)
@@ -1663,47 +1734,37 @@ def main():
 
     app = create_app()
 
+    # STARTUP/SHUTDOWN : portés par le lifespan ASGI composé
+    # (`_install_vault_lifespan`, issue #110) — PAS ici. uvicorn ré-émet le
+    # SIGTERM après son arrêt interne : tout code placé après `serve()` ne
+    # s'exécute pas sur un `docker stop`.
+    # `timeout_graceful_shutdown` borne le pré-drain des connexions ASGI, pour
+    # que le budget d'arrêt du coffre (seal + effacement des clés + sauvegarde)
+    # ne soit pas consommé par des connexions clientes qui traînent.
     config = uvicorn.Config(
         app,
         host=settings.mcp_server_host,
         port=settings.mcp_server_port,
         log_level="info" if not settings.mcp_server_debug else "debug",
+        timeout_graceful_shutdown=settings.uvicorn_graceful_timeout,
     )
     server = uvicorn.Server(config)
 
     async def serve_with_lifecycle():
-        """Lance le lifecycle startup → serveur → shutdown."""
-        from .lifecycle import vault_startup, vault_shutdown
+        """Lance le serveur ; le lifecycle du coffre est porté par le lifespan."""
+        from .lifecycle import vault_shutdown
 
-        # ── STARTUP ──────────────────────────────────────────
-        # `ok` initialisé à False AVANT le try : si vault_startup() lève avant
-        # de retourner (plutôt que de retourner False), le shutdown doit quand
-        # même traiter ça comme un démarrage non abouti (fail-closed) — jamais
-        # un upload final par défaut sur une variable non définie.
-        ok = False
-        try:
-            ok = await vault_startup()
-            if not ok:
-                logger.warning("⚠️ Démarrage en mode dégradé (OpenBao indisponible)")
-        except Exception as e:
-            logger.error(f"❌ Erreur critique au démarrage : {e}")
-            logger.warning("⚠️ Démarrage en mode dégradé")
-
-        # ── SERVEUR (bloquant jusqu'à SIGTERM/SIGINT) ────────
         try:
             await server.serve()
         except Exception as e:
             logger.error(f"❌ Erreur serveur : {e}")
 
-        # ── SHUTDOWN ─────────────────────────────────────────
-        # skip_upload=not ok : un démarrage non abouti (dont restauration S3
-        # ambiguë, durcissement 2026-07) ne doit jamais déclencher l'upload
-        # final inconditionnel — il écraserait sinon une sauvegarde distante
-        # potentiellement valide avec un état local incomplet/non initialisé
-        # (trouvé en revue de diff adversariale).
+        # Filet de sécurité IDEMPOTENT : si le lifespan n'a pas pu s'exécuter
+        # (échec avant son démarrage), l'arrêt est tenté ici. `vault_shutdown`
+        # est idempotent — un second appel ne refait ni seal ni upload.
         try:
-            await vault_shutdown(skip_upload=not ok)
+            await vault_shutdown(skip_upload=True)
         except Exception as e:
-            logger.error(f"❌ Erreur au shutdown : {e}")
+            logger.error(f"❌ Erreur au shutdown (filet) : {e}")
 
     asyncio.run(serve_with_lifecycle())

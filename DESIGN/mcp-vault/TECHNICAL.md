@@ -1,6 +1,6 @@
 # Documentation Technique — MCP Vault
 
-> **Version** : 0.10.0 | **Date** : 2026-08-11 | **Auteur** : Cloud Temple
+> **Version** : 0.10.1 | **Date** : 2026-08-11 | **Auteur** : Cloud Temple
 > **Licence** : Apache 2.0 | **Statut** : ✅ Production-ready (audit V2.1 complété + PKI interne v0.5.1)
 
 ---
@@ -124,6 +124,10 @@ Utilise `pydantic-settings` pour charger la configuration depuis les variables d
 | `S3_ACCESS_KEY_ID`       | *(vide)*                  | Access key S3               |
 | `S3_SECRET_ACCESS_KEY`   | *(vide)*                  | Secret key S3               |
 | `S3_BUCKET_NAME`         | *(vide)*                  | Nom du bucket S3            |
+| `S3_CONNECT_TIMEOUT`     | `5`                       | Plafond de connexion S3 (s) — issue #110 |
+| `S3_READ_TIMEOUT`        | `30`                      | Plafond d'inactivité socket S3 (s) — pas une durée totale de transfert |
+| `S3_MAX_ATTEMPTS`        | `2`                       | Nombre TOTAL de tentatives S3 (`total_max_attempts`, 1 = aucun retry) |
+| `UVICORN_GRACEFUL_TIMEOUT` | `10`                    | Plafond du pré-drain des connexions à l'arrêt (s) — issue #110 |
 | `S3_REGION_NAME`         | `fr1`                     | Région S3                   |
 | `OPENBAO_ADDR`           | `http://127.0.0.1:8200`   | Adresse OpenBao             |
 | `OPENBAO_SHARES`         | `1`                       | Nombre de parts Shamir      |
@@ -997,10 +1001,10 @@ Voir `ARCHITECTURE.md §11.3` pour les diagrammes d'architecture et les étapes 
 | ------------------- | ------- | --------------------------------------------- |
 | `mcp[cli]`          | ≥1.9.0  | Framework MCP (FastMCP, Streamable HTTP)      |
 | `pydantic-settings` | ≥2.0    | Configuration env vars                        |
-| `boto3`             | ≥1.35.0 | Client S3 Dell ECS                            |
+| `boto3`             | ≥1.38.43 | Client S3 Dell ECS — plancher imposé par `PutObject.IfMatch` (écriture conditionnelle, issue #121) |
 | `hvac`              | ≥2.3.0  | Client Python pour OpenBao/Vault              |
 | `cryptography`      | ≥42.0   | Chiffrement clés unseal (AES-256-GCM, PBKDF2) |
-| `uvicorn[standard]` | ≥0.32.0 | Serveur ASGI                                  |
+| `uvicorn[standard]` | ==0.42.0 | Serveur ASGI — **épinglé** (issue #110) : la sémantique de ré-émission du SIGTERM conditionne l'exécution du lifespan d'arrêt |
 
 ### Composants du WAF (hors Python, cf. `waf/Dockerfile`)
 

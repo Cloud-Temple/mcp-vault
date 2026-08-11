@@ -1,5 +1,154 @@
 # Changelog — MCP Vault
 
+## [0.10.1] — 2026-08-11
+
+### Sécurité : stabilité d'`ADMIN_BOOTSTRAP_KEY` — plus jamais d'invitation au geste irréversible (issue #121)
+
+`ADMIN_BOOTSTRAP_KEY` chiffre l'objet S3 contenant les clés d'unseal d'OpenBao.
+Deux situations à ne pas confondre :
+
+| Situation | Récupérable ? |
+|---|---|
+| Mauvaise clé + objet chiffré **intact** | ✅ oui — restaurer l'ancienne clé |
+| Mauvaise clé + objet chiffré **réécrit** | ❌ non — définitif |
+
+On passait de la première à la seconde par un seul geste humain, que le produit
+**suggérait lui-même** : le message « Clés unseal introuvables — Initialiser
+d'abord avec `initialize_vault()` » est correct sur une installation neuve, mais
+détruit l'accès aux données sur un coffre existant (l'initialisation génère de
+nouvelles clés d'unseal et écrase l'objet chiffré).
+
+- **Plus aucune invitation à initialiser quand des données existent** : le
+  chemin vérifie le file backend et, s'il contient des données, refuse en
+  disant explicitement quoi **ne pas** faire (ne pas initialiser, ne pas
+  effacer le volume). Sonde fail-close : en cas de doute, on suppose qu'il y a
+  des données.
+- **Échec BRUYANT** (`UnsealKeysUnrecoverable`) au lieu du mode dégradé : un
+  coffre qui ne peut pas s'ouvrir n'accepte plus de trafic, et le diagnostic
+  n'est plus retardé. L'exception traverse le lifespan → uvicorn refuse de
+  démarrer.
+- **Message actionnable** : cause la plus probable nommée
+  (`ADMIN_BOOTSTRAP_KEY` a changé), interdits explicites, indication que les
+  **file backend n'a pas été modifié**, la récupération exigeant une ancienne clé correspondante **et** une copie/version intacte de l'objet chiffré (« clé incorrecte **ou** objet corrompu »),
+  et renvoi vers la procédure outillée.
+- **Rotation SCRIPTÉE** : `scripts/rotate_bootstrap_key.py` (avec `--dry-run`)
+  exécute la seule séquence sûre — sauvegarde locale, déchiffrement avec
+  l'ancienne clé, re-chiffrement, **vérification avant toute écriture**, copie
+  de retour arrière horodatée sur S3, écriture, relecture et re-vérification.
+  Les clés passent par l'environnement, jamais par la ligne de commande.
+  L'écriture de l'objet courant est **conditionnelle** (`If-Match` sur
+  l'ETag) : une modification concurrente fait échouer le PUT au lieu
+  d'écraser une version plus récente. La rotation est refusée si le
+  stockage ne fournit pas d'ETag ou si le SDK n'expose pas l'écriture
+  conditionnelle (plancher `boto3>=1.38.43`). Le script impose le
+  **test de redémarrage à froid** comme validation finale.
+- Le comportement sûr existant (aucune réécriture automatique de l'objet
+  chiffré après un échec de déchiffrement) est désormais **verrouillé par un
+  test** — il n'était garanti par rien.
+
+Tests : `tests/test_bootstrap_key_stability_121.py` (23 cas) — dont la
+séquence du script EXERCÉE contre un faux S3 (dry-run qui n'écrit rien, ordre
+copie de retour arrière → objet courant, abandon sur mauvaise ancienne clé,
+abandon sur modification concurrente, échec de chaque écriture) et un
+`vault_startup()` réellement traversé jusqu'à l'échec d'unseal. Les estampilles
+de version des documents sont désormais liées mécaniquement à `VERSION` par
+`tests/test_env_example_contract.py`.
+
+### Contrat : `secret_revoke_wrap` ne masque plus un registre indisponible (issue #120)
+
+Signalé par mcp-mission (leur issue #507). Quand le WrapRegistry n'est **pas
+initialisé** (S3 non configuré), `secret_revoke_wrap` répondait
+`{"status": "ok", "state": "not_found"}` — alors qu'**aucune révocation n'avait
+été tentée**. Le contrat documentant « introuvable = succès idempotent », un
+client pouvait créditer à tort une révocation ; seule une `note` non
+contractuelle distinguait les deux cas.
+
+L'outil renvoie désormais `{"status": "error",
+"error_type": "registry_unavailable"}`, aligné sur `secret_wrap` et
+`secret_consume` qui traitaient déjà ce cas comme une erreur. `not_found` reste
+réservé au registre **consulté** (accessor inconnu ou hors périmètre, #115).
+Docstrings et contrat précisés : « introuvable **dans un registre disponible**
+= succès ». Comportement préexistant (≤ 0.9.2), pas une régression.
+
+
+### Disponibilité : bornes réseau S3 et chemin d'arrêt réellement exécuté (issue #110, lot 1)
+
+Premier lot du chantier #110 (« un appel S3 bloquant gèle tout le coffre,
+488 s mesurées »). Ce lot **borne** l'incident et corrige un défaut d'arrêt
+découvert en revue ; le retrait des appels S3 de la boucle événementielle est
+traité dans les lots suivants (issues dédiées).
+
+**1. Le chemin d'arrêt ne s'exécutait jamais sur `docker stop`**
+
+`vault_shutdown()` (arrêt de la sync, seal OpenBao, effacement des clés
+d'unseal en mémoire, sauvegarde finale S3) était appelé **après**
+`server.serve()`. uvicorn ré-émet le SIGTERM qu'il a capturé une fois son
+arrêt interne terminé : le code placé après l'`await` ne s'exécutait donc pas.
+Conséquence en production : aucune sauvegarde finale et aucun seal explicite à
+chaque arrêt ou redéploiement (l'archive S3 datait du dernier cycle
+périodique, ≤ 60 s).
+
+- L'arrêt est désormais porté par le **lifespan ASGI**, exécuté pendant la
+  phase de shutdown d'uvicorn — donc avant la ré-émission du signal.
+- Le lifespan est **composé** autour de celui de FastMCP
+  (`session_manager.run()`), jamais remplacé : ordre
+  `vault_startup → FastMCP → service → FastMCP → vault_shutdown`. Sans cette
+  composition, toute requête MCP échouerait sur « Task group is not
+  initialized ».
+- Mode dégradé **inchangé** : `vault_startup()` qui lève ou retourne `False`
+  laisse le service démarrer et force `skip_upload=True` (invariant #94 : un
+  démarrage non abouti n'écrase jamais la sauvegarde S3).
+- `vault_shutdown()` devient **idempotent** ; `server.main()` conserve un appel
+  de secours si le lifespan n'a pas pu s'exécuter.
+- `uvicorn` **épinglé** à 0.42.0 (le comportement de ré-émission du signal
+  conditionne ce correctif) et `timeout_graceful_shutdown` borné
+  (`UVICORN_GRACEFUL_TIMEOUT`, défaut 10 s) pour que le pré-drain des
+  connexions ne consomme pas le budget d'arrêt du coffre.
+
+**2. Appels S3 bornés**
+
+Les deux clients boto3 étaient créés **sans timeout** (défauts : 60 s
+connexion + 60 s lecture, retries « adaptive ») — c'est ce qui transformait une
+lenteur S3 en gel de plusieurs minutes.
+
+- Nouvelles clés : `S3_CONNECT_TIMEOUT` (5 s), `S3_READ_TIMEOUT` (30 s),
+  `S3_MAX_ATTEMPTS` (2) — valeurs en configuration, jamais en dur ; refus de
+  démarrer si une borne est nulle ou négative.
+- `total_max_attempts` et non `max_attempts` : botocore compte `max_attempts`
+  comme des retries **après** la tentative initiale — `S3_MAX_ATTEMPTS=2`
+  signifie donc bien 2 appels réseau au total.
+- Mode `standard` au lieu d'`adaptive` : sans régulation adaptative côté
+  client, donc plus prévisible pendant une panne (le backoff avec jitter,
+  lui, subsiste).
+- Fabrique de configuration **unique** : `create_s3_clients()` (non-singleton)
+  passe par le même chemin — aucun client ne peut repartir sans bornes.
+
+**3. Délai de grâce Docker**
+
+`stop_grace_period: 120s` déclaré explicitement pour `mcp-vault` : le défaut
+Docker (10 s) tuait le processus avant le seal et la sauvegarde finale,
+maintenant que l'arrêt s'exécute réellement. Le budget couvre le pré-drain
+uvicorn, l'arrêt de la sync, le seal, l'effacement des clés, la sauvegarde
+finale bornée et l'arrêt d'OpenBao — vérifié par un test statique du Compose.
+
+**Effet attendu** : une panne S3 ne peut plus geler le coffre plusieurs
+minutes ; l'attente est plafonnée et l'arrêt propre est restauré. Le gel
+résiduel (le temps d'un appel borné) est traité par les lots 2 (#122) et
+3 (#123).
+
+⚠️ `S3_READ_TIMEOUT` est un délai d'**inactivité socket**, pas une durée
+totale de transfert : une archive de plusieurs Mo n'échoue pas parce que son
+transfert dépasse 30 s tant que les données progressent. Les valeurs livrées
+ne constituent donc pas une borne murale stricte (le backoff des tentatives et
+la compression locale ne sont pas inclus) — c'est un plafond opérationnel.
+
+Tests : `tests/test_s3_bounds_shutdown_110.py` (20 cas — bornes des deux
+clients, `total_max_attempts`, validation au boot, lifespan piloté sur la VRAIE
+stack via le protocole ASGI, ordre startup/shutdown, mode dégradé, idempotence
+rejouable après annulation, réarmement au nouveau cycle, délai de grâce du
+Compose). Preuve RED : 20/20 échouent sur l'état pré-correctif. Suite
+complète : 1122 passed / 14 skipped / 2 failed préexistants (#98).
+
 ## [0.10.0] — 2026-08-11
 
 ### Sécurité : permission dédiée non-admin `wrap` pour le broker JIT mcp-mission (issue #115)

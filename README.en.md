@@ -179,7 +179,7 @@ Contract for the mcp-mission `CredentialBrokerService`: single-use credential de
 | Tool | Perm | Description |
 | --- | --- | --- |
 | `secret_wrap(vault_id, secret_path, mission_id, operation_id, ttl_seconds?, tenant_id?, expected_aud?)` | wrap | Creates a single-use wrap token (write-ahead registry) |
-| `secret_revoke_wrap(lease_id)` | wrap | Idempotent revocation of a wrap token (not found = success) |
+| `secret_revoke_wrap(lease_id)` | wrap | Idempotent revocation (not found **in an available registry** = success), scoped to the caller; uninitialized registry → `error/registry_unavailable` *(#120)* |
 | `secret_wrap_lookup(operation_id)` | wrap | Finds & **revokes** wraps by operation_id (orphan compensation #74) |
 | `secret_wrap_status(operation_id)` | wrap | Reads a wrap's state **without revoking it** — read-only, best-effort snapshot (#77) |
 | `secret_consume(wrap_token, operation_id, mission_token)` | admin | Validates ES256/JWKS JWT (full PEP contract since *(#86)*: exp/iat/iss/aud/mission_id/jti/scope/tenant_id + `component_id`), checks full binding (mission_id, tenant_id, aud), unwraps OpenBao (C18) |
@@ -345,7 +345,7 @@ See [scripts/README.md](scripts/README.md) for the full CLI documentation.
 ## ⚙️ Environment variables
 
 Copy `.env.example` → `.env` and adjust. **`.env.example` is the authoritative
-configuration contract**: it declares exactly the **41** variables consumed by
+configuration contract**: it declares exactly the **45** variables consumed by
 `Settings` ([`src/mcp_vault/config.py`](src/mcp_vault/config.py)), no more and no
 fewer, and it is enforced by
 [`tests/test_env_example_contract.py`](tests/test_env_example_contract.py).
@@ -505,8 +505,8 @@ mcp-vault/
 ├── requirements.lock         # Pinned dependencies (exact versions)
 ├── VERSION                   # current service version
 ├── DESIGN/mcp-vault/
-│   ├── ARCHITECTURE.md       # Detailed specification (v0.10.0)
-│   ├── TECHNICAL.md          # Technical documentation (v0.10.0)
+│   ├── ARCHITECTURE.md       # Detailed specification (v0.10.1)
+│   ├── TECHNICAL.md          # Technical documentation (v0.10.1)
 │   └── SECURITY_AUDIT.md     # Consolidated audit report (60 V2.1 findings)
 ├── scripts/
 │   ├── mcp_cli.py            # CLI entry point
@@ -565,4 +565,4 @@ mcp-vault/
 
 ---
 
-**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.10.0
+**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.10.1

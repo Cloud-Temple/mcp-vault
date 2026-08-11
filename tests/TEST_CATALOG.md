@@ -1,6 +1,6 @@
 # Catalogue des Tests E2E — MCP Vault
 
-> **Version** : v0.10.0 — Permission dédiée `wrap` non-admin pour le broker JIT mcp-mission (cf. #115)
+> **Version** : v0.10.1 — Bornes réseau S3 + chemin d'arrêt rétabli (#110 lot 1), contrat `registry_unavailable` (#120), stabilité `ADMIN_BOOTSTRAP_KEY` (#121)
 > **Dernière exécution** : 349 assertions e2e sur 15 catégories (+ 18 tests crypto)
 > **Décompte reproductible** : comptage AST des appels `check` / `check_true` / `check_value` / `check_traversed` dans les fonctions `test_*` de `tests/test_e2e.py`, boucles littérales expansées
 > **Durée** : ~5 secondes (e2e) + <1s (crypto)

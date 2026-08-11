@@ -1,6 +1,6 @@
 # Architecture — MCP Vault
 
-> **Version** : 0.10.0 | **Date** : 2026-08-11 | **Auteur** : Cloud Temple  
+> **Version** : 0.10.1 | **Date** : 2026-08-11 | **Auteur** : Cloud Temple  
 > **Projet** : mcp-vault | **Licence** : Apache 2.0  
 > **Statut** : ✅ Implémenté — Production-ready (PKI interne v0.5.x + C18 v0.6.x)
 
@@ -1696,7 +1696,7 @@ Un crash du processus efface automatiquement les clés de la mémoire.
 ## 9. Configuration (.env)
 
 > **Source unique du contrat de configuration** : [`.env.example`](../../.env.example)
-> à la racine du dépôt. Ce fichier documente les **41** variables réellement
+> à la racine du dépôt. Ce fichier documente les **45** variables réellement
 > consommées par `Settings` (`src/mcp_vault/config.py`), une par une, avec leur
 > défaut. Le bloc ci-dessous n'en montre que le **minimum viable** ; il ne le
 > remplace pas.
@@ -1728,6 +1728,11 @@ OPENBAO_DATA_DIR=/openbao/file
 OPENBAO_CONFIG_DIR=/openbao/config
 
 # --- S3 (token store + backup du file backend OpenBao) ---
+# Bornes réseau (issue #110) : sans elles, une lenteur S3 gèle le service.
+S3_CONNECT_TIMEOUT=5
+S3_READ_TIMEOUT=30
+S3_MAX_ATTEMPTS=2
+UVICORN_GRACEFUL_TIMEOUT=10
 S3_ENDPOINT_URL=https://your-s3-endpoint.example.com
 S3_ACCESS_KEY_ID=your_access_key_here
 S3_SECRET_ACCESS_KEY=your_secret_key_here
@@ -1838,10 +1843,10 @@ CMD ["python", "-m", "mcp_vault"]
 
 ```
 mcp[cli]>=1.8.0
-uvicorn>=0.32.0
+uvicorn==0.42.0  # épinglé (issue #110)
 pydantic>=2.0
 pydantic-settings>=2.0
-boto3>=1.34
+boto3>=1.38.43  # écriture conditionnelle IfMatch (issue #121)
 hvac>=2.0
 click>=8.1
 prompt-toolkit>=3.0
@@ -2686,4 +2691,4 @@ result = await vault_client.call("ssh_sign_key", {
 
 ---
 
-*Document mis à jour le 11 août 2026 — MCP Vault v0.10.0 (39 outils MCP, permission dédiée `wrap` non-admin pour le broker JIT (verrou wrap-only, policy stricte obligatoire, registre scopé vault+chemins, #115), WAF Coraza v3.7.0 avec parsing JSON borné sur /mcp (profondeur, taille, refus des corps non analysables) et exclusions de cibles anti-évasion, accès SSH JIT opérateur (bearer nominatif + policy dédiée, clé publique pré-enrôlée), pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer, écriture create-only atomique (CAS), sync S3 conditionnelle, contrat de configuration `.env.example` déterministe et testé)*
+*Document mis à jour le 11 août 2026 — MCP Vault v0.10.1 (39 outils MCP, bornes réseau S3 et chemin d'arrêt porté par le lifespan ASGI (#110 lot 1), échec bruyant sur clés d'unseal inexploitables (#121), permission dédiée `wrap` non-admin pour le broker JIT (verrou wrap-only, policy stricte obligatoire, registre scopé vault+chemins, #115), WAF Coraza v3.7.0 avec parsing JSON borné sur /mcp (profondeur, taille, refus des corps non analysables) et exclusions de cibles anti-évasion, accès SSH JIT opérateur (bearer nominatif + policy dédiée, clé publique pré-enrôlée), pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer, écriture create-only atomique (CAS), sync S3 conditionnelle, contrat de configuration `.env.example` déterministe et testé)*

@@ -49,8 +49,22 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from mcp_vault.lifecycle import vault_shutdown, _check_local_data_status
+import pytest
+
+from mcp_vault.lifecycle import (vault_shutdown, _check_local_data_status,
+                                 _reset_shutdown_state_for_tests)
 from mcp_vault.s3_sync import _RESTORE_MARKER_FILENAME, _RESTORE_STAGING_DIRNAME
+
+
+@pytest.fixture(autouse=True)
+def _rearm_shutdown_idempotence():
+    """#110 : `vault_shutdown()` est IDEMPOTENT (le lifespan ASGI et le filet de
+    `server.main()` peuvent tous deux l'appeler). Le drapeau est au niveau
+    module : sans ce réarmement, seul le PREMIER test du fichier exercerait
+    réellement la séquence d'arrêt et les suivants seraient de faux verts."""
+    _reset_shutdown_state_for_tests()
+    yield
+    _reset_shutdown_state_for_tests()
 
 
 def _run(coro):

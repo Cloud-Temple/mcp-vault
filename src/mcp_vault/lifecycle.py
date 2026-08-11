@@ -28,6 +28,31 @@ from .config import get_settings
 
 logger = logging.getLogger("mcp-vault.lifecycle")
 
+# Idempotence de l'arrêt (issue #110) : l'arrêt est déclenché par le lifespan
+# ASGI, avec un appel de secours dans server.main(). Deux états DISTINCTS —
+# `running` (séquence en cours) et `done` (séquence ACHEVÉE) : si l'arrêt est
+# interrompu (annulation, exception) alors que rien n'a été scellé, il doit
+# rester REJOUABLE. Un drapeau unique posé avant le premier `await` gèlerait
+# définitivement l'arrêt sur une annulation précoce (revue pré-commit).
+_shutdown_running: bool = False
+_shutdown_done: bool = False
+
+
+def _reset_shutdown_state() -> None:
+    """Réarme l'idempotence pour un NOUVEAU cycle de vie.
+
+    Appelé par `vault_startup()` : un même processus peut enchaîner deux
+    lifespans (embedding ASGI, redémarrage à chaud) — sans réarmement, le
+    second coffre ne serait jamais arrêté proprement.
+    """
+    global _shutdown_running, _shutdown_done
+    _shutdown_running = False
+    _shutdown_done = False
+
+
+# Alias historique conservé pour les tests.
+_reset_shutdown_state_for_tests = _reset_shutdown_state
+
 
 def _check_local_data_status(data_dir: Path) -> bool:
     """
@@ -95,6 +120,12 @@ async def vault_startup() -> bool:
     Returns:
         True si tout est OK, False si mode dégradé
     """
+    # Nouveau cycle de vie → l'arrêt redevient exécutable (issue #110) : un même
+    # processus peut enchaîner deux lifespans, le second doit pouvoir s'arrêter.
+    _reset_shutdown_state()
+
+    from .openbao.lifecycle import UnsealKeysUnrecoverable
+
     settings = get_settings()
 
     # ── 0. Bootstrap key (défense en profondeur) ────────────────────
@@ -262,6 +293,15 @@ async def vault_startup() -> bool:
         else:
             logger.error(f"❌ Échec du déverrouillage : {unseal_result}")
             return False
+    except UnsealKeysUnrecoverable:
+        # #121 : ÉCHEC BRUYANT, PAS de mode dégradé. Les clés d'unseal sont
+        # inexploitables (ADMIN_BOOTSTRAP_KEY probablement changée, ou objet
+        # chiffré manquant alors que des données existent). Un coffre qui ne
+        # peut pas s'ouvrir n'a aucune raison d'accepter du trafic, et le mode
+        # dégradé retarderait le diagnostic. L'exception traverse le lifespan
+        # (qui la relaie) → le service refuse de démarrer.
+        logger.critical("🚨 DÉMARRAGE REFUSÉ — clés d'unseal inexploitables")
+        raise
     except Exception as e:
         logger.error(f"❌ Erreur unseal OpenBao : {e}")
         return False
@@ -302,7 +342,33 @@ async def vault_shutdown(skip_upload: bool = False):
             correctement abouti. `skip_upload=True` retire spécifiquement CET
             upload, sans changer la politique de "mode dégradé" elle-même
             (hors périmètre de ce fix).
+
+    IDEMPOTENT (issue #110, lot 1) : l'arrêt est porté par le lifespan ASGI, et
+    `server.main()` conserve un appel de secours au cas où le lifespan n'aurait
+    pas pu s'exécuter. Un second appel ne refait donc NI seal, NI upload final
+    (un upload rejoué après le seal réécrirait l'archive sans raison, et un
+    second seal masquerait le résultat du premier dans les logs).
+
+    L'idempotence n'est PAS un verrou définitif : si la séquence est interrompue
+    (annulation, exception) avant d'aboutir, l'état est restauré et un appel
+    ultérieur la rejoue — sinon une annulation précoce laisserait le coffre non
+    scellé sans plus aucune chance d'arrêt propre.
     """
+    global _shutdown_running, _shutdown_done
+    if _shutdown_done or _shutdown_running:
+        logger.debug("Arrêt déjà effectué ou en cours — appel ignoré (idempotence)")
+        return
+    _shutdown_running = True
+    try:
+        await _vault_shutdown_sequence(skip_upload=skip_upload)
+    finally:
+        # Rejouable si la séquence n'a pas abouti (annulation/exception).
+        _shutdown_running = False
+    _shutdown_done = True
+
+
+async def _vault_shutdown_sequence(skip_upload: bool = False):
+    """Séquence d'arrêt proprement dite (voir `vault_shutdown`)."""
     logger.info("🛑 Arrêt de MCP Vault...")
 
     # ── 1. Arrêter le sync périodique ─────────────────────────────

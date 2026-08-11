@@ -476,10 +476,15 @@ def secret_wrap_cmd(ctx, vault_id, secret_path, mission_id, operation_id,
 @click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
 @click.pass_context
 def secret_revoke_wrap_cmd(ctx, lease_id, output_json):
-    """Révoquer un wrap token (idempotent — introuvable = succès).
+    """Révoquer un wrap token (idempotent).
 
     \b
     LEASE_ID : accessor du wrap token (retourné par `secret wrap`).
+
+    \b
+    Introuvable DANS UN REGISTRE DISPONIBLE = succès. Si le registre n'est pas
+    initialisé (S3 absent), la commande renvoie error/registry_unavailable :
+    aucune révocation n'a été tentée, ne pas créditer un succès (#120).
     """
     async def _run():
         client = MCPClient(ctx.obj["url"], ctx.obj["token"])
