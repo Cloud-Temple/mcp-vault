@@ -1001,7 +1001,7 @@ Voir `ARCHITECTURE.md §11.3` pour les diagrammes d'architecture et les étapes 
 | ------------------- | ------- | --------------------------------------------- |
 | `mcp[cli]`          | ≥1.9.0  | Framework MCP (FastMCP, Streamable HTTP)      |
 | `pydantic-settings` | ≥2.0    | Configuration env vars                        |
-| `boto3`             | ≥1.35.0 | Client S3 Dell ECS                            |
+| `boto3`             | ≥1.38.43 | Client S3 Dell ECS — plancher imposé par `PutObject.IfMatch` (écriture conditionnelle, issue #121) |
 | `hvac`              | ≥2.3.0  | Client Python pour OpenBao/Vault              |
 | `cryptography`      | ≥42.0   | Chiffrement clés unseal (AES-256-GCM, PBKDF2) |
 | `uvicorn[standard]` | ==0.42.0 | Serveur ASGI — **épinglé** (issue #110) : la sémantique de ré-émission du SIGTERM conditionne l'exécution du lifespan d'arrêt |

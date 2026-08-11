@@ -46,7 +46,7 @@ nouvelles clés d'unseal et écrase l'objet chiffré).
   chiffré après un échec de déchiffrement) est désormais **verrouillé par un
   test** — il n'était garanti par rien.
 
-Tests : `tests/test_bootstrap_key_stability_121.py` (14 cas) — dont la
+Tests : `tests/test_bootstrap_key_stability_121.py` (23 cas) — dont la
 séquence du script EXERCÉE contre un faux S3 (dry-run qui n'écrit rien, ordre
 copie de retour arrière → objet courant, abandon sur mauvaise ancienne clé,
 abandon sur modification concurrente, échec de chaque écriture) et un

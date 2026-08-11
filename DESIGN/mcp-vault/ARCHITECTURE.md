@@ -1846,7 +1846,7 @@ mcp[cli]>=1.8.0
 uvicorn==0.42.0  # épinglé (issue #110)
 pydantic>=2.0
 pydantic-settings>=2.0
-boto3>=1.34
+boto3>=1.38.43  # écriture conditionnelle IfMatch (issue #121)
 hvac>=2.0
 click>=8.1
 prompt-toolkit>=3.0
