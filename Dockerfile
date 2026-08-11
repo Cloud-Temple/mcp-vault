@@ -26,7 +26,7 @@ FROM python:3.12-slim@sha256:3d5ed973e45820f5ba5e46bd065bd88b3a504ff0724d85980dc
 # Metadata
 LABEL maintainer="Cloud Temple" \
       description="MCP Vault — Secure secrets management for AI agents" \
-      version="0.10.1"
+      version="0.10.2"
 
 # System deps for OpenBao
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -45,9 +45,20 @@ RUN mkdir -p /openbao/file /openbao/config /openbao/logs && \
 # Working directory
 WORKDIR /app
 
-# Install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies — LE VERROU FAIT FOI (issue #125)
+# `requirements.txt` déclare des PLANCHERS (`mcp[cli]>=1.23.0`, ...) : une
+# construction fraîche résout donc la dernière version publiée en amont. Quand
+# `mcp 2.0.0` est sorti — sans `mcp.server.fastmcp`, importé par server.py —
+# toute image reconstruite a cessé de démarrer, sur TOUTES les versions depuis
+# la v0.4.5. Le verrou existait déjà mais n'était pas consommé ici.
+COPY requirements.lock .
+RUN pip install --no-cache-dir -r requirements.lock
+
+# Garde de CONSTRUCTION (issue #125) : l'import qui a cassé la production est
+# vérifié ici, à la construction. Une résolution de dépendances incompatible
+# fait désormais échouer le `build` — elle ne se découvre plus au démarrage du
+# conteneur, en aval de la chaîne de livraison.
+RUN python -c "from mcp.server.fastmcp import FastMCP"
 
 # Python path pour les imports
 ENV PYTHONPATH=/app/src
@@ -82,8 +93,16 @@ COPY --from=openbao-download /tmp/openbao/bao /usr/local/bin/bao
 RUN mkdir -p /openbao/file /openbao/config /openbao/logs && chmod -R 700 /openbao
 
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Le verrou fait foi ici AUSSI (issue #125), mais il ne contient que les
+# dépendances d'EXÉCUTION : `pytest` et `pytest-asyncio` n'y figurent pas. Les
+# deux fichiers sont donc passés à UNE SEULE invocation pip, qui résout leur
+# intersection : les versions verrouillées l'emportent partout où le verrou
+# épingle, et `requirements.txt` n'apporte que ce qui manque (les outils de
+# test). Un futur verrou qui passerait SOUS un plancher déclaré ferait échouer
+# la résolution, donc le build — bruyamment, et non en production.
+COPY requirements.lock requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.lock -r requirements.txt
+RUN python -c "from mcp.server.fastmcp import FastMCP"
 
 ENV PYTHONPATH=/app/src
 COPY src/ ./src/
@@ -101,6 +120,12 @@ COPY DESIGN/ ./DESIGN/
 COPY CHANGELOG.md ./
 COPY Dockerfile ./
 COPY .dockerignore ./
+COPY README.md README.en.md ./
+# `docker-compose.yml` est une FIXTURE de test, pas une dépendance d'exécution :
+# `test_s3_bounds_shutdown_110.py` vérifie que le `stop_grace_period` couvre la
+# séquence d'arrêt (#110). Sans ce COPY, ce test échouait silencieusement dans
+# l'image — invisible tant qu'aucune CI n'y exécutait la suite (#113).
+COPY docker-compose.yml ./
 
 RUN useradd -r -s /bin/false mcp && chown -R mcp:mcp /app /openbao
 USER mcp

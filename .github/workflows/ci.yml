@@ -1,0 +1,71 @@
+name: CI
+
+# Le dépôt n'exécutait AUCUN test en intégration continue (issue #113) : la
+# qualité des releases reposait entièrement sur des exécutions locales. Deux
+# conséquences constatées — des tests rouges ont vécu plusieurs versions sans
+# être vus (#98), et l'image de la v0.10.1 a atteint la qualification plateforme
+# sans démarrer (#125), parce que rien ne construisait l'image ni ne vérifiait
+# qu'elle importait son propre framework.
+#
+# Ce workflow construit les ARTEFACTS RÉELLEMENT LIVRÉS et exécute la suite
+# DEDANS, plutôt que dans un environnement Python reconstitué qui ne prouverait
+# rien sur l'image. Il ne remplace pas les tests e2e (opt-in, stack complète avec
+# WAF et S3 de recette) : ceux-là restent hors CI.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  # Appelable par `release.yml` : la publication d'un tag et d'une release ne
+  # doit JAMAIS précéder la validation. Les deux workflows se déclenchant tous
+  # deux sur `push: main`, ils courraient sinon en parallèle — une release
+  # pourrait être publiée avant la fin de la CI, voire malgré son échec.
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image-and-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # La cible `production` porte le garde d'import à la construction
+      # (issue #125) : une résolution de dépendances incompatible fait échouer
+      # CETTE étape, et non le démarrage d'un conteneur en aval de la livraison.
+      - name: Construire l'image de production
+        run: docker build --target production -t mcp-vault:ci .
+
+      # Le garde de construction prouve que l'import passe au BUILD. Ici on
+      # vérifie la propriété complémentaire : l'image livrée contient bien la
+      # version VERROUILLÉE, et non une version résolue librement.
+      - name: Vérifier que l'image porte les versions verrouillées
+        run: |
+          set -euo pipefail
+          expected="$(sed -n 's/^mcp==\(.*\)$/\1/p' requirements.lock)"
+          [ -n "$expected" ] || { echo "::error::mcp absent de requirements.lock"; exit 1; }
+          installed="$(docker run --rm mcp-vault:ci \
+            python -c "import importlib.metadata as m; print(m.version('mcp'))")"
+          echo "mcp verrouillé=${expected} installé=${installed}"
+          if [ "$installed" != "$expected" ]; then
+            echo "::error::l'image installe mcp ${installed}, le verrou épingle ${expected}"
+            exit 1
+          fi
+          docker run --rm mcp-vault:ci python -c "from mcp.server.fastmcp import FastMCP"
+
+      - name: Construire l'image de test
+        run: docker build --target test -t mcp-vault:ci-test .
+
+      # ENTRYPOINT de la cible `test` = pytest sur tests/. La suite s'exécute
+      # donc dans l'image, avec les versions verrouillées — l'artefact testé est
+      # celui qu'on livre.
+      - name: Exécuter la suite de tests dans l'image
+        run: docker run --rm mcp-vault:ci-test

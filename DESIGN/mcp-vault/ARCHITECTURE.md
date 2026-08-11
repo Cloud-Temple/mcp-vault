@@ -1,6 +1,6 @@
 # Architecture — MCP Vault
 
-> **Version** : 0.10.1 | **Date** : 2026-08-11 | **Auteur** : Cloud Temple  
+> **Version** : 0.10.2 | **Date** : 2026-08-11 | **Auteur** : Cloud Temple  
 > **Projet** : mcp-vault | **Licence** : Apache 2.0  
 > **Statut** : ✅ Implémenté — Production-ready (PKI interne v0.5.x + C18 v0.6.x)
 
@@ -1795,65 +1795,41 @@ mcp-vault/
 │       ├── commands.py        # CLI Click (vault, secret, ssh, token, audit)
 │       ├── shell.py           # Shell interactif
 │       └── display.py         # Affichage Rich
-├── Dockerfile                 # Python 3.11 + binaire OpenBao
+├── Dockerfile                 # Python 3.12 + binaire OpenBao
 ├── docker-compose.yml         # WAF + mcp-vault + volume + réseau
-├── requirements.txt
+├── requirements.lock          # versions installées dans l'image (fait foi)
+├── requirements.txt           # planchers déclarés + outillage de test
 ├── .env.example
 └── VERSION
 ```
 
-### 10.1 Dockerfile
+### 10.1 Dockerfile et dépendances
 
-```dockerfile
-FROM python:3.11-slim
+La recette exacte fait foi dans le dépôt (`Dockerfile`, `requirements.lock`,
+`requirements.txt`) ; elle n'est pas dupliquée ici — une copie de courtoisie
+avait divergé au point de contredire le code (issue #125). Trois invariants
+structurent la construction :
 
-WORKDIR /app
+1. **Le verrou fait foi pour les versions d'exécution.** La cible `production`
+   installe `requirements.lock` seul. `requirements.txt` ne déclare que des
+   planchers : le laisser piloter l'image la rend dépendante de ce qui est
+   publié en amont le jour de la construction — c'est exactement ainsi que la
+   parution de `mcp 2.0.0`, qui a supprimé `mcp.server.fastmcp`, a rendu
+   l'image non démarrable sur toutes les versions depuis la v0.4.5.
+2. **La construction vérifie l'import critique.** Chaque stage qui installe des
+   dépendances exécute `python -c "from mcp.server.fastmcp import FastMCP"` :
+   une résolution incompatible fait échouer le `build`, et non le démarrage du
+   conteneur en production.
+3. **L'outillage de test reste hors de l'image de production.** Le verrou ne
+   contient pas `pytest` ; la cible `test` reçoit donc le verrou ET
+   `requirements.txt` en une seule invocation pip, dont l'intersection préserve
+   les versions verrouillées.
 
-# Installer OpenBao
-ARG OPENBAO_VERSION=2.1.0
-RUN apt-get update && apt-get install -y wget unzip && \
-    wget -q https://github.com/openbao/openbao/releases/download/v${OPENBAO_VERSION}/bao_${OPENBAO_VERSION}_linux_amd64.zip && \
-    unzip bao_${OPENBAO_VERSION}_linux_amd64.zip -d /usr/local/bin/ && \
-    chmod +x /usr/local/bin/bao && \
-    rm bao_${OPENBAO_VERSION}_linux_amd64.zip && \
-    apt-get remove -y wget unzip && apt-get autoremove -y
-
-# Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Application
-COPY src/ src/
-COPY scripts/ scripts/
-COPY VERSION .
-
-# Sécurité : utilisateur non-root
-# Le volume /data/openbao est monté via docker-compose (persistance)
-RUN useradd -r -u 10001 -s /bin/false mcp && \
-    mkdir -p /data/openbao && \
-    chown -R mcp:mcp /data/openbao
-USER mcp
-
-EXPOSE 8030
-
-CMD ["python", "-m", "mcp_vault"]
-```
-
-### 10.2 requirements.txt
-
-```
-mcp[cli]>=1.8.0
-uvicorn==0.42.0  # épinglé (issue #110)
-pydantic>=2.0
-pydantic-settings>=2.0
-boto3>=1.38.43  # écriture conditionnelle IfMatch (issue #121)
-hvac>=2.0
-click>=8.1
-prompt-toolkit>=3.0
-rich>=13.0
-httpx>=0.27
-python-dotenv>=1.0
-```
+Le contrat est verrouillé par `tests/test_packaging_contract_125.py`, qui vérifie
+notamment que le verrou satisfait TOUS les planchers déclarés — sans quoi une
+régénération du verrou pourrait repasser sous `boto3>=1.38.43`
+(`PutObject.IfMatch`, #121) ou sous `uvicorn==0.42.0` (ré-émission du SIGTERM
+dont dépend le chemin d'arrêt, #110).
 
 ---
 
@@ -2691,4 +2667,4 @@ result = await vault_client.call("ssh_sign_key", {
 
 ---
 
-*Document mis à jour le 11 août 2026 — MCP Vault v0.10.1 (39 outils MCP, bornes réseau S3 et chemin d'arrêt porté par le lifespan ASGI (#110 lot 1), échec bruyant sur clés d'unseal inexploitables (#121), permission dédiée `wrap` non-admin pour le broker JIT (verrou wrap-only, policy stricte obligatoire, registre scopé vault+chemins, #115), WAF Coraza v3.7.0 avec parsing JSON borné sur /mcp (profondeur, taille, refus des corps non analysables) et exclusions de cibles anti-évasion, accès SSH JIT opérateur (bearer nominatif + policy dédiée, clé publique pré-enrôlée), pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer, écriture create-only atomique (CAS), sync S3 conditionnelle, contrat de configuration `.env.example` déterministe et testé)*
+*Document mis à jour le 11 août 2026 — MCP Vault v0.10.2 (39 outils MCP, reproductibilité de l'image : verrou consommé par le Dockerfile et garde d'import à la construction (#125), CI d'exécution des tests sur les artefacts livrés (#113), bornes réseau S3 et chemin d'arrêt porté par le lifespan ASGI (#110 lot 1), échec bruyant sur clés d'unseal inexploitables (#121), permission dédiée `wrap` non-admin pour le broker JIT (verrou wrap-only, policy stricte obligatoire, registre scopé vault+chemins, #115), WAF Coraza v3.7.0 avec parsing JSON borné sur /mcp (profondeur, taille, refus des corps non analysables) et exclusions de cibles anti-évasion, accès SSH JIT opérateur (bearer nominatif + policy dédiée, clé publique pré-enrôlée), pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer, écriture create-only atomique (CAS), sync S3 conditionnelle, contrat de configuration `.env.example` déterministe et testé)*

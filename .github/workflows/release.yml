@@ -20,7 +20,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # GARDE (issue #113) : rien n'est tagué ni publié tant que la CI n'a pas
+  # validé CE commit. Sans ce `needs`, les deux workflows se déclenchent
+  # indépendamment sur `push: main` et la release peut sortir avant la fin de la
+  # CI — voire malgré son échec. Le workflow appelé construit les images et
+  # exécute la suite dans l'image de test.
+  verify:
+    uses: ./.github/workflows/ci.yml
+
   release:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (historique complet pour les tags)

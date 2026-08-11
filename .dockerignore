@@ -15,20 +15,26 @@
 # le bon sens de l'erreur.
 #
 # Chemins réellement copiés par le Dockerfile :
-#   cible production : requirements.txt, src/, VERSION
-#   cible test       : + tests/, scripts/, pytest.ini, .env.example, DESIGN/,
-#                        CHANGELOG.md, Dockerfile
+#   cible production : requirements.lock, src/, VERSION
+#   cible test       : + requirements.txt, tests/, scripts/, pytest.ini,
+#                        .env.example, DESIGN/, CHANGELOG.md, Dockerfile,
+#                        README.md, README.en.md, docker-compose.yml
 # =============================================================================
 
 # --- 1. Tout est exclu par défaut ---
 *
 
 # --- 2. Ré-inclusions nominatives (cible production) ---
-!requirements.txt
+# `requirements.lock` est la source d'autorité des versions installées dans
+# l'image (issue #125). Son absence de cette allowlist ferait échouer le COPY.
+!requirements.lock
 !src
 !VERSION
 
 # --- 3. Ré-inclusions nominatives (cible test) ---
+# `requirements.txt` n'est plus copié qu'ici : il n'apporte à l'image de test
+# que les outils absents du verrou (pytest, pytest-asyncio).
+!requirements.txt
 !tests
 !scripts
 !pytest.ini
@@ -37,6 +43,12 @@
 !CHANGELOG.md
 !Dockerfile
 !.dockerignore
+# Fixtures de tests de contrat : estampilles de version (README FR/EN) et délai
+# de grâce d'arrêt (docker-compose.yml). Aucun credential — le compose ne
+# référence que des variables d'environnement.
+!README.md
+!README.en.md
+!docker-compose.yml
 
 # --- 4. Bruit à l'intérieur des répertoires ré-inclus ---
 # Les règles ci-dessus ré-incluent des arborescences entières ; on retire ensuite

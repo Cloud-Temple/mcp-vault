@@ -1,6 +1,10 @@
 # --- MCP Framework ---
 # SÉCURITÉ V3-01 : >=1.23.0 corrige CVE-2025-53366 (DoS) et CVE-2025-66416 (DNS rebinding)
-mcp[cli]>=1.23.0
+# BORNE HAUTE (issue #125) : `mcp 2.0.0` a supprimé `mcp.server.fastmcp`, importé
+# par src/mcp_vault/server.py. Sans cette borne, un `pip install -r` hors Docker
+# (poste de développement, README) réinstalle le défaut que le verrou corrige
+# côté image. Le passage à MCP 2.x est une migration à part entière.
+mcp[cli]>=1.23.0,<2
 
 # --- Configuration ---
 pydantic-settings>=2.0
