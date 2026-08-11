@@ -65,7 +65,7 @@ def test_decryption_failure_raises_loudly_with_actionable_message():
          patch.object(ol, "_check_and_migrate_legacy_keys", return_value=None), \
          patch.object(ol, "_download_encrypted_keys_from_s3",
                       side_effect=ValueError("Déchiffrement impossible")), \
-         patch.object(ol, "_init_keys_memory", None, create=True):
+         patch.object(ol, "_in_memory_keys", None):
         with pytest.raises(ol.UnsealKeysUnrecoverable) as exc:
             _run(ol.unseal_vault())
 
@@ -188,18 +188,19 @@ def _isolated_store_singletons():
     fermée par l'issue #64. On sauvegarde et on restaure.
     """
     import mcp_vault.audit as au
+    import mcp_vault.auth.jwt_validator as jv
     import mcp_vault.auth.mission_bindings as mb
     import mcp_vault.auth.policies as pol
     import mcp_vault.auth.token_store as ts
     import mcp_vault.vault.wrapping as wr
 
     saved = (ts._token_store, pol._policy_store, mb._mission_binding_store,
-             wr._wrap_registry, au._audit_store)
+             wr._wrap_registry, au._audit_store, jv._validator)
     try:
         yield
     finally:
         (ts._token_store, pol._policy_store, mb._mission_binding_store,
-         wr._wrap_registry, au._audit_store) = saved
+         wr._wrap_registry, au._audit_store, jv._validator) = saved
 
 
 def test_vault_startup_propagates_instead_of_degrading(_isolated_store_singletons):
@@ -312,12 +313,20 @@ class _FakeS3:
     """Faux S3 minimal : mémorise l'ordre des écritures et permet d'injecter
     une modification concurrente ou un échec de PUT."""
 
-    def __init__(self, objects, fail_on_key=None, mutate_before_put=None):
+    def __init__(self, objects, fail_on_key=None, mutate_before_put=None,
+                 mutate_in_toctou_window=None, etags=True):
         self.objects = dict(objects)          # key -> contenu str
         self.puts = []                        # ordre des écritures
         self.gets = 0
         self.fail_on_key = fail_on_key
         self.mutate_before_put = mutate_before_put
+        # Modification survenant APRÈS la relecture de contrôle, dans la fenêtre
+        # que seule une écriture conditionnelle (If-Match) peut fermer.
+        self.mutate_in_toctou_window = mutate_in_toctou_window
+        self.etags = etags
+
+    def _etag(self, key):
+        return f'"{hash(self.objects[key])}"' if self.etags else None
 
     def get_object(self, Bucket=None, Key=None):
         self.gets += 1
@@ -335,11 +344,17 @@ class _FakeS3:
 
         if Key not in self.objects:
             raise RuntimeError("NoSuchKey")
-        return {"Body": _Body(self.objects[Key]), "ETag": f'"{hash(self.objects[Key])}"'}
+        return {"Body": _Body(self.objects[Key]), "ETag": self._etag(Key)}
 
-    def put_object(self, Bucket=None, Key=None, Body=None, **kw):
+    def put_object(self, Bucket=None, Key=None, Body=None, IfMatch=None, **kw):
         if self.fail_on_key == Key:
             raise RuntimeError("PUT refusé (test)")
+        # Écriture concurrente glissée dans la fenêtre contrôle → écriture.
+        if IfMatch and self.mutate_in_toctou_window:
+            self.objects[Key] = self.mutate_in_toctou_window
+            self.mutate_in_toctou_window = None
+        if IfMatch is not None and Key in self.objects and IfMatch != self._etag(Key):
+            raise RuntimeError("An error occurred (PreconditionFailed): 412")
         self.puts.append(Key)
         self.objects[Key] = Body.decode("ascii")
 
@@ -443,6 +458,107 @@ def test_rotation_reports_restore_path_if_current_put_fails(tmp_path):
     message = str(exc.value)
     assert ".S.bak" in message, "le message doit pointer la copie de retour arrière"
     assert "NE PAS réinitialiser" in message
+
+
+def test_rotation_conditional_put_closes_the_toctou_window(tmp_path):
+    """Une écriture concurrente DANS la fenêtre contrôle → écriture doit échouer.
+
+    La relecture de contrôle ne suffit pas : seule l'écriture conditionnelle
+    (If-Match) rend la vérification atomique côté stockage.
+    """
+    mod = _import_rotate()
+    original = _encrypted_payload(_OLD_KEY)
+    concurrent = _encrypted_payload(_OLD_KEY)
+    s3 = _FakeS3({mod._S3_INIT_KEY: original},
+                 mutate_in_toctou_window=concurrent)
+
+    with pytest.raises(mod.RotationAborted) as exc:
+        mod.rotate(s3, "bucket", _OLD_KEY, _NEW_KEY,
+                   backup_path=str(tmp_path / "b.bak"), dry_run=False, stamp="S")
+
+    assert "CONFLIT" in str(exc.value)
+    assert mod._S3_INIT_KEY not in s3.puts, \
+        "l'écriture conditionnelle aurait dû être refusée (412)"
+    assert s3.objects[mod._S3_INIT_KEY] == concurrent, \
+        "la version concurrente doit rester intacte"
+
+
+def test_rotation_refuses_when_storage_gives_no_etag(tmp_path):
+    """Sans ETag, l'écriture conditionnelle est impossible → refus explicite.
+
+    Mieux vaut refuser que promettre une garantie qu'on ne peut pas tenir.
+    """
+    mod = _import_rotate()
+    s3 = _FakeS3({mod._S3_INIT_KEY: _encrypted_payload(_OLD_KEY)}, etags=False)
+
+    with pytest.raises(mod.RotationAborted) as exc:
+        mod.rotate(s3, "bucket", _OLD_KEY, _NEW_KEY,
+                   backup_path=str(tmp_path / "b.bak"), dry_run=False, stamp="S")
+
+    assert "ETag" in str(exc.value) and "refusée" in str(exc.value)
+    assert s3.puts == []
+
+
+def test_rotation_verifies_by_rereading_from_storage(tmp_path):
+    """La vérification finale doit RELIRE le stockage, pas se croire sur parole.
+
+    NON-COMPLAISANCE : on fait diverger l'objet stocké au moment de la relecture
+    finale ; si le script ne relisait pas, il conclurait à tort au succès.
+    """
+    mod = _import_rotate()
+    s3 = _FakeS3({mod._S3_INIT_KEY: _encrypted_payload(_OLD_KEY)})
+
+    original_get = s3.get_object
+    state = {"puts_seen": False}
+
+    def _get_with_corruption(Bucket=None, Key=None):
+        # Après l'écriture de l'objet courant, le stockage renvoie autre chose.
+        if state["puts_seen"] and Key == mod._S3_INIT_KEY:
+            # Contenu DIFFÉRENT (autres clés d'unseal), chiffré avec la
+            # nouvelle clé : déchiffrable, mais ≠ de l'original.
+            from mcp_vault.openbao.crypto import encrypt_with_bootstrap_key
+            s3.objects[Key] = encrypt_with_bootstrap_key(
+                json.dumps({"keys": ["AUTRE-unseal"], "root_token": "s.autre"}),
+                _NEW_KEY)
+        return original_get(Bucket=Bucket, Key=Key)
+
+    original_put = s3.put_object
+
+    def _put(Bucket=None, Key=None, Body=None, **kw):
+        original_put(Bucket=Bucket, Key=Key, Body=Body, **kw)
+        if Key == mod._S3_INIT_KEY:
+            state["puts_seen"] = True
+
+    s3.get_object = _get_with_corruption
+    s3.put_object = _put
+
+    with pytest.raises(mod.RotationAborted) as exc:
+        mod.rotate(s3, "bucket", _OLD_KEY, _NEW_KEY,
+                   backup_path=str(tmp_path / "b.bak"), dry_run=False, stamp="S")
+
+    assert "RESTAURER" in str(exc.value), \
+        "une relecture incohérente doit exiger la restauration"
+
+
+@pytest.mark.parametrize("artefact", [
+    ".gitkeep", ".DS_Store", ".s3_sync_restore_staging",
+])
+def test_data_probe_ignores_known_artefacts(artefact, tmp_path):
+    """Un artefact seul n'est PAS une donnée de coffre (#121, revue).
+
+    Sinon un dossier fraîchement monté ferait refuser un démarrage légitime.
+    """
+    from mcp_vault.openbao import lifecycle as ol
+
+    (tmp_path / artefact).touch()
+    settings = MagicMock()
+    settings.openbao_data_dir = str(tmp_path)
+    with patch.object(ol, "get_settings", return_value=settings):
+        assert ol._openbao_data_exists() is False, \
+            f"{artefact} ne doit pas compter comme une donnée"
+        # Un vrai fichier de données, lui, compte.
+        (tmp_path / "core").mkdir()
+        assert ol._openbao_data_exists() is True
 
 
 def test_rotation_script_documents_exclusive_execution_and_cold_restart():

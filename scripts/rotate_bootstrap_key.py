@@ -17,9 +17,10 @@ l'objet chiffré, les secrets sont perdus.
 instance vivante (ou une autre rotation, une initialisation, une migration
 legacy) peut réécrire l'objet chiffré pendant l'opération : le script écrirait
 alors par-dessus une version plus récente, dont le volume peut dépendre.
-Le script se protège en relisant et comparant l'objet (contenu + ETag) juste
-avant l'écriture, et **abandonne au moindre changement** — mais cette garde ne
-remplace pas l'exclusion.
+Le script se protège en relisant et comparant l'objet (contenu + ETag) puis en
+écrivant en **If-Match** (écriture conditionnelle atomique) : un changement
+concurrent fait échouer le PUT au lieu d'écraser. Cette garde ne remplace
+toutefois pas l'exclusion.
 
 ## Séquence
 
@@ -31,7 +32,9 @@ remplace pas l'exclusion.
      AVANT toute écriture distante ;
   6. écrire une COPIE horodatée sur S3 (filet de retour arrière) ;
   7. RELIRE et comparer (contenu + ETag) — abandon si l'objet a changé ;
-  8. écrire l'objet courant ;
+  8. écrire l'objet courant en ÉCRITURE CONDITIONNELLE (If-Match sur
+     l'ETag lu à l'étape 1) — un changement concurrent fait échouer le PUT
+     au lieu d'écraser ;
   9. relire et re-vérifier depuis S3.
 
 Aucune clé d'unseal ni valeur de bootstrap n'est affichée.
@@ -109,8 +112,14 @@ def rotate(s3, bucket: str, old_key: str, new_key: str, *,
     Returns:
         {"rollback_key": str|None, "backup_path": str|None}
     """
-    # ── 1. Lire l'objet chiffré (+ ETag pour la détection de conflit) ──────
+    # ── 1. Lire l'objet chiffré (+ ETag pour l'écriture conditionnelle) ───
     encrypted_b64, etag = _read_object(s3, bucket)
+    if not dry_run and not etag:
+        raise RotationAborted(
+            "Le stockage n'a pas fourni d'ETag pour l'objet chiffré : "
+            "l'écriture conditionnelle (If-Match) est alors impossible, donc "
+            "la garantie « abandon au moindre changement concurrent » ne peut "
+            "pas être tenue. Rotation refusée — rien n'a été modifié.")
     _ok(f"Objet chiffré lu ({len(encrypted_b64)} octets base64)")
 
     # ── 2. Sauvegarde locale AVANT toute opération (objet CHIFFRÉ) ─────────
@@ -191,11 +200,24 @@ def rotate(s3, bucket: str, old_key: str, new_key: str, *,
             "Arrêter toutes les instances, puis relancer.")
     _ok("Aucun changement concurrent détecté (contenu et ETag identiques)")
 
-    # ── 8. Écrire l'objet courant ─────────────────────────────────────────
+    # ── 8. Écrire l'objet courant — ÉCRITURE CONDITIONNELLE ───────────────
+    # `IfMatch` rend la vérification ATOMIQUE côté stockage : la relecture de
+    # l'étape 7 ne ferme pas à elle seule la fenêtre entre le contrôle et
+    # l'écriture (TOCTOU). Une modification concurrente fait échouer le PUT
+    # (412/409) au lieu d'écraser une version plus récente.
     try:
         s3.put_object(Bucket=bucket, Key=_S3_INIT_KEY,
-                      Body=re_encrypted.encode("ascii"))
+                      Body=re_encrypted.encode("ascii"), IfMatch=etag)
     except Exception as exc:
+        text = str(exc)
+        if any(marker in text for marker in
+               ("412", "409", "PreconditionFailed", "ConditionalRequestConflict")):
+            raise RotationAborted(
+                "CONFLIT à l'écriture : l'objet chiffré a été modifié entre la "
+                "vérification et l'écriture (écriture conditionnelle refusée). "
+                "Rotation ABANDONNÉE ; l'objet courant est intact et une copie de "
+                f"l'état initial reste dans s3://{bucket}/{rollback_key}. "
+                "Arrêter toutes les instances, puis relancer.") from exc
         raise RotationAborted(
             f"Écriture de l'objet courant échouée ({type(exc).__name__}). "
             f"L'objet d'origine est peut-être intact ; vérifier, et restaurer "
