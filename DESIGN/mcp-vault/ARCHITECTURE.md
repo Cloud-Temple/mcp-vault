@@ -1811,9 +1811,11 @@ avait divergé au point de contredire le code (issue #125). Trois invariants
 structurent la construction :
 
 1. **Le verrou fait foi pour les versions d'exécution.** La cible `production`
-   installe `requirements.lock` seul. `requirements.txt` ne déclare que des
-   planchers : le laisser piloter l'image la rend dépendante de ce qui est
-   publié en amont le jour de la construction — c'est exactement ainsi que la
+   installe `requirements.lock` seul. `requirements.txt` déclare des
+   CONTRAINTES (majoritairement des planchers, plus une borne haute sur `mcp` et
+   une égalité stricte sur `uvicorn`), et non des versions résolues : le laisser
+   piloter l'image la rend dépendante de ce qui est publié en amont le jour de
+   la construction — c'est exactement ainsi que la
    parution de `mcp 2.0.0`, qui a supprimé `mcp.server.fastmcp`, a rendu
    l'image non démarrable sur toutes les versions depuis la v0.4.5.
 2. **La construction vérifie l'import critique.** Chaque stage qui installe des

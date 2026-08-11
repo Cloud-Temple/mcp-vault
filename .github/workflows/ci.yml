@@ -15,14 +15,18 @@ name: CI
 on:
   pull_request:
     branches: [main]
-  push:
-    branches: [main]
-  # Appelable par `release.yml` : la publication d'un tag et d'une release ne
-  # doit JAMAIS précéder la validation. Les deux workflows se déclenchant tous
-  # deux sur `push: main`, ils courraient sinon en parallèle — une release
-  # pourrait être publiée avant la fin de la CI, voire malgré son échec.
+  # Appelable par `release.yml`, qui en fait un `needs` de son job de
+  # publication : aucun tag ni aucune release ne sort sans validation préalable.
   workflow_call:
 
+# PAS de déclencheur `push: main` — délibéré (revue post-commit). Le dépôt
+# travaille exclusivement par PR : un push sur `main` est donc toujours un merge
+# dont la PR vient d'être validée ici, et `release.yml` rappelle explicitement ce
+# workflow. Le conserver produisait deux exécutions concurrentes sur le même
+# `github.ref`, donc dans le MÊME groupe de concurrence ci-dessous : avec
+# `cancel-in-progress`, la CI appelée par la release pouvait être annulée par la
+# CI autonome (ou l'inverse) — une garde de release non déterministe, en plus
+# d'un coût doublé.
 permissions:
   contents: read
 
@@ -64,8 +68,11 @@ jobs:
       - name: Construire l'image de test
         run: docker build --target test -t mcp-vault:ci-test .
 
-      # ENTRYPOINT de la cible `test` = pytest sur tests/. La suite s'exécute
-      # donc dans l'image, avec les versions verrouillées — l'artefact testé est
-      # celui qu'on livre.
+      # ENTRYPOINT de la cible `test` = pytest sur tests/. C'est un stage
+      # DISTINCT de `production` — pas l'artefact livré — mais il partage le
+      # même verrou et les mêmes sources : la suite s'exécute donc sur les
+      # versions réellement installées en production, et non sur celles d'un
+      # environnement Python reconstitué. L'image livrée, elle, est construite
+      # et sondée par les deux étapes précédentes.
       - name: Exécuter la suite de tests dans l'image
         run: docker run --rm mcp-vault:ci-test

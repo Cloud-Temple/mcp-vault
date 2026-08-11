@@ -999,7 +999,7 @@ Voir `ARCHITECTURE.md §11.3` pour les diagrammes d'architecture et les étapes 
 
 | Package             | Version | Rôle                                          |
 | ------------------- | ------- | --------------------------------------------- |
-| `mcp[cli]`          | ≥1.9.0  | Framework MCP (FastMCP, Streamable HTTP)      |
+| `mcp[cli]`          | ≥1.23.0,<2 | Framework MCP (FastMCP, Streamable HTTP). Plancher : CVE-2025-53366 / CVE-2025-66416 (V3-01). Borne haute : `mcp 2.0.0` supprime `mcp.server.fastmcp` (#125) |
 | `pydantic-settings` | ≥2.0    | Configuration env vars                        |
 | `boto3`             | ≥1.38.43 | Client S3 Dell ECS — plancher imposé par `PutObject.IfMatch` (écriture conditionnelle, issue #121) |
 | `hvac`              | ≥2.3.0  | Client Python pour OpenBao/Vault              |
