@@ -2,8 +2,9 @@
 # SÉCURITÉ V3-01 : >=1.23.0 corrige CVE-2025-53366 (DoS) et CVE-2025-66416 (DNS rebinding)
 # BORNE HAUTE (issue #125) : `mcp 2.0.0` a supprimé `mcp.server.fastmcp`, importé
 # par src/mcp_vault/server.py. Sans cette borne, un `pip install -r` hors Docker
-# (poste de développement, README) réinstalle le défaut que le verrou corrige
-# côté image. Le passage à MCP 2.x est une migration à part entière.
+# (venv de développement, où la suite est exécutée avant chaque livraison)
+# réinstalle le défaut que le verrou corrige côté image. Le passage à MCP 2.x
+# est une migration à part entière.
 mcp[cli]>=1.23.0,<2
 
 # --- Configuration ---
@@ -47,3 +48,8 @@ python-dotenv>=1.0
 # la suite complète.
 pytest==9.1.1
 pytest-asyncio==1.4.0
+# Transitives de pytest, épinglées pour la même raison : sans elles la chaîne de
+# test n'est reproductible qu'en apparence. `packaging`, l'autre transitive, est
+# déjà épinglée par le verrou (dépendance d'exécution).
+pluggy==1.6.0
+iniconfig==2.3.0

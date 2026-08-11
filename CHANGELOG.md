@@ -32,8 +32,8 @@ Dockerfile ne le consommait**.
   FastMCP"` dans les deux stages. Une résolution incompatible fait désormais
   échouer le `build`, au lieu de se découvrir au démarrage en production.
 - **Borne haute** `mcp[cli]>=1.23.0,<2` dans `requirements.txt` : le verrou
-  protège l'image, cette borne protège l'installation hors Docker (poste de
-  développement, procédure du README). Le passage à MCP 2.x est une migration à
+  protège l'image, cette borne protège l'installation hors Docker (venv de
+  développement, où la suite est jouée avant chaque livraison). Le passage à MCP 2.x est une migration à
   part entière.
 - `requirements.lock` ajouté à l'allowlist `.dockerignore` (sans quoi le `COPY`
   échouerait), et `python-dateutil` — seule dépendance transitive installée mais

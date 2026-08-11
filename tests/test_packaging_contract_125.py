@@ -48,8 +48,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Outils présents dans `requirements.txt` mais délibérément ABSENTS de l'image de
 # production (durcissement P2-8 : les tests ne sont pas embarqués en prod). Le
-# verrou n'a donc pas à les épingler.
-TEST_ONLY = {"pytest", "pytest-asyncio"}
+# verrou n'a donc pas à les épingler — mais ils sont épinglés dans le `.txt`,
+# car la chaîne de test est ce qui garde la release. `pluggy` et `iniconfig`
+# sont les transitives de pytest ; `packaging`, la troisième, est déjà dans le
+# verrou au titre des dépendances d'exécution.
+TEST_ONLY = {"pytest", "pytest-asyncio", "pluggy", "iniconfig"}
 
 
 def _read(name: str) -> str:
@@ -130,7 +133,7 @@ def test_every_dockerfile_pip_install_consumes_the_lock() -> None:
 def test_requirements_bounds_mcp_below_the_breaking_major() -> None:
     """
     Le verrou protège l'IMAGE. Un `pip install -r requirements.txt` hors Docker
-    (poste de développement, procédure du README) réinstallerait le défaut.
+    (venv de développement) réinstallerait le défaut.
     """
     mcp = _requirements().get("mcp")
     assert mcp is not None, "mcp absent de requirements.txt"

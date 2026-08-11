@@ -1828,7 +1828,7 @@ structurent la construction :
    les versions verrouillées.
 
 Le contrat est verrouillé par `tests/test_packaging_contract_125.py`, qui vérifie
-notamment que le verrou satisfait TOUS les planchers déclarés — sans quoi une
+notamment que le verrou satisfait TOUTES les contraintes déclarées — sans quoi une
 régénération du verrou pourrait repasser sous `boto3>=1.38.43`
 (`PutObject.IfMatch`, #121) ou sous `uvicorn==0.42.0` (ré-émission du SIGTERM
 dont dépend le chemin d'arrêt, #110).
