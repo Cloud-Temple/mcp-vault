@@ -36,9 +36,11 @@ Dockerfile ne le consommait**.
   développement, où la suite est jouée avant chaque livraison). Le passage à MCP 2.x est une migration à
   part entière.
 - `requirements.lock` ajouté à l'allowlist `.dockerignore` (sans quoi le `COPY`
-  échouerait), et `python-dateutil` — seule dépendance transitive installée mais
-  non épinglée, relevée en revue — ajouté au verrou : « le verrou fait foi » ne
-  souffre pas d'exception silencieuse.
+  échouerait). Les trois dépendances qui flottaient encore, relevées en revue,
+  sont épinglées : `python-dateutil` au verrou (dépendance d'exécution de
+  botocore), `pluggy` et `iniconfig` dans `requirements.txt` (transitives de
+  pytest). « Le verrou fait foi » ne souffre plus d'exception silencieuse, et la
+  chaîne de test qui garde la release est reproductible en entier.
 - Le workflow de release **dépend désormais de la CI** (`needs: verify`) :
   aucun tag ni aucune release ne sort sans validation préalable. C'est la seule
   garde technique du dépôt — `main` n'a ni protection de branche ni ruleset.
@@ -83,8 +85,9 @@ exercée. Le constructeur de `VaultError` est désormais reproduit à l'identiqu
 contrat de reproductibilité : chaque `pip install` du Dockerfile consomme le
 verrou, `requirements.txt` borne MCP sous le majeur cassant, le garde d'import
 existe dans chaque stage installant des dépendances, la production n'embarque
-pas l'outillage de test — et, réciproquement, **le verrou respecte tous les
-planchers déclarés**. Ce dernier point protège les garanties durement acquises
+pas l'outillage de test — et, réciproquement, **le verrou respecte toutes les
+contraintes déclarées** (planchers, mais aussi la borne haute `<2` et l'égalité
+`uvicorn==0.42.0`). Ce dernier point protège les garanties durement acquises
 au lot 1 : `boto3>=1.38.43` porte `PutObject.IfMatch` (#121), `uvicorn==0.42.0`
 porte la ré-émission du SIGTERM dont dépend le chemin d'arrêt du coffre (#110).
 
