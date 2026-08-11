@@ -565,4 +565,4 @@ mcp-vault/
 
 ---
 
-**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.10.0
+**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.10.1

@@ -59,6 +59,23 @@ class Settings(BaseSettings):
     s3_secret_access_key: str = ""
     s3_bucket_name: str = ""
     s3_region_name: str = "fr1"
+    # Bornes réseau des appels S3 (issue #110, lot 1). Les défauts botocore
+    # (60 s connexion + 60 s lecture, retries "adaptive") laissent un appel
+    # lent monopoliser la boucle asyncio pendant plusieurs minutes — 488 s
+    # mesurées en production. Ces bornes plafonnent l'attente ; le retrait des
+    # appels S3 de la boucle est traité séparément (lots 2 et 3).
+    # `s3_max_attempts` = nombre TOTAL de tentatives (botocore
+    # `total_max_attempts`), pas un nombre de retries additionnels.
+    s3_connect_timeout: int = 5
+    s3_read_timeout: int = 30
+    s3_max_attempts: int = 2
+
+    # Plafond du pré-drain des connexions ASGI par uvicorn à l'arrêt (issue
+    # #110) : au-delà, uvicorn passe à la phase de shutdown du lifespan, où le
+    # coffre exécute seal + effacement des clés + sauvegarde finale. Sans
+    # plafond, des connexions clientes qui traînent consomment tout le délai de
+    # grâce du conteneur.
+    uvicorn_graceful_timeout: int = 10
 
     # --- OpenBao ---
     openbao_addr: str = "http://127.0.0.1:8200"
@@ -233,6 +250,25 @@ class Settings(BaseSettings):
                     "mission abortée."
                 )
 
+        return True, ""
+
+    def check_s3_timeouts(self) -> tuple[bool, str]:
+        """Valide les bornes réseau S3 au démarrage (fail-fast, issue #110).
+
+        Une valeur nulle ou négative signifierait « pas de borne » côté
+        botocore (ou lèverait à l'usage) : c'est exactement le défaut que ce
+        lot corrige. On refuse donc de démarrer plutôt que de servir avec des
+        appels S3 non bornés.
+        """
+        if self.s3_connect_timeout <= 0:
+            return False, (f"S3_CONNECT_TIMEOUT={self.s3_connect_timeout} invalide "
+                           "— doit être > 0 (secondes)")
+        if self.s3_read_timeout <= 0:
+            return False, (f"S3_READ_TIMEOUT={self.s3_read_timeout} invalide "
+                           "— doit être > 0 (secondes)")
+        if self.s3_max_attempts < 1:
+            return False, (f"S3_MAX_ATTEMPTS={self.s3_max_attempts} invalide — doit "
+                           "être >= 1 (nombre TOTAL de tentatives, 1 = aucun retry)")
         return True, ""
 
     def check_operator_ssh_jit_config(self) -> tuple[bool, str]:

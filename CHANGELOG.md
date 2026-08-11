@@ -1,5 +1,85 @@
 # Changelog — MCP Vault
 
+## [0.10.1] — 2026-08-11
+
+### Disponibilité : bornes réseau S3 et chemin d'arrêt réellement exécuté (issue #110, lot 1)
+
+Premier lot du chantier #110 (« un appel S3 bloquant gèle tout le coffre,
+488 s mesurées »). Ce lot **borne** l'incident et corrige un défaut d'arrêt
+découvert en revue ; le retrait des appels S3 de la boucle événementielle est
+traité dans les lots suivants (issues dédiées).
+
+**1. Le chemin d'arrêt ne s'exécutait jamais sur `docker stop`**
+
+`vault_shutdown()` (arrêt de la sync, seal OpenBao, effacement des clés
+d'unseal en mémoire, sauvegarde finale S3) était appelé **après**
+`server.serve()`. uvicorn ré-émet le SIGTERM qu'il a capturé une fois son
+arrêt interne terminé : le code placé après l'`await` ne s'exécutait donc pas.
+Conséquence en production : aucune sauvegarde finale et aucun seal explicite à
+chaque arrêt ou redéploiement (l'archive S3 datait du dernier cycle
+périodique, ≤ 60 s).
+
+- L'arrêt est désormais porté par le **lifespan ASGI**, exécuté pendant la
+  phase de shutdown d'uvicorn — donc avant la ré-émission du signal.
+- Le lifespan est **composé** autour de celui de FastMCP
+  (`session_manager.run()`), jamais remplacé : ordre
+  `vault_startup → FastMCP → service → FastMCP → vault_shutdown`. Sans cette
+  composition, toute requête MCP échouerait sur « Task group is not
+  initialized ».
+- Mode dégradé **inchangé** : `vault_startup()` qui lève ou retourne `False`
+  laisse le service démarrer et force `skip_upload=True` (invariant #94 : un
+  démarrage non abouti n'écrase jamais la sauvegarde S3).
+- `vault_shutdown()` devient **idempotent** ; `server.main()` conserve un appel
+  de secours si le lifespan n'a pas pu s'exécuter.
+- `uvicorn` **épinglé** à 0.42.0 (le comportement de ré-émission du signal
+  conditionne ce correctif) et `timeout_graceful_shutdown` borné
+  (`UVICORN_GRACEFUL_TIMEOUT`, défaut 10 s) pour que le pré-drain des
+  connexions ne consomme pas le budget d'arrêt du coffre.
+
+**2. Appels S3 bornés**
+
+Les deux clients boto3 étaient créés **sans timeout** (défauts : 60 s
+connexion + 60 s lecture, retries « adaptive ») — c'est ce qui transformait une
+lenteur S3 en gel de plusieurs minutes.
+
+- Nouvelles clés : `S3_CONNECT_TIMEOUT` (5 s), `S3_READ_TIMEOUT` (30 s),
+  `S3_MAX_ATTEMPTS` (2) — valeurs en configuration, jamais en dur ; refus de
+  démarrer si une borne est nulle ou négative.
+- `total_max_attempts` et non `max_attempts` : botocore compte `max_attempts`
+  comme des retries **après** la tentative initiale — `S3_MAX_ATTEMPTS=2`
+  signifie donc bien 2 appels réseau au total.
+- Mode `standard` au lieu d'`adaptive` : sans régulation adaptative côté
+  client, donc plus prévisible pendant une panne (le backoff avec jitter,
+  lui, subsiste).
+- Fabrique de configuration **unique** : `create_s3_clients()` (non-singleton)
+  passe par le même chemin — aucun client ne peut repartir sans bornes.
+
+**3. Délai de grâce Docker**
+
+`stop_grace_period: 120s` déclaré explicitement pour `mcp-vault` : le défaut
+Docker (10 s) tuait le processus avant le seal et la sauvegarde finale,
+maintenant que l'arrêt s'exécute réellement. Le budget couvre le pré-drain
+uvicorn, l'arrêt de la sync, le seal, l'effacement des clés, la sauvegarde
+finale bornée et l'arrêt d'OpenBao — vérifié par un test statique du Compose.
+
+**Effet attendu** : une panne S3 ne peut plus geler le coffre plusieurs
+minutes ; l'attente est plafonnée et l'arrêt propre est restauré. Le gel
+résiduel (le temps d'un appel borné) est traité par les lots 2 (#122) et
+3 (#123).
+
+⚠️ `S3_READ_TIMEOUT` est un délai d'**inactivité socket**, pas une durée
+totale de transfert : une archive de plusieurs Mo n'échoue pas parce que son
+transfert dépasse 30 s tant que les données progressent. Les valeurs livrées
+ne constituent donc pas une borne murale stricte (le backoff des tentatives et
+la compression locale ne sont pas inclus) — c'est un plafond opérationnel.
+
+Tests : `tests/test_s3_bounds_shutdown_110.py` (20 cas — bornes des deux
+clients, `total_max_attempts`, validation au boot, lifespan piloté sur la VRAIE
+stack via le protocole ASGI, ordre startup/shutdown, mode dégradé, idempotence
+rejouable après annulation, réarmement au nouveau cycle, délai de grâce du
+Compose). Preuve RED : 20/20 échouent sur l'état pré-correctif. Suite
+complète : 1122 passed / 14 skipped / 2 failed préexistants (#98).
+
 ## [0.10.0] — 2026-08-11
 
 ### Sécurité : permission dédiée non-admin `wrap` pour le broker JIT mcp-mission (issue #115)
