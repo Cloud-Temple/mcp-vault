@@ -39,5 +39,11 @@ prompt-toolkit>=3.0
 python-dotenv>=1.0
 
 # --- Tests (intégration réelle, pas de mocking) ---
-pytest>=8.0
-pytest-asyncio>=0.24.0
+# ÉPINGLÉS (issue #125, revue) : ces deux outils ne sont pas dans
+# `requirements.lock` — ils n'ont rien à faire dans l'image de production. Mais
+# la chaîne de test est ce qui GARDE la release (`release.yml` en dépend) : la
+# laisser flotter sur des planchers, c'est reproduire à l'identique le défaut
+# corrigé ici, un cran plus loin dans la chaîne. Versions constatées vertes sur
+# la suite complète.
+pytest==9.1.1
+pytest-asyncio==1.4.0

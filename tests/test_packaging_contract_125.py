@@ -89,6 +89,24 @@ def _pip_install_commands() -> list[str]:
     ]
 
 
+def _stages() -> dict[str, str]:
+    """Corps de chaque stage du Dockerfile, indexé par son nom `AS <nom>`.
+
+    Le découpage par stage est nécessaire aux tests qui portent sur UN stage
+    précis : compter des occurrences sur le fichier entier laisserait passer
+    deux gardes dans le même stage et aucun dans un autre.
+    """
+    stages: dict[str, str] = {}
+    parts = re.split(r"^FROM\s+(.*)$", _read("Dockerfile"), flags=re.M)
+    # parts = [préambule, en-tête1, corps1, en-tête2, corps2, ...]
+    for header, body in zip(parts[1::2], parts[2::2]):
+        match = re.search(r"\bAS\s+(\S+)", header)
+        if match:
+            stages[match.group(1)] = body
+    assert stages, "aucun stage nommé trouvé dans le Dockerfile : test à revoir"
+    return stages
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 1-2 : preuves du défaut (RED sur `main` avant correctif)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -185,18 +203,20 @@ def test_build_verifies_the_import_that_broke_production() -> None:
     """
     La construction doit échouer sur une résolution incompatible — le défaut ne
     doit plus se découvrir au démarrage du conteneur, en aval de la livraison.
+
+    La vérification est faite STAGE PAR STAGE (revue) : un simple comptage
+    global laisserait passer deux gardes dans le même stage, en laissant un
+    autre stage capable de produire une image qui ne démarre pas.
     """
-    dockerfile = _read("Dockerfile")
-    guards = re.findall(
-        r"^RUN python -c .from mcp\.server\.fastmcp import FastMCP.$",
-        dockerfile,
-        re.M,
-    )
-    installs = _pip_install_commands()
-    assert len(guards) >= len(installs), (
-        f"{len(installs)} stage(s) installent des dépendances mais seulement "
-        f"{len(guards)} garde(s) d'import à la construction — un stage peut "
-        "produire une image qui ne démarre pas"
+    guard = re.compile(r"^RUN python -c .from mcp\.server\.fastmcp import FastMCP.$", re.M)
+
+    unguarded = [
+        name for name, body in _stages().items()
+        if re.search(r"^RUN pip install", body, re.M) and not guard.search(body)
+    ]
+    assert unguarded == [], (
+        "stages installant des dépendances sans garde d'import à la "
+        f"construction : {unguarded}"
     )
 
 
@@ -206,12 +226,10 @@ def test_production_stage_never_installs_the_test_tooling() -> None:
     en passant le verrou : `requirements.txt` porte pytest, et ne doit donc être
     installé QUE dans le stage de test.
     """
-    dockerfile = _read("Dockerfile")
-    stages = re.split(r"^FROM ", dockerfile, flags=re.M)
-    production = [s for s in stages if s.startswith("python:3.12-slim") and "AS production" in s]
-    assert len(production) == 1, "stage de production introuvable ou dupliqué"
+    production = _stages().get("production")
+    assert production is not None, "stage `production` introuvable : test à revoir"
 
-    installs = re.findall(r"^RUN pip install.*$", production[0], re.M)
+    installs = re.findall(r"^RUN pip install.*$", production, re.M)
     assert installs, "le stage de production n'installe aucune dépendance : test à revoir"
     with_txt = [cmd for cmd in installs if "requirements.txt" in cmd]
     assert with_txt == [], (

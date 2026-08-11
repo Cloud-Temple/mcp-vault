@@ -39,9 +39,9 @@ Dockerfile ne le consommait**.
   échouerait), et `python-dateutil` — seule dépendance transitive installée mais
   non épinglée, relevée en revue — ajouté au verrou : « le verrou fait foi » ne
   souffre pas d'exception silencieuse.
-- Le workflow de release **dépend désormais de la CI** (`needs: verify`) : les
-  deux se déclenchant sur `push: main`, une release pouvait être publiée avant
-  la fin de la validation, voire malgré son échec.
+- Le workflow de release **dépend désormais de la CI** (`needs: verify`) :
+  aucun tag ni aucune release ne sort sans validation préalable. C'est la seule
+  garde technique du dépôt — `main` n'a ni protection de branche ni ruleset.
 - `docker-compose.yml` et les README sont copiés dans l'image de test : le test
   de `stop_grace_period` livré en v0.10.1 n'avait jamais pu s'y exécuter.
 
@@ -55,8 +55,11 @@ des tests rouges vivant plusieurs versions (#98) et une image ne démarrant pas
 Nouveau workflow `.github/workflows/ci.yml`, déclenché sur `pull_request` et
 appelable par `release.yml` : il construit **l'image de production livrée**,
 vérifie qu'elle porte bien les versions verrouillées et qu'elle importe son
-framework, puis exécute la suite dans l'**image de test** — un stage distinct,
-non livré, mais qui partage le même verrou et les mêmes sources. Les tests e2e
+framework, **démarre le conteneur et vérifie que `/health` répond en annonçant
+la version du dépôt** (critère d'acceptation de #125 : S3 injoignable, le coffre
+démarre en mode dégradé, ce qui exerce au passage le chemin de lifespan rétabli
+au lot 1 de #110), puis exécute la suite dans l'**image de test** — un stage
+distinct, non livré, mais qui partage le même verrou et les mêmes sources. Les tests e2e
 (stack complète avec WAF et S3 de recette) restent opt-in et hors CI.
 
 Le workflow n'a délibérément **pas** de déclencheur `push: main` : il partagerait

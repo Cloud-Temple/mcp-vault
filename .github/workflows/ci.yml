@@ -68,6 +68,42 @@ jobs:
           fi
           docker run --rm mcp-vault:ci python -c "from mcp.server.fastmcp import FastMCP"
 
+      # Critère d'acceptation explicite de l'issue #125 : « Le conteneur Vault
+      # démarre et passe sa sonde de santé. » Construire et importer ne le
+      # démontre pas. S3 est injoignable ici (endpoint mort) : le coffre démarre
+      # donc en mode DÉGRADÉ, ce qui exerce au passage le chemin de lifespan
+      # rétabli au lot 1 de #110. `/health` est servi par un middleware et reste
+      # disponible dans ce mode ; on vérifie en plus que la version servie est
+      # bien celle du dépôt, ce qui prouve que l'image testée est la bonne.
+      - name: Démarrer le conteneur et vérifier la sonde de santé
+        run: |
+          set -euo pipefail
+          key="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+          docker run -d --name vault-probe \
+            -e ADMIN_BOOTSTRAP_KEY="$key" \
+            -e S3_ENDPOINT_URL=http://127.0.0.1:1 \
+            -e S3_ACCESS_KEY_ID=ci -e S3_SECRET_ACCESS_KEY=ci -e S3_BUCKET_NAME=ci \
+            -p 18030:8030 mcp-vault:ci
+          for _ in $(seq 40); do
+            if curl -sf -o /dev/null http://localhost:18030/health; then break; fi
+            if [ "$(docker inspect -f '{{.State.Running}}' vault-probe)" != "true" ]; then
+              echo "::error::le conteneur s'est arrêté avant de répondre"; exit 1
+            fi
+            sleep 3
+          done
+          body="$(curl -sf http://localhost:18030/health)" || {
+            echo "::error::/health ne répond pas"; exit 1; }
+          echo "$body"
+          expected="$(cat VERSION)"
+          echo "$body" | grep -q "\"version\": \"${expected}\"" || {
+            echo "::error::/health n'annonce pas la version ${expected}"; exit 1; }
+
+      - name: Journal du conteneur (diagnostic) et nettoyage
+        if: always()
+        run: |
+          docker logs vault-probe 2>&1 | tail -40 || true
+          docker rm -f vault-probe >/dev/null 2>&1 || true
+
       - name: Construire l'image de test
         run: docker build --target test -t mcp-vault:ci-test .
 
