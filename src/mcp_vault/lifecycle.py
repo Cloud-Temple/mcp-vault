@@ -124,6 +124,8 @@ async def vault_startup() -> bool:
     # processus peut enchaîner deux lifespans, le second doit pouvoir s'arrêter.
     _reset_shutdown_state()
 
+    from .openbao.lifecycle import UnsealKeysUnrecoverable
+
     settings = get_settings()
 
     # ── 0. Bootstrap key (défense en profondeur) ────────────────────
@@ -291,6 +293,15 @@ async def vault_startup() -> bool:
         else:
             logger.error(f"❌ Échec du déverrouillage : {unseal_result}")
             return False
+    except UnsealKeysUnrecoverable:
+        # #121 : ÉCHEC BRUYANT, PAS de mode dégradé. Les clés d'unseal sont
+        # inexploitables (ADMIN_BOOTSTRAP_KEY probablement changée, ou objet
+        # chiffré manquant alors que des données existent). Un coffre qui ne
+        # peut pas s'ouvrir n'a aucune raison d'accepter du trafic, et le mode
+        # dégradé retarderait le diagnostic. L'exception traverse le lifespan
+        # (qui la relaie) → le service refuse de démarrer.
+        logger.critical("🚨 DÉMARRAGE REFUSÉ — clés d'unseal inexploitables")
+        raise
     except Exception as e:
         logger.error(f"❌ Erreur unseal OpenBao : {e}")
         return False

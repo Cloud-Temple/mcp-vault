@@ -42,9 +42,9 @@ def _build_config(region: str, signature_version: str, *,
     appels réseau). `total_max_attempts=N` borne le nombre TOTAL de tentatives,
     ce qui est la sémantique attendue d'un plafond de disponibilité.
 
-    Mode "standard" (et non "adaptive") : déterministe pendant une panne —
-    l'adaptatif ajoute une temporisation côté client, imprévisible pour un
-    calcul de borne.
+    Mode "standard" (et non "adaptive") : sans régulation adaptative côté
+    client, donc plus PRÉVISIBLE pendant une panne. Le backoff avec jitter
+    subsiste — ce n'est pas un délai déterministe au sens strict.
     """
     s3_opts = {"addressing_style": "path"}
     if payload_signing is not None:

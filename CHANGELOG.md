@@ -2,6 +2,64 @@
 
 ## [0.10.1] — 2026-08-11
 
+### Sécurité : stabilité d'`ADMIN_BOOTSTRAP_KEY` — plus jamais d'invitation au geste irréversible (issue #121)
+
+`ADMIN_BOOTSTRAP_KEY` chiffre l'objet S3 contenant les clés d'unseal d'OpenBao.
+Deux situations à ne pas confondre :
+
+| Situation | Récupérable ? |
+|---|---|
+| Mauvaise clé + objet chiffré **intact** | ✅ oui — restaurer l'ancienne clé |
+| Mauvaise clé + objet chiffré **réécrit** | ❌ non — définitif |
+
+On passait de la première à la seconde par un seul geste humain, que le produit
+**suggérait lui-même** : le message « Clés unseal introuvables — Initialiser
+d'abord avec `initialize_vault()` » est correct sur une installation neuve, mais
+détruit l'accès aux données sur un coffre existant (l'initialisation génère de
+nouvelles clés d'unseal et écrase l'objet chiffré).
+
+- **Plus aucune invitation à initialiser quand des données existent** : le
+  chemin vérifie le file backend et, s'il contient des données, refuse en
+  disant explicitement quoi **ne pas** faire (ne pas initialiser, ne pas
+  effacer le volume). Sonde fail-close : en cas de doute, on suppose qu'il y a
+  des données.
+- **Échec BRUYANT** (`UnsealKeysUnrecoverable`) au lieu du mode dégradé : un
+  coffre qui ne peut pas s'ouvrir n'accepte plus de trafic, et le diagnostic
+  n'est plus retardé. L'exception traverse le lifespan → uvicorn refuse de
+  démarrer.
+- **Message actionnable** : cause la plus probable nommée
+  (`ADMIN_BOOTSTRAP_KEY` a changé), interdits explicites, indication que les
+  données sont **intactes et récupérables tant que l'objet n'est pas réécrit**,
+  et renvoi vers la procédure outillée.
+- **Rotation SCRIPTÉE** : `scripts/rotate_bootstrap_key.py` (avec `--dry-run`)
+  exécute la seule séquence sûre — sauvegarde locale, déchiffrement avec
+  l'ancienne clé, re-chiffrement, **vérification avant toute écriture**, copie
+  de retour arrière horodatée sur S3, écriture, relecture et re-vérification.
+  Les clés passent par l'environnement, jamais par la ligne de commande. Le
+  script impose le **test de redémarrage à froid** comme validation finale.
+- Le comportement sûr existant (aucune réécriture automatique de l'objet
+  chiffré après un échec de déchiffrement) est désormais **verrouillé par un
+  test** — il n'était garanti par rien.
+
+Tests : `tests/test_bootstrap_key_stability_121.py` (8 cas).
+
+### Contrat : `secret_revoke_wrap` ne masque plus un registre indisponible (issue #120)
+
+Signalé par mcp-mission (leur issue #507). Quand le WrapRegistry n'est **pas
+initialisé** (S3 non configuré), `secret_revoke_wrap` répondait
+`{"status": "ok", "state": "not_found"}` — alors qu'**aucune révocation n'avait
+été tentée**. Le contrat documentant « introuvable = succès idempotent », un
+client pouvait créditer à tort une révocation ; seule une `note` non
+contractuelle distinguait les deux cas.
+
+L'outil renvoie désormais `{"status": "error",
+"error_type": "registry_unavailable"}`, aligné sur `secret_wrap` et
+`secret_consume` qui traitaient déjà ce cas comme une erreur. `not_found` reste
+réservé au registre **consulté** (accessor inconnu ou hors périmètre, #115).
+Docstrings et contrat précisés : « introuvable **dans un registre disponible**
+= succès ». Comportement préexistant (≤ 0.9.2), pas une régression.
+
+
 ### Disponibilité : bornes réseau S3 et chemin d'arrêt réellement exécuté (issue #110, lot 1)
 
 Premier lot du chantier #110 (« un appel S3 bloquant gèle tout le coffre,

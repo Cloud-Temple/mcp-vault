@@ -48,6 +48,39 @@ Effacé au seal/shutdown. Garbage collected au crash.
 # Chemin S3 des clés chiffrées (aligné sur DESIGN §5)
 _S3_INIT_KEY = "_init/init_keys.json.enc"
 
+
+class UnsealKeysUnrecoverable(RuntimeError):
+    """Les clés d'unseal existent mais sont INEXPLOITABLES (issue #121).
+
+    Levée plutôt que retournée : ce cas doit provoquer un ÉCHEC BRUYANT du
+    démarrage (le service refuse de servir) et non un mode dégradé. Un coffre
+    qui ne peut pas s'ouvrir n'a aucune raison d'accepter du trafic, et le mode
+    dégradé retarde le diagnostic au moment où chaque minute compte pour
+    retrouver l'ancienne valeur d'ADMIN_BOOTSTRAP_KEY.
+
+    ⚠️ Situation RÉCUPÉRABLE tant que l'objet chiffré n'est pas réécrit :
+    mauvaise clé + objet intact = on retrouve l'ancienne clé et tout revient.
+    Mauvaise clé + objet réécrit (réinitialisation) = perte définitive.
+    """
+
+
+def _openbao_data_exists() -> bool:
+    """Le file backend OpenBao contient-il des données ? (issue #121)
+
+    Sert à ne JAMAIS suggérer `initialize_vault()` quand un coffre existe :
+    l'initialisation génère de nouvelles clés d'unseal et écrase l'objet
+    chiffré — c'est le geste irréversible. Fail-close : en cas de doute
+    (erreur de lecture), on répond True (« il y a peut-être des données »).
+    """
+    from pathlib import Path
+    try:
+        data_dir = Path(get_settings().openbao_data_dir)
+        if not data_dir.exists():
+            return False
+        return any(data_dir.iterdir())
+    except Exception:
+        return True
+
 # Ancien fichier local (v0.1.x) — pour migration uniquement
 _LEGACY_INIT_FILE = "init_keys.json"
 
@@ -276,10 +309,19 @@ async def unseal_vault() -> dict:
             if init_keys:
                 logger.info("🔑 Clés déchiffrées depuis S3")
         except ValueError as e:
-            return {
-                "status": "error",
-                "message": f"Déchiffrement des clés S3 impossible : {e}",
-            }
+            # #121 : cause la PLUS probable en tête, et surtout ce qu'il ne faut
+            # PAS faire. Une réinitialisation « pour repartir propre » écrase
+            # l'objet chiffré et rend les données définitivement inaccessibles.
+            raise UnsealKeysUnrecoverable(
+                "Les clés d'unseal sont présentes sur S3 mais INDÉCHIFFRABLES. "
+                "Cause la plus probable : ADMIN_BOOTSTRAP_KEY a changé "
+                "(régénérée par un déploiement ?). "
+                "⚠️ NE PAS réinitialiser le coffre, NE PAS effacer le volume, "
+                "NE PAS supprimer l'objet chiffré : vos données sont intactes et "
+                "récupérables TANT QUE cet objet n'est pas réécrit. "
+                "Action : restaurer l'ancienne valeur d'ADMIN_BOOTSTRAP_KEY "
+                f"(procédure de rotation : scripts/rotate_bootstrap_key.py). [{e}]"
+            ) from e
         except Exception as e:
             return {
                 "status": "error",
@@ -287,11 +329,26 @@ async def unseal_vault() -> dict:
             }
 
     if not init_keys:
+        # #121 : NE JAMAIS suggérer l'initialisation quand un coffre existe —
+        # elle génère de nouvelles clés d'unseal et écrase l'objet chiffré,
+        # rendant les données existantes définitivement inaccessibles.
+        if _openbao_data_exists():
+            raise UnsealKeysUnrecoverable(
+                "Clés d'unseal INTROUVABLES (ni en mémoire, ni en local, ni sur "
+                "S3) alors que le coffre CONTIENT DES DONNÉES. "
+                "⚠️ NE PAS initialiser, NE PAS effacer le volume : "
+                "l'initialisation détruirait l'accès à ces données. "
+                "Causes probables : objet chiffré des clés supprimé/déplacé, "
+                "mauvais bucket S3, ou credentials S3 pointant vers un autre "
+                "environnement. Action : restaurer l'objet chiffré et la valeur "
+                "d'ADMIN_BOOTSTRAP_KEY d'origine."
+            )
         return {
             "status": "error",
             "message": (
                 "Clés unseal introuvables — ni en mémoire, ni en local (legacy), "
-                "ni sur S3. Initialiser d'abord avec initialize_vault()."
+                "ni sur S3. Aucune donnée existante détectée : initialiser avec "
+                "initialize_vault()."
             ),
         }
 

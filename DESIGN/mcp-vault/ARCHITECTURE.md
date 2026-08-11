@@ -1,6 +1,6 @@
 # Architecture — MCP Vault
 
-> **Version** : 0.10.0 | **Date** : 2026-08-11 | **Auteur** : Cloud Temple  
+> **Version** : 0.10.1 | **Date** : 2026-08-11 | **Auteur** : Cloud Temple  
 > **Projet** : mcp-vault | **Licence** : Apache 2.0  
 > **Statut** : ✅ Implémenté — Production-ready (PKI interne v0.5.x + C18 v0.6.x)
 
@@ -1728,6 +1728,11 @@ OPENBAO_DATA_DIR=/openbao/file
 OPENBAO_CONFIG_DIR=/openbao/config
 
 # --- S3 (token store + backup du file backend OpenBao) ---
+# Bornes réseau (issue #110) : sans elles, une lenteur S3 gèle le service.
+S3_CONNECT_TIMEOUT=5
+S3_READ_TIMEOUT=30
+S3_MAX_ATTEMPTS=2
+UVICORN_GRACEFUL_TIMEOUT=10
 S3_ENDPOINT_URL=https://your-s3-endpoint.example.com
 S3_ACCESS_KEY_ID=your_access_key_here
 S3_SECRET_ACCESS_KEY=your_secret_key_here
@@ -1838,7 +1843,7 @@ CMD ["python", "-m", "mcp_vault"]
 
 ```
 mcp[cli]>=1.8.0
-uvicorn>=0.32.0
+uvicorn==0.42.0  # épinglé (issue #110)
 pydantic>=2.0
 pydantic-settings>=2.0
 boto3>=1.34

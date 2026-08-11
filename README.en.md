@@ -345,7 +345,7 @@ See [scripts/README.md](scripts/README.md) for the full CLI documentation.
 ## ⚙️ Environment variables
 
 Copy `.env.example` → `.env` and adjust. **`.env.example` is the authoritative
-configuration contract**: it declares exactly the **41** variables consumed by
+configuration contract**: it declares exactly the **45** variables consumed by
 `Settings` ([`src/mcp_vault/config.py`](src/mcp_vault/config.py)), no more and no
 fewer, and it is enforced by
 [`tests/test_env_example_contract.py`](tests/test_env_example_contract.py).

@@ -572,14 +572,21 @@ async def secret_revoke_wrap(lease_id: str) -> dict:
     Révoque un wrap token de façon IDEMPOTENTE.
 
     Contrat VaultClient pour mcp-mission : revoke(lease_id) → idempotent.
-    lease_id introuvable ou déjà révoqué = SUCCÈS (jamais une erreur dure).
+    lease_id introuvable DANS UN REGISTRE DISPONIBLE, ou déjà révoqué = SUCCÈS.
     Erreur réseau ou 5xx = erreur réelle (le broker doit retenter).
+
+    ⚠️ `not_found` n'est PAS une preuve de révocation universelle (#120) : quand
+    le registre n'est pas initialisé (S3 non configuré), l'outil renvoie
+    `status="error"`, `error_type="registry_unavailable"` — aucune révocation
+    n'a été tentée. Un client ne doit créditer une révocation que sur
+    `state ∈ {revoked, already_revoked}`.
 
     Args:
         lease_id: Accessor du wrap token (retourné par secret_wrap)
 
     Returns:
         {status: "ok", state: "revoked" | "already_revoked" | "not_found"}
+        ou {status: "error", error_type: "registry_unavailable" | ...}
     """
     from .auth.context import check_policy, check_wrap_permission
     from .vault.wrapping import revoke_wrap, is_safe_id
@@ -1581,12 +1588,21 @@ def _install_vault_lifespan(inner_app) -> None:
     async def _combined_lifespan(app):
         from .lifecycle import vault_startup, vault_shutdown
 
+        from .openbao.lifecycle import UnsealKeysUnrecoverable
+
         ok = False
         try:
             try:
                 ok = await vault_startup()
                 if not ok:
                     logger.warning("⚠️ Démarrage en mode dégradé (OpenBao indisponible)")
+            except UnsealKeysUnrecoverable as e:
+                # #121 : ÉCHEC BRUYANT — le service NE DOIT PAS servir avec un
+                # coffre inouvrable. L'exception remonte à uvicorn, qui refuse de
+                # démarrer (« Application startup failed »). Le message porte la
+                # cause probable et l'interdit de réinitialisation.
+                logger.critical(f"🚨 {e}")
+                raise
             except Exception as e:
                 logger.error(f"❌ Erreur critique au démarrage : {e}")
                 logger.warning("⚠️ Démarrage en mode dégradé")

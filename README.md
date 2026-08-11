@@ -348,7 +348,7 @@ Voir [scripts/README.md](scripts/README.md) pour la documentation complète du C
 ## ⚙️ Variables d'environnement
 
 Copier `.env.example` → `.env` et adapter. **`.env.example` est le contrat de
-configuration de référence** : il déclare exactement les **41** variables
+configuration de référence** : il déclare exactement les **45** variables
 consommées par `Settings` ([`src/mcp_vault/config.py`](src/mcp_vault/config.py)),
 ni plus ni moins, et il est vérifié par
 [`tests/test_env_example_contract.py`](tests/test_env_example_contract.py).

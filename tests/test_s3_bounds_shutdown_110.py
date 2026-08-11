@@ -79,7 +79,8 @@ def test_retries_use_total_max_attempts_not_max_attempts(getter):
 
     NON-COMPLAISANCE : botocore interprète `max_attempts=2` comme 2 retries
     APRÈS la tentative initiale (3 appels). Le test pin donc explicitement
-    `total_max_attempts == 2` et le mode déterministe "standard".
+    `total_max_attempts == 2` et le mode "standard" (plus prévisible que
+    l'adaptatif ; le backoff avec jitter subsiste).
     """
     from mcp_vault import s3_client
 
@@ -88,7 +89,7 @@ def test_retries_use_total_max_attempts_not_max_attempts(getter):
         client = getattr(s3_client, getter)()
     retries = client.meta.config.retries
     assert retries["total_max_attempts"] == 2, f"attendu 2 tentatives totales : {retries}"
-    assert retries["mode"] == "standard", f"mode adaptatif non déterministe : {retries}"
+    assert retries["mode"] == "standard", f"mode adaptatif moins prévisible : {retries}"
     s3_client.reset_clients()
 
 
