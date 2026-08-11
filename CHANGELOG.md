@@ -1,6 +1,6 @@
 # Changelog — MCP Vault
 
-## [Non publié]
+## [0.10.0] — 2026-08-11
 
 ### Sécurité : permission dédiée non-admin `wrap` pour le broker JIT mcp-mission (issue #115)
 

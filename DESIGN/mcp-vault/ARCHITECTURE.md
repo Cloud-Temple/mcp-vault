@@ -1,6 +1,6 @@
 # Architecture — MCP Vault
 
-> **Version** : 0.9.2 | **Date** : 2026-07-26 | **Auteur** : Cloud Temple  
+> **Version** : 0.10.0 | **Date** : 2026-08-11 | **Auteur** : Cloud Temple  
 > **Projet** : mcp-vault | **Licence** : Apache 2.0  
 > **Statut** : ✅ Implémenté — Production-ready (PKI interne v0.5.x + C18 v0.6.x)
 
@@ -2686,4 +2686,4 @@ result = await vault_client.call("ssh_sign_key", {
 
 ---
 
-*Document mis à jour le 26 juillet 2026 — MCP Vault v0.9.2 (39 outils MCP, WAF Coraza v3.7.0 avec parsing JSON borné sur /mcp (profondeur, taille, refus des corps non analysables) et exclusions de cibles anti-évasion, accès SSH JIT opérateur (bearer nominatif + policy dédiée, clé publique pré-enrôlée), pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer, écriture create-only atomique (CAS), sync S3 conditionnelle, contrat de configuration `.env.example` déterministe et testé)*
+*Document mis à jour le 11 août 2026 — MCP Vault v0.10.0 (39 outils MCP, permission dédiée `wrap` non-admin pour le broker JIT (verrou wrap-only, policy stricte obligatoire, registre scopé vault+chemins, #115), WAF Coraza v3.7.0 avec parsing JSON borné sur /mcp (profondeur, taille, refus des corps non analysables) et exclusions de cibles anti-évasion, accès SSH JIT opérateur (bearer nominatif + policy dédiée, clé publique pré-enrôlée), pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer, écriture create-only atomique (CAS), sync S3 conditionnelle, contrat de configuration `.env.example` déterministe et testé)*
