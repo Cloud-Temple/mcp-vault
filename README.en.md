@@ -505,8 +505,8 @@ mcp-vault/
 ├── requirements.lock         # Pinned dependencies (exact versions)
 ├── VERSION                   # current service version
 ├── DESIGN/mcp-vault/
-│   ├── ARCHITECTURE.md       # Detailed specification (v0.10.0)
-│   ├── TECHNICAL.md          # Technical documentation (v0.10.0)
+│   ├── ARCHITECTURE.md       # Detailed specification (v0.10.1)
+│   ├── TECHNICAL.md          # Technical documentation (v0.10.1)
 │   └── SECURITY_AUDIT.md     # Consolidated audit report (60 V2.1 findings)
 ├── scripts/
 │   ├── mcp_cli.py            # CLI entry point
