@@ -29,7 +29,7 @@ nouvelles clés d'unseal et écrase l'objet chiffré).
   démarrer.
 - **Message actionnable** : cause la plus probable nommée
   (`ADMIN_BOOTSTRAP_KEY` a changé), interdits explicites, indication que les
-  données sont **intactes et récupérables tant que l'objet n'est pas réécrit**,
+  **file backend n'a pas été modifié**, la récupération exigeant une ancienne clé correspondante **et** une copie/version intacte de l'objet chiffré (« clé incorrecte **ou** objet corrompu »),
   et renvoi vers la procédure outillée.
 - **Rotation SCRIPTÉE** : `scripts/rotate_bootstrap_key.py` (avec `--dry-run`)
   exécute la seule séquence sûre — sauvegarde locale, déchiffrement avec
@@ -41,7 +41,13 @@ nouvelles clés d'unseal et écrase l'objet chiffré).
   chiffré après un échec de déchiffrement) est désormais **verrouillé par un
   test** — il n'était garanti par rien.
 
-Tests : `tests/test_bootstrap_key_stability_121.py` (8 cas).
+Tests : `tests/test_bootstrap_key_stability_121.py` (14 cas) — dont la
+séquence du script EXERCÉE contre un faux S3 (dry-run qui n'écrit rien, ordre
+copie de retour arrière → objet courant, abandon sur mauvaise ancienne clé,
+abandon sur modification concurrente, échec de chaque écriture) et un
+`vault_startup()` réellement traversé jusqu'à l'échec d'unseal. Les estampilles
+de version des documents sont désormais liées mécaniquement à `VERSION` par
+`tests/test_env_example_contract.py`.
 
 ### Contrat : `secret_revoke_wrap` ne masque plus un registre indisponible (issue #120)
 

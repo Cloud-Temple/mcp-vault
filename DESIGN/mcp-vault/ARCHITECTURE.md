@@ -1696,7 +1696,7 @@ Un crash du processus efface automatiquement les clés de la mémoire.
 ## 9. Configuration (.env)
 
 > **Source unique du contrat de configuration** : [`.env.example`](../../.env.example)
-> à la racine du dépôt. Ce fichier documente les **41** variables réellement
+> à la racine du dépôt. Ce fichier documente les **45** variables réellement
 > consommées par `Settings` (`src/mcp_vault/config.py`), une par une, avec leur
 > défaut. Le bloc ci-dessous n'en montre que le **minimum viable** ; il ne le
 > remplace pas.

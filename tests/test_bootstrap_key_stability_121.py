@@ -20,6 +20,7 @@ On passe de la première à la seconde par un seul geste humain : réinitialiser
 """
 
 import asyncio
+import json
 import os
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -71,12 +72,15 @@ def test_decryption_failure_raises_loudly_with_actionable_message():
     message = str(exc.value)
     # La cause la plus probable est NOMMÉE...
     assert "ADMIN_BOOTSTRAP_KEY" in message
+    # ...sans être présentée comme la SEULE (l'objet peut aussi être corrompu —
+    # dans ce cas restaurer la clé ne suffit pas ; ne pas promettre l'inverse).
+    assert "corrompu" in message
     # ...et surtout l'interdit est EXPLICITE (c'est le geste qui détruit tout).
     assert "NE PAS réinitialiser" in message, \
         "le message doit interdire explicitement la réinitialisation"
     assert "NE PAS effacer le volume" in message
-    # L'espoir de récupération est indiqué (évite la panique et le geste fatal).
-    assert "récupérables" in message or "intactes" in message
+    # Fait rassurant EXACT : le file backend n'a pas été touché par cet échec.
+    assert "file backend n'a PAS été modifié" in message
     # La procédure outillée est pointée.
     assert "rotate_bootstrap_key" in message
 
@@ -173,29 +177,77 @@ def test_data_existence_probe_is_fail_close():
 # 3. Échec BRUYANT de bout en bout : le service refuse de démarrer
 # =============================================================================
 
-def test_vault_startup_propagates_instead_of_degrading():
+@pytest.fixture
+def _isolated_store_singletons():
+    """Isole les singletons de stores autour d'un VRAI `vault_startup()`.
+
+    `vault_startup()` réinitialise les singletons process-wide (TokenStore,
+    PolicyStore, MissionBindingStore, WrapRegistry, AuditStore). Sans
+    restauration, exercer le vrai startup dans un test contamine toute la
+    session pytest — c'est précisément la classe de faux verts/faux rouges
+    fermée par l'issue #64. On sauvegarde et on restaure.
+    """
+    import mcp_vault.audit as au
+    import mcp_vault.auth.mission_bindings as mb
+    import mcp_vault.auth.policies as pol
+    import mcp_vault.auth.token_store as ts
+    import mcp_vault.vault.wrapping as wr
+
+    saved = (ts._token_store, pol._policy_store, mb._mission_binding_store,
+             wr._wrap_registry, au._audit_store)
+    try:
+        yield
+    finally:
+        (ts._token_store, pol._policy_store, mb._mission_binding_store,
+         wr._wrap_registry, au._audit_store) = saved
+
+
+def test_vault_startup_propagates_instead_of_degrading(_isolated_store_singletons):
     """`vault_startup()` ne doit PAS retourner False (mode dégradé) ici.
 
-    Un coffre inouvrable n'a aucune raison d'accepter du trafic : l'exception
-    doit traverser pour que le démarrage soit refusé.
+    NON-COMPLAISANCE (revue du diff) : on exerce le VRAI `vault_startup()`
+    jusqu'à l'appel d'`unseal_vault` mocké — une version antérieure de ce test
+    court-circuitait avant, et serait donc restée verte si l'exception était de
+    nouveau absorbée par la garde générique `except Exception: return False`.
     """
-    from mcp_vault import lifecycle
-    from mcp_vault.openbao.lifecycle import UnsealKeysUnrecoverable
+    import tempfile
 
-    fake_openbao_lc = MagicMock()
-    fake_openbao_lc.UnsealKeysUnrecoverable = UnsealKeysUnrecoverable
-    fake_openbao_lc.unseal_vault = AsyncMock(
-        side_effect=UnsealKeysUnrecoverable("clés inexploitables"))
-    fake_openbao_lc.initialize_vault = AsyncMock(
-        return_value={"status": "already_initialized"})
+    import mcp_vault.lifecycle as lifecycle
+    import mcp_vault.openbao.lifecycle as ol
+    import mcp_vault.openbao.manager as om
+    import mcp_vault.s3_sync as s3_sync
 
-    with patch.dict(sys.modules, {"mcp_vault.openbao.lifecycle": fake_openbao_lc}), \
-         patch.object(lifecycle, "_reset_shutdown_state"), \
-         patch.object(lifecycle, "get_settings", side_effect=RuntimeError("court-circuit")):
-        # On ne rejoue pas tout le startup : on vérifie que l'exception dédiée
-        # n'est pas convertie en `return False` par la garde générique.
-        with pytest.raises(RuntimeError):
-            _run(lifecycle.vault_startup())
+    reached = {"unseal": False}
+
+    async def _unseal():
+        reached["unseal"] = True
+        raise ol.UnsealKeysUnrecoverable("clés inexploitables")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # Settings SANS S3 : les initialisations de stores sont traversées mais
+        # ne tentent aucun appel réseau (rapide et déterministe).
+        settings = MagicMock()
+        settings.admin_bootstrap_key = "Test-Bootstrap-Key-2026-Pour-Tests!!"
+        settings.s3_endpoint_url = ""
+        settings.s3_bucket_name = ""
+        settings.openbao_data_dir = tmp
+        settings.mission_jwks_url = ""
+        settings.resolved_mission_aud = ""
+        settings.mcp_auth_mode = "bearer"
+
+        with patch.object(lifecycle, "get_settings", return_value=settings), \
+             patch.object(ol, "unseal_vault", new=_unseal), \
+             patch.object(ol, "initialize_vault",
+                          new=AsyncMock(return_value={"status": "already_initialized"})), \
+             patch.object(om, "start_openbao", new=AsyncMock(return_value=True)), \
+             patch.object(s3_sync, "download_from_s3",
+                          new=AsyncMock(return_value=s3_sync.RestoreResult.CONFIRMED_ABSENT)), \
+             patch.object(lifecycle, "_reset_shutdown_state"):
+            with pytest.raises(ol.UnsealKeysUnrecoverable):
+                _run(lifecycle.vault_startup())
+
+    assert reached["unseal"], \
+        "le test doit atteindre unseal_vault — sinon il ne prouve rien"
 
 
 def test_lifespan_refuses_to_start_on_unrecoverable_keys():
@@ -234,23 +286,174 @@ def test_lifespan_refuses_to_start_on_unrecoverable_keys():
 # 4. Script de rotation : présent et documenté
 # =============================================================================
 
-def test_rotation_script_exists_and_documents_the_cold_restart_test():
-    """La procédure est SCRIPTÉE (décision propriétaire) et impose le test final.
+# =============================================================================
+# 4. Script de rotation : garanties EXERCÉES contre un faux S3
+# =============================================================================
+# NON-COMPLAISANCE (revue du diff) : chercher des chaînes dans le source ne
+# prouve rien — une inversion des PUT, un --dry-run qui écrit, une absence de
+# copie de retour arrière ou une relecture non vérifiée passeraient. Ces tests
+# exécutent la vraie fonction `rotate()`.
 
-    Une rotation « réussie » sans test de redémarrage à froid ne prouve rien :
-    l'incident n'apparaîtrait qu'au prochain arrêt.
-    """
+_OLD_KEY = "Ancienne-Cle-Bootstrap-2026-Pour-Tests-121!!"
+_NEW_KEY = "Nouvelle-Cle-Bootstrap-2026-Pour-Tests-121!!"
+
+
+def _import_rotate():
+    import importlib.util
     root = os.path.join(os.path.dirname(__file__), "..")
     path = os.path.join(root, "scripts", "rotate_bootstrap_key.py")
-    assert os.path.exists(path), "le script de rotation doit exister"
-    source = open(path, encoding="utf-8").read()
+    spec = importlib.util.spec_from_file_location("rotate_bootstrap_key", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
-    # Séquence sûre : sauvegarde → déchiffrer ancienne → rechiffrer → vérifier
-    for needle in ("--dry-run", "decrypt_with_bootstrap_key",
-                   "encrypt_with_bootstrap_key", "redémarrage à froid"):
-        assert needle in source, f"le script doit couvrir : {needle}"
+
+class _FakeS3:
+    """Faux S3 minimal : mémorise l'ordre des écritures et permet d'injecter
+    une modification concurrente ou un échec de PUT."""
+
+    def __init__(self, objects, fail_on_key=None, mutate_before_put=None):
+        self.objects = dict(objects)          # key -> contenu str
+        self.puts = []                        # ordre des écritures
+        self.gets = 0
+        self.fail_on_key = fail_on_key
+        self.mutate_before_put = mutate_before_put
+
+    def get_object(self, Bucket=None, Key=None):
+        self.gets += 1
+        # Simule une écriture concurrente entre deux lectures.
+        if self.mutate_before_put and self.gets >= 2:
+            self.objects[Key] = self.mutate_before_put
+            self.mutate_before_put = None
+
+        class _Body:
+            def __init__(self, data):
+                self._data = data
+
+            def read(self):
+                return self._data.encode("ascii")
+
+        if Key not in self.objects:
+            raise RuntimeError("NoSuchKey")
+        return {"Body": _Body(self.objects[Key]), "ETag": f'"{hash(self.objects[Key])}"'}
+
+    def put_object(self, Bucket=None, Key=None, Body=None, **kw):
+        if self.fail_on_key == Key:
+            raise RuntimeError("PUT refusé (test)")
+        self.puts.append(Key)
+        self.objects[Key] = Body.decode("ascii")
+
+
+def _encrypted_payload(key):
+    from mcp_vault.openbao.crypto import encrypt_with_bootstrap_key
+    return encrypt_with_bootstrap_key(
+        json.dumps({"keys": ["unseal-key-1"], "root_token": "s.root"}), key)
+
+
+def test_rotation_dry_run_writes_absolutely_nothing(tmp_path):
+    mod = _import_rotate()
+    s3 = _FakeS3({mod._S3_INIT_KEY: _encrypted_payload(_OLD_KEY)})
+    backup = str(tmp_path / "backup.bak")
+
+    result = mod.rotate(s3, "bucket", _OLD_KEY, _NEW_KEY,
+                        backup_path=backup, dry_run=True, stamp="STAMP")
+
+    assert s3.puts == [], "un dry-run ne doit RIEN écrire sur S3"
+    assert not os.path.exists(backup), "un dry-run ne doit RIEN écrire sur disque"
+    assert result["rollback_key"] is None
+
+
+def test_rotation_writes_rollback_copy_before_current_object(tmp_path):
+    """ORDRE CRITIQUE : la copie de retour arrière AVANT l'objet courant."""
+    mod = _import_rotate()
+    original = _encrypted_payload(_OLD_KEY)
+    s3 = _FakeS3({mod._S3_INIT_KEY: original})
+
+    result = mod.rotate(s3, "bucket", _OLD_KEY, _NEW_KEY,
+                        backup_path=str(tmp_path / "b.bak"),
+                        dry_run=False, stamp="STAMP")
+
+    assert s3.puts == [f"{mod._S3_INIT_KEY}.STAMP.bak", mod._S3_INIT_KEY], \
+        f"ordre des écritures incorrect : {s3.puts}"
+    # La copie contient bien l'ANCIEN contenu, l'objet courant le NOUVEAU.
+    assert s3.objects[result["rollback_key"]] == original
+    from mcp_vault.openbao.crypto import decrypt_with_bootstrap_key
+    assert decrypt_with_bootstrap_key(s3.objects[mod._S3_INIT_KEY], _NEW_KEY)
+
+
+def test_rotation_aborts_on_wrong_old_key_without_touching_s3(tmp_path):
+    mod = _import_rotate()
+    s3 = _FakeS3({mod._S3_INIT_KEY: _encrypted_payload(_OLD_KEY)})
+
+    with pytest.raises(mod.RotationAborted) as exc:
+        mod.rotate(s3, "bucket", "Mauvaise-Cle-2026-Pour-Tests-121!!!!", _NEW_KEY,
+                   backup_path=str(tmp_path / "b.bak"), dry_run=False, stamp="S")
+
+    assert "rien n'a été modifié sur S3" in str(exc.value)
+    assert s3.puts == [], "aucune écriture ne doit avoir eu lieu"
+
+
+def test_rotation_aborts_on_concurrent_modification(tmp_path):
+    """CONFLIT : si l'objet change entre la lecture et l'écriture, on abandonne.
+
+    Sinon on écraserait une version plus récente (initialisation, migration,
+    autre rotation, instance encore vivante) dont le volume peut dépendre.
+    """
+    mod = _import_rotate()
+    original = _encrypted_payload(_OLD_KEY)
+    concurrent = _encrypted_payload(_OLD_KEY)  # autre ciphertext (nonce/sel neufs)
+    s3 = _FakeS3({mod._S3_INIT_KEY: original}, mutate_before_put=concurrent)
+
+    with pytest.raises(mod.RotationAborted) as exc:
+        mod.rotate(s3, "bucket", _OLD_KEY, _NEW_KEY,
+                   backup_path=str(tmp_path / "b.bak"), dry_run=False, stamp="S")
+
+    assert "CONFLIT" in str(exc.value)
+    # La copie de retour arrière a pu être écrite, mais JAMAIS l'objet courant.
+    assert mod._S3_INIT_KEY not in s3.puts, \
+        "l'objet courant ne doit pas être écrasé après un changement concurrent"
+    assert s3.objects[mod._S3_INIT_KEY] == concurrent, \
+        "la version concurrente doit rester intacte"
+
+
+def test_rotation_aborts_if_rollback_copy_cannot_be_written(tmp_path):
+    """Pas de filet de retour arrière → on ne touche pas à l'objet courant."""
+    mod = _import_rotate()
+    s3 = _FakeS3({mod._S3_INIT_KEY: _encrypted_payload(_OLD_KEY)},
+                 fail_on_key=f"{mod._S3_INIT_KEY}.S.bak")
+
+    with pytest.raises(mod.RotationAborted) as exc:
+        mod.rotate(s3, "bucket", _OLD_KEY, _NEW_KEY,
+                   backup_path=str(tmp_path / "b.bak"), dry_run=False, stamp="S")
+
+    assert "AVANT modification de l'objet courant" in str(exc.value)
+    assert s3.puts == []
+
+
+def test_rotation_reports_restore_path_if_current_put_fails(tmp_path):
+    """Échec du PUT courant → message pointant la copie de retour arrière."""
+    mod = _import_rotate()
+    s3 = _FakeS3({mod._S3_INIT_KEY: _encrypted_payload(_OLD_KEY)},
+                 fail_on_key=mod._S3_INIT_KEY)
+
+    with pytest.raises(mod.RotationAborted) as exc:
+        mod.rotate(s3, "bucket", _OLD_KEY, _NEW_KEY,
+                   backup_path=str(tmp_path / "b.bak"), dry_run=False, stamp="S")
+
+    message = str(exc.value)
+    assert ".S.bak" in message, "le message doit pointer la copie de retour arrière"
+    assert "NE PAS réinitialiser" in message
+
+
+def test_rotation_script_documents_exclusive_execution_and_cold_restart():
+    """Garanties documentaires : exécution exclusive et test de redémarrage."""
+    root = os.path.join(os.path.dirname(__file__), "..")
+    source = open(os.path.join(root, "scripts", "rotate_bootstrap_key.py"),
+                  encoding="utf-8").read()
+    assert "EXCLUSIVE" in source, "l'exécution exclusive doit être imposée"
+    assert "redémarrage à froid" in source
     # Les clés ne passent JAMAIS en argument de ligne de commande.
-    assert "--old-key\"" not in source and "--new-key\"" not in source
+    assert '"--old-key"' not in source and '"--new-key"' not in source
 
 
 if __name__ == "__main__":

@@ -180,7 +180,7 @@ Contrat pour le `CredentialBrokerService` de mcp-mission : livraison de credenti
 | Outil | Perm | Description |
 | --- | --- | --- |
 | `secret_wrap(vault_id, secret_path, mission_id, operation_id, ttl_seconds?, tenant_id?, expected_aud?)` | wrap | Crée un wrap token single-use (write-ahead registry) |
-| `secret_revoke_wrap(lease_id)` | wrap | Révocation idempotente d'un wrap token (introuvable = succès), limitée au périmètre de l'appelant |
+| `secret_revoke_wrap(lease_id)` | wrap | Révocation idempotente (introuvable **dans un registre disponible** = succès), limitée au périmètre de l'appelant ; registre non initialisé → `error/registry_unavailable` *(#120)* |
 | `secret_wrap_lookup(operation_id)` | wrap | Retrouve & **révoque** les wraps par operation_id (compensation orphelins #74), limité au périmètre de l'appelant |
 | `secret_wrap_status(operation_id)` | wrap | Consulte l'état d'un wrap **sans le révoquer** — lecture seule, instantané best-effort (#77), limité au périmètre de l'appelant |
 | `secret_consume(wrap_token, operation_id, mission_token)` | admin | Valide JWT ES256/JWKS (contrat PEP complet depuis *(#86)* : exp/iat/iss/aud/mission_id/jti/scope/tenant_id + `component_id`), vérifie binding complet (mission_id, tenant_id, aud), unwrap OpenBao (C18) |

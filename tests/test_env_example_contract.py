@@ -1010,3 +1010,42 @@ def test_changelog_documents_the_current_version() -> None:
         f"la section {header!r} du CHANGELOG est vide : les notes de release "
         "publiées seraient dégradées"
     )
+
+# ── Estampilles de version des documents (reco revue #110/#121) ──────────────
+# La dérive « docs restées à la version précédente » a été relevée DEUX fois en
+# revue. Ce test lie mécaniquement les mentions de version COURANTE au fichier
+# VERSION, pour qu'un oubli devienne rouge au lieu d'être trouvé en relecture.
+
+def test_current_version_stamps_match_VERSION_file() -> None:
+    import re as _re
+
+    root = os.path.join(os.path.dirname(__file__), "..")
+    version = open(os.path.join(root, "VERSION")).read().strip()
+
+    checks = {
+        "README.md": [r"\*\*Version\*\* : ([0-9.]+)"],
+        "README.en.md": [r"\*\*Version\*\*: ([0-9.]+)"],
+        "DESIGN/mcp-vault/ARCHITECTURE.md": [r"> \*\*Version\*\* : ([0-9.]+)"],
+        "DESIGN/mcp-vault/TECHNICAL.md": [r"> \*\*Version\*\* : ([0-9.]+)"],
+        "tests/TEST_CATALOG.md": [r"> \*\*Version\*\* : v?([0-9.]+)"],
+    }
+    for rel, patterns in checks.items():
+        content = open(os.path.join(root, rel), encoding="utf-8").read()
+        for pattern in patterns:
+            found = _re.search(pattern, content)
+            assert found, f"{rel} : estampille de version introuvable ({pattern})"
+            assert found.group(1) == version, (
+                f"{rel} annonce la version {found.group(1)} alors que VERSION "
+                f"vaut {version} — aligner avant merge")
+
+
+def test_dockerfile_label_matches_VERSION_file() -> None:
+    import re as _re
+
+    root = os.path.join(os.path.dirname(__file__), "..")
+    version = open(os.path.join(root, "VERSION")).read().strip()
+    dockerfile = open(os.path.join(root, "Dockerfile"), encoding="utf-8").read()
+    found = _re.search(r'version="([0-9.]+)"', dockerfile)
+    assert found, "LABEL version introuvable dans le Dockerfile"
+    assert found.group(1) == version, (
+        f"Dockerfile LABEL version={found.group(1)} != VERSION {version}")

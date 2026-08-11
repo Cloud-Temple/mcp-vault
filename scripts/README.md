@@ -116,6 +116,8 @@ python scripts/mcp_cli.py secret wrap prod db/pg \
   --tenant-id t-7 --expected-aud mcp-vault:prod
 
 # Révoquer un wrap (idempotent — introuvable = succès)
+# Révocation idempotente : introuvable DANS UN REGISTRE DISPONIBLE = succès.
+# Registre non initialisé → error/registry_unavailable (#120) : rien n'a été tenté.
 python scripts/mcp_cli.py secret revoke-wrap <accessor>
 
 # Retrouver/révoquer les wraps d'un operation_id (compensation orphelins)

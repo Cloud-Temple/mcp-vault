@@ -73,11 +73,15 @@ def _openbao_data_exists() -> bool:
     (erreur de lecture), on répond True (« il y a peut-être des données »).
     """
     from pathlib import Path
+    # Artefacts qui ne constituent PAS des données de coffre (cohérent avec le
+    # durcissement de `_check_local_data_status` côté s3_sync).
+    _ARTEFACTS = {".gitkeep", ".DS_Store", ".s3_sync_restore_staging",
+                  ".s3_sync_restore_in_progress"}
     try:
         data_dir = Path(get_settings().openbao_data_dir)
         if not data_dir.exists():
             return False
-        return any(data_dir.iterdir())
+        return any(entry.name not in _ARTEFACTS for entry in data_dir.iterdir())
     except Exception:
         return True
 
@@ -314,13 +318,17 @@ async def unseal_vault() -> dict:
             # l'objet chiffré et rend les données définitivement inaccessibles.
             raise UnsealKeysUnrecoverable(
                 "Les clés d'unseal sont présentes sur S3 mais INDÉCHIFFRABLES. "
-                "Cause la plus probable : ADMIN_BOOTSTRAP_KEY a changé "
-                "(régénérée par un déploiement ?). "
+                "Deux causes possibles : ADMIN_BOOTSTRAP_KEY incorrecte "
+                "(régénérée par un déploiement ?) OU objet chiffré corrompu. "
                 "⚠️ NE PAS réinitialiser le coffre, NE PAS effacer le volume, "
-                "NE PAS supprimer l'objet chiffré : vos données sont intactes et "
-                "récupérables TANT QUE cet objet n'est pas réécrit. "
-                "Action : restaurer l'ancienne valeur d'ADMIN_BOOTSTRAP_KEY "
-                f"(procédure de rotation : scripts/rotate_bootstrap_key.py). [{e}]"
+                "NE PAS supprimer ni réécrire l'objet chiffré. "
+                "Le file backend n'a PAS été modifié par cet échec. La "
+                "récupération exige une ancienne clé CORRESPONDANTE **et** une "
+                "copie ou version intacte de l'objet chiffré : si l'objet est "
+                "corrompu, restaurer la clé ne suffira pas — il faudra une "
+                "sauvegarde de l'objet. "
+                "Procédure de rotation : scripts/rotate_bootstrap_key.py. "
+                f"[{e}]"
             ) from e
         except Exception as e:
             return {

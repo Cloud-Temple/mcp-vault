@@ -179,7 +179,7 @@ Contract for the mcp-mission `CredentialBrokerService`: single-use credential de
 | Tool | Perm | Description |
 | --- | --- | --- |
 | `secret_wrap(vault_id, secret_path, mission_id, operation_id, ttl_seconds?, tenant_id?, expected_aud?)` | wrap | Creates a single-use wrap token (write-ahead registry) |
-| `secret_revoke_wrap(lease_id)` | wrap | Idempotent revocation of a wrap token (not found = success) |
+| `secret_revoke_wrap(lease_id)` | wrap | Idempotent revocation (not found **in an available registry** = success), scoped to the caller; uninitialized registry → `error/registry_unavailable` *(#120)* |
 | `secret_wrap_lookup(operation_id)` | wrap | Finds & **revokes** wraps by operation_id (orphan compensation #74) |
 | `secret_wrap_status(operation_id)` | wrap | Reads a wrap's state **without revoking it** — read-only, best-effort snapshot (#77) |
 | `secret_consume(wrap_token, operation_id, mission_token)` | admin | Validates ES256/JWKS JWT (full PEP contract since *(#86)*: exp/iat/iss/aud/mission_id/jti/scope/tenant_id + `component_id`), checks full binding (mission_id, tenant_id, aud), unwraps OpenBao (C18) |
