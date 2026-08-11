@@ -125,8 +125,9 @@ COPY .dockerignore ./
 COPY README.md README.en.md ./
 # `docker-compose.yml` est une FIXTURE de test, pas une dépendance d'exécution :
 # `test_s3_bounds_shutdown_110.py` vérifie que le `stop_grace_period` couvre la
-# séquence d'arrêt (#110). Sans ce COPY, ce test échouait silencieusement dans
-# l'image — invisible tant qu'aucune CI n'y exécutait la suite (#113).
+# séquence d'arrêt (#110). Sans ce COPY, ce test échouait dans l'image sur un
+# `open()` manquant — bruyamment, mais invisible tant qu'aucune CI n'y exécutait
+# la suite (#113).
 COPY docker-compose.yml ./
 
 RUN useradd -r -s /bin/false mcp && chown -R mcp:mcp /app /openbao

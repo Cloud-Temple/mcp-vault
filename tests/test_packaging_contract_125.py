@@ -147,7 +147,7 @@ def test_requirements_bounds_mcp_below_the_breaking_major() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3-5 : gardes de non-régression contre une dérive FUTURE du verrou
+# 3-4 : gardes de non-régression contre une dérive FUTURE du verrou
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_lock_satisfies_every_declared_floor() -> None:
@@ -199,7 +199,7 @@ def test_every_runtime_requirement_is_pinned_in_the_lock() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6-7 : garde de construction et durcissement de l'image de production
+# 5-6 : garde de construction et durcissement de l'image de production
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_build_verifies_the_import_that_broke_production() -> None:
@@ -236,6 +236,15 @@ def test_production_stage_never_installs_the_test_tooling() -> None:
     assert installs, "le stage de production n'installe aucune dépendance : test à revoir"
     with_txt = [cmd for cmd in installs if "requirements.txt" in cmd]
     assert with_txt == [], (
-        "le stage de production installe requirements.txt, qui embarque pytest et "
-        f"pytest-asyncio dans l'image livrée : {with_txt}"
+        "le stage de production installe requirements.txt, qui embarque "
+        f"l'outillage de test dans l'image livrée : {with_txt}"
+    )
+
+    # Vérifier la SOURCE ne suffit pas (revue) : le stage de production installe
+    # le verrou, donc y ajouter `pytest` embarquerait l'outillage de test tout en
+    # laissant ce test vert. On contrôle donc aussi le CONTENU du verrou.
+    leaked = sorted(TEST_ONLY & _lock().keys())
+    assert leaked == [], (
+        "outillage de test épinglé dans requirements.lock — donc installé dans "
+        f"l'image de PRODUCTION, qui n'installe que le verrou : {leaked}"
     )
