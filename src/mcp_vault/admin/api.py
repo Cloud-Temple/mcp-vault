@@ -96,6 +96,18 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
     if not isinstance(allowed_vaults, list):
         allowed_vaults = []
 
+    # SÉCURITÉ #115 : un token wrap-only (wrap sans read/write/admin) est confiné
+    # aux 4 outils MCP du broker JIT — il n'a AUCUNE raison d'atteindre
+    # l'admin-plane REST, y compris les routes « tout token » (health, whoami,
+    # generate-password, pki/status, pki/roles). Refus uniforme dès l'entrée.
+    from ..auth.context import is_wrap_only_token
+    if is_wrap_only_token(token_info):
+        return await _json_response(send, 403, {
+            "status": "error",
+            "message": "Token wrap : accès à l'API d'administration refusé "
+                       "(périmètre limité au broker JIT via MCP)",
+        })
+
     # --- Routes système (tout token) ---
     if path == "/admin/api/health" and method == "GET":
         return await _api_health(send, mcp)
@@ -517,7 +529,7 @@ async def _api_create_token(send, body):
     # SÉCURITÉ V3-03 : validation whitelist des permissions
     # (source unique : TokenStore.VALID_PERMISSIONS — cohérent avec create/update)
     if not isinstance(permissions, list) or not all(isinstance(p, str) and p in TokenStore.VALID_PERMISSIONS for p in permissions):
-        return await _json_response(send, 400, {"status": "error", "message": f"Permissions invalides: {permissions}. Valides: read, write, admin"})
+        return await _json_response(send, 400, {"status": "error", "message": f"Permissions invalides: {permissions}. Valides: read, write, admin, wrap"})
     email = data.get("email", "")
     expires_in_days = data.get("expires_in_days", 90)
     policy_id = data.get("policy_id", "")

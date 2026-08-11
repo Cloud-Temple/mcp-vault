@@ -274,6 +274,28 @@ class WrapRegistry:
             self._save()
         return found
 
+    def mark_entries_revoked(self, entries: list) -> bool:
+        """
+        Marque comme "revoked" UNIQUEMENT les entrées passées (références vivantes
+        de _wraps) puis persiste. Retourne True si au moins une entrée a mué.
+
+        SÉCURITÉ #115 : contrairement à mark_revoked(accessor) qui mute TOUTES
+        les entrées d'un accessor (y compris une entrée hors du périmètre de
+        l'appelant en cas de registre dupliqué/incohérent), cette méthode ne
+        touche que la sélection déjà filtrée par visibilité. AUCUN
+        _maybe_refresh ici : un rechargement remplacerait _wraps et détacherait
+        les références passées — la mutation serait perdue silencieusement. Le
+        refresh a lieu UNE fois en tête de primitive, avant la sélection.
+        """
+        found = False
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("status") in ("active", "pending"):
+                entry["status"] = "revoked"
+                found = True
+        if found:
+            self._save()
+        return found
+
     def has_accessor(self, accessor: str) -> bool:
         """Vérifie que l'accessor appartient à un wrap géré par ce registry."""
         self._maybe_refresh()
@@ -546,6 +568,89 @@ async def wrap_secret(
     }
 
 
+# ── Sélection défensive & visibilité du registre (issue #115) ────────────────
+# Les trois primitives revoke/lookup/status travaillent sur une sélection
+# UNIQUE, défensive (une entrée malformée n'est jamais lue par clé sans garde)
+# et filtrée par l'identité courante (un token wrap ne voit que les entrées de
+# son périmètre vault+chemins). Garde placée DANS la primitive (pattern
+# anti-contournement du projet) — un futur point d'entrée ne peut pas
+# réintroduire le bypass.
+
+def _entry_well_formed(entry) -> bool:
+    """Entrée de registre structurellement exploitable (types stricts)."""
+    return (
+        isinstance(entry, dict)
+        and isinstance(entry.get("operation_id"), str)
+        and isinstance(entry.get("vault_id"), str)
+        and isinstance(entry.get("secret_path"), str)
+        and isinstance(entry.get("status"), str)
+        and (entry.get("accessor") is None or isinstance(entry.get("accessor"), str))
+    )
+
+
+def _select_wrap_entries(wraps, *, accessor: str = None,
+                         operation_id: str = None) -> tuple:
+    """
+    Sélection défensive : retourne (entrées_valides_matchantes, saw_malformed).
+
+    N'accède JAMAIS à une clé d'entrée sans garde de type. saw_malformed
+    signale une entrée inexploitable N'IMPORTE OÙ dans le registre (miroir du
+    comportement historique : l'itération complète de find_by_operation_id
+    levait sur toute entrée malformée, matchante ou non) — consommé par
+    status_by_operation_id pour préserver `registry_inconsistent` côté admin.
+    """
+    valid, saw_malformed = [], False
+    for entry in wraps or []:
+        if not _entry_well_formed(entry):
+            saw_malformed = True
+            continue
+        if accessor is not None and entry.get("accessor") != accessor:
+            continue
+        if operation_id is not None and entry.get("operation_id") != operation_id:
+            continue
+        valid.append(entry)
+    return valid, saw_malformed
+
+
+def _caller_is_admin() -> bool:
+    """Identité courante admin ? token absent → False (JAMAIS traité admin)."""
+    from ..auth.context import current_token_info
+    token_info = current_token_info.get()
+    if not isinstance(token_info, dict):
+        return False
+    perms = token_info.get("permissions", [])
+    return isinstance(perms, list) and "admin" in perms
+
+
+def _visible_entries(entries: list) -> list:
+    """
+    Filtre d'autorisation par entrée pour l'identité courante (issue #115).
+
+    - admin → toutes les entrées (comportement historique inchangé) ;
+    - toute autre identité (y compris contexte ABSENT — fail-close, None n'est
+      jamais admin) : l'entrée n'est visible que si check_access(vault_id)
+      passe ET si le chemin passe l'évaluation STRICTE de policy
+      (check_wrap_path_policy — symétrie avec la création : ce qu'un token ne
+      peut pas wrapper, il ne peut ni le voir ni le révoquer).
+    Les entrées hors scope sont présentées comme ABSENTES (not_found en aval),
+    pas comme refusées : aucune fuite d'existence inter-tenant.
+    """
+    if _caller_is_admin():
+        return list(entries)
+    from ..auth.context import check_access, check_wrap_path_policy
+    visible = []
+    for entry in entries:
+        if check_access(entry["vault_id"]) is not None:
+            continue
+        # audit=False : une entrée hors scope est un cas nominal du filtrage,
+        # pas un refus d'opération — ne pas générer de faux événements denied.
+        if check_wrap_path_policy(entry["vault_id"], entry["secret_path"],
+                                  audit=False) is not None:
+            continue
+        visible.append(entry)
+    return visible
+
+
 async def revoke_wrap(lease_id: str) -> dict:
     """
     Révoque un wrap token de façon IDEMPOTENTE.
@@ -571,39 +676,60 @@ async def revoke_wrap(lease_id: str) -> dict:
         return {"status": "ok", "state": "not_found", "accessor": lease_id[:12] + "...",
                 "note": "Registry indisponible — révocation impossible sans vérification de scope"}
 
-    # ── Vérifier que l'accessor appartient à ce broker ───────────────
-    if not registry.has_accessor(lease_id):
+    # ── Sélection défensive + visibilité (issue #115) ────────────────
+    # UN SEUL refresh en tête, puis toutes les décisions, l'appel OpenBao ET
+    # les mutations portent sur cette sélection : entrée malformée jamais lue
+    # par clé, entrée hors du périmètre de l'appelant traitée comme ABSENTE,
+    # et jamais mutée même si elle partage l'accessor d'une entrée visible.
+    registry._maybe_refresh()
+    # FAIL-CLOSE (revue pré-commit #115) : si le refresh S3 a échoué, le cache
+    # est un instantané AMBIGU — aucune décision destructive (revoke OpenBao,
+    # _save last-write-wins qui écraserait un état S3 plus récent) ne doit être
+    # prise dessus. Le broker retente (contrat : erreur réseau = erreur réelle).
+    if getattr(registry, "_last_load_ok", True) is False:
+        return {"status": "error", "error_type": "backend_unavailable",
+                "message": "Registre non rafraîchi (S3 injoignable) — révocation refusée (réessayer)"}
+    entries, _ = _select_wrap_entries(registry._wraps, accessor=lease_id)
+    visible = _visible_entries(entries)
+    if not visible:
         return {"status": "ok", "state": "not_found", "accessor": lease_id[:12] + "..."}
 
     # ── Vérifier si déjà révoqué dans le registry ────────────────────
-    entries = [e for e in registry._wraps if e.get("accessor") == lease_id]
-    if entries and all(e["status"] == "revoked" for e in entries):
+    if all(e["status"] == "revoked" for e in visible):
         return {"status": "ok", "state": "already_revoked", "accessor": lease_id[:12] + "..."}
 
-    # ── Appeler OpenBao ──────────────────────────────────────────────
+    return await _revoke_accessor_selected(registry, lease_id, visible)
+
+
+async def _revoke_accessor_selected(registry, accessor: str, selection: list) -> dict:
+    """
+    Révoque un accessor côté OpenBao et marque UNIQUEMENT la sélection passée.
+
+    AUCUN refresh ici (revue pré-commit #115) : la sélection a été établie par
+    l'appelant après SON refresh fail-close — un rechargement intercalé
+    détacherait les références et invaliderait la décision de visibilité.
+    Mapping idempotent : accessor inconnu/expiré côté OpenBao → already_revoked.
+    """
     client = _get_client()
     if not client:
         return {"status": "error", "error_type": "backend_unavailable",
                 "message": "OpenBao non disponible"}
 
     try:
-        client.auth.token.revoke_accessor(accessor=lease_id)
-        if registry:
-            registry.mark_revoked(lease_id)
-        return {"status": "ok", "state": "revoked", "accessor": lease_id[:12] + "..."}
+        client.auth.token.revoke_accessor(accessor=accessor)
+        registry.mark_entries_revoked(selection)
+        return {"status": "ok", "state": "revoked", "accessor": accessor[:12] + "..."}
     except Exception as e:
         err_str = str(e).lower()
         # OpenBao : "bad accessor" ou token déjà révoqué/expiré → idempotent
         if any(k in err_str for k in ("bad accessor", "not found", "invalid accessor")):
             # Marquer comme révoqué dans le registry (est expiré ou déjà révoqué côté Vault)
-            if registry:
-                registry.mark_revoked(lease_id)
-            return {"status": "ok", "state": "already_revoked", "accessor": lease_id[:12] + "..."}
+            registry.mark_entries_revoked(selection)
+            return {"status": "ok", "state": "already_revoked", "accessor": accessor[:12] + "..."}
         # Distinguer HTTP 4xx (client error, idem already_revoked) vs 5xx/réseau
         if any(k in err_str for k in ("404", "400")):
-            if registry:
-                registry.mark_revoked(lease_id)
-            return {"status": "ok", "state": "already_revoked", "accessor": lease_id[:12] + "..."}
+            registry.mark_entries_revoked(selection)
+            return {"status": "ok", "state": "already_revoked", "accessor": accessor[:12] + "..."}
         # 5xx / réseau → erreur réelle (broker doit retenter)
         logger.warning("revoke_wrap backend_error: %s", type(e).__name__)
         return {"status": "error", "error_type": "backend_error",
@@ -630,7 +756,19 @@ async def lookup_and_revoke_by_operation_id(operation_id: str) -> dict:
         return {"status": "error", "error_type": "backend_unavailable",
                 "message": "WrapRegistry non disponible (S3 requis)"}
 
-    entries = registry.find_by_operation_id(operation_id)
+    # Sélection défensive + visibilité (issue #115) : états et comptages
+    # calculés sur les SEULES entrées visibles par l'identité courante — les
+    # entrées hors scope ou malformées sont traitées comme absentes.
+    # UN SEUL refresh (les révocations passent ensuite par
+    # _revoke_accessor_selected, qui ne refresh pas).
+    registry._maybe_refresh()
+    # FAIL-CLOSE (revue pré-commit #115) : cache ambigu après échec de refresh
+    # → aucune révocation ni _save (voir revoke_wrap).
+    if getattr(registry, "_last_load_ok", True) is False:
+        return {"status": "error", "error_type": "backend_unavailable",
+                "message": "Registre non rafraîchi (S3 injoignable) — compensation refusée (réessayer)"}
+    all_matching, _ = _select_wrap_entries(registry._wraps, operation_id=operation_id)
+    entries = _visible_entries(all_matching)
 
     if not entries:
         return {
@@ -657,13 +795,26 @@ async def lookup_and_revoke_by_operation_id(operation_id: str) -> dict:
             "operation_id": operation_id, "count_revoked": 0, "entries_found": len(entries),
         }
 
-    # Révoquer toutes les entrées actives
+    # Révoquer toutes les entrées actives — DIRECTEMENT sur la sélection déjà
+    # établie et filtrée ci-dessus (pas de re-lookup ni de second refresh :
+    # F4 revue pré-commit #115). GROUPÉES PAR ACCESSOR AVANT la boucle (revue
+    # pré-commit R2) : un accessor partagé n'est révoqué qu'une fois ; le
+    # compteur n'avance que sur résultat ok, de la taille du groupe — en cas
+    # d'échec OpenBao, AUCUNE entrée du groupe n'est comptée révoquée.
     count_revoked = 0
     errors = []
+    groups: dict = {}
     for entry in active_entries:
-        result = await revoke_wrap(entry["accessor"])
+        groups.setdefault(entry["accessor"], []).append(entry)
+    for accessor, group in groups.items():
+        # La sélection marquée couvre TOUTES les entrées visibles de cet
+        # accessor (y compris un éventuel "pending" incohérent qui le
+        # partagerait) — même sémantique que l'historique mark_revoked par
+        # accessor, mais bornée à la visibilité de l'appelant.
+        selection = [e for e in entries if e.get("accessor") == accessor]
+        result = await _revoke_accessor_selected(registry, accessor, selection)
         if result["status"] == "ok":
-            count_revoked += 1
+            count_revoked += len(group)
         else:
             errors.append(result.get("error_type", "backend_error"))
 
@@ -721,12 +872,19 @@ async def status_by_operation_id(operation_id: str) -> dict:
         return {"status": "error", "error_type": "backend_unavailable",
                 "message": "WrapRegistry non disponible (S3 requis)"}
 
-    # Lecture DÉFENSIVE : une entrée malformée (dict sans clés, None, …) ne doit
-    # jamais faire crasher la consultation — registre corrompu → registry_inconsistent,
-    # jamais d'exception MCP.
-    try:
-        entries = registry.find_by_operation_id(operation_id)
-    except Exception:
+    # Lecture DÉFENSIVE (#77, refondue #115) : la sélection n'accède jamais à
+    # une clé d'entrée sans garde — un registre corrompu ne produit JAMAIS
+    # d'exception MCP. Pour un ADMIN, toute entrée malformée dans le registre
+    # signale `registry_inconsistent` (comportement historique : l'itération
+    # complète levait sur l'entrée malformée). Pour une identité non-admin,
+    # une entrée malformée est simplement INVISIBLE (fail-close → not_found),
+    # comme une entrée hors de son périmètre vault+chemins.
+    registry._maybe_refresh()
+    all_matching, saw_malformed = _select_wrap_entries(
+        registry._wraps, operation_id=operation_id)
+
+    is_admin = _caller_is_admin()
+    if is_admin and saw_malformed:
         logger.warning("status_by_operation_id : registre illisible (op=%r)", operation_id[:16])
         return {"status": "ok", "state": "registry_inconsistent"}
 
@@ -736,19 +894,19 @@ async def status_by_operation_id(operation_id: str) -> dict:
         return {"status": "error", "error_type": "backend_unavailable",
                 "message": "Registre non rafraîchi (S3 injoignable) — état indéterminé"}
 
+    entries = all_matching if is_admin else _visible_entries(all_matching)
+
     if not entries:
         return {"status": "ok", "state": "not_found"}
     if len(entries) > 1:
         # Anomalie (duplication) — on ne divulgue pas le compte (activité interne).
         return {"status": "ok", "state": "ambiguous"}
 
-    # Une seule entrée. PROJECTION NEUVE : `find_by_operation_id` renvoie des
-    # références VIVANTES du registre — on ne mute jamais l'entrée (un pop/masquage
+    # Une seule entrée. PROJECTION NEUVE : la sélection renvoie des références
+    # VIVANTES du registre — on ne mute jamais l'entrée (un pop/masquage
     # corromprait la mémoire, puis S3 au prochain _save). On lit, on construit un
     # dict neuf, sans jamais exposer accessor/wrap_token.
     entry = entries[0]
-    if not isinstance(entry, dict):
-        return {"status": "ok", "state": "registry_inconsistent"}
     raw_status = entry.get("status")
     # Contrôle de TYPE avant le test d'appartenance : un status non-str (liste/dict,
     # non hashable) ferait lever `in frozenset`. Registre corrompu → état neutre.

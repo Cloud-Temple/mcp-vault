@@ -178,12 +178,13 @@ Contract for the mcp-mission `CredentialBrokerService`: single-use credential de
 
 | Tool | Perm | Description |
 | --- | --- | --- |
-| `secret_wrap(vault_id, secret_path, mission_id, operation_id, ttl_seconds?, tenant_id?, expected_aud?)` | admin | Creates a single-use wrap token (write-ahead registry) |
-| `secret_revoke_wrap(lease_id)` | admin | Idempotent revocation of a wrap token (not found = success) |
-| `secret_wrap_lookup(operation_id)` | admin | Finds & **revokes** wraps by operation_id (orphan compensation #74) |
-| `secret_wrap_status(operation_id)` | admin | Reads a wrap's state **without revoking it** — read-only, best-effort snapshot (#77) |
+| `secret_wrap(vault_id, secret_path, mission_id, operation_id, ttl_seconds?, tenant_id?, expected_aud?)` | wrap | Creates a single-use wrap token (write-ahead registry) |
+| `secret_revoke_wrap(lease_id)` | wrap | Idempotent revocation of a wrap token (not found = success) |
+| `secret_wrap_lookup(operation_id)` | wrap | Finds & **revokes** wraps by operation_id (orphan compensation #74) |
+| `secret_wrap_status(operation_id)` | wrap | Reads a wrap's state **without revoking it** — read-only, best-effort snapshot (#77) |
 | `secret_consume(wrap_token, operation_id, mission_token)` | admin | Validates ES256/JWKS JWT (full PEP contract since *(#86)*: exp/iat/iss/aud/mission_id/jti/scope/tenant_id + `component_id`), checks full binding (mission_id, tenant_id, aud), unwraps OpenBao (C18) |
 
+> *(#115)* Permission `wrap` (or `admin`): a non-admin `wrap` token must carry a non-empty `allowed_resources` list **and** an explicit policy (named `allowed_tools`, a matching `path_rule` with non-empty `allowed_paths` — strict evaluation). A wrap-only token (no read/write/admin) is confined to these 4 tools (MCP) and denied on all `/admin/api/*`. Revoke/lookup/status are scoped to the caller's vaults+paths. ⚠️ Downgrade ≤ 0.9.2: revoke/purge `wrap` tokens first (otherwise the whole `tokens.json` is rejected, see CHANGELOG).
 > Enable C18 validation with `ENFORCE_MISSION_TOKEN_VALIDATION=true`. Default (false): log warning, continue — zero impact in standalone mode without mcp-mission.
 > `tenant_id` and `expected_aud` in `secret_wrap` feed the full C18 binding on the `secret_consume` side *(v0.6.8)*.
 > ⚠️ *(#86)* As soon as `ENFORCE_MISSION_TOKEN_VALIDATION=true` (standalone, or via the `/mcp` PEP below), `MISSION_JWKS_URL`, `MCP_INSTANCE_ID`/`MISSION_TOKEN_AUD` **and** `MISSION_STATUS_URL` become mandatory (fail-fast at boot) — otherwise an aborted mission would keep access until the `mission_token` expires.
@@ -504,8 +505,8 @@ mcp-vault/
 ├── requirements.lock         # Pinned dependencies (exact versions)
 ├── VERSION                   # current service version
 ├── DESIGN/mcp-vault/
-│   ├── ARCHITECTURE.md       # Detailed specification (v0.9.2)
-│   ├── TECHNICAL.md          # Technical documentation (v0.9.2)
+│   ├── ARCHITECTURE.md       # Detailed specification (v0.10.0)
+│   ├── TECHNICAL.md          # Technical documentation (v0.10.0)
 │   └── SECURITY_AUDIT.md     # Consolidated audit report (60 V2.1 findings)
 ├── scripts/
 │   ├── mcp_cli.py            # CLI entry point
@@ -564,4 +565,4 @@ mcp-vault/
 
 ---
 
-**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.9.2
+**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.10.0

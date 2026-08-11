@@ -80,3 +80,32 @@ _install_hvac_stub_if_absent()
 # tests/cli/ (enforcés) ; on exclut donc la collecte pytest de l'agrégateur. Le run standalone
 # (n'utilise pas pytest) reste inchangé.
 collect_ignore = ["test_cli_all.py"]
+
+
+# ── Contexte d'identité pour les primitives de wrapping (issue #115) ─────────
+# Depuis #115, revoke_wrap/lookup_and_revoke_by_operation_id/status_by_operation_id
+# filtrent les entrées du registre par l'identité courante (ContextVar
+# current_token_info). Contexte ABSENT (None) = fail-close (rien de visible) —
+# JAMAIS traité comme admin. Les tests historiques de primitives, écrits avant
+# le scoping, s'exécutent donc sous une identité admin EXPLICITE via ce
+# context manager (set/reset garantis, pas de fuite entre tests).
+from contextlib import contextmanager
+
+
+@contextmanager
+def auth_context(token_info):
+    """Injecte une identité dans current_token_info, reset garanti en sortie."""
+    from mcp_vault.auth.context import current_token_info
+    ctx_token = current_token_info.set(token_info)
+    try:
+        yield
+    finally:
+        current_token_info.reset(ctx_token)
+
+
+@contextmanager
+def admin_auth_context():
+    """Identité admin de test (comportement pré-#115 des primitives)."""
+    with auth_context({"client_name": "test-admin", "permissions": ["admin"],
+                       "allowed_resources": []}):
+        yield

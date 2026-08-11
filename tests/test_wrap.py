@@ -24,7 +24,22 @@ from contextlib import ExitStack
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+from tests.conftest import admin_auth_context  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _admin_identity():
+    """#115 : les primitives revoke/lookup/status filtrent désormais par
+    identité (ContextVar) — contexte absent = fail-close (rien de visible).
+    Ces tests historiques, écrits avant le scoping, s'exécutent sous une
+    identité admin explicite (comportement pré-#115 préservé). Les cas
+    non-admin/scoping sont couverts par test_wrap_permission_115.py."""
+    with admin_auth_context():
+        yield
 
 
 # =============================================================================
@@ -508,8 +523,9 @@ def test_server_lookup_validates_operation_id():
     mock_lookup = AsyncMock(return_value={"status": "ok", "state": "not_found",
                                           "count_revoked": 0, "entries_found": 0})
 
-    with patch("mcp_vault.auth.context.check_admin_permission", return_value=None), \
-         patch("mcp_vault.vault.wrapping.lookup_and_revoke_by_operation_id",
+    # #115 : la garde de l'outil est check_policy + check_wrap_permission — la
+    # fixture admin autouse du module les fait passer (plus de patch admin).
+    with patch("mcp_vault.vault.wrapping.lookup_and_revoke_by_operation_id",
                new=mock_lookup):
         try:
             from mcp_vault.server import secret_wrap_lookup

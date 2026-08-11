@@ -93,9 +93,9 @@ def _validate_permissions(permissions) -> tuple:
         (liste_validée, "") si OK, (None, message) sinon.
     """
     if not isinstance(permissions, list) or not permissions:
-        return None, "permissions doit être une liste non vide (read|write|admin)"
+        return None, "permissions doit être une liste non vide (read|write|admin|wrap)"
     if not all(isinstance(p, str) and p in TokenStore.VALID_PERMISSIONS for p in permissions):
-        return None, f"Permissions invalides: {permissions}. Valides: read, write, admin"
+        return None, f"Permissions invalides: {permissions}. Valides: read, write, admin, wrap"
     return list(permissions), ""
 
 
@@ -201,7 +201,12 @@ class TokenStore:
     # Source unique de vérité des niveaux de permission valides (flags non
     # hiérarchiques). Utilisée par create() et update(), et référencée par
     # admin/api.py (_api_create_token) pour éviter toute divergence.
-    VALID_PERMISSIONS = frozenset({"read", "write", "admin"})
+    # "wrap" (issue #115) : broker JIT non-admin — donne accès aux seuls outils
+    # secret_wrap/secret_revoke_wrap/secret_wrap_lookup/secret_wrap_status, et
+    # EXIGE allowed_resources non vide + policy explicite (check_wrap_permission).
+    # ⚠️ Downgrade : un tokens.json contenant "wrap" est rejeté ATOMIQUEMENT par
+    # les versions < 0.10.0 (whitelist) — révoquer ces tokens avant tout rollback.
+    VALID_PERMISSIONS = frozenset({"read", "write", "admin", "wrap"})
     # Borne de POLITIQUE de durée de vie (≈ 100 ans), cohérente avec le cap
     # older_than_days de la purge. Empêche des durées absurdes / abus DoS. Ce n'est
     # PAS la limite d'overflow technique de timedelta (bien plus haute) : c'est un

@@ -32,6 +32,16 @@ pytestmark = pytest.mark.skipif(
 
 _MOUNT = "wrapstatus77"
 
+from tests.conftest import admin_auth_context  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _admin_identity():
+    """#115 : les primitives filtrent par identité (fail-close sans contexte) —
+    identité admin explicite pour préserver le comportement pré-#115 de ce flux."""
+    with admin_auth_context():
+        yield
+
 
 def _run(coro):
     import asyncio

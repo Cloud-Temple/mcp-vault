@@ -128,9 +128,46 @@ def test_update_partage_la_meme_whitelist():
 
 
 def test_constante_valid_permissions_est_la_source_unique():
-    """La whitelist est exactement {read, write, admin} et immuable (frozenset)."""
-    assert TokenStore.VALID_PERMISSIONS == frozenset({"read", "write", "admin"})
+    """La whitelist est exactement {read, write, admin, wrap} et immuable (frozenset)."""
+    assert TokenStore.VALID_PERMISSIONS == frozenset({"read", "write", "admin", "wrap"})
     assert isinstance(TokenStore.VALID_PERMISSIONS, frozenset)
+
+
+def test_create_accepte_wrap_seul():
+    """#115 : un token broker JIT ["wrap"] est créable (le moindre privilège
+    exige de POUVOIR créer un token sans read/write/admin)."""
+    store = _make_store()
+    result = store.create(client_name="mcp-mission-broker", permissions=["wrap"])
+    assert "raw_token" in result
+    assert result["permissions"] == ["wrap"]
+
+
+def test_create_rejette_variantes_de_wrap():
+    """#115 : la whitelist reste stricte — pas de variantes de casse/typo."""
+    store = _make_store()
+    for bad in (["wrapp"], ["WRAP"], ["wrap "], ["unwrap"]):
+        result = store.create(client_name="agent", permissions=bad)
+        assert result["status"] == "error", f"devrait refuser {bad!r}"
+
+
+def test_load_accepte_wrap_et_rejette_flag_inconnu():
+    """#115 : _validate_and_normalize_token (chemin load S3) partage la même
+    whitelist — un tokens.json avec "wrap" charge, un flag inconnu rejette
+    (c'est aussi la preuve du comportement fail-close d'un DOWNGRADE : pour
+    v0.9.2, "wrap" est précisément le flag inconnu)."""
+    from mcp_vault.auth.token_store import _validate_and_normalize_token
+    base = {
+        "hash": "a" * 64,
+        "client_name": "broker", "permissions": ["wrap"],
+        "allowed_resources": ["mcp-mission"], "policy_id": "broker-jit",
+        "created_at": "2026-01-01T00:00:00+00:00",
+    }
+    normalized = _validate_and_normalize_token(base)
+    assert normalized["permissions"] == ["wrap"]
+
+    bad = dict(base, permissions=["wrap", "superuser"])
+    with pytest.raises(ValueError):
+        _validate_and_normalize_token(bad)
 
 
 # ── Chemin HTTP réel : _api_create_token doit refuser en 400 (pas 500) ────────

@@ -137,11 +137,12 @@
             </div>
         </div>
         <div class="form-group">
-            <label>Permissions <span class="help-icon" title="read = lecture seule&#10;write = lecture + écriture de secrets et vaults&#10;admin = accès total (tokens, policies, suppression)">ⓘ</span></label>
+            <label>Permissions <span class="help-icon" title="read = lecture seule&#10;write = lecture + écriture de secrets et vaults&#10;admin = accès total (tokens, policies, suppression)&#10;wrap = broker JIT uniquement (secret_wrap/revoke/lookup/status) — exige vaults autorisés + policy">ⓘ</span></label>
             <div class="checkbox-group">
-                <label title="Accès en lecture aux vaults et secrets autorisés"><input type="checkbox" checked disabled> read</label>
+                <label title="Accès en lecture aux vaults et secrets autorisés"><input type="checkbox" id="ctPermRead" checked> read</label>
                 <label title="Création de vaults, écriture et suppression de secrets"><input type="checkbox" id="ctPermWrite"> write</label>
                 <label title="Gestion des tokens, policies, suppression de vaults — accès total"><input type="checkbox" id="ctPermAdmin"> admin</label>
+                <label title="Broker JIT (mcp-mission) : uniquement secret_wrap / secret_revoke_wrap / secret_wrap_lookup / secret_wrap_status. Exige des vaults autorisés ET une policy avec allowed_tools + allowed_paths explicites."><input type="checkbox" id="ctPermWrap"> wrap</label>
             </div>
         </div>
         <div class="form-group">
@@ -169,11 +170,12 @@
         <h2>✏️ Modifier le token</h2>
         <input type="hidden" id="etHashPrefix">
         <div class="form-group">
-            <label>Permissions <span class="help-icon" title="read = lecture seule&#10;write = lecture + écriture&#10;admin = accès total">ⓘ</span></label>
+            <label>Permissions <span class="help-icon" title="read = lecture seule&#10;write = lecture + écriture&#10;admin = accès total&#10;wrap = broker JIT uniquement (exige vaults autorisés + policy)">ⓘ</span></label>
             <div class="checkbox-group">
                 <label title="Accès en lecture"><input type="checkbox" id="etPermRead"> read</label>
                 <label title="Écriture de secrets et vaults"><input type="checkbox" id="etPermWrite"> write</label>
                 <label title="Accès total — tokens, policies, suppression"><input type="checkbox" id="etPermAdmin"> admin</label>
+                <label title="Broker JIT (mcp-mission) : uniquement les 4 outils wrap. Exige des vaults autorisés ET une policy explicite."><input type="checkbox" id="etPermWrap"> wrap</label>
             </div>
         </div>
         <div class="form-group">
