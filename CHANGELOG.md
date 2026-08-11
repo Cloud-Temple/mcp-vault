@@ -35,8 +35,13 @@ nouvelles clés d'unseal et écrase l'objet chiffré).
   exécute la seule séquence sûre — sauvegarde locale, déchiffrement avec
   l'ancienne clé, re-chiffrement, **vérification avant toute écriture**, copie
   de retour arrière horodatée sur S3, écriture, relecture et re-vérification.
-  Les clés passent par l'environnement, jamais par la ligne de commande. Le
-  script impose le **test de redémarrage à froid** comme validation finale.
+  Les clés passent par l'environnement, jamais par la ligne de commande.
+  L'écriture de l'objet courant est **conditionnelle** (`If-Match` sur
+  l'ETag) : une modification concurrente fait échouer le PUT au lieu
+  d'écraser une version plus récente. La rotation est refusée si le
+  stockage ne fournit pas d'ETag ou si le SDK n'expose pas l'écriture
+  conditionnelle (plancher `boto3>=1.38.43`). Le script impose le
+  **test de redémarrage à froid** comme validation finale.
 - Le comportement sûr existant (aucune réécriture automatique de l'objet
   chiffré après un échec de déchiffrement) est désormais **verrouillé par un
   test** — il n'était garanti par rien.

@@ -313,8 +313,28 @@ class _FakeS3:
     """Faux S3 minimal : mémorise l'ordre des écritures et permet d'injecter
     une modification concurrente ou un échec de PUT."""
 
+    class _Shape:
+        def __init__(self, members):
+            self.members = members
+
+    class _OpModel:
+        def __init__(self, members):
+            self.input_shape = _FakeS3._Shape(members)
+
+    class _ServiceModel:
+        def __init__(self, members):
+            self._members = members
+
+        def operation_model(self, name):
+            return _FakeS3._OpModel(self._members)
+
+    class _Meta:
+        def __init__(self, members):
+            self.service_model = _FakeS3._ServiceModel(members)
+
     def __init__(self, objects, fail_on_key=None, mutate_before_put=None,
-                 mutate_in_toctou_window=None, etags=True):
+                 mutate_in_toctou_window=None, etags=True,
+                 supports_ifmatch=True):
         self.objects = dict(objects)          # key -> contenu str
         self.puts = []                        # ordre des écritures
         self.gets = 0
@@ -324,6 +344,11 @@ class _FakeS3:
         # que seule une écriture conditionnelle (If-Match) peut fermer.
         self.mutate_in_toctou_window = mutate_in_toctou_window
         self.etags = etags
+        # Capacité SDK : `PutObject.IfMatch` exposé ou non (issue #121, revue).
+        members = {"Bucket": None, "Key": None, "Body": None}
+        if supports_ifmatch:
+            members["IfMatch"] = None
+        self.meta = _FakeS3._Meta(members)
 
     def _etag(self, key):
         return f'"{hash(self.objects[key])}"' if self.etags else None
@@ -354,7 +379,11 @@ class _FakeS3:
             self.objects[Key] = self.mutate_in_toctou_window
             self.mutate_in_toctou_window = None
         if IfMatch is not None and Key in self.objects and IfMatch != self._etag(Key):
-            raise RuntimeError("An error occurred (PreconditionFailed): 412")
+            from botocore.exceptions import ClientError
+            raise ClientError(
+                {"Error": {"Code": "PreconditionFailed", "Message": "etag mismatch"},
+                 "ResponseMetadata": {"HTTPStatusCode": 412}},
+                "PutObject")
         self.puts.append(Key)
         self.objects[Key] = Body.decode("ascii")
 
@@ -559,6 +588,58 @@ def test_data_probe_ignores_known_artefacts(artefact, tmp_path):
         # Un vrai fichier de données, lui, compte.
         (tmp_path / "core").mkdir()
         assert ol._openbao_data_exists() is True
+
+
+def test_rotation_refuses_when_sdk_lacks_conditional_write(tmp_path):
+    """SDK sans `PutObject.IfMatch` → refus explicite AVANT toute écriture.
+
+    Le contrat de dépendances autorisait des versions de boto3 sans ce
+    paramètre : l'appel aurait échoué à la validation botocore, après avoir
+    écrit la copie de retour arrière. On refuse en amont, avec un message
+    actionnable.
+    """
+    mod = _import_rotate()
+    s3 = _FakeS3({mod._S3_INIT_KEY: _encrypted_payload(_OLD_KEY)},
+                 supports_ifmatch=False)
+
+    with pytest.raises(mod.RotationAborted) as exc:
+        mod.rotate(s3, "bucket", _OLD_KEY, _NEW_KEY,
+                   backup_path=str(tmp_path / "b.bak"), dry_run=False, stamp="S")
+
+    assert "IfMatch" in str(exc.value) and "boto3" in str(exc.value)
+    assert s3.puts == [], "aucune écriture avant de constater l'incapacité"
+
+
+def test_concurrent_deletion_is_classified_as_a_conflict():
+    """Suppression concurrente (404) → traitée comme un CONFLIT, pas une erreur floue."""
+    from botocore.exceptions import ClientError
+
+    mod = _import_rotate()
+    err = ClientError(
+        {"Error": {"Code": "NoSuchKey", "Message": "absent"},
+         "ResponseMetadata": {"HTTPStatusCode": 404}}, "PutObject")
+    assert mod._is_conflict(err) is True
+    # Une erreur sans rapport ne doit PAS être classée conflit (anti-faux positif).
+    other = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": "nope"},
+         "ResponseMetadata": {"HTTPStatusCode": 403}}, "PutObject")
+    assert mod._is_conflict(other) is False
+
+
+def test_requirements_floor_guarantees_conditional_write():
+    """Le plancher boto3 doit exposer `PutObject.IfMatch` (issue #121, revue).
+
+    Vérifié sur le SDK réellement installé : si le service model ne l'exposait
+    pas, le script refuserait toute rotation — autant le savoir ici.
+    """
+    import boto3
+
+    client = boto3.client("s3", region_name="us-east-1",
+                          aws_access_key_id="x", aws_secret_access_key="y")
+    members = client.meta.service_model.operation_model("PutObject").input_shape.members
+    assert "IfMatch" in members, (
+        f"boto3 {boto3.__version__} n'expose pas PutObject.IfMatch — "
+        "relever le plancher dans requirements.txt")
 
 
 def test_rotation_script_documents_exclusive_execution_and_cold_restart():

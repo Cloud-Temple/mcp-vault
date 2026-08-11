@@ -70,6 +70,8 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from botocore.exceptions import ClientError  # noqa: E402
+
 from mcp_vault.openbao.crypto import (  # noqa: E402
     decrypt_with_bootstrap_key,
     encrypt_with_bootstrap_key,
@@ -85,6 +87,40 @@ class RotationAborted(RuntimeError):
 
 def _ok(message: str) -> None:
     print(f"✅ {message}")
+
+
+def _supports_conditional_put(s3) -> bool:
+    """Le SDK expose-t-il `PutObject.IfMatch` ? (issue #121, revue)
+
+    L'écriture conditionnelle est la seule garantie d'atomicité de ce script.
+    Les versions anciennes de boto3 autorisées par le contrat de dépendances
+    n'exposent pas ce paramètre : botocore refuserait l'appel AVANT toute
+    requête réseau. On préfère un refus explicite et actionnable.
+    """
+    try:
+        shape = s3.meta.service_model.operation_model("PutObject").input_shape
+        return "IfMatch" in shape.members
+    except Exception:
+        return False
+
+
+def _is_conflict(exc: Exception) -> bool:
+    """Erreur imputable à une écriture concurrente ?
+
+    Lecture STRUCTURÉE de `ClientError` (code + statut HTTP) plutôt que
+    recherche de sous-chaînes. Inclut la suppression concurrente (404) :
+    l'objet visé n'existe plus au moment du PUT conditionnel.
+    """
+    if isinstance(exc, ClientError):
+        code = exc.response.get("Error", {}).get("Code", "")
+        status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        return (code in {"PreconditionFailed", "ConditionalRequestConflict",
+                         "NoSuchKey", "NoSuchBucket"}
+                or status in (404, 409, 412))
+    # Repli pour les clients non-botocore (harnais de test, implémentations tierces)
+    text = str(exc)
+    return any(marker in text for marker in
+               ("412", "409", "PreconditionFailed", "ConditionalRequestConflict"))
 
 
 def _read_object(s3, bucket: str) -> tuple:
@@ -112,6 +148,14 @@ def rotate(s3, bucket: str, old_key: str, new_key: str, *,
     Returns:
         {"rollback_key": str|None, "backup_path": str|None}
     """
+    if not dry_run and not _supports_conditional_put(s3):
+        raise RotationAborted(
+            "Le SDK installé n'expose pas l'écriture conditionnelle "
+            "(PutObject.IfMatch) : la protection contre une écriture "
+            "concurrente ne peut pas être garantie. Mettre à jour boto3 "
+            "(voir requirements.txt) avant de faire tourner la clé. "
+            "Rotation refusée — rien n'a été modifié.")
+
     # ── 1. Lire l'objet chiffré (+ ETag pour l'écriture conditionnelle) ───
     encrypted_b64, etag = _read_object(s3, bucket)
     if not dry_run and not etag:
@@ -209,9 +253,7 @@ def rotate(s3, bucket: str, old_key: str, new_key: str, *,
         s3.put_object(Bucket=bucket, Key=_S3_INIT_KEY,
                       Body=re_encrypted.encode("ascii"), IfMatch=etag)
     except Exception as exc:
-        text = str(exc)
-        if any(marker in text for marker in
-               ("412", "409", "PreconditionFailed", "ConditionalRequestConflict")):
+        if _is_conflict(exc):
             raise RotationAborted(
                 "CONFLIT à l'écriture : l'objet chiffré a été modifié entre la "
                 "vérification et l'écriture (écriture conditionnelle refusée). "
