@@ -25,11 +25,10 @@
 # Usage :
 #   pip install --no-cache-dir -r requirements.lock
 #
-# Pour mettre à jour :
-#   1. Modifier requirements.txt (dépendances avec bornes >= )
-#   2. Rebuild l'image Docker
-#   3. Exécuter : docker compose run --rm --no-deps --entrypoint pip mcp-vault freeze > requirements.lock
-#   4. Ajouter ce header et vérifier les versions
+# Pour mettre à jour : voir la procédure de RÉGÉNÉRATION en tête de fichier.
+# (L'ancienne procédure — rebuild de l'image puis `pip freeze` dedans — a été
+#  retirée ici : elle réinstallerait ce verrou et ne prendrait donc jamais en
+#  compte une modification de requirements.txt.)
 
 # --- MCP Framework ---
 mcp==1.26.0
