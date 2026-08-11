@@ -1,5 +1,96 @@
 # Changelog — MCP Vault
 
+## [0.10.2] — 2026-08-11
+
+### Correctif : l'image ne démarrait plus après reconstruction (issue #125)
+
+`src/mcp_vault/server.py` importe `mcp.server.fastmcp.FastMCP`. Le Dockerfile
+n'installait que `requirements.txt`, où MCP est déclaré par un **plancher**
+(`mcp[cli]>=1.23.0`). Quand `mcp 2.0.0` est paru en amont — sans ce module —
+toute construction fraîche a cessé de démarrer :
+
+```
+ModuleNotFoundError: No module named 'mcp.server.fastmcp'
+```
+
+Le dépôt livrait déjà `requirements.lock` (`mcp==1.26.0`), mais **aucun stage du
+Dockerfile ne le consommait**.
+
+> **Ce défaut n'a pas été introduit par la v0.10.1.** La ligne est non bornée
+> depuis la v0.4.5, commit où `requirements.lock` a précisément été ajouté sans
+> jamais être branché. Toute version depuis la v0.4.5, reconstruite après la
+> publication de `mcp 2.0.0`, échoue à l'identique. Le déclencheur est externe.
+
+**Correctif**
+
+- Le **verrou fait foi** pour les versions installées : la cible `production`
+  installe `requirements.lock` seul ; la cible `test` reçoit le verrou **et**
+  `requirements.txt` en une invocation pip, parce que le verrou ne contient pas
+  l'outillage de test (`pytest`, `pytest-asyncio`). L'image de production reste
+  donc exempte de dépendances de test (durcissement P2-8 préservé).
+- **Garde à la construction** : `RUN python -c "from mcp.server.fastmcp import
+  FastMCP"` dans les deux stages. Une résolution incompatible fait désormais
+  échouer le `build`, au lieu de se découvrir au démarrage en production.
+- **Borne haute** `mcp[cli]>=1.23.0,<2` dans `requirements.txt` : le verrou
+  protège l'image, cette borne protège l'installation hors Docker (venv de
+  développement, où la suite est jouée avant chaque livraison). Le passage à MCP 2.x est une migration à
+  part entière.
+- `requirements.lock` ajouté à l'allowlist `.dockerignore` (sans quoi le `COPY`
+  échouerait). Les trois dépendances qui flottaient encore, relevées en revue,
+  sont épinglées : `python-dateutil` au verrou (dépendance d'exécution de
+  botocore), `pluggy` et `iniconfig` dans `requirements.txt` (transitives de
+  pytest). « Le verrou fait foi » ne souffre plus d'exception silencieuse, et la
+  chaîne de test qui garde la release est reproductible en entier.
+- Le workflow de release **dépend désormais de la CI** (`needs: verify`) :
+  aucun tag ni aucune release ne sort sans validation préalable. C'est la seule
+  garde technique du dépôt — `main` n'a ni protection de branche ni ruleset.
+- `docker-compose.yml` et les README sont copiés dans l'image de test : le test
+  de `stop_grace_period` livré en v0.10.1 n'avait jamais pu s'y exécuter.
+
+### Intégration continue : la suite s'exécute enfin automatiquement (issue #113)
+
+Le dépôt n'exécutait **aucun test en CI** : la qualité des releases reposait sur
+des exécutions locales. Cette lacune a laissé passer deux défauts documentés —
+des tests rouges vivant plusieurs versions (#98) et une image ne démarrant pas
+(#125).
+
+Nouveau workflow `.github/workflows/ci.yml`, déclenché sur `pull_request` et
+appelable par `release.yml` : il construit **l'image de production livrée**,
+vérifie qu'elle porte bien les versions verrouillées et qu'elle importe son
+framework, **démarre le conteneur et vérifie que `/health` répond en annonçant
+la version du dépôt** (critère d'acceptation de #125 : S3 injoignable, le coffre
+démarre en mode dégradé, ce qui exerce au passage le chemin de lifespan rétabli
+au lot 1 de #110), puis exécute la suite dans l'**image de test** — un stage
+distinct, non livré, mais qui partage le même verrou et les mêmes sources. Les tests e2e
+(stack complète avec WAF et S3 de recette) restent opt-in et hors CI.
+
+Le workflow n'a délibérément **pas** de déclencheur `push: main` : il partagerait
+alors son groupe de concurrence avec l'exécution appelée par la release, qui
+pourrait être annulée par elle — une garde non déterministe. La publication
+reste protégée par le `needs: verify` de `release.yml`, qui s'applique quel que
+soit le chemin par lequel le commit est arrivé sur `main`.
+
+### Correctif de test : le stub `hvac` divergeait de la vraie signature (issue #98)
+
+Les exceptions du stub `hvac` (`tests/conftest.py`) étaient des `Exception`
+nues, alors que le vrai `hvac.exceptions.VaultError` accepte `errors=[...]` et
+expose `.errors` — attribut que la production **lit** pour distinguer un conflit
+CAS d'un 400 générique (`vault/secrets.py::_is_cas_conflict`). Deux tests de #92
+étaient donc rouges hors Docker, et la couverture du mapping CAS n'était jamais
+exercée. Le constructeur de `VaultError` est désormais reproduit à l'identique.
+
+### Tests
+
+`tests/test_packaging_contract_125.py` (6 tests, sans Docker) verrouille le
+contrat de reproductibilité : chaque `pip install` du Dockerfile consomme le
+verrou, `requirements.txt` borne MCP sous le majeur cassant, le garde d'import
+existe dans chaque stage installant des dépendances, la production n'embarque
+pas l'outillage de test — et, réciproquement, **le verrou respecte toutes les
+contraintes déclarées** (planchers, mais aussi la borne haute `<2` et l'égalité
+`uvicorn==0.42.0`). Ce dernier point protège les garanties durement acquises
+au lot 1 : `boto3>=1.38.43` porte `PutObject.IfMatch` (#121), `uvicorn==0.42.0`
+porte la ré-émission du SIGTERM dont dépend le chemin d'arrêt du coffre (#110).
+
 ## [0.10.1] — 2026-08-11
 
 ### Sécurité : stabilité d'`ADMIN_BOOTSTRAP_KEY` — plus jamais d'invitation au geste irréversible (issue #121)

@@ -20,7 +20,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # GARDE (issue #113) : rien n'est tagué ni publié tant que la CI n'a pas
+  # validé CE commit. Le workflow appelé construit les images et exécute la
+  # suite dans l'image de test. C'est la SEULE garde technique du dépôt : `main`
+  # n'a ni protection de branche ni ruleset (vérifié), donc un commit peut y
+  # arriver sans être passé par une PR. Ce `needs` protège alors la publication,
+  # à défaut du merge.
+  verify:
+    uses: ./.github/workflows/ci.yml
+
   release:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (historique complet pour les tags)

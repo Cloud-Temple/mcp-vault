@@ -50,11 +50,34 @@ def _install_hvac_stub_if_absent():
         pass
 
     stub = MagicMock(name="hvac_stub")
+
     # Vraies classes d'exception (un attribut MagicMock ne serait pas catchable par
     # `except hvac.exceptions.Forbidden`).
-    stub.exceptions.Forbidden = type("Forbidden", (Exception,), {})
-    stub.exceptions.InvalidRequest = type("InvalidRequest", (Exception,), {})
-    stub.exceptions.InvalidPath = type("InvalidPath", (Exception,), {})
+    #
+    # ISSUE #98 : ces classes étaient des `Exception` NUES, alors que le vrai
+    # `hvac.exceptions.VaultError` accepte `errors=[...]` et expose `.errors` —
+    # attribut que la production LIT (`vault/secrets.py::_is_cas_conflict`, qui
+    # distingue le conflit CAS d'un 400 générique). Deux tests de #92 étaient donc
+    # rouges hors Docker sur un `TypeError: InvalidRequest() takes no keyword
+    # arguments`, et la couverture du mapping CAS n'était jamais exercée. Un stub
+    # qui diverge de la vraie signature ne teste pas le code réel : on reproduit
+    # ici le constructeur de `hvac.exceptions.VaultError` à l'identique.
+    class _StubVaultError(Exception):
+        def __init__(self, message=None, errors=None, method=None, url=None,
+                     text=None, json=None):
+            if errors:
+                message = ", ".join(errors)
+            self.errors = errors
+            self.method = method
+            self.url = url
+            self.text = text
+            self.json = json
+            super().__init__(message)
+
+    stub.exceptions.VaultError = _StubVaultError
+    stub.exceptions.Forbidden = type("Forbidden", (_StubVaultError,), {})
+    stub.exceptions.InvalidRequest = type("InvalidRequest", (_StubVaultError,), {})
+    stub.exceptions.InvalidPath = type("InvalidPath", (_StubVaultError,), {})
 
     # FAIL-CLOSE (issue #64, reco red team). `hvac.Client(...)` LÈVE au lieu de renvoyer un
     # MagicMock complaisant : sinon un health_check()/check_vault_owner() non patché renverrait

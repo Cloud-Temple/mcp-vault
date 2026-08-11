@@ -1,6 +1,11 @@
 # --- MCP Framework ---
 # SÉCURITÉ V3-01 : >=1.23.0 corrige CVE-2025-53366 (DoS) et CVE-2025-66416 (DNS rebinding)
-mcp[cli]>=1.23.0
+# BORNE HAUTE (issue #125) : `mcp 2.0.0` a supprimé `mcp.server.fastmcp`, importé
+# par src/mcp_vault/server.py. Sans cette borne, un `pip install -r` hors Docker
+# (venv de développement, où la suite est exécutée avant chaque livraison)
+# réinstalle le défaut que le verrou corrige côté image. Le passage à MCP 2.x
+# est une migration à part entière.
+mcp[cli]>=1.23.0,<2
 
 # --- Configuration ---
 pydantic-settings>=2.0
@@ -35,5 +40,16 @@ prompt-toolkit>=3.0
 python-dotenv>=1.0
 
 # --- Tests (intégration réelle, pas de mocking) ---
-pytest>=8.0
-pytest-asyncio>=0.24.0
+# ÉPINGLÉS (issue #125, revue) : ces deux outils ne sont pas dans
+# `requirements.lock` — ils n'ont rien à faire dans l'image de production. Mais
+# la chaîne de test est ce qui GARDE la release (`release.yml` en dépend) : la
+# laisser flotter sur des planchers, c'est reproduire à l'identique le défaut
+# corrigé ici, un cran plus loin dans la chaîne. Versions constatées vertes sur
+# la suite complète.
+pytest==9.1.1
+pytest-asyncio==1.4.0
+# Transitives de pytest, épinglées pour la même raison : sans elles la chaîne de
+# test n'est reproductible qu'en apparence. `packaging`, l'autre transitive, est
+# déjà épinglée par le verrou (dépendance d'exécution).
+pluggy==1.6.0
+iniconfig==2.3.0

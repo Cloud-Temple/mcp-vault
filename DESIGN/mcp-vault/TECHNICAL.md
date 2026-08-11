@@ -1,6 +1,6 @@
 # Documentation Technique — MCP Vault
 
-> **Version** : 0.10.1 | **Date** : 2026-08-11 | **Auteur** : Cloud Temple
+> **Version** : 0.10.2 | **Date** : 2026-08-11 | **Auteur** : Cloud Temple
 > **Licence** : Apache 2.0 | **Statut** : ✅ Production-ready (audit V2.1 complété + PKI interne v0.5.1)
 
 ---
@@ -999,12 +999,15 @@ Voir `ARCHITECTURE.md §11.3` pour les diagrammes d'architecture et les étapes 
 
 | Package             | Version | Rôle                                          |
 | ------------------- | ------- | --------------------------------------------- |
-| `mcp[cli]`          | ≥1.9.0  | Framework MCP (FastMCP, Streamable HTTP)      |
+| `mcp[cli]`          | ≥1.23.0,<2 | Framework MCP (FastMCP, Streamable HTTP). Plancher : CVE-2025-53366 / CVE-2025-66416 (V3-01). Borne haute : `mcp 2.0.0` supprime `mcp.server.fastmcp` (#125) |
 | `pydantic-settings` | ≥2.0    | Configuration env vars                        |
 | `boto3`             | ≥1.38.43 | Client S3 Dell ECS — plancher imposé par `PutObject.IfMatch` (écriture conditionnelle, issue #121) |
 | `hvac`              | ≥2.3.0  | Client Python pour OpenBao/Vault              |
 | `cryptography`      | ≥42.0   | Chiffrement clés unseal (AES-256-GCM, PBKDF2) |
 | `uvicorn[standard]` | ==0.42.0 | Serveur ASGI — **épinglé** (issue #110) : la sémantique de ré-émission du SIGTERM conditionne l'exécution du lifespan d'arrêt |
+| `pytest`            | ==9.1.1 | Tests — épinglé (#125) : la chaîne de test garde la release (`release.yml` en dépend) ; la laisser flotter reproduirait le défaut corrigé |
+| `pytest-asyncio`    | ==1.4.0 | Tests async — épinglé (#125)                  |
+| `pluggy` / `iniconfig` | ==1.6.0 / ==2.3.0 | Transitives de pytest — épinglées (#125). Hors verrou, donc absentes de l'image de production |
 
 ### Composants du WAF (hors Python, cf. `waf/Dockerfile`)
 
@@ -1015,8 +1018,6 @@ Voir `ARCHITECTURE.md §11.3` pour les diagrammes d'architecture et les étapes 
 | `corazawaf/coraza/v3`        | v3.7.0  | Moteur WAF — **relevé en v0.9.2** (issue #107) : `SecRequestBodyJsonDepthLimit` n'existe qu'à partir de v3.4.0, et sans plafond de profondeur le parseur JSON était vulnérable à un DoS par imbrication |
 | `mholt/caddy-ratelimit`      | v0.1.0  | Limitation de débit par IP                                      |
 | OWASP CoreRuleSet            | 4.7.0   | 23 fichiers de règles chargés                                   |
-| `pytest`            | ≥8.0    | Tests                                         |
-| `pytest-asyncio`    | ≥0.24.0 | Tests async                                   |
 
 **Runtime** :
 - Python 3.12+

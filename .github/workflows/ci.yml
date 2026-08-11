@@ -1,0 +1,117 @@
+name: CI
+
+# Le dépôt n'exécutait AUCUN test en intégration continue (issue #113) : la
+# qualité des releases reposait entièrement sur des exécutions locales. Deux
+# conséquences constatées — des tests rouges ont vécu plusieurs versions sans
+# être vus (#98), et l'image de la v0.10.1 a atteint la qualification plateforme
+# sans démarrer (#125), parce que rien ne construisait l'image ni ne vérifiait
+# qu'elle importait son propre framework.
+#
+# Ce workflow construit l'IMAGE DE PRODUCTION LIVRÉE et la sonde, puis exécute
+# la suite dans l'image de TEST — un stage distinct, non livré, mais bâti sur le
+# même verrou et les mêmes sources. Les tests tournent donc sur les versions
+# réellement installées en production, et non dans un environnement Python
+# reconstitué qui ne prouverait rien sur l'image. Il ne remplace pas les tests
+# e2e (opt-in, stack complète avec WAF et S3 de recette) : ceux-là restent hors
+# CI.
+
+on:
+  pull_request:
+    branches: [main]
+  # Appelable par `release.yml`, qui en fait un `needs` de son job de
+  # publication : aucun tag ni aucune release ne sort sans validation préalable.
+  workflow_call:
+
+# PAS de déclencheur `push: main` — délibéré (revue post-commit). Le dépôt
+# travaille par PR (règle de projet, PAS une protection de branche : `main` n'a
+# ni protection ni ruleset — vérifié), et `release.yml` rappelle explicitement ce
+# workflow avant toute publication. Le conserver produisait deux exécutions
+# concurrentes sur le même `github.ref`, donc dans le MÊME groupe de concurrence
+# ci-dessous : avec `cancel-in-progress`, la CI appelée par la release pouvait
+# être annulée par la CI autonome (ou l'inverse) — une garde de release non
+# déterministe, en plus d'un coût doublé.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image-and-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # La cible `production` porte le garde d'import à la construction
+      # (issue #125) : une résolution de dépendances incompatible fait échouer
+      # CETTE étape, et non le démarrage d'un conteneur en aval de la livraison.
+      - name: Construire l'image de production
+        run: docker build --target production -t mcp-vault:ci .
+
+      # Le garde de construction prouve que l'import passe au BUILD. Ici on
+      # vérifie la propriété complémentaire : l'image livrée contient bien la
+      # version VERROUILLÉE, et non une version résolue librement.
+      - name: Vérifier que l'image porte les versions verrouillées
+        run: |
+          set -euo pipefail
+          expected="$(sed -n 's/^mcp==\(.*\)$/\1/p' requirements.lock)"
+          [ -n "$expected" ] || { echo "::error::mcp absent de requirements.lock"; exit 1; }
+          installed="$(docker run --rm mcp-vault:ci \
+            python -c "import importlib.metadata as m; print(m.version('mcp'))")"
+          echo "mcp verrouillé=${expected} installé=${installed}"
+          if [ "$installed" != "$expected" ]; then
+            echo "::error::l'image installe mcp ${installed}, le verrou épingle ${expected}"
+            exit 1
+          fi
+          docker run --rm mcp-vault:ci python -c "from mcp.server.fastmcp import FastMCP"
+
+      # Critère d'acceptation explicite de l'issue #125 : « Le conteneur Vault
+      # démarre et passe sa sonde de santé. » Construire et importer ne le
+      # démontre pas. S3 est injoignable ici (endpoint mort) : le coffre démarre
+      # donc en mode DÉGRADÉ, ce qui exerce au passage le chemin de lifespan
+      # rétabli au lot 1 de #110. `/health` est servi par un middleware et reste
+      # disponible dans ce mode ; on vérifie en plus que la version servie est
+      # bien celle du dépôt, ce qui prouve que l'image testée est la bonne.
+      - name: Démarrer le conteneur et vérifier la sonde de santé
+        run: |
+          set -euo pipefail
+          key="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+          docker run -d --name vault-probe \
+            -e ADMIN_BOOTSTRAP_KEY="$key" \
+            -e S3_ENDPOINT_URL=http://127.0.0.1:1 \
+            -e S3_ACCESS_KEY_ID=ci -e S3_SECRET_ACCESS_KEY=ci -e S3_BUCKET_NAME=ci \
+            -p 18030:8030 mcp-vault:ci
+          for _ in $(seq 40); do
+            if curl -sf -o /dev/null http://localhost:18030/health; then break; fi
+            if [ "$(docker inspect -f '{{.State.Running}}' vault-probe)" != "true" ]; then
+              echo "::error::le conteneur s'est arrêté avant de répondre"; exit 1
+            fi
+            sleep 3
+          done
+          body="$(curl -sf http://localhost:18030/health)" || {
+            echo "::error::/health ne répond pas"; exit 1; }
+          echo "$body"
+          expected="$(cat VERSION)"
+          echo "$body" | grep -q "\"version\": \"${expected}\"" || {
+            echo "::error::/health n'annonce pas la version ${expected}"; exit 1; }
+
+      - name: Journal du conteneur (diagnostic) et nettoyage
+        if: always()
+        run: |
+          docker logs vault-probe 2>&1 | tail -40 || true
+          docker rm -f vault-probe >/dev/null 2>&1 || true
+
+      - name: Construire l'image de test
+        run: docker build --target test -t mcp-vault:ci-test .
+
+      # ENTRYPOINT de la cible `test` = pytest sur tests/. C'est un stage
+      # DISTINCT de `production` — pas l'artefact livré — mais il partage le
+      # même verrou et les mêmes sources : la suite s'exécute donc sur les
+      # versions réellement installées en production, et non sur celles d'un
+      # environnement Python reconstitué. L'image livrée, elle, est construite
+      # et sondée par les deux étapes précédentes.
+      - name: Exécuter la suite de tests dans l'image
+        run: docker run --rm mcp-vault:ci-test
