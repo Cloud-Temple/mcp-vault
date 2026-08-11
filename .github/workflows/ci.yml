@@ -7,10 +7,13 @@ name: CI
 # sans démarrer (#125), parce que rien ne construisait l'image ni ne vérifiait
 # qu'elle importait son propre framework.
 #
-# Ce workflow construit les ARTEFACTS RÉELLEMENT LIVRÉS et exécute la suite
-# DEDANS, plutôt que dans un environnement Python reconstitué qui ne prouverait
-# rien sur l'image. Il ne remplace pas les tests e2e (opt-in, stack complète avec
-# WAF et S3 de recette) : ceux-là restent hors CI.
+# Ce workflow construit l'IMAGE DE PRODUCTION LIVRÉE et la sonde, puis exécute
+# la suite dans l'image de TEST — un stage distinct, non livré, mais bâti sur le
+# même verrou et les mêmes sources. Les tests tournent donc sur les versions
+# réellement installées en production, et non dans un environnement Python
+# reconstitué qui ne prouverait rien sur l'image. Il ne remplace pas les tests
+# e2e (opt-in, stack complète avec WAF et S3 de recette) : ceux-là restent hors
+# CI.
 
 on:
   pull_request:
@@ -20,13 +23,13 @@ on:
   workflow_call:
 
 # PAS de déclencheur `push: main` — délibéré (revue post-commit). Le dépôt
-# travaille exclusivement par PR : un push sur `main` est donc toujours un merge
-# dont la PR vient d'être validée ici, et `release.yml` rappelle explicitement ce
-# workflow. Le conserver produisait deux exécutions concurrentes sur le même
-# `github.ref`, donc dans le MÊME groupe de concurrence ci-dessous : avec
-# `cancel-in-progress`, la CI appelée par la release pouvait être annulée par la
-# CI autonome (ou l'inverse) — une garde de release non déterministe, en plus
-# d'un coût doublé.
+# travaille par PR (règle de projet, PAS une protection de branche : `main` n'a
+# ni protection ni ruleset — vérifié), et `release.yml` rappelle explicitement ce
+# workflow avant toute publication. Le conserver produisait deux exécutions
+# concurrentes sur le même `github.ref`, donc dans le MÊME groupe de concurrence
+# ci-dessous : avec `cancel-in-progress`, la CI appelée par la release pouvait
+# être annulée par la CI autonome (ou l'inverse) — une garde de release non
+# déterministe, en plus d'un coût doublé.
 permissions:
   contents: read
 

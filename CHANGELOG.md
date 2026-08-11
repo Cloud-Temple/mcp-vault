@@ -52,11 +52,18 @@ des exécutions locales. Cette lacune a laissé passer deux défauts documentés
 des tests rouges vivant plusieurs versions (#98) et une image ne démarrant pas
 (#125).
 
-Nouveau workflow `.github/workflows/ci.yml`, sur `pull_request` et `push` vers
-`main` : il construit les **artefacts réellement livrés**, vérifie que l'image
-porte bien les versions verrouillées, puis exécute la suite **dans l'image de
-test**. Les tests e2e (stack complète avec WAF et S3 de recette) restent opt-in
-et hors CI.
+Nouveau workflow `.github/workflows/ci.yml`, déclenché sur `pull_request` et
+appelable par `release.yml` : il construit **l'image de production livrée**,
+vérifie qu'elle porte bien les versions verrouillées et qu'elle importe son
+framework, puis exécute la suite dans l'**image de test** — un stage distinct,
+non livré, mais qui partage le même verrou et les mêmes sources. Les tests e2e
+(stack complète avec WAF et S3 de recette) restent opt-in et hors CI.
+
+Le workflow n'a délibérément **pas** de déclencheur `push: main` : il partagerait
+alors son groupe de concurrence avec l'exécution appelée par la release, qui
+pourrait être annulée par elle — une garde non déterministe. La publication
+reste protégée par le `needs: verify` de `release.yml`, qui s'applique quel que
+soit le chemin par lequel le commit est arrivé sur `main`.
 
 ### Correctif de test : le stub `hvac` divergeait de la vraie signature (issue #98)
 

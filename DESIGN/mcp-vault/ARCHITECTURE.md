@@ -1798,7 +1798,7 @@ mcp-vault/
 ├── Dockerfile                 # Python 3.12 + binaire OpenBao
 ├── docker-compose.yml         # WAF + mcp-vault + volume + réseau
 ├── requirements.lock          # versions installées dans l'image (fait foi)
-├── requirements.txt           # planchers déclarés + outillage de test
+├── requirements.txt           # contraintes déclarées + outillage de test
 ├── .env.example
 └── VERSION
 ```

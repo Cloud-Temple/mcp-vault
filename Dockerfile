@@ -46,11 +46,13 @@ RUN mkdir -p /openbao/file /openbao/config /openbao/logs && \
 WORKDIR /app
 
 # Install Python dependencies — LE VERROU FAIT FOI (issue #125)
-# `requirements.txt` déclare des PLANCHERS (`mcp[cli]>=1.23.0`, ...) : une
-# construction fraîche résout donc la dernière version publiée en amont. Quand
-# `mcp 2.0.0` est sorti — sans `mcp.server.fastmcp`, importé par server.py —
-# toute image reconstruite a cessé de démarrer, sur TOUTES les versions depuis
-# la v0.4.5. Le verrou existait déjà mais n'était pas consommé ici.
+# `requirements.txt` déclare des CONTRAINTES, pas des versions résolues : des
+# planchers pour la plupart, plus une borne haute sur `mcp` et une égalité
+# stricte sur `uvicorn`. Une construction fraîche y résout donc la dernière
+# version publiée en amont qui les satisfait. Quand `mcp 2.0.0` est sorti — sans
+# `mcp.server.fastmcp`, importé par server.py — toute image reconstruite a cessé
+# de démarrer, sur TOUTES les versions depuis la v0.4.5. Le verrou existait déjà
+# mais n'était pas consommé ici.
 COPY requirements.lock .
 RUN pip install --no-cache-dir -r requirements.lock
 
