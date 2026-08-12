@@ -943,14 +943,14 @@ verts sans rien prouver — c'est arrivé deux fois sur ce dépôt.
 | `Future` remplacé par une `Task` (rotation à vide au teardown) | 1 |
 | attente rendue sur annulation (verrou relâché) | 2 |
 | priorité exception métier / annulation inversée | 1 |
-| garde anti-seconde-boucle non drainée retirée | 1 |
-| verrou définitif de la sync retiré | 2 |
-| verrou posé seulement s'il y a une boucle à drainer | 1 |
+| garde anti-seconde-boucle non drainée retirée | 2 |
+| verrou de la sync retiré (démarrage toujours accepté) | 2 |
+| verrou posé seulement s'il y a une boucle à drainer | 2 |
 | verrou relâché à la fin du drainage (transitoire) | 1 |
 | nettoyage inconditionnel (2e barrière retirée) | 2 |
 | référence perdue après un drainage échoué | 2 |
 | réouverture non câblée dans `vault_startup` | 1 |
-| réouverture inconditionnelle (boucle vivante ignorée) | 1 |
+| réouverture inconditionnelle (boucle vivante ignorée) | 2 |
 | refus de démarrage ignoré par `vault_startup` | 1 |
 | garde « arrêt en cours » retirée du démarrage | 1 |
 
