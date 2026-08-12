@@ -188,7 +188,7 @@ class Settings(BaseSettings):
         de rester permissif (c'était exactement le scénario du finding CRITIQUE).
 
         Règles :
-          1. mcp_auth_mode ∈ {bearer, jwt, dual-stack}.
+          1. mcp_auth_mode ∈ {bearer, bearer-anonymous, jwt, dual-stack}.
           2. mcp_instance_id et mission_token_aud, si tous deux renseignés, doivent
              être identiques (une seule vérité d'audience — anti config-drift).
           3. Si une des deux portes est active : mission_jwks_url ET
