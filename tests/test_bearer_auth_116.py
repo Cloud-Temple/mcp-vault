@@ -9,14 +9,18 @@ Le mode `bearer` est le DÉFAUT. Le middleware y faisait :
     token_info = self._validate_token(token) if token else None
 
 puis injectait et poursuivait. Un appelant sans en-tête `Authorization` — ou
-avec un jeton invalide — atteignait donc les outils. Toutes les gardes en aval
-répondent à la question « CETTE identité a-t-elle le droit ? » ; aucune ne
-posait « y a-t-il seulement une identité ? » :
+avec un jeton invalide — atteignait donc les outils. Les gardes répondent à la
+question « CETTE identité a-t-elle le droit ? » ; celles des outils ALORS
+EXPOSÉS ne posaient jamais « y a-t-il seulement une identité ? » :
 
 - `get_listing_filter(None)` → `visible: True`, aucun filtre → inventaire complet ;
 - `check_policy(None)` → `None`, c'est-à-dire autorisé ;
 - `enforce_mission_jwt_tool` / `enforce_wrap_only_token` → refusent des
-  identités PARTICULIÈRES, n'exigent jamais d'être authentifié.
+  identités PARTICULIÈRES, n'exigent pas d'être authentifié.
+
+`check_access` fait EXCEPTION et refuse bien sans identité — c'est précisément
+ce qui a protégé les secrets. Le quantificateur « aucune garde » serait donc
+faux, et contredirait le paragraphe suivant.
 
 Relevé `curl` du déclarant sur une instance en service : `initialize`,
 `tools/list`, `system_about`, `system_health`, `vault_list`, les quatre outils

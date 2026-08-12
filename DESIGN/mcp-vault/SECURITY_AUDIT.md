@@ -156,10 +156,11 @@ L'audit V2.1 valide explicitement les éléments suivants comme **conformes** :
 `curl` seul et sans en-tête `Authorization`.
 
 **Cause.** Le middleware injectait `token_info=None` et poursuivait, aussi bien
-sans jeton qu'avec un jeton invalide. Les gardes en aval répondent toutes à
-« *cette* identité a-t-elle le droit ? » et concluent « rien à vérifier » en
-l'absence d'identité (`get_listing_filter(None)` → `visible: True`,
-`check_policy(None)` → autorisé).
+sans jeton qu'avec un jeton invalide. Les gardes des outils **alors exposés**
+concluent « rien à vérifier » en l'absence d'identité
+(`get_listing_filter(None)` → `visible: True`, `check_policy(None)` → autorisé).
+`check_access` fait exception et refuse sans identité, ce qui explique que les
+secrets soient restés inaccessibles.
 
 **Impact.** Divulgation non authentifiée : inventaire des coffres, certificats
 émis (**SAN, numéros de série — donc les noms de domaine et adresses du parc**),

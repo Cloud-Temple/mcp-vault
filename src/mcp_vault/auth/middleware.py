@@ -131,9 +131,12 @@ class AuthMiddleware:
         invalide → refus ACTIF 401 au middleware, l'aval n'est jamais atteint.
         La bootstrap key admin reste acceptée (break-glass).
       - "bearer-anonymous" : ⚠️ MODE D'EXCEPTION — ancien comportement de
-        "bearer" : token_info ou None injecté, les outils vérifient. Un appelant
-        SANS identité atteint donc les outils (aucune garde en aval n'exige
-        d'être authentifié). Repli temporaire, CRITICAL au démarrage.
+        "bearer" : token_info ou None injecté, les outils vérifient. Les
+        gardes des outils ALORS EXPOSÉS ne contrôlent pas l'EXISTENCE d'une
+        identité (get_listing_filter et check_policy concluent « rien à
+        vérifier ») — un appelant anonyme les atteint. check_access, lui,
+        refuse bien sans identité : les secrets restent protégés. Repli
+        temporaire, CRITICAL au démarrage.
       - "jwt"        : mission_token JWT ES256 OBLIGATOIRE. Refus ACTIF au
         middleware : 401 (token absent/opaque/JWT invalide), 403 (token authentique
         mais aud/component_id ≠ instance, mission inactive), 503 (JWKS indisponible,

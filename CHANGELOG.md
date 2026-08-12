@@ -17,10 +17,11 @@ inventaire des coffres, **certificats émis (donc les noms de domaine et adresse
 du parc)**, nom du bucket S3, adresse interne d'OpenBao, versions.
 
 **Pourquoi c'est arrivé.** Les protections existent et fonctionnent. Elles
-répondent toutes à « *cette* identité a-t-elle le droit ? ». Aucune ne posait
-« y a-t-il seulement une identité ? ». Sans identité, chaque garde conclut
-« rien à vérifier » et laisse passer — `get_listing_filter(None)` rend
-`visible: True`, `check_policy(None)` rend « autorisé ».
+répondent à « *cette* identité a-t-elle le droit ? ». Les gardes des outils
+**alors exposés** ne posaient jamais « y a-t-il seulement une identité ? » :
+`get_listing_filter(None)` rend `visible: True` et `check_policy(None)` rend
+« autorisé ». `check_access`, lui, refuse bien sans identité — c'est
+précisément pourquoi les secrets sont restés protégés.
 
 **Le correctif est au middleware, pas dans les outils.** Refuser à l'entrée
 ferme la surface des outils MCP d'un seul geste — `initialize` et `tools/list`

@@ -2291,11 +2291,12 @@ appels hvac synchrones du cycle de vie OpenBao restent également hors périmèt
 
 **Le défaut.** En mode `bearer` — le **défaut** — le middleware injectait
 `token_info=None` et poursuivait quand aucun jeton n'était présenté, ou quand
-il était invalide. Toutes les gardes en aval répondent à « *cette* identité
-a-t-elle le droit ? » ; aucune ne posait « y a-t-il seulement une identité ? » :
-`get_listing_filter(None)` rend `visible: True`, `check_policy(None)` rend
-« autorisé », et les gardes mission/wrap refusent des identités *particulières*
-sans jamais exiger d'être authentifié.
+il était invalide. Les gardes répondent à « *cette* identité a-t-elle le
+droit ? » ; celles des outils **alors exposés** ne posaient jamais « y a-t-il
+seulement une identité ? » : `get_listing_filter(None)` rend `visible: True`,
+`check_policy(None)` rend « autorisé », et les gardes mission/wrap refusent des
+identités *particulières* sans exiger d'être authentifié. `check_access` fait
+exception et refuse bien sans identité — c'est ce qui a protégé les secrets.
 
 Conséquence, relevée par un tiers sur une instance en service : divulgation non
 authentifiée de l'inventaire des coffres, des **certificats émis — donc des
