@@ -209,7 +209,10 @@ JWT authentique mais destiné à une autre instance (aud multiple, `component_id
 différent) est rejeté de façon identique aux deux portes, plus seulement à celle-ci.
 Piloté par `MCP_AUTH_MODE` :
 
-- `bearer` *(défaut)* — comportement historique, **zéro impact** ;
+- `bearer` *(défaut)* — bearer opaque **valide exigé** : sans jeton, ou jeton
+  invalide, **401** au middleware (#116, cf. §11.3e) ;
+- `bearer-anonymous` — ⚠️ **mode d'exception** : ancien comportement de `bearer`,
+  un appelant sans identité atteint les outils. `CRITICAL` au démarrage ;
 - `jwt` — `mission_token` JWT ES256 obligatoire (bearer opaque refusé) ;
 - `dual-stack` — JWT valide **ou** bearer opaque valide (migration).
 
@@ -2312,10 +2315,20 @@ exhaustive.
 | `bearer-anonymous` | Ancien comportement, **mode d'exception**. `CRITICAL` au démarrage. N'exige aucun paramètre mission, pour rester utilisable en urgence. |
 | `jwt` / `dual-stack` | Inchangés. |
 
-**Restent publics par conception** : `/health`, `/healthz`, `/ready`,
-`/favicon.ico`, `/` et les routes PKI/ACME. La console `/admin` est traitée par
-un middleware en amont et n'atteint jamais cette couche. La formule exacte est
-« toute la surface des **outils MCP** », jamais « toute la surface ».
+**Ce qui reste joignable sans jeton**, par conception et vérifié dans le code —
+aucune de ces surfaces n'expose d'outil MCP :
+
+| Surface | Traitée par | Pourquoi |
+| --- | --- | --- |
+| `/acme/*`, `/v1/_sys_pki_int/acme/*` | `PkiMiddleware` | Protocole ACME : le client n'a pas encore de certificat |
+| `/pki/ca/*.pem` | `PkiMiddleware` | Chaîne de confiance publique par nature |
+| `/admin`, `/admin/` et ses fichiers statiques | `AdminMiddleware` | La SPA elle-même ; **son API `/admin/api/*` exige un jeton admin** |
+| `OPTIONS /admin/api/*` | `AdminMiddleware` | Préflight CORS, sans effet de bord |
+| `/health`, `/healthz`, `/ready`, `/` | `HealthCheckMiddleware` | Sondes d'orchestrateur |
+| `/favicon.ico` | `AuthMiddleware` (`PUBLIC_PATHS`) | Ressource inerte |
+
+La formule exacte est donc « toute la surface des **outils MCP** », jamais
+« toute la surface ».
 
 **Piège latent fermé au passage.** `MCP_AUTH_MODE != "bearer"` décidait
 « PEP mission actif ? » en trois endroits — une négation qui range du côté

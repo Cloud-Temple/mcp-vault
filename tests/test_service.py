@@ -274,25 +274,34 @@ async def test_02_auth():
     print("\n🔐 TEST 2 — Authentification")
     print("=" * 50)
 
-    # 2a. Sans token → 401
+    # 2a. Sans token → 401 (issue #116)
+    #
+    # Ce cas enregistrait auparavant un SUCCÈS quel que soit le statut reçu, au
+    # motif que « l'auth était optionnelle sur /mcp ». C'est précisément le
+    # défaut #116 : le banc a donc observé l'accès anonyme pendant des mois
+    # sans jamais le signaler. Un contrôle qui accepte tout ne contrôle rien.
     try:
         data = await call_rest("POST", "/mcp", json_body={"jsonrpc": "2.0", "method": "initialize", "id": 1})
-        # Note: le serveur peut accepter sans token (auth optionnelle sur /mcp)
-        # ou refuser. On vérifie juste qu'il répond.
-        record("POST /mcp sans token", True, f"HTTP {data['status_code']}")
+        ok = data["status_code"] == 401
+        record("POST /mcp sans token → 401", ok,
+               f"HTTP {data['status_code']} (attendu: 401)")
     except Exception as e:
-        record("POST /mcp sans token", False, str(e))
+        record("POST /mcp sans token → 401", False, str(e))
 
-    # 2b. Mauvais token → devrait être rejeté ou ignoré
+    # 2b. Mauvais token → 401 aussi (issue #116)
+    # Un jeton invalide produisait le même `token_info=None`, donc le même
+    # passage anonyme. Les deux causes doivent être refusées.
     try:
         data = await call_rest(
             "POST", "/mcp",
             headers={"Authorization": "Bearer bad_token_12345"},
             json_body={"jsonrpc": "2.0", "method": "initialize", "id": 1}
         )
-        record("POST /mcp mauvais token", True, f"HTTP {data['status_code']}")
+        ok = data["status_code"] == 401
+        record("POST /mcp mauvais token → 401", ok,
+               f"HTTP {data['status_code']} (attendu: 401)")
     except Exception as e:
-        record("POST /mcp mauvais token", False, str(e))
+        record("POST /mcp mauvais token → 401", False, str(e))
 
     # 2c. Admin API sans token → 401
     try:

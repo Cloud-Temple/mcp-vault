@@ -315,21 +315,27 @@ class TestAvertissementDeDemarrage:
     muet sur le second chemin — précisément un déploiement ASGI."""
 
     def _construire(self, mode, caplog):
+        """Construit RÉELLEMENT l'application et retourne les CRITICAL émis.
+
+        Aucun `try/except` autour de `create_app()` : une construction qui
+        échoue doit faire ÉCHOUER le test. Avaler l'exception rendrait le test
+        vide de sens — il prouverait l'appel au logger sans prouver que
+        l'application se construit (remarque de revue).
+        """
         import logging
         from mcp_vault import server
-        s = SimpleNamespace(
-            admin_bootstrap_key=BOOTSTRAP_KEY, mcp_auth_mode=mode,
-            mission_pep_active=mode in ("jwt", "dual-stack"),
-        )
-        with patch.object(server, "settings", s), \
+        from mcp_vault.config import Settings
+
+        # De VRAIS réglages, pas un simulacre : `create_app()` appelle
+        # `check_mission_pep_config()` et le fail-fast bootstrap. Un
+        # `SimpleNamespace` masquerait ces contrôles et le test ne prouverait
+        # plus qu'une application réelle se construit dans ce mode.
+        reglages = Settings(admin_bootstrap_key=BOOTSTRAP_KEY, mcp_auth_mode=mode)
+        with patch.object(server, "settings", reglages), \
              patch.object(server, "_install_vault_lifespan", lambda app: None), \
-             patch("mcp_vault.openbao.crypto.validate_bootstrap_key",
-                   return_value=(True, "")), \
              caplog.at_level(logging.CRITICAL, logger="mcp-vault"):
-            try:
-                server.create_app()
-            except Exception:
-                pass  # la construction complète de la stack n'est pas l'objet
+            app = server.create_app()
+        assert app is not None, "create_app() n'a pas retourné d'application"
         return [r for r in caplog.records
                 if r.levelno >= logging.CRITICAL
                 and "bearer-anonymous" in r.getMessage()]

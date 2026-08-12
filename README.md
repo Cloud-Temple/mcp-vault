@@ -371,7 +371,7 @@ ni plus ni moins, et il est vérifié par
 | **OpenBao** | `OPENBAO_ADDR`, `OPENBAO_SHARES`, `OPENBAO_THRESHOLD`, `OPENBAO_DATA_DIR`, `OPENBAO_CONFIG_DIR` | Non |
 | **PKI** *(v0.5.x)* | `PKI_BASE_URL` | Non — vide = déduit du premier FQDN ; override de l'URL ACME en test Docker |
 | **Mission JWT** *(v0.6.0)* | `ENFORCE_MISSION_TOKEN_VALIDATION`, `MISSION_JWKS_URL`, `MISSION_TOKEN_AUD`, `MISSION_JWKS_CACHE_TTL`, `MISSION_JWKS_MAX_REFRESH_PER_MIN`, `MISSION_TOKEN_LEEWAY_SECONDS`, `MISSION_STATUS_URL`, `MISSION_STATUS_CACHE_TTL` | Non — standalone sans mcp-mission |
-| **PEP mission JWT** *(v0.8.0)* | `MCP_AUTH_MODE` (`bearer`/`jwt`/`dual-stack`), `MCP_INSTANCE_ID`, `MCP_COMPONENT_KIND` | Non — défaut `bearer` = zéro impact. `jwt`/`dual-stack` exigent `MISSION_JWKS_URL`, `MCP_INSTANCE_ID`, `MISSION_STATUS_URL` et `ENFORCE_MISSION_TOKEN_VALIDATION` à `true` (fail-fast au boot, #86) |
+| **PEP mission JWT** *(v0.8.0)* | `MCP_AUTH_MODE` (`bearer`/`bearer-anonymous`/`jwt`/`dual-stack`), `MCP_INSTANCE_ID`, `MCP_COMPONENT_KIND` | ⚠️ **Oui depuis #116** — le défaut `bearer` exige désormais un jeton valide (401 sinon). Repli : `bearer-anonymous` (mode d'exception). `jwt`/`dual-stack` exigent `MISSION_JWKS_URL`, `MCP_INSTANCE_ID`, `MISSION_STATUS_URL` et `ENFORCE_MISSION_TOKEN_VALIDATION` à `true` (fail-fast au boot, #86) |
 
 > **Tokens sensibles du CLI — ce ne sont PAS des variables du serveur.**
 > `VAULT_WRAP_TOKEN` et `VAULT_MISSION_TOKEN` sont lus uniquement par le CLI

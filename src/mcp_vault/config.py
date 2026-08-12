@@ -130,7 +130,11 @@ class Settings(BaseSettings):
 
     # --- PEP mission JWT (issue #47) — validation du bearer entrant sur /mcp ---
     # Mode d'authentification de l'endpoint MCP :
-    #   "bearer"     : bearer opaque uniquement (défaut — comportement historique, zéro impact).
+    #   "bearer"     : bearer opaque VALIDE EXIGÉ (défaut) — sans jeton, ou jeton
+    #                  invalide, refus 401 au middleware (issue #116).
+    #   "bearer-anonymous" : ⚠️ MODE D'EXCEPTION — ancien comportement de "bearer" :
+    #                  un appelant sans identité atteint les outils. CRITICAL au
+    #                  démarrage. Repli temporaire uniquement.
     #   "jwt"        : mission_token JWT ES256 obligatoire sur /mcp (bearer opaque refusé).
     #   "dual-stack" : accepte un JWT valide OU un bearer opaque (mode de migration).
     mcp_auth_mode: str = "bearer"

@@ -137,10 +137,10 @@ Utilise `pydantic-settings` pour charger la configuration depuis les variables d
 | `VAULT_S3_PREFIX`        | `_storage`                | Préfixe S3 pour le sync     |
 | `VAULT_S3_SYNC_INTERVAL` | `60`                      | Intervalle sync en secondes |
 | `PKI_BASE_URL`           | *(vide)*                  | Override URL base PKI (ACME directory, CDPs). Utile en test Docker : `http://mcp-vault:8030`. Doit être http(s)://. |
-| `MCP_AUTH_MODE`          | `bearer`                  | PEP mission JWT porte /mcp (#47). `bearer` = historique (zéro impact). `jwt` = mission_token obligatoire. `dual-stack` = JWT valide OU bearer (migration). `jwt`/`dual-stack` exigent `MISSION_JWKS_URL` + `MCP_INSTANCE_ID` + `ENFORCE_MISSION_TOKEN_VALIDATION=true` + `MISSION_STATUS_URL` (fail-fast au boot, #86). |
+| `MCP_AUTH_MODE`          | `bearer`                  | PEP mission JWT porte /mcp (#47). `bearer` = bearer valide **exigé** — sans jeton ou jeton invalide, 401 au middleware (#116). `bearer-anonymous` = ⚠️ mode d'exception, ancien comportement (appelant anonyme accepté), CRITICAL au démarrage. `jwt` = mission_token obligatoire. `dual-stack` = JWT valide OU bearer (migration). `jwt`/`dual-stack` exigent `MISSION_JWKS_URL` + `MCP_INSTANCE_ID` + `ENFORCE_MISSION_TOKEN_VALIDATION=true` + `MISSION_STATUS_URL` (fail-fast au boot, #86). |
 | `MCP_INSTANCE_ID`        | *(vide)*                  | Identifiant d'instance de CE vault : doit figurer dans `aud` du mission_token ET valoir `component_id[MCP_COMPONENT_KIND]`. Source unique d'audience (`resolved_mission_aud`) — remplace `MISSION_TOKEN_AUD` (alias legacy ; divergence des deux = fail-fast boot). |
 | `MCP_COMPONENT_KIND`     | `vault`                   | Clé de `component_id` vérifiée (`component_id[kind] == MCP_INSTANCE_ID`). |
-| `ENFORCE_MISSION_TOKEN_VALIDATION` | `false` | `true` = hard-reject JWT dans secret_consume. `false` = log warning, continue (standalone compatible). Obligatoire dès `MCP_AUTH_MODE != bearer` (fail-fast, #86) — sinon secret_consume resterait permissif malgré le PEP actif. Active seul (mode bearer), requiert aussi `MISSION_JWKS_URL`/audience/`MISSION_STATUS_URL`. Depuis le Lot 2 (#86), le validateur applique le contrat PEP complet (exp/iat/iss/aud/mission_id/jti/scope/tenant_id + `component_id`) ; audience vide = rejet explicite `misconfigured`, plus de mode permissif silencieux. |
+| `ENFORCE_MISSION_TOKEN_VALIDATION` | `false` | `true` = hard-reject JWT dans secret_consume. `false` = log warning, continue (standalone compatible). Obligatoire dès `MCP_AUTH_MODE` ∈ {`jwt`, `dual-stack`} (fail-fast, #86 ; cf. `Settings.mission_pep_active`, #116) — sinon secret_consume resterait permissif malgré le PEP actif. Active seul (mode bearer), requiert aussi `MISSION_JWKS_URL`/audience/`MISSION_STATUS_URL`. Depuis le Lot 2 (#86), le validateur applique le contrat PEP complet (exp/iat/iss/aud/mission_id/jti/scope/tenant_id + `component_id`) ; audience vide = rejet explicite `misconfigured`, plus de mode permissif silencieux. |
 | `MISSION_JWKS_URL`       | *(vide)*                  | JWKS public mcp-mission (`/.well-known/jwks.json`). Vide = validation désactivée. Requis dès que la validation mission_token est active (PEP ou `ENFORCE_MISSION_TOKEN_VALIDATION=true` seul). |
 | `MISSION_TOKEN_AUD`      | *(vide)*                  | Audience attendue dans le JWT (anti-confused-deputy). Ex : `mcp-vault:prod:v1`. |
 | `MISSION_JWKS_CACHE_TTL` | `60`                      | TTL cache JWKS en secondes. |
@@ -987,8 +987,8 @@ zéro. Vérifier seulement le `401` ne dirait pas si les outils ont malgré tout
 | refus limité au jeton ABSENT (un jeton invalide passe) | 3 |
 | clé de bootstrap non exemptée | 3 |
 | `PUBLIC_PATHS` ignoré | 4 |
-| `bearer-anonymous` non reconnu | 2 |
-| `mission_pep_active` retombant sur `!= "bearer"` | 2 |
+| `bearer-anonymous` non reconnu | 3 |
+| `mission_pep_active` retombant sur `!= "bearer"` | 3 |
 | avertissement de démarrage retiré | 1 |
 | audit du refus retiré | 2 |
 

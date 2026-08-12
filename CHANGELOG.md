@@ -27,10 +27,13 @@ ferme la surface des outils MCP d'un seul geste — `initialize` et `tools/list`
 compris, et donc **aussi tout outil ajouté plus tard**. Une correction outil par
 outil aurait rouvert le trou au prochain ajout.
 
-**Ce qui reste public**, par conception : `/health`, `/healthz`, `/ready`,
-`/favicon.ico`, `/`, et les routes PKI/ACME (`/acme/*`, `/pki/ca/*.pem`). La
-console `/admin` est traitée en amont et n'est pas affectée. La clé
-`ADMIN_BOOTSTRAP_KEY` reste acceptée (break-glass).
+**Ce qui reste joignable sans jeton**, par conception — aucune de ces surfaces
+n'expose d'outil MCP : `/acme/*` et `/v1/_sys_pki_int/acme/*` (protocole ACME),
+`/pki/ca/*.pem` (chaîne de confiance publique), `/admin` et ses fichiers
+statiques ainsi que le préflight `OPTIONS /admin/api/*` — **l'API
+`/admin/api/*` exige toujours un jeton admin** —, `/health`, `/healthz`,
+`/ready`, `/` (sondes) et `/favicon.ico`. La clé `ADMIN_BOOTSTRAP_KEY` reste
+acceptée (break-glass).
 
 #### Si un client sans jeton se casse — contournement
 
