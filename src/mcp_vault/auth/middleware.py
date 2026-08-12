@@ -175,17 +175,19 @@ class AuthMiddleware:
         if settings.mcp_auth_mode == "bearer-anonymous":
             # ── Mode d'exception EXPLICITE (issue #116) ────────────────────
             # Comportement historique : un appelant sans jeton — ou avec un
-            # jeton invalide — atteint les outils, et chaque garde en aval
-            # conclut « pas d'identité, rien à vérifier ». Conservé UNIQUEMENT
-            # comme repli documenté, jamais comme défaut. Voir l'avertissement
-            # CRITICAL émis par `create_app()`.
+            # jeton invalide — atteint les outils dont les gardes ne contrôlent
+            # pas l'EXISTENCE d'une identité. Conservé UNIQUEMENT comme repli
+            # documenté, jamais comme défaut. Voir l'avertissement CRITICAL
+            # émis par `create_app()`.
             token_info = self._validate_token(token) if token else None
         elif settings.mcp_auth_mode == "bearer":
             # ── Refus ACTIF (issue #116) ──────────────────────────────────
             # Le défaut historique injectait `None` et poursuivait. Les gardes
-            # en aval (`get_listing_filter`, `check_policy`, gardes mission et
-            # wrap) répondent toutes à la question « CETTE identité a-t-elle le
-            # droit ? » — aucune ne posait « y a-t-il seulement une identité ? ».
+            # des outils ALORS EXPOSÉS (`get_listing_filter`, `check_policy`,
+            # gardes mission et wrap) répondent à « CETTE identité a-t-elle le
+            # droit ? » sans jamais poser « y a-t-il seulement une identité ? ».
+            # `check_access` fait exception et refuse sans identité — c'est ce
+            # qui a protégé les secrets pendant que l'inventaire fuyait.
             # Un appelant anonyme obtenait donc l'inventaire des coffres, les
             # certificats émis (donc les FQDN du parc), le nom du bucket et
             # l'état des backends.
