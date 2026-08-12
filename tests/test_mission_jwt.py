@@ -761,30 +761,67 @@ class _MiddlewareHarness:
         return None
 
 
-class TestAuthMiddlewareBearerMode:
-    """Non-régression : mode bearer = comportement historique strict."""
+class TestAuthMiddlewareBearerAnonymousMode:
+    """Mode `bearer-anonymous` = ancien comportement `bearer`, désormais OPT-IN.
+
+    Ces deux cas de passthrough anonyme encodaient le contrat d'AVANT #116,
+    sous le libellé « comportement historique strict ». Le contrat a changé
+    DÉLIBÉRÉMENT : `bearer` refuse maintenant. Les tests ne sont pas supprimés
+    — ils sont déplacés vers le mode qui porte encore ce comportement, et
+    prouvent qu'il reste disponible QUAND ON LE DEMANDE.
+
+    Le refus en mode `bearer` est couvert par `tests/test_bearer_auth_116.py`.
+    """
 
     def test_no_token_proceeds_with_none(self):
-        h = _MiddlewareHarness(_pep_settings(mode="bearer"))
+        h = _MiddlewareHarness(_pep_settings(mode="bearer-anonymous"))
         events = h.call(token=None)
         assert h.status_of(events) == 200
         assert h.captured["token_info"] is None
 
     def test_bootstrap_key_grants_admin(self):
-        h = _MiddlewareHarness(_pep_settings(mode="bearer"))
+        h = _MiddlewareHarness(_pep_settings(mode="bearer-anonymous"))
         events = h.call(token=BOOTSTRAP_KEY)
         assert h.status_of(events) == 200
         assert "admin" in h.captured["token_info"]["permissions"]
 
     def test_jwt_shaped_token_not_validated_as_jwt(self):
-        """En mode bearer, un compact JWT est traité comme bearer opaque
-        (comportement historique — aucun dispatch JWT)."""
+        """Un compact JWT reste traité comme bearer opaque — aucun dispatch
+        JWT, conformément au comportement historique."""
         priv, _ = _make_es256_keypair()
-        h = _MiddlewareHarness(_pep_settings(mode="bearer"))
+        h = _MiddlewareHarness(_pep_settings(mode="bearer-anonymous"))
         with patch("mcp_vault.auth.middleware.get_token_store", return_value=None):
             events = h.call(token=_make_mission_token(priv))
         assert h.status_of(events) == 200          # pas de 401 actif
         assert h.captured["token_info"] is None    # store inconnu → None injecté
+
+    def test_bearer_opaque_invalide_passe_aussi(self):
+        """Complément demandé en revue : ce n'est pas seulement le JWT compact
+        inconnu qui passe — un bearer opaque invalide passe également."""
+        h = _MiddlewareHarness(_pep_settings(mode="bearer-anonymous"))
+        with patch("mcp_vault.auth.middleware.get_token_store", return_value=None):
+            events = h.call(token="jeton-opaque-totalement-inconnu")
+        assert h.status_of(events) == 200
+        assert h.captured["token_info"] is None
+
+
+class TestAuthMiddlewareBearerMode:
+    """Mode `bearer` (DÉFAUT) : refus actif d'un appelant sans identité (#116)."""
+
+    def test_no_token_is_refused(self):
+        h = _MiddlewareHarness(_pep_settings(mode="bearer"))
+        events = h.call(token=None)
+        assert h.status_of(events) == 401
+        assert "token_info" not in h.captured, (
+            "l'application en aval a été atteinte malgré le refus"
+        )
+
+    def test_bootstrap_key_grants_admin(self):
+        """Break-glass préservé : la clé d'amorçage reste acceptée."""
+        h = _MiddlewareHarness(_pep_settings(mode="bearer"))
+        events = h.call(token=BOOTSTRAP_KEY)
+        assert h.status_of(events) == 200
+        assert "admin" in h.captured["token_info"]["permissions"]
 
 
 class TestAuthMiddlewareJwtMode:

@@ -197,7 +197,8 @@ Second point d'application (PEP) du `mission_token` JWT ES256 de mcp-mission, **
 
 | Mode | Comportement `/mcp` |
 | --- | --- |
-| `bearer` *(défaut)* | Bearer opaque uniquement — comportement historique, **zéro impact**. |
+| `bearer` *(défaut)* | Bearer opaque **obligatoire** : une requête sans jeton, ou avec un jeton invalide, reçoit `401` au middleware (#116). |
+| `bearer-anonymous` | ⚠️ **Mode d'exception** — ancien comportement de `bearer` : un appelant sans identité atteint les outils. Repli temporaire uniquement ; `CRITICAL` au démarrage. |
 | `jwt` | `mission_token` JWT ES256 **obligatoire** (bearer opaque refusé). Requiert aussi `ENFORCE_MISSION_TOKEN_VALIDATION=true` et `MISSION_STATUS_URL` (fail-fast, #86). |
 | `dual-stack` | JWT valide **OU** bearer opaque valide (migration). Mêmes exigences que `jwt` ci-dessus. |
 

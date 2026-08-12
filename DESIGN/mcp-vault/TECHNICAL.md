@@ -974,6 +974,36 @@ lui-même**, chacun après une mesure trompeuse observée :
 
 Principe et pièges : ARCHITECTURE.md §11.3d.
 
+### 5.z Authentification du mode par défaut — `tests/test_bearer_auth_116.py`
+
+**24 tests.** La preuve centrale n'est pas le code de statut mais un **compteur
+de passage** sur l'application en aval : un refus doit laisser ce compteur à
+zéro. Vérifier seulement le `401` ne dirait pas si les outils ont malgré tout
+été atteints.
+
+| Mutation appliquée | Échecs |
+| --- | --- |
+| refus retiré (retour au passthrough) | 8 |
+| refus limité au jeton ABSENT (un jeton invalide passe) | 3 |
+| clé de bootstrap non exemptée | 3 |
+| `PUBLIC_PATHS` ignoré | 4 |
+| `bearer-anonymous` non reconnu | 2 |
+| `mission_pep_active` retombant sur `!= "bearer"` | 2 |
+| avertissement de démarrage retiré | 1 |
+| audit du refus retiré | 2 |
+
+Les 8 mutations sont détectées. Deux tests méritent d'être signalés :
+
+- **non-divulgation du jeton refusé** : un jeton invalide est souvent un jeton
+  VALIDE d'un autre environnement. Le test présente une valeur SENTINELLE et
+  exige son absence de l'audit **et** des logs capturés. Un refus « sans
+  jeton » ne pourrait rien prouver ici — il n'y a pas de jeton à divulguer.
+- **`mission_pep_active`** : la mutation qui le fait retomber sur
+  `!= "bearer"` reproduit exactement la régression trouvée en revue de plan —
+  le mode de repli devenant inutilisable parce qu'il exigerait un JWKS.
+
+Principe et portée : ARCHITECTURE.md §11.3e.
+
 ---
 
 ## 6. Sécurité

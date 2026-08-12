@@ -1635,6 +1635,21 @@ def create_app():
             "(ex: python -c \"import secrets; print(secrets.token_urlsafe(48))\")."
         )
 
+    # ── Mode d'exception `bearer-anonymous` (issue #116) ───────────────────
+    # Émis ICI et non dans `main()` : `create_app` est le point commun aux deux
+    # démarrages (`main()` l'appelle, et `uvicorn ...:create_app --factory`
+    # l'invoque directement). Un avertissement placé dans `main()` seul serait
+    # muet sur le second chemin — précisément celui d'un déploiement ASGI.
+    if settings.mcp_auth_mode == "bearer-anonymous":
+        logger.critical(
+            "🚨 MCP_AUTH_MODE=bearer-anonymous — MODE D'EXCEPTION DANGEREUX. "
+            "Toute requête SANS jeton, ou avec un jeton invalide, atteint les "
+            "outils MCP : inventaire des coffres, certificats émis (donc les "
+            "noms de domaine du parc), nom du bucket et état des backends sont "
+            "lisibles sans aucune authentification. À n'utiliser que le temps "
+            "de faire migrer un client sans jeton (issue #116)."
+        )
+
     # ── Fail-fast validation mission JWT (issues #47, #86) ─────────────────
     # Refuse de démarrer avec une config incohérente : jwks_url/audience absents,
     # drift instance_id/mission_token_aud, PEP actif sans enforcement C18, statut
@@ -1725,7 +1740,7 @@ def main():
         logger.error(f"❌ Config SSH JIT opérateur invalide : {operator_msg}")
         logger.error("   Démarrage refusé (fail-fast sécurité).")
         sys.exit(1)
-    if settings.mcp_auth_mode != "bearer":
+    if settings.mission_pep_active:
         logger.info(f"🛡️  PEP mission JWT actif (mode={settings.mcp_auth_mode}, "
                     f"aud={settings.resolved_mission_aud})")
     if settings.enforce_mission_token_validation:

@@ -144,6 +144,23 @@ class Settings(BaseSettings):
     mcp_component_kind: str = "vault"
 
     @property
+    def mission_pep_active(self) -> bool:
+        """Le PEP mission JWT est-il actif ? (modes `jwt` et `dual-stack` SEULS)
+
+        Cette propriété existe parce que la formulation historique
+        `mcp_auth_mode != "bearer"` était un PIÈGE LATENT (issue #116) : elle
+        range du côté « PEP actif » TOUT mode qui n'est pas exactement
+        `bearer`. L'ajout de `bearer-anonymous` aurait donc exigé de lui un
+        JWKS, une audience et `ENFORCE_MISSION_TOKEN_VALIDATION=true` — rendant
+        inutilisable le seul geste de repli offert à un exploitant dont un
+        client anonyme se casse.
+
+        Nommer l'intention ferme le piège pour tout mode futur : c'est une
+        appartenance à un ensemble explicite, jamais une négation.
+        """
+        return self.mcp_auth_mode in {"jwt", "dual-stack"}
+
+    @property
     def resolved_mission_aud(self) -> str:
         """Audience attendue du mission_token — source unique de vérité.
 
@@ -184,7 +201,7 @@ class Settings(BaseSettings):
         Returns:
             (True, "") si OK, (False, message) sinon.
         """
-        valid_modes = {"bearer", "jwt", "dual-stack"}
+        valid_modes = {"bearer", "bearer-anonymous", "jwt", "dual-stack"}
         if self.mcp_auth_mode not in valid_modes:
             return False, (
                 f"MCP_AUTH_MODE invalide : '{self.mcp_auth_mode}' — "
@@ -199,14 +216,14 @@ class Settings(BaseSettings):
                 "une seule audience mission doit être configurée (config drift)."
             )
 
-        pep_active = self.mcp_auth_mode != "bearer"
+        pep_active = self.mission_pep_active
         mission_validation_active = pep_active or self.enforce_mission_token_validation
 
         if mission_validation_active:
             if not self.mission_jwks_url:
                 return False, (
                     "MISSION_JWKS_URL requis dès que la validation mission_token est "
-                    "active (MCP_AUTH_MODE != bearer, ou "
+                    "active (MCP_AUTH_MODE ∈ {jwt, dual-stack}, ou "
                     "ENFORCE_MISSION_TOKEN_VALIDATION=true) — URL du JWKS public de "
                     "mcp-mission."
                 )

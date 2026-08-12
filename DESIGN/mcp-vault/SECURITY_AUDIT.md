@@ -91,10 +91,11 @@ L'audit V2.1 valide explicitement les éléments suivants comme **conformes** :
 
 ## 3. Tableau de Synthèse — Tous les Findings
 
-### 3.1 Élevé (4/4 corrigés)
+### 3.1 Élevé (5/5 corrigés)
 
 | ID     | Composant  | Description                                    | CVSS | Statut     | Version |
 | ------ | ---------- | ---------------------------------------------- | ---- | ---------- | ------- |
+| V4-01  | Auth       | Mode `bearer` (défaut) : appelant anonyme atteignant les outils — divulgation d'inventaire, certificats, backends (#116) | 7.5  | ✅ Corrigé | v0.11.0 |
 | V2-03  | MCP Server | `audit_log` sans contrôle d'authentification   | 8.1  | ✅ Corrigé | v0.4.0  |
 | V2-02  | Auth       | `is_path_allowed()` fail-open inconsistant     | 7.8  | ✅ Corrigé | v0.4.0  |
 | V3-01  | Infra      | CVE-2025-53366 — MCP SDK DoS requête malformée | 7.5  | ✅ Corrigé | v0.4.0  |
@@ -148,6 +149,32 @@ L'audit V2.1 valide explicitement les éléments suivants comme **conformes** :
 | V3-17  | Infra      | SigV4 meta client désactive signature du payload      | 2.0  | ⚠️ Résiduel | —       |
 
 ---
+
+## 3.4 V4-01 — Accès anonyme aux outils en mode `bearer` (#116)
+
+**Relevé par** un tiers (alex-lata) sur une instance en service (0.9.2), avec
+`curl` seul et sans en-tête `Authorization`.
+
+**Cause.** Le middleware injectait `token_info=None` et poursuivait, aussi bien
+sans jeton qu'avec un jeton invalide. Les gardes en aval répondent toutes à
+« *cette* identité a-t-elle le droit ? » et concluent « rien à vérifier » en
+l'absence d'identité (`get_listing_filter(None)` → `visible: True`,
+`check_policy(None)` → autorisé).
+
+**Impact.** Divulgation non authentifiée : inventaire des coffres, certificats
+émis (**SAN, numéros de série — donc les noms de domaine et adresses du parc**),
+nom du bucket S3, adresse interne d'OpenBao, versions, plus l'ouverture de
+session et la liste complète des 39 outils. **Aucune lecture de secret** :
+`secret_read`/`secret_list` passent par `check_access`, qui refuse.
+
+**Correctif.** Refus actif au middleware (`401`) en mode `bearer` — ferme la
+surface des outils MCP d'un seul geste, outils futurs compris. Ancien
+comportement disponible en `bearer-anonymous`, mode d'exception signalé par un
+`CRITICAL` au démarrage. Voir ARCHITECTURE.md §11.3e.
+
+**Piège corrigé au passage** : `MCP_AUTH_MODE != "bearer"` rangeait tout mode
+futur du côté « PEP mission actif », ce qui aurait rendu le mode de repli
+inutilisable. Remplacé par `Settings.mission_pep_active`.
 
 ## 4. Findings Détaillés — Corrigés
 

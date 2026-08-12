@@ -2,6 +2,58 @@
 
 ## [Non publié] — cible v0.11.0
 
+### RUPTURE — le mode `bearer` exige désormais un jeton valide (issue #116)
+
+**Ce qui était ouvert.** `bearer` est le mode par **défaut**. Une requête sans
+en-tête `Authorization` — ou avec un jeton invalide — atteignait les outils.
+Relevé par un tiers sur une instance en service, avec `curl` seul :
+`initialize`, `tools/list`, `system_about`, `system_health`, `vault_list`, les
+quatre outils PKI de lecture, `secret_types` et `secret_generate_password`
+répondaient à un appelant **anonyme**.
+
+**Aucun secret n'était lisible** — `secret_read` et `secret_list` passent par
+`check_access`, qui refuse sans identité. Le défaut est une **divulgation** :
+inventaire des coffres, **certificats émis (donc les noms de domaine et adresses
+du parc)**, nom du bucket S3, adresse interne d'OpenBao, versions.
+
+**Pourquoi c'est arrivé.** Les protections existent et fonctionnent. Elles
+répondent toutes à « *cette* identité a-t-elle le droit ? ». Aucune ne posait
+« y a-t-il seulement une identité ? ». Sans identité, chaque garde conclut
+« rien à vérifier » et laisse passer — `get_listing_filter(None)` rend
+`visible: True`, `check_policy(None)` rend « autorisé ».
+
+**Le correctif est au middleware, pas dans les outils.** Refuser à l'entrée
+ferme la surface des outils MCP d'un seul geste — `initialize` et `tools/list`
+compris, et donc **aussi tout outil ajouté plus tard**. Une correction outil par
+outil aurait rouvert le trou au prochain ajout.
+
+**Ce qui reste public**, par conception : `/health`, `/healthz`, `/ready`,
+`/favicon.ico`, `/`, et les routes PKI/ACME (`/acme/*`, `/pki/ca/*.pem`). La
+console `/admin` est traitée en amont et n'est pas affectée. La clé
+`ADMIN_BOOTSTRAP_KEY` reste acceptée (break-glass).
+
+#### Si un client sans jeton se casse — contournement
+
+`MCP_AUTH_MODE=bearer-anonymous` reproduit **exactement** l'ancien comportement.
+
+> ⚠️ **Mode d'exception dangereux**, jamais un défaut. Il émet un `CRITICAL` au
+> démarrage nommant ce qu'il expose, et n'exige **aucun** paramètre mission
+> (JWKS, audience) — pour rester utilisable en urgence. À n'employer que le
+> temps de faire migrer le client concerné.
+
+#### Correction d'un piège latent
+
+`MCP_AUTH_MODE != "bearer"` servait à décider « le PEP mission est-il actif ? »
+en trois endroits. Cette formulation range du côté « PEP actif » **tout** mode
+qui n'est pas exactement `bearer` : le mode de repli aurait exigé un JWKS et une
+audience, donc aurait été inutilisable au moment précis où on en a besoin.
+Remplacé par une propriété explicite `Settings.mission_pep_active`
+(appartenance à `{jwt, dual-stack}`), qui ferme le piège pour tout mode futur.
+
+**Tests** : `tests/test_bearer_auth_116.py` — 24 tests. 8 mutations mesurées,
+toutes détectées. Suite : 1211 passed / 29 skipped / 0 failed.
+
+
 ### Disponibilité — la sauvegarde S3 ne gèle plus le coffre (issue #122, lot 2 de #110)
 
 **Ce qui changeait pour l'exploitation.** Les appels S3 sont synchrones.
