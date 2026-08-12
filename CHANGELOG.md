@@ -26,7 +26,10 @@ même famille. Le détail complet, les sondes et les mesures sont dans l'issue #
 **Ce que Click apporte, mesuré sur 8.3.1** : options inconnues refusées avec
 suggestion d'orthographe (`Did you mean --permissions?`), arité des positionnels
 déclarés contrôlée, types validés, valeurs citées et JSON correctement transmis.
-Cinq des huit familles de défauts disparaissent ainsi.
+Disparaissent ainsi les défauts liés aux options non reconnues, aux valeurs
+citées, au JSON en valeur et aux options placées avant les positionnels. Les
+trois qui subsistent sont listés juste après — ils existent aussi sur la surface
+Click, et sont suivis dans #128.
 
 **Ce que Click n'apporte PAS** — à traiter séparément, ces défauts existent aussi
 sur la surface Click : `pki setup --ttl --prod` (option consommée comme valeur),
