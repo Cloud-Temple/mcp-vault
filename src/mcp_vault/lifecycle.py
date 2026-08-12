@@ -120,9 +120,48 @@ async def vault_startup() -> bool:
     Returns:
         True si tout est OK, False si mode dégradé
     """
+    # Un arrêt est EN COURS (issue #122). Sa séquence se poursuit bien après le
+    # drainage — seal, puis sauvegarde finale — avec des points où le service
+    # rend la main. Démarrer ici réarmerait l'idempotence d'arrêt sous les pieds
+    # de cette séquence, et rouvrirait la sync : le nouveau cycle créerait une
+    # boucle que l'arrêt en cours ne connaît pas et ne drainera pas, libre de
+    # publier un instantané ANTÉRIEUR après la sauvegarde finale.
+    if _shutdown_running:
+        logger.critical(
+            "🚨 DÉMARRAGE REFUSÉ — un arrêt du coffre est en cours. Démarrer "
+            "maintenant créerait une sauvegarde périodique invisible de cet "
+            "arrêt."
+        )
+        return False
+
     # Nouveau cycle de vie → l'arrêt redevient exécutable (issue #110) : un même
     # processus peut enchaîner deux lifespans, le second doit pouvoir s'arrêter.
     _reset_shutdown_state()
+
+    # Même raison pour la sync périodique (issue #122) : son arrêt la verrouille
+    # jusqu'à la fin COMPLÈTE de la séquence d'arrêt (seal + sauvegarde finale).
+    # C'est ici, et nulle part ailleurs, qu'un nouveau cycle la rouvre — la
+    # rouvrir depuis `start_periodic_sync()` rendrait le verrou inopérant.
+    # Une boucle du cycle précédent encore vivante fait échouer la réouverture :
+    # elle peut écrire, et lui en superposer une seconde la rendrait invisible.
+    from .s3_sync import reopen_periodic_sync
+    if not reopen_periodic_sync():
+        # Refus AVANT tout démarrage d'OpenBao : une boucle du cycle précédent
+        # peut encore écrire sur S3. Démarrer ici la laisserait publier son
+        # instantané ANTÉRIEUR par-dessus les écritures du nouveau cycle — et
+        # ce nouveau cycle n'aurait même pas de sync périodique pour rattraper,
+        # puisque le verrou reste posé.
+        #
+        # Le retour `False` emprunte le signal EXISTANT de démarrage non abouti
+        # (il fait notamment sauter la sauvegarde finale à l'arrêt, ce qui est
+        # exactement ce qu'on veut ici). La politique de « mode dégradé » qui
+        # découle de ce booléen n'est PAS modifiée : c'est un comportement
+        # préexistant, hors périmètre de #122.
+        logger.critical(
+            "🚨 DÉMARRAGE REFUSÉ — une boucle de sauvegarde du cycle précédent "
+            "n'a pas été drainée et peut encore écrire sur S3."
+        )
+        return False
 
     from .openbao.lifecycle import UnsealKeysUnrecoverable
 
@@ -371,12 +410,19 @@ async def _vault_shutdown_sequence(skip_upload: bool = False):
     """Séquence d'arrêt proprement dite (voir `vault_shutdown`)."""
     logger.info("🛑 Arrêt de MCP Vault...")
 
-    # ── 1. Arrêter le sync périodique ─────────────────────────────
+    # ── 1. Arrêter le sync périodique (par DRAINAGE) ──────────────
+    # `stop_periodic_sync()` ne fait plus d'annulation (issue #122) : annuler une
+    # tâche qui porte un PUT S3 en vol ne l'interrompt pas, et ce PUT pourrait
+    # terminer APRÈS l'upload final — écrasant une archive récente par une
+    # ancienne. On draine, et le résultat décide de l'upload final.
     try:
         from .s3_sync import stop_periodic_sync
-        await stop_periodic_sync()
+        drained = await stop_periodic_sync()
     except Exception as e:
         logger.warning(f"⚠️ Erreur arrêt sync : {e}")
+        # Fail-close : sans preuve de drainage, on ne prend pas le risque
+        # d'écraser une sauvegarde distante potentiellement plus récente.
+        drained = False
 
     # ── 2. Sceller OpenBao + effacer les clés mémoire ────────────
     try:
@@ -401,6 +447,17 @@ async def _vault_shutdown_sequence(skip_upload: bool = False):
             "⚠️ Upload S3 final SAUTÉ (le démarrage n'a pas abouti — éviter "
             "d'écraser une sauvegarde distante potentiellement valide avec un "
             "état local incomplet ou non initialisé)"
+        )
+    elif not drained:
+        # PERTE DE DURABILITÉ S3 ASSUMÉE (issue #122). Le coffre n'est pas perdu
+        # — le volume local reste l'autorité de reprise — mais la copie distante
+        # peut rester périmée. C'est le prix de l'invariant « ne jamais écraser
+        # une archive plus récente par une plus ancienne ».
+        logger.critical(
+            "🚨 Upload S3 final SAUTÉ — la sync périodique n'a pas pu être "
+            "drainée. Une sauvegarde peut être encore en vol ; l'écraser "
+            "risquerait de publier un état plus ancien. La copie S3 peut donc "
+            "rester périmée : la reprise s'appuiera sur le volume local."
         )
     else:
         try:

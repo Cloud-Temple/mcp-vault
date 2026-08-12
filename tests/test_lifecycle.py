@@ -74,7 +74,12 @@ def _run(coro):
 def _patched_shutdown_deps(**overrides):
     """Contexte qui mocke toutes les dépendances de vault_shutdown()."""
     defaults = dict(
-        stop_periodic_sync=AsyncMock(),
+        # #122 : `stop_periodic_sync()` retourne désormais l'ÉTAT DE DRAINAGE.
+        # `AsyncMock()` sans `return_value` rendrait un `MagicMock` — truthy —
+        # et `not drained` serait toujours faux : la garde qui saute l'upload
+        # final ne serait JAMAIS exercée, quel que soit le code. Le retour est
+        # donc explicite ici, et le cas `False` a son propre test.
+        stop_periodic_sync=AsyncMock(return_value=True),
         seal_vault=AsyncMock(return_value={"status": "sealed"}),
         clear_in_memory_keys=MagicMock(),
         upload_to_s3=AsyncMock(return_value=True),
@@ -133,6 +138,54 @@ class TestSkipUploadOnIncompleteStartup:
         # que sabotée en direct sur le fichier source (déjà fait manuellement
         # lors de l'implémentation, cf. commit) pour rester exécutable en CI.
         assert defaults["upload_to_s3"].await_count == 0
+
+
+class TestDrainGovernsFinalUpload:
+    """#122 — le résultat du DRAINAGE décide de l'upload final.
+
+    Un drainage non abouti signifie qu'une sauvegarde S3 peut être encore en
+    vol. Uploader par-dessus publierait potentiellement un état PLUS ANCIEN que
+    celui que le PUT en vol est en train d'écrire.
+    """
+
+    def test_drainage_abouti_autorise_upload_final(self):
+        p1, p2, p3, defaults = _patched_shutdown_deps(
+            stop_periodic_sync=AsyncMock(return_value=True))
+        with p1, p2, p3:
+            _run(vault_shutdown())
+        defaults["upload_to_s3"].assert_awaited_once()
+
+    def test_drainage_non_abouti_interdit_upload_final(self):
+        p1, p2, p3, defaults = _patched_shutdown_deps(
+            stop_periodic_sync=AsyncMock(return_value=False))
+        with p1, p2, p3:
+            _run(vault_shutdown())
+        assert defaults["upload_to_s3"].await_count == 0, (
+            "un drainage non abouti doit INTERDIRE l'upload final"
+        )
+
+    def test_drainage_non_abouti_scelle_et_arrete_quand_meme(self):
+        """La protection des données en mémoire ne dépend pas du drainage :
+        seul l'upload final est sacrifié."""
+        p1, p2, p3, defaults = _patched_shutdown_deps(
+            stop_periodic_sync=AsyncMock(return_value=False))
+        with p1, p2, p3:
+            _run(vault_shutdown())
+        defaults["seal_vault"].assert_awaited_once()
+        defaults["clear_in_memory_keys"].assert_called_once()
+        defaults["stop_openbao"].assert_awaited_once()
+
+    def test_exception_au_drainage_est_fail_close(self):
+        """Sans preuve de drainage, on ne prend pas le risque : une exception
+        de `stop_periodic_sync` doit valoir « non drainé », pas « drainé »."""
+        p1, p2, p3, defaults = _patched_shutdown_deps(
+            stop_periodic_sync=AsyncMock(side_effect=RuntimeError("boum")))
+        with p1, p2, p3:
+            _run(vault_shutdown())
+        assert defaults["upload_to_s3"].await_count == 0, (
+            "une exception au drainage doit être traitée comme un échec de "
+            "drainage (fail-close), pas comme un succès"
+        )
 
 
 class TestCheckLocalDataStatus:

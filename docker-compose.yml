@@ -53,10 +53,20 @@ services:
       - "8030"
     # Délai de grâce à l'arrêt (issue #110). Le défaut Docker est 10 s : trop
     # court depuis que l'arrêt du coffre s'exécute réellement (lifespan ASGI).
-    # Budget à couvrir : pré-drain uvicorn (UVICORN_GRACEFUL_TIMEOUT, 10 s)
-    # + arrêt de la sync + seal + effacement des clés + sauvegarde finale S3
-    # (bornée par S3_*: jusqu'à 2 tentatives × (5 s connexion + 30 s lecture))
-    # + arrêt d'OpenBao. Marge incluse ; à revoir si les bornes S3 changent.
+    #
+    # ⚠️ Cette valeur est un DIMENSIONNEMENT, pas une couverture démontrée
+    # (correction issue #122). Le chemin d'arrêt comporte des étapes SANS borne :
+    # construction de l'archive (parcours disque + compression), `seal_vault()`
+    # (appel hvac synchrone sans timeout), `stop_openbao()` (`kill()` puis
+    # `wait()` non borné), et l'acquisition du verrou d'upload quand une
+    # opération PKI le détient. Le backoff botocore avec jitter n'est pas
+    # déterministe non plus. Un dépassement — donc un SIGKILL — reste possible.
+    #
+    # Ordres de grandeur avec les défauts : pré-drain uvicorn
+    # (UVICORN_GRACEFUL_TIMEOUT, 10 s) + drainage de la sync (30 s, cf.
+    # `_DRAIN_BUDGET_SECONDS`) + sauvegarde finale S3 (jusqu'à 2 tentatives ×
+    # (5 s connexion + 30 s lecture)) + seal et arrêt d'OpenBao.
+    # À revoir si les bornes S3 changent.
     stop_grace_period: 120s
     env_file: .env
     volumes:

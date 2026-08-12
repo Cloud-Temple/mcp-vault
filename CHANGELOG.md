@@ -2,6 +2,92 @@
 
 ## [Non publié] — cible v0.11.0
 
+### Disponibilité — la sauvegarde S3 ne gèle plus le coffre (issue #122, lot 2 de #110)
+
+**Ce qui changeait pour l'exploitation.** Les appels S3 sont synchrones.
+Exécutés dans la boucle d'événements, ils monopolisaient l'unique fil qui sert
+**toutes** les requêtes : pendant un ralentissement du stockage, le coffre
+entier ne répondait plus — la sonde de santé comprise, ce qui déclenchait des
+redémarrages en cascade. L'incident de référence a duré **488 secondes**. Le
+lot 1 (v0.10.1) avait ramené ce gel à quelques dizaines de secondes en bornant
+les appels ; **ce lot le supprime sur les cinq chemins traités**.
+
+Ces cinq points d'appel sont désormais exécutés hors de la boucle : la
+sauvegarde (construction de l'archive **et** envoi), la restauration au
+démarrage, la sonde de connectivité, et les deux opérations sur les clés
+chiffrées d'OpenBao (qui portent aussi une dérivation PBKDF2 de 600 000
+itérations, bloquante même quand le réseau va bien).
+
+> ⚠️ **Le gel n'est pas éliminé partout.** Les magasins d'autorisation —
+> jetons, policies, liaisons de mission, registre de wrapping — appellent
+> toujours S3 de façon synchrone dans la boucle. Un stockage lent sur ces
+> chemins **peut encore figer le coffre** jusqu'au lot 3 (issue #123).
+
+**La sonde de santé ne part plus en rafale.** `system_health` déclenchait un
+appel S3 à chaque invocation ; pendant une panne, chaque vérification ajoutait
+un blocage. Une seule sonde réelle est maintenant en vol à la fois, les
+appelants suivants s'y raccrochent, et chacun attend avec sa propre échéance.
+**Aucun cache de résultat n'a été ajouté** : `system_health` doit refléter
+l'état observé, pas un état vieux de quelques secondes.
+
+**Arrêt : drainage, jamais d'annulation.** Annuler une tâche qui porte une
+sauvegarde S3 en vol ne l'interrompt pas — le travail continue et peut se
+terminer *après* la sauvegarde finale, publiant alors un état **plus ancien**.
+L'arrêt demande donc à la boucle de sync de sortir, puis l'attend (budget de
+30 s). Si le drainage n'aboutit pas, la sauvegarde finale est **abandonnée** et
+un message CRITICAL le signale.
+
+> **Perte de durabilité assumée.** Dans ce cas, la copie S3 peut rester
+> périmée. Le coffre n'est pas perdu — le volume local reste l'autorité de
+> reprise — mais la sauvegarde distante n'est pas à jour. C'est le prix de
+> l'invariant « ne jamais écraser une archive plus récente par une plus
+> ancienne ».
+
+**Correction d'une affirmation antérieure.** Le commentaire de
+`stop_grace_period` présentait 120 s comme un budget d'arrêt *couvert*. C'était
+faux : quatre étapes du chemin d'arrêt n'ont aucune borne — construction de
+l'archive, `seal_vault()` (appel hvac synchrone sans timeout), `stop_openbao()`
+(`kill()` puis attente non bornée) et l'acquisition du verrou de sauvegarde
+quand une opération PKI le détient. Le backoff botocore avec jitter n'est pas
+déterministe non plus. La valeur reste un **dimensionnement**, désormais
+présenté comme tel ; un dépassement — donc un arrêt forcé par Docker — reste
+possible. Aucune variable d'environnement n'a été ajoutée : un validateur de
+budget aurait produit une assurance fausse.
+
+**Limite connue, non fermée.** Une opération PKI qui détient le verrou de
+sauvegarde au moment de l'arrêt allonge le chemin critique au-delà du budget de
+drainage, et peut donc être interrompue par Docker. Documenté plutôt que
+masqué : une borne à cet endroit n'écourterait rien, puisque l'attente ne rend
+la main qu'à la fin réelle du travail.
+
+**Hors périmètre**, traité au lot 3 (issue #123) : les appels S3 des magasins
+d'autorisation (jetons, policies, liaisons de mission, registre de wrapping).
+Les appels **hvac** synchrones d'`initialize_vault`/`unseal_vault` restent
+également hors périmètre.
+
+**Une fois la sync arrêtée, elle ne redémarre pas avant un nouveau cycle de
+vie complet.** Le
+risque est toujours le même : une boucle que l'arrêt ne voit pas. Il conclurait
+« tout est drainé », la sauvegarde finale partirait, et cette boucle pourrait
+écrire **après** elle. Or l'arrêt du coffre ne s'achève pas avec le drainage —
+viennent ensuite le seal puis la sauvegarde finale, pendant lesquels le service
+rend la main. Le verrouillage est donc **définitif** et non le temps du seul
+drainage. Un même processus pouvant enchaîner deux cycles de vie (scénario déjà
+supporté), c'est le démarrage du coffre — et lui seul — qui rouvre la sync. Si
+une boucle du cycle précédent vit encore, **le nouveau démarrage est refusé**
+avant même de relancer OpenBao : cette boucle pourrait publier un état antérieur
+par-dessus les écritures du nouveau cycle. Symétriquement, **un démarrage
+pendant un arrêt en cours est refusé** : l'arrêt se poursuit après le drainage,
+et un nouveau cycle y créerait une boucle qu'il ne drainerait jamais. La référence d'une
+boucle non drainée est par ailleurs conservée : la perdre effacerait la seule
+trace d'un travail encore capable d'écrire.
+
+**Tests** : `tests/test_s3_offload_122.py` — 27 tests, preuve déterministe par
+barrières (aucun seuil de performance, donc rien de fragile en CI), plus un
+**contrôle de l'instrument** qui exige que le témoin détecte bien un appel resté
+dans la boucle. 24 mutations mesurées, toutes détectées. Quatre tests ajoutés à
+`tests/test_lifecycle.py` pour le câblage du drainage.
+
 ### RUPTURE — le shell interactif est supprimé (issue #128)
 
 `python scripts/mcp_cli.py shell` n'existe plus. Le mode Click
