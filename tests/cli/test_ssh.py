@@ -7,7 +7,6 @@ Vérifie que chaque commande ssh appelle le bon outil MCP avec les bons
 arguments. Utilise run_cli_mocked() qui intercepte MCPClient.call_tool.
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from . import (
@@ -133,26 +132,3 @@ def test_ssh():
     )
     check_value("Exit code 0 même en erreur", r.exit_code, 0)
     check("ssh_ca_public_key bien appelé", mock.called)
-
-
-@pytest.mark.asyncio
-async def test_shell_request_preserves_quoted_reason_and_closed_contract():
-    """Le shell utilise shlex : un motif multi-mots reste un seul argument."""
-    from cli.shell import cmd_ssh
-
-    client = MagicMock()
-    client.call_tool = AsyncMock(return_value={"status": "ok", "serial_number": "42"})
-    await cmd_ssh(
-        client,
-        'request bastion-prod --key-data "ssh-ed25519 AAAA..." '
-        '--reason "maintenance autorisée par ticket"',
-        json_output=True,
-    )
-    client.call_tool.assert_awaited_once_with(
-        "ssh_request_operator_access",
-        {
-            "profile_id": "bastion-prod",
-            "public_key": "ssh-ed25519 AAAA...",
-            "reason": "maintenance autorisée par ticket",
-        },
-    )

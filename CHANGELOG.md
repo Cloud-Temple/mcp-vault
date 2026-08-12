@@ -1,5 +1,111 @@
 # Changelog — MCP Vault
 
+## [Non publié] — cible v0.11.0
+
+### RUPTURE — le shell interactif est supprimé (issue #128)
+
+`python scripts/mcp_cli.py shell` n'existe plus. Le mode Click
+(`python scripts/mcp_cli.py <commande>`) devient la **seule** surface CLI.
+
+**Pourquoi.** Le shell analysait ses arguments à la main, seize boucles
+indépendantes, une par opération. Quinze finissaient par `else: i += 1` : tout
+jeton non reconnu était **ignoré en silence**. Une faute de frappe ne produisait
+donc pas une erreur, mais **une opération différente de celle demandée** — sans
+erreur ni avertissement. Dix défauts ont été mesurés, dont trois de sécurité :
+
+| Saisie | Ce qui était réellement exécuté |
+| --- | --- |
+| `ssh setup v role --ttl "15"m --user deploy` | `allowed_users="*"` — rôle autorisant tous les principals SSH |
+| `policy create no-ssh --denied ssh_*'` | motif inopérant ; liste d'autorisation vide = tout autoriser → la policy « no-ssh » autorise SSH |
+| `pki setup --domains exemple.fr --prod'` | `lab_mode=True` → politique d'enrôlement ACME `not-required` au lieu de `new-account-required` |
+
+Une tentative de correctif incrémental a été conduite puis abandonnée : neuf
+tours de revue adversariale, et à chaque tour de nouveaux contournements de la
+même famille. Le détail complet, les sondes et les mesures sont dans l'issue #128.
+
+**Ce que Click apporte, mesuré sur 8.3.1** : options inconnues refusées avec
+suggestion d'orthographe (`Did you mean --permissions?`), arité des positionnels
+déclarés contrôlée, types validés, valeurs citées et JSON correctement transmis.
+Cinq des huit familles de défauts disparaissent ainsi.
+
+**Ce que Click n'apporte PAS** — à traiter séparément, ces défauts existent aussi
+sur la surface Click : `pki setup --ttl --prod` (option consommée comme valeur),
+`policy create --denied ssh_*'` (grammaire des motifs, à valider côté serveur),
+`pki setup --prod --lab` (exclusion mutuelle non déclarée). Suivi dans #128.
+
+**Aucune perte fonctionnelle** : les 50 opérations du shell ont toutes un
+équivalent Click. Seules disparaissent les méta-commandes `help` et `quit`.
+
+**Ruptures de syntaxe** — le mode Click a ses propres noms d'options :
+
+| Shell (supprimé) | Click |
+| --- | --- |
+| `vault create v --desc 'X'` | `vault create v --description 'X'` |
+| `secret list v prefixe` | `secret list v --prefix prefixe` |
+| `password 32` | `secret password --length 32` |
+| `types` | `secret types` |
+| `secret wrap v p mission op 600` | `secret wrap v p --mission-id mission --operation-id op --ttl 600` |
+
+Click est par ailleurs **plus prudent** : `vault delete`, `secret delete` et
+`policy delete` demandent une confirmation, là où le shell supprimait directement.
+
+**Confort d'utilisation** : voir `scripts/README.md`. Un alias remplace le
+préfixe ; l'historique et l'édition de ligne sont ceux du terminal.
+
+### Tests — invariants de sécurité portés, aucun perdu
+
+Vingt-trois tests étaient propres au shell — 7 purge token, 6 purge binding,
+9 expiration, 1 SSH. Chaque invariant a été vérifié avant suppression, dans le
+CODE et pas seulement dans les tests :
+
+- **`token create --expires` (contrat #65)** — la protection vit déjà côté Click
+  (`_ExpiresDaysType`, un `click.ParamType` sans coercition). Trois cas
+  n'étaient couverts que par le shell : valeur absente, borne valide réellement
+  transmise, défaut implicite de 90 jours. **Ajoutés** à `tests/cli/test_token.py`.
+- **`ssh request`** — le contrat fermé (aucun attribut de certificat libre
+  transmis) est déjà verrouillé par `tests/cli/test_ssh.py` côté Click. Rien à
+  porter.
+- **`token purge-revoked` et `mission-binding purge`** — le code Click faisait
+  bien l'aperçu avant toute purge, mais **aucun test ne le couvrait**. Les treize
+  invariants sont portés dans `tests/cli/test_purge_destructive.py`, paramétrés
+  sur les deux commandes.
+
+> Une erreur relevée pendant ce portage mérite d'être consignée : le premier
+> simulacre de refus de confirmation renvoyait `False`, et le test ÉCHOUAIT. Le
+> code n'examine pas la valeur de retour — c'est `abort=True` qui interrompt, par
+> exception. Un simulacre approximatif aurait laissé croire la purge protégée.
+
+### Correctif au passage : `--older-than` n'accepte plus de valeur négative
+
+`token purge-revoked --older-than -1` et son équivalent `mission-binding purge`
+étaient acceptés (`type=int` sans borne). Avec la sémantique « purger ce qui est
+plus vieux que N jours », une valeur négative sélectionne **tout** et contourne
+la rétention demandée — l'inverse de l'intention. Les deux options sont bornées
+à `>= 0`. Zéro reste accepté : c'est un choix explicite (« sans condition
+d'âge »), une valeur négative n'en est pas un.
+
+Dette préexistante, relevée pendant le portage des tests. Elle n'était couverte
+par aucune surface, ni le shell ni Click.
+
+Deux autres gardes ont été ajoutées au même endroit : le décompte de l'aperçu
+doit être un **entier strictement positif** (`-1`, `True` et `"0"` passaient tous
+l'ancien `if n == 0` et déclenchaient une suppression), et un échec réseau de la
+purge n'est **jamais** suivi d'une reprise — après un délai d'attente ambigu, la
+première requête peut déjà avoir été appliquée.
+
+> **Limite qui demeure, à traiter côté serveur.** L'aperçu est indicatif : la
+> purge ne transmet que la durée de rétention et le serveur recalcule la
+> sélection. Un enregistrement devenu éligible entre l'aperçu et la confirmation
+> est supprimé sans avoir été présenté. Aucune garde côté client ne ferme cette
+> fenêtre ; il faudrait que la purge porte l'empreinte de l'aperçu.
+
+### Dépendances
+
+`prompt-toolkit` retiré de `requirements.txt`, `prompt_toolkit` et sa transitive
+`wcwidth` retirées de `requirements.lock`. Vérifié : le shell en était le seul
+consommateur, et aucune autre dépendance du verrou ne requiert `wcwidth`.
+`typer` et `shellingham` sont **conservés** — ils viennent de `mcp[cli]`.
+
 ## [0.10.2] — 2026-08-11
 
 ### Correctif : l'image ne démarrait plus après reconstruction (issue #125)

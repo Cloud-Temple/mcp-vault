@@ -38,7 +38,7 @@
 ### 2.1 Vue d'ensemble
 
 ```
-    Humain (CLI/shell)       Mission Controller       MCP Agent (instances)
+    Humain (CLI Click)       Mission Controller       MCP Agent (instances)
          │                        │                        │
          │  MCP Protocol (Streamable HTTP)                 │
          ▼                        ▼                        ▼
@@ -261,7 +261,7 @@ validation JWT + mission active, appelle `MissionBindingStore.resolve(tenant_id)
   périmètre. Fenêtre de propagation d'une révocation = TTL cache (≤ 5 min) inter-instance. Grain
   par mission = déjà présent à la consommation (`secret_consume`/C18), évolution future sur ce chemin.
 - **Administration** : `GET/POST/DELETE /admin/api/mission-bindings[/{tenant_id}]` + `.../purge`,
-  **bearer/bootstrap-only** (jamais via mission JWT), parité CLI/shell, audit `decision_id` en tête.
+  **bearer/bootstrap-only** (jamais via mission JWT), piloté par le CLI Click (le groupe `mission-binding` n'est pas exposé dans la console), audit `decision_id` en tête.
 
 **LoggingMiddleware + Ring Buffer** — Chaque requête HTTP est loguée dans un
 **ring buffer mémoire** (200 entrées par défaut) contenant : méthode, path,
@@ -865,7 +865,7 @@ vraie surface d'administration live (ajout/retrait d'empreinte sans
 redéploiement) reste un suivi séparé, à ouvrir explicitement si le besoin
 opérationnel le justifie — ce n'est pas un oubli, c'est un choix de périmètre.
 
-La console Web, le REST Admin, Click et le shell sont quatre canaux vers cette
+La console Web, le REST Admin et le CLI Click sont trois canaux vers cette
 même décision ; ils ne sont jamais l'autorité. Le vrai breaking-glass reste un
 credential humain externe et indépendant de cette instance Vault.
 
@@ -1793,7 +1793,6 @@ mcp-vault/
 │       ├── __init__.py
 │       ├── client.py          # Client MCP Streamable HTTP
 │       ├── commands.py        # CLI Click (vault, secret, ssh, token, audit)
-│       ├── shell.py           # Shell interactif
 │       └── display.py         # Affichage Rich
 ├── Dockerfile                 # Python 3.12 + binaire OpenBao
 ├── docker-compose.yml         # WAF + mcp-vault + volume + réseau
@@ -2147,6 +2146,56 @@ docker exec mcp-vault /opt/luna/bin/lunacm -c "slot list"
 >     ↓
 > v2.0   : Clés dans un HSM matériel (PKCS#11, jamais extractibles)
 > ```
+
+### 11.3b Une seule analyse d'arguments côté CLI *(#128)*
+
+**Décision** : le shell interactif est supprimé ; le mode Click est la seule
+surface de ligne de commande.
+
+**Pourquoi.** Les deux modes exposaient les mêmes commandes avec deux analyseurs
+d'arguments distincts. Celui du shell était écrit à la main, seize boucles
+indépendantes, et **ignorait silencieusement tout jeton non reconnu**. Une faute
+de frappe n'y produisait pas une erreur mais **une opération différente de celle
+demandée** : `ssh setup … --user deploy` créait un rôle ouvert à tous les
+principals, `policy create no-ssh --denied ssh_*'` posait une liste de refus
+inopérante — donc une policy « no-ssh » autorisant SSH.
+
+**Principe retenu, applicable au-delà de ce cas** : une surface qui décide d'une
+frontière de sécurité ne doit **jamais deviner**. Un argument non reconnu est un
+refus, pas un silence. Deux analyseurs pour un même contrat, c'est un contrat qui
+diverge — et c'est toujours le plus permissif qui définit la sécurité réelle.
+
+**Limites assumées, documentées dans #128.** Click ne couvre pas tout : il accepte
+une option consommée comme valeur (`pki setup --ttl --prod`), ignore la sémantique
+des motifs `fnmatch` (la validation doit vivre dans `PolicyStore`, pas dans le
+client), et ne devine pas les exclusions mutuelles (`--prod` / `--lab`). Ces trois
+points restent ouverts et concernent la surface conservée.
+
+### 11.3c Sûreté d'état des opérations de purge
+
+`token purge-revoked` et `mission-binding purge` sont les deux seules opérations
+irréversibles du CLI. Elles appliquent la doctrine de sûreté d'état du projet :
+**une décision destructive se prend sur une preuve positive stricte, jamais sur un
+signal ambigu.**
+
+| Garantie | Ce qu'elle empêche |
+| --- | --- |
+| Aperçu préalable systématique | Supprimer sans avoir obtenu de décompte |
+| Aperçu en échec → aucune purge | Supprimer sur la foi d'un décompte qu'on n'a pas |
+| Décompte = entier strictement positif | `-1`, `True` et `"0"` déclenchaient une suppression |
+| Confirmation (`abort=True`) hors `--yes` | Purge lancée par inadvertance |
+| Rétention par défaut 30 j, bornée à `>= 0` | Une valeur négative sélectionnerait tout |
+| Aucune reprise après échec réseau | Double suppression sur une sélection recalculée |
+
+Chacune est prouvée par une mutation mesurée
+(`tests/cli/test_purge_destructive.py`).
+
+> **Fenêtre non fermée, à traiter côté serveur.** L'aperçu est **indicatif** : la
+> purge ne transmet que la durée de rétention, et le serveur **recalcule** la
+> sélection. Un enregistrement devenu éligible entre l'aperçu et la confirmation
+> est supprimé sans avoir été présenté à l'opérateur. Aucune garde côté client ne
+> ferme cette fenêtre — il faudrait que la purge porte l'empreinte de l'aperçu
+> (identifiants, ou version côté serveur).
 
 ### 11.4 Menaces et mitigations
 
@@ -2669,4 +2718,4 @@ result = await vault_client.call("ssh_sign_key", {
 
 ---
 
-*Document mis à jour le 11 août 2026 — MCP Vault v0.10.2 (39 outils MCP, reproductibilité de l'image : verrou consommé par le Dockerfile et garde d'import à la construction (#125), CI d'exécution des tests, avec démarrage du conteneur et sonde de santé (#113), bornes réseau S3 et chemin d'arrêt porté par le lifespan ASGI (#110 lot 1), échec bruyant sur clés d'unseal inexploitables (#121), permission dédiée `wrap` non-admin pour le broker JIT (verrou wrap-only, policy stricte obligatoire, registre scopé vault+chemins, #115), WAF Coraza v3.7.0 avec parsing JSON borné sur /mcp (profondeur, taille, refus des corps non analysables) et exclusions de cibles anti-évasion, accès SSH JIT opérateur (bearer nominatif + policy dédiée, clé publique pré-enrôlée), pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer, écriture create-only atomique (CAS), sync S3 conditionnelle, contrat de configuration `.env.example` déterministe et testé)*
+*Document mis à jour le 12 août 2026 — MCP Vault v0.10.2, cible v0.11.0 (39 outils MCP, suppression du shell interactif au profit d'une seule analyse d'arguments côté CLI et sûreté d'état des purges (#128),  reproductibilité de l'image : verrou consommé par le Dockerfile et garde d'import à la construction (#125), CI d'exécution des tests, avec démarrage du conteneur et sonde de santé (#113), bornes réseau S3 et chemin d'arrêt porté par le lifespan ASGI (#110 lot 1), échec bruyant sur clés d'unseal inexploitables (#121), permission dédiée `wrap` non-admin pour le broker JIT (verrou wrap-only, policy stricte obligatoire, registre scopé vault+chemins, #115), WAF Coraza v3.7.0 avec parsing JSON borné sur /mcp (profondeur, taille, refus des corps non analysables) et exclusions de cibles anti-évasion, accès SSH JIT opérateur (bearer nominatif + policy dédiée, clé publique pré-enrôlée), pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer, écriture create-only atomique (CAS), sync S3 conditionnelle, contrat de configuration `.env.example` déterministe et testé)*

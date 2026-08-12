@@ -1,8 +1,11 @@
 # 🖥️ MCP Vault CLI
 
-> CLI complet pour interagir avec le serveur MCP Vault — Click + Rich + shell interactif.
+> CLI complet pour interagir avec le serveur MCP Vault — Click + Rich.
 
-> 💡 **Console web** : toutes les fonctionnalités du CLI sont également disponibles dans la **console admin SPA** accessible à `/admin` (dashboard, vaults, secrets, SSH CA, PKI/TLS, policies, tokens, audit, générateur de mot de passe, référence des 14 types). L'interface guide l'utilisateur avec des tooltips et de l'aide contextuelle.
+> 💡 **Console web** : l'essentiel des fonctionnalités du CLI est également disponible dans la **console admin SPA** accessible à `/admin` (dashboard, vaults, secrets, SSH CA, PKI/TLS, policies, tokens, audit, générateur de mot de passe, référence des 14 types). L'interface guide l'utilisateur avec des tooltips et de l'aide contextuelle.
+>
+> Restent propres au CLI : le parcours JIT `secret wrap` / `secret consume` et le
+> groupe `mission-binding`, absents de la console.
 
 ---
 
@@ -164,8 +167,9 @@ python scripts/mcp_cli.py ssh request bastion-prod \
   --key ~/.ssh/id_ed25519.pub \
   --reason "INC-230 maintenance bastion"
 
-# Même demande depuis le shell interactif
-ssh request bastion-prod --key-data 'ssh-ed25519 AAAA...' \
+# Variante : clé fournie en ligne plutôt que par fichier
+python scripts/mcp_cli.py ssh request bastion-prod \
+  --key-data 'ssh-ed25519 AAAA...' \
   --reason 'INC-230 maintenance bastion'
 ```
 
@@ -265,29 +269,68 @@ python scripts/mcp_cli.py audit --vault prod --status denied --json
 
 ---
 
-## 🐚 Shell interactif
+## ⚠️ Opérations irréversibles — les purges
+
+Deux commandes suppriment définitivement des enregistrements :
 
 ```bash
-python scripts/mcp_cli.py shell
+python scripts/mcp_cli.py token purge-revoked --older-than 30
+python scripts/mcp_cli.py mission-binding purge --older-than 30
 ```
 
-```
-🐚 MCP Vault Shell — connecté à http://localhost:8085
-Tapez 'help' pour l'aide, 'quit' pour quitter.
+Le déroulé est identique pour les deux, et il est protégé à trois niveaux :
 
-mcp-vault> health
-mcp-vault> vault list
-mcp-vault> vault create demo --desc "Test"
-mcp-vault> secret write demo test/key --data '{"value":"hello"}' --type custom
-mcp-vault> secret read demo test/key
-mcp-vault> secret list demo
-mcp-vault> password 32
-mcp-vault> types
-mcp-vault> token list
-mcp-vault> quit
+1. **Aperçu systématique.** Un premier appel en `dry_run` compte les candidats.
+   Si cet aperçu échoue, ou si son décompte n'est pas un entier strictement
+   positif, la purge n'est jamais tentée — on ne supprime pas sur la foi d'un
+   décompte qu'on n'a pas su lire.
+
+   > **Limite à connaître.** L'aperçu est **indicatif**, pas contractuel : la
+   > purge ne transmet que la durée de rétention, et le serveur **recalcule** la
+   > sélection. Un enregistrement devenu éligible entre l'aperçu et la
+   > confirmation sera supprimé sans avoir figuré dans l'aperçu. Fermer cette
+   > fenêtre demanderait que la purge porte l'empreinte de l'aperçu — cela relève
+   > du serveur, pas du client.
+2. **Confirmation.** Sans `--yes`, la commande demande une confirmation explicite
+   et s'interrompt si vous refusez.
+3. **Rétention bornée.** `--older-than` vaut 30 jours par défaut. `0` purge
+   **sans condition d'âge** — c'est un choix explicite, toujours soumis à
+   l'aperçu et à la confirmation. Une valeur négative est **refusée** : avec la
+   sémantique « plus de N jours », elle sélectionnerait tout et contournerait la
+   rétention demandée.
+
+`--dry-run` s'arrête après l'aperçu, même combiné à `--yes`.
+
+Ces trois garanties sont verrouillées par `tests/cli/test_purge_destructive.py`,
+dont chaque protection est prouvée par une mutation mesurée.
+
+---
+
+## 🐚 Confort d'utilisation
+
+Le **shell interactif a été supprimé** (issue #128). Son analyseur d'arguments
+était écrit à la main, commande par commande, et **ignorait silencieusement tout
+jeton non reconnu** : une faute de frappe ne produisait pas une erreur, mais une
+opération différente de celle demandée. Click refuse ces saisies et propose même
+la correction :
+
+```
+$ python scripts/mcp_cli.py token create agent --permission read
+Error: No such option: --permission  Did you mean --permissions?
 ```
 
-**Fonctionnalités** : historique (↑↓), auto-complétion (Tab), `--json` sur toutes les commandes.
+Pour retrouver le confort d'une session interactive :
+
+```bash
+# Raccourci — évite de retaper le préfixe
+alias vault='python /chemin/vers/mcp-vault/scripts/mcp_cli.py'
+vault vault list
+```
+
+L'historique et l'édition de ligne sont ceux de votre terminal. Pour la
+complétion, Click sait générer un script dédié — elle cible l'exécutable
+`mcp_cli.py` et suppose donc qu'il soit installé ou présent dans le `PATH` ; elle
+ne s'applique pas à un simple alias.
 
 ---
 
@@ -300,9 +343,8 @@ scripts/
 └── cli/
     ├── __init__.py   # Config : charge .env, expose BASE_URL et TOKEN
     ├── client.py     # MCPClient : Streamable HTTP via SDK MCP
-    ├── commands.py   # 8 groupes Click : health, about, vault, secret, ssh, pki, token, shell
-    ├── display.py    # Affichage Rich : panels, tables, syntax highlighting
-    └── shell.py      # Shell interactif : prompt-toolkit, history, auto-complete
+    ├── commands.py   # Groupes Click : vault, secret, ssh, pki, policy, token, mission-binding
+    └── display.py    # Affichage Rich : panels, tables, syntax highlighting
 ```
 
 ---
@@ -311,9 +353,8 @@ scripts/
 
 | Package          | Rôle                                        |
 | ---------------- | ------------------------------------------- |
-| `click`          | CLI framework                               |
+| `click`          | CLI framework — analyse et VALIDE les arguments |
 | `rich`           | Affichage terminal (tables, panels, syntax) |
-| `prompt-toolkit` | Shell interactif (history, completion)      |
 | `python-dotenv`  | Chargement .env                             |
 | `mcp[cli]`       | SDK MCP (Streamable HTTP client)            |
 | `httpx`          | Appels REST (health, tokens admin)          |

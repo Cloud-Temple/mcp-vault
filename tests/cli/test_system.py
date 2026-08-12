@@ -72,5 +72,12 @@ def test_system():
 
     # Vérifier que toutes les commandes principales sont listées
     section("Commandes principales visibles dans l'aide")
-    for cmd in ["health", "about", "whoami", "vault", "secret", "ssh", "policy", "token", "audit", "shell"]:
+    for cmd in ["health", "about", "whoami", "vault", "secret", "ssh", "policy",
+                "token", "mission-binding", "pki", "logs", "audit"]:
         check_contains(f"Commande '{cmd}' visible", r.output, cmd)
+
+    # Le shell interactif a été SUPPRIMÉ (issue #128) : son analyseur d'arguments
+    # artisanal ignorait silencieusement les jetons non reconnus, exécutant une
+    # opération différente de celle saisie. Click est la seule surface CLI.
+    check("Commande 'shell' absente de l'aide", "shell" not in r.output,
+          "la commande shell est réapparue dans l'aide")
