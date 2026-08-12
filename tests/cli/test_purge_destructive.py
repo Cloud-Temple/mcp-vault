@@ -5,9 +5,9 @@ Opérations de purge DESTRUCTIVES — contrat fail-close (issue #50).
 
 ## Origine
 
-Ces invariants étaient verrouillés uniquement par `tests/cli/test_purge_shell.py`
-et `test_purge_shell_mission_binding.py`, qui exerçaient les handlers du shell
-interactif. Le shell est supprimé (issue #128) : la protection, elle, vit dans
+Ces invariants étaient verrouillés uniquement par les anciens tests du shell
+interactif (`main:tests/cli/test_purge_shell.py` et
+`main:tests/cli/test_purge_shell_mission_binding.py`, supprimés avec lui). Le shell est supprimé (issue #128) : la protection, elle, vit dans
 les commandes Click — mais **aucun test ne la couvrait de ce côté**. Sans ce
 portage, supprimer le shell aurait laissé deux opérations irréversibles sans
 filet.

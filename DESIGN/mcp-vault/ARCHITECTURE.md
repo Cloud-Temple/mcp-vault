@@ -2173,10 +2173,16 @@ points restent ouverts et concernent la surface conservée.
 
 ### 11.3c Sûreté d'état des opérations de purge
 
-`token purge-revoked` et `mission-binding purge` sont les deux seules opérations
-irréversibles du CLI. Elles appliquent la doctrine de sûreté d'état du projet :
-**une décision destructive se prend sur une preuve positive stricte, jamais sur un
-signal ambigu.**
+`token purge-revoked` et `mission-binding purge` sont les deux opérations de
+**purge en masse** du CLI. Elles ne sont pas les seules commandes irréversibles —
+`vault delete`, `secret delete` et `policy delete` le sont aussi, et sont
+protégées par une confirmation (`abort=True`) — mais elles sont les seules à
+supprimer un ENSEMBLE déterminé par un critère plutôt qu'une cible nommée. C'est
+ce qui justifie une chaîne de garanties propre.
+
+Elles appliquent la doctrine de sûreté d'état du projet : **une décision
+destructive se prend sur une preuve positive stricte, jamais sur un signal
+ambigu.**
 
 | Garantie | Ce qu'elle empêche |
 | --- | --- |
