@@ -906,6 +906,74 @@ Chaque protection est prouvée par une mutation mesurée :
 
 Détail des garanties et fenêtre TOCTOU non fermée : ARCHITECTURE.md §11.3c.
 
+### 5.y Sortie des appels S3 de la boucle — `tests/test_s3_offload_122.py`
+
+**27 tests** (+ 4 ajoutés à `tests/test_lifecycle.py` pour le câblage du
+drainage à l'arrêt).
+
+**Preuve déterministe par barrières, sans aucun seuil de performance** — donc
+rien qui devienne instable selon la charge de la machine. (Des délais
+subsistent : plafonds de sécurité pour qu'un test en échec se termine, budgets
+de drainage raccourcis ; aucun ne conditionne le verdict.) Le stub bloquant
+signale son entrée puis
+attend d'être libéré ; une coroutine témoin, dans la même boucle, progresse et
+le libère ; **le stub échantillonne le témoin juste avant de sortir, depuis le
+fil d'exécution** — c'est-à-dire entre son entrée effective et sa sortie. Si
+l'appel était resté dans la boucle, le témoin n'aurait pas pu progresser :
+l'échantillon vaut faux. Le RED est structurel, pas une course.
+
+**Contrôle de l'instrument** : `test_le_temoin_detecte_un_appel_reste_dans_la_boucle`
+applique le même témoin à un appel volontairement laissé dans la boucle et exige
+un résultat négatif. Sans lui, un témoin cassé rendrait tous les autres tests
+verts sans rien prouver — c'est arrivé deux fois sur ce dépôt.
+
+| Mutation appliquée | Échecs |
+| --- | --- |
+| offload du PUT retiré | 3 |
+| offload de la construction d'archive retiré | 1 |
+| offload de la restauration retiré | 1 |
+| offload de la sonde retiré | 2 |
+| offload du PUT des clés OpenBao retiré | 1 |
+| offload du GET des clés OpenBao retiré | 1 |
+| verrou de sérialisation retiré | 1 |
+| single-flight de la sonde retiré | 1 |
+| annulation réintroduite dans le drainage | 2 |
+| boucle réveillable re-remplacée par `sleep` | 5 |
+| garde « drainage non abouti » retirée | 2 |
+| `Future` remplacé par une `Task` (rotation à vide au teardown) | 1 |
+| attente rendue sur annulation (verrou relâché) | 2 |
+| priorité exception métier / annulation inversée | 1 |
+| garde anti-seconde-boucle non drainée retirée | 1 |
+| verrou définitif de la sync retiré | 2 |
+| verrou posé seulement s'il y a une boucle à drainer | 1 |
+| verrou relâché à la fin du drainage (transitoire) | 1 |
+| nettoyage inconditionnel (2e barrière retirée) | 2 |
+| référence perdue après un drainage échoué | 2 |
+| réouverture non câblée dans `vault_startup` | 1 |
+| réouverture inconditionnelle (boucle vivante ignorée) | 1 |
+| refus de démarrage ignoré par `vault_startup` | 1 |
+| garde « arrêt en cours » retirée du démarrage | 1 |
+
+Les 24 mutations sont détectées. **Trois enseignements sur l'instrument
+lui-même**, chacun après une mesure trompeuse observée :
+
+1. **Valider la syntaxe** (`ast.parse`) avant d'écrire une mutation — un fichier
+   invalide produit des *erreurs de collecte* et non des *échecs*, ce qu'un
+   compteur naïf affiche comme un « 0 échec » faussement rassurant.
+2. **Borner le temps d'exécution** — la mutation « boucle réveillable
+   re-remplacée par `sleep` » faisait initialement **figer** un test au lieu de
+   le faire échouer : la mesure restait suspendue sans rien rapporter. Le test
+   concerné borne désormais son attente, et l'instrument signale un figeage au
+   lieu de le confondre avec un succès.
+3. **Un « 0 échec » signale une protection NON COUVERTE, pas une protection
+   inutile.** La garde anti-seconde-boucle est tombée à 0 quand le verrou
+   définitif a été ajouté : celui-ci masquait son cas dans tous les scénarios
+   testés. Le cas propre à cette garde — deux démarrages sans arrêt entre eux —
+   n'était couvert par aucun test. Un test dédié a été ajouté plutôt que la
+   garde retirée.
+
+Principe et pièges : ARCHITECTURE.md §11.3d.
+
 ---
 
 ## 6. Sécurité

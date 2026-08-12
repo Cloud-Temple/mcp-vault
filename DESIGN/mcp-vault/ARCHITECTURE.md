@@ -2203,6 +2203,87 @@ Chacune est prouvée par une mutation mesurée
 > ferme cette fenêtre — il faudrait que la purge porte l'empreinte de l'aperçu
 > (identifiants, ou version côté serveur).
 
+### 11.3d Les appels S3 du cycle de vie sortent de la boucle *(#122, lot 2 de #110)*
+
+> **Portée exacte, à ne pas élargir.** Ce lot traite **cinq** points d'appel :
+> sauvegarde (archive + envoi), restauration au démarrage, sonde de
+> connectivité, et les deux opérations sur les clés chiffrées d'OpenBao. Les
+> magasins d'autorisation — jetons, policies, liaisons de mission, registre de
+> wrapping — exécutent **toujours** boto3 de façon synchrone dans la boucle :
+> **un stockage lent sur ces chemins peut encore figer le coffre**, jusqu'au
+> lot 3 (#123).
+
+**Le défaut.** Les appels S3 (boto3) sont synchrones. Exécutés dans la boucle
+d'événements, ils monopolisent l'unique fil qui sert toutes les requêtes : un
+ralentissement du stockage rendait le coffre **totalement indisponible**, sonde
+de santé comprise — donc expiration du healthcheck, redémarrage, et blocage à
+nouveau au chargement du magasin de jetons. 488 s mesurées en production.
+
+**Le principe retenu** : les appels bloquants **du périmètre** sortent de la
+boucle, mais **le verrou qui sérialise l'état n'est jamais relâché avant la fin
+réelle du travail**. C'est l'invariant central, et il est plus subtil qu'il n'y paraît —
+trois pièges ont été vérifiés expérimentalement plutôt que déduits :
+
+| Piège | Ce qui se passe réellement |
+| --- | --- |
+| `await asyncio.shield(tâche)` | L'annulation de l'attente fait sortir l'appelant — donc relâche son verrou — alors que le fil d'exécution continue d'écrire sur S3. |
+| `tâche.done()` / `tâche.cancelled()` | Ne prouvent **pas** la fin du travail : annuler la tâche asyncio n'interrompt pas un fil bloqué en Python. |
+| Une `Task` autour de `to_thread` | Elle est annulée par le teardown de la boucle. `shield` ne protège que de l'annulation propagée, pas d'une annulation directe. L'attente part alors en rotation à vide : **1 411 649 tours mesurés en 0,5 s**. |
+
+D'où la primitive `async_offload.run_blocking` : le travailleur est un `Future`
+d'exécuteur (invisible pour le teardown, contrairement à une `Task`), la preuve
+de fin est un `threading.Event` posé **depuis le fil lui-même**, et une
+annulation reçue pendant l'attente est **mémorisée puis re-levée après** la fin
+du travail. L'attente n'est bornée par aucun compteur : une borne qui rendrait
+la main relâcherait le verrou avec une écriture en vol, c'est-à-dire violerait
+l'invariant qu'elle prétendrait protéger. Ce qui la termine, c'est la fin du
+fil. Les appels réseau sont bornés par le lot 1, mais **pas tout ce qui est
+offloadé** : construction de l'archive, dérivation PBKDF2 et attente d'un
+worker libre n'ont aucune borne propre. Un travail qui ne se terminerait jamais
+bloquerait cette attente — choix assumé face à l'alternative, qui serait de
+relâcher le verrou sur une écriture en vol.
+
+**Aucune boucle de sync ne peut apparaître là où l'arrêt ne la verrait pas.**
+Un arrêt verrouille la sync, et ce verrou tient au-delà du drainage : l'arrêt
+se poursuit par le seal puis la sauvegarde finale, deux points où le service
+rend la main. Seul le démarrage d'un nouveau cycle de vie rouvre la sync — un
+même processus peut enchaîner deux lifespans. Si une boucle du cycle précédent
+vit encore, le nouveau démarrage est **refusé** avant tout redémarrage
+d'OpenBao : elle pourrait publier un état antérieur par-dessus les écritures du
+nouveau cycle, qui n'aurait pas même de sync périodique pour rattraper.
+Symétriquement, un démarrage **pendant** un arrêt en cours est refusé : cet
+arrêt se poursuit après le drainage, et ne drainerait jamais une boucle créée
+entre-temps. Sur échec de drainage, la référence à la tâche
+est en outre conservée : l'effacer perdrait la seule trace d'un travail encore
+capable d'écrire.
+
+**Sonde de santé en single-flight.** Une seule vérification réelle est en vol à
+la fois ; les appelants suivants s'y raccrochent, chacun avec sa propre
+échéance, qui n'annule pas la sonde partagée. **Sans cache de résultat** : un
+cache permettrait de répondre « stockage disponible » après la panne, ce qui
+serait une régression de contrat déguisée en optimisation.
+
+**Arrêt : drainage, jamais d'annulation.** Une sauvegarde annulée n'est pas
+interrompue ; elle peut se terminer *après* la sauvegarde finale et publier un
+état plus ancien. L'arrêt demande donc la sortie de la boucle de sync et
+l'attend. Drainage non abouti ⇒ **aucune sauvegarde finale**, message CRITICAL.
+
+> **Perte de durabilité assumée.** La copie S3 peut alors rester périmée. Le
+> volume local demeure l'autorité de reprise, donc le coffre n'est pas perdu ;
+> c'est le prix de l'invariant « ne jamais écraser une archive plus récente par
+> une plus ancienne ».
+
+**Le budget d'arrêt est un dimensionnement, pas une couverture démontrée.**
+Quatre étapes n'ont aucune borne : construction de l'archive, `seal_vault()`
+(hvac synchrone sans timeout), `stop_openbao()` (`kill()` puis attente non
+bornée), et l'acquisition du verrou de sauvegarde quand une opération PKI le
+détient. Le backoff botocore avec jitter n'est pas déterministe. Un dépassement
+de `stop_grace_period` — donc un arrêt forcé — reste possible. Aucun validateur
+de budget n'a été ajouté : il aurait produit une assurance fausse.
+
+**Hors périmètre**, traité au lot 3 (#123) : les magasins d'autorisation. Les
+appels hvac synchrones du cycle de vie OpenBao restent également hors périmètre.
+
 ### 11.4 Menaces et mitigations
 
 | Menace                           | Mitigation                                                                                                            |

@@ -74,10 +74,12 @@ import shutil
 import stat
 import tarfile
 import time
+import weakref
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
+from .async_offload import run_blocking
 from .config import get_settings
 from .s3_client import get_s3_data_client, get_s3_meta_client
 
@@ -101,7 +103,73 @@ _RESTORE_STAGING_DIRNAME = ".s3_sync_restore_staging"
 _RESTORE_MARKER_FILENAME = ".s3_sync_restore_in_progress"
 
 _sync_task: Optional[asyncio.Task] = None
+_sync_stop_event: Optional[asyncio.Event] = None
+# Verrou de la sync périodique (issue #122).
+#
+# Posé par `stop_periodic_sync()` : à partir de cet instant, plus aucune boucle
+# de sync ne démarre — jusqu'à un NOUVEAU cycle de vie.
+#
+# Pourquoi il tient au-delà du drainage. L'arrêt du coffre ne
+# s'achève pas avec le drainage : viennent ensuite le seal PUIS la sauvegarde
+# finale, deux `await` qui rendent la main à la boucle d'événements. Un verrou
+# relâché à la fin du seul drainage laisserait une boucle démarrer dans cette
+# fenêtre : jamais drainée, invisible de l'arrêt, elle pourrait écrire APRÈS la
+# sauvegarde dite finale — et publier un état plus ancien.
+#
+# Un drapeau relâché en fin de `stop_periodic_sync()` aurait un second défaut :
+# n'étant ni possédé ni compté, un premier arrêt qui expire le relâcherait alors
+# qu'un second attend encore la même tâche. Ici, le seul chemin de libération
+# est un nouveau démarrage de coffre — jamais la fin d'un arrêt.
+#
+# Le verrou n'est rouvert QUE par `reopen_periodic_sync()`, appelée par
+# `vault_startup()` au début d'un NOUVEAU cycle de vie — un même processus peut
+# enchaîner deux lifespans (embedding ASGI, redémarrage à chaud), scénario
+# documenté et supporté. Le rouvrir ailleurs, en particulier depuis
+# `start_periodic_sync()`, rouvrirait la fenêtre que ce verrou ferme.
+_sync_closed: bool = False
 _last_sync_time: float = 0
+
+# Budget de drainage de la boucle périodique à l'arrêt (issue #122).
+#
+# ⚠️ ESTIMATION, PAS PREUVE. Dérivation avec les valeurs par défaut :
+# `stop_grace_period` Docker 120 s − pré-drain Uvicorn 10 s − upload final borné
+# `(connect 5 + read 30) × 2 tentatives` = 70 s − marge seal/arrêt ≈ 10 s → 30 s.
+#
+# Cette soustraction ne MAJORE pas le chemin critique réel : quatre composantes
+# de l'arrêt n'ont aucune borne (`_snapshot_and_archive` — parcours disque et
+# compression ; `seal_vault()` — appel hvac synchrone sans timeout ;
+# `stop_openbao()` — `kill()` suivi d'un `wait()` non borné ; et l'acquisition
+# du verrou d'upload quand un upload PKI le détient). Le backoff botocore avec
+# jitter n'est pas déterministe non plus. Un dépassement reste donc possible :
+# c'est pourquoi le dépassement de CE budget a un chemin défini (aucun upload
+# final, log CRITICAL) plutôt qu'un espoir.
+_DRAIN_BUDGET_SECONDS = 30
+
+# --- État lié à la boucle d'événements ---
+# Un `asyncio.Lock` module se LIE à la première boucle qui le met en contention
+# et lève ensuite `RuntimeError: ... is bound to a different event loop` dans
+# toute autre boucle (reproduit : contention en boucle 1 OK, boucle 2 = erreur).
+# La suite de tests crée des boucles fraîches par `asyncio.run`. On garde donc
+# l'état lié à la boucle, dans un dictionnaire à clés faibles : stable pendant
+# toute la vie de la boucle de production (un seul enregistrement), isolé
+# naturellement entre boucles de test. Ne JAMAIS recréer ce verrou en cours de
+# route : le recréer pendant qu'un worker le détient détruirait précisément la
+# sérialisation qu'il assure.
+_loop_state: "weakref.WeakKeyDictionary[Any, dict]" = weakref.WeakKeyDictionary()
+
+
+def _state_for_loop() -> dict:
+    """État (verrou d'upload, sonde partagée) attaché à la boucle courante."""
+    loop = asyncio.get_running_loop()
+    state = _loop_state.get(loop)
+    if state is None:
+        state = {
+            "upload_lock": asyncio.Lock(),
+            "probe_lock": asyncio.Lock(),
+            "probe_task": None,
+        }
+        _loop_state[loop] = state
+    return state
 
 # --- État de détection de changement (cf. docstring module) ---
 # Empreinte de l'état source au moment du dernier PUT CONFIRMÉ réussi. `None` tant
@@ -137,9 +205,15 @@ def _reset_sync_state_for_tests() -> None:
     dans `s3_client.py`).
     """
     global _last_uploaded_fingerprint, _s3_state_uncertain, _last_sync_time
+    global _sync_closed
     _last_uploaded_fingerprint = None
     _s3_state_uncertain = False
     _last_sync_time = 0
+    # `_sync_closed` est DÉFINITIF en exploitation (cf. sa déclaration) : seul
+    # ce point de remise à zéro, réservé aux tests, le relâche — sans quoi le
+    # premier test qui arrête la sync empêcherait tous les suivants d'en
+    # démarrer une.
+    _sync_closed = False
 
 
 def _is_confirmed_absent(exc: Exception) -> bool:
@@ -208,6 +282,22 @@ def _clear_data_dir_leftovers(data_dir: Path, *, include_staging: bool = False) 
 
 
 async def download_from_s3() -> RestoreResult:
+    """
+    Télécharge le file backend depuis S3 et le décompresse, HORS de la boucle
+    d'événements (issue #122).
+
+    Le corps réel est `_download_from_s3_blocking` — inchangé, simplement
+    exécuté dans un thread : GET S3, extraction tar et promotion par renommages
+    sont tous bloquants, et l'extraction d'une archive volumineuse gèle la
+    boucle aussi sûrement qu'un réseau lent.
+
+    Aucun verrou : appelée uniquement au démarrage (`vault_startup`), avant que
+    la boucle de sync périodique n'existe, et ne touche aucun état de sync.
+    """
+    return await run_blocking(_download_from_s3_blocking)
+
+
+def _download_from_s3_blocking() -> RestoreResult:
     """
     Télécharge le file backend depuis S3 et le décompresse.
 
@@ -485,8 +575,20 @@ async def upload_to_s3(skip_if_unchanged: bool = False) -> bool:
         True si uploadé avec succès OU sauté car inchangé (cas nominal du point de
         vue de l'appelant — rien à signaler). False UNIQUEMENT si le PUT a
         réellement échoué.
+
+    SÉRIALISATION (issue #122) : l'offload des parties bloquantes introduit de la
+    concurrence réelle là où la boucle d'événements sérialisait de fait. Le
+    verrou couvre l'ENSEMBLE « lecture de l'état → travail en thread → écriture
+    de l'état ». Sans lui, deux uploads simultanés (tick périodique et opération
+    PKI, par exemple) pourraient publier une archive et enregistrer l'empreinte
+    d'une AUTRE : le prochain cycle sauterait alors un upload sur une référence
+    qui ne correspond à rien de publié.
+
+    Ce verrou porte aussi la garantie « pas de PUT orphelin » : `run_blocking` ne
+    rend la main qu'à la fin RÉELLE du thread, donc le verrou n'est jamais
+    relâché avec un PUT en vol — quel que soit l'appelant, et y compris si
+    l'attente est annulée par un arrêt.
     """
-    global _last_sync_time, _last_uploaded_fingerprint, _s3_state_uncertain
     settings = get_settings()
     data_dir = Path(settings.openbao_data_dir)
 
@@ -494,8 +596,31 @@ async def upload_to_s3(skip_if_unchanged: bool = False) -> bool:
         logger.warning("⚠️ Data dir n'existe pas, rien à uploader")
         return False
 
+    async with _state_for_loop()["upload_lock"]:
+        return await _upload_to_s3_locked(settings, data_dir, skip_if_unchanged)
+
+
+def _put_archive_blocking(settings, archive_bytes: bytes) -> None:
+    """PUT S3 de l'archive — bloquant, destiné à `run_blocking`."""
+    s3 = get_s3_data_client()  # PUT = SigV2
+    s3.put_object(
+        Bucket=settings.s3_bucket_name,
+        Key=_s3_key(),
+        Body=archive_bytes,
+        ContentType="application/gzip",
+    )
+
+
+async def _upload_to_s3_locked(settings, data_dir: Path,
+                               skip_if_unchanged: bool) -> bool:
+    """Corps d'`upload_to_s3`, exécuté sous le verrou de sérialisation."""
+    global _last_sync_time, _last_uploaded_fingerprint, _s3_state_uncertain
+
     try:
-        archive_bytes, fingerprint = _snapshot_and_archive(data_dir)
+        # Parcours disque + compression : bloquant et NON borné. Offloadé pour
+        # la même raison que le réseau — une archive volumineuse gèle la boucle
+        # sans qu'aucun appel S3 ne soit encore parti.
+        archive_bytes, fingerprint = await run_blocking(_snapshot_and_archive, data_dir)
     except Exception as e:
         # Échec de construction (ex. fichier disparu pendant le parcours) : même
         # profil de risque que l'implémentation historique (qui pouvait lever de
@@ -515,13 +640,7 @@ async def upload_to_s3(skip_if_unchanged: bool = False) -> bool:
     size_mb = len(archive_bytes) / (1024 * 1024)
 
     try:
-        s3 = get_s3_data_client()  # PUT = SigV2
-        s3.put_object(
-            Bucket=settings.s3_bucket_name,
-            Key=_s3_key(),
-            Body=archive_bytes,
-            ContentType="application/gzip",
-        )
+        await run_blocking(_put_archive_blocking, settings, archive_bytes)
     except Exception as e:
         # Échec possiblement AMBIGU : par exemple un timeout après l'envoi, où
         # l'objet peut avoir été écrit côté S3 malgré l'exception côté client. On
@@ -557,9 +676,36 @@ async def _periodic_sync_tick() -> bool:
     return await upload_to_s3(skip_if_unchanged=True)
 
 
+def reopen_periodic_sync() -> bool:
+    """
+    Réarme la sync périodique pour un NOUVEAU cycle de vie (issue #122).
+
+    Appelée UNIQUEMENT par `vault_startup()`. Rouvrir depuis
+    `start_periodic_sync()` réintroduirait exactement la fenêtre que
+    `_sync_closed` ferme : entre le drainage et la sauvegarde finale de l'arrêt
+    précédent, une boucle pourrait redémarrer sans être vue de cet arrêt.
+
+    Refuse de rouvrir tant qu'une boucle du cycle PRÉCÉDENT est encore vivante
+    (drainage non abouti) : elle peut encore écrire sur S3, et lui superposer
+    une nouvelle boucle la rendrait invisible de l'arrêt suivant.
+
+    Returns:
+        True si la sync est rouverte, False si une boucle précédente vit encore.
+    """
+    global _sync_closed
+    if _sync_task is not None and not _sync_task.done():
+        logger.critical(
+            "🚨 Réouverture de la sync périodique REFUSÉE : une boucle du cycle "
+            "précédent n'a pas été drainée et peut encore écrire sur S3."
+        )
+        return False
+    _sync_closed = False
+    return True
+
+
 async def start_periodic_sync():
     """Démarre la tâche de sync périodique en arrière-plan."""
-    global _sync_task
+    global _sync_task, _sync_stop_event
     settings = get_settings()
     interval = settings.vault_s3_sync_interval
 
@@ -567,9 +713,46 @@ async def start_periodic_sync():
         logger.info("⏸️ Sync périodique désactivée (interval=0)")
         return
 
+    if _sync_closed:
+        # La sync a déjà été arrêtée dans ce processus. En redémarrer une ici
+        # créerait une boucle invisible de l'arrêt en cours ou déjà passé :
+        # jamais drainée, elle pourrait écrire APRÈS la sauvegarde finale et
+        # publier un état plus ancien.
+        logger.critical(
+            "🚨 Démarrage de la sync périodique REFUSÉ : la sync a été arrêtée "
+            "dans ce processus et ne redémarre pas. Aucune boucle n'est créée."
+        )
+        return
+
+    if _sync_task is not None and not _sync_task.done():
+        # Une boucle précédente n'a PAS été drainée et peut encore écrire sur
+        # S3. En démarrer une seconde par-dessus serait le pire des cas : le
+        # prochain arrêt ne connaîtrait que la nouvelle, la drainerait avec
+        # succès, et autoriserait l'upload final alors que l'ancienne écrit
+        # toujours — exactement l'invariant que tout ce chemin protège.
+        logger.critical(
+            "🚨 Démarrage de la sync périodique REFUSÉ : une boucle précédente "
+            "n'a pas été drainée et peut encore écrire sur S3. Aucune seconde "
+            "boucle n'est créée."
+        )
+        return
+
+    stop_event = asyncio.Event()
+    _sync_stop_event = stop_event
+
     async def _sync_loop():
         while True:
-            await asyncio.sleep(interval)
+            # RÉVEILLABLE (issue #122) : on attend l'ORDRE D'ARRÊT avec un
+            # délai maximal d'un intervalle, au lieu de dormir l'intervalle
+            # entier. Avec `asyncio.sleep(interval)`, un worker au repos et un
+            # intervalle supérieur au budget de drainage serait classé « non
+            # drainé » à l'arrêt — et l'upload final abandonné alors que rien
+            # n'était en cours.
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                return  # arrêt demandé
+            except asyncio.TimeoutError:
+                pass  # intervalle écoulé → cycle normal
             try:
                 await _periodic_sync_tick()
             except Exception as e:
@@ -579,26 +762,121 @@ async def start_periodic_sync():
     logger.info(f"🔄 Sync périodique activée (toutes les {interval}s, conditionnelle)")
 
 
-async def stop_periodic_sync():
-    """Arrête la tâche de sync périodique."""
-    global _sync_task
-    if _sync_task:
-        _sync_task.cancel()
-        try:
-            await _sync_task
-        except asyncio.CancelledError:
-            pass
-        _sync_task = None
+async def stop_periodic_sync() -> bool:
+    """
+    Arrête la boucle de sync périodique par DRAINAGE — jamais par annulation.
+
+    Annuler une tâche qui porte un PUT S3 en vol ne l'interrompt pas : le thread
+    continue et peut terminer APRÈS l'upload final de l'arrêt, écrasant une
+    archive plus récente par une plus ancienne. On demande donc l'arrêt, puis on
+    attend que la boucle sorte d'elle-même.
+
+    Returns:
+        True  — boucle drainée proprement, l'upload final peut avoir lieu.
+        False — budget de drainage dépassé. Un PUT peut être encore en vol :
+                l'appelant DOIT sauter l'upload final. La tâche n'est PAS
+                annulée et continue jusqu'à la fin de son travail (ou jusqu'au
+                SIGKILL du superviseur).
+
+    ⚠️ Sur échec de drainage, la RÉFÉRENCE à la tâche est CONSERVÉE. L'effacer
+    perdrait la seule trace d'un travail encore capable d'écrire sur S3 :
+    `start_periodic_sync()` pourrait alors créer une seconde boucle par-dessus,
+    et l'arrêt suivant — ne connaissant que la nouvelle — la drainerait avec
+    succès puis autoriserait l'upload final pendant que l'ancienne écrit encore.
+    Un arrêt ultérieur ré-attend donc la même tâche, avec un budget neuf.
+
+    ⚠️ Cet appel VERROUILLE la sync périodique : `start_periodic_sync()` sera
+    refusé ensuite, y compris pendant la suite de la séquence d'arrêt (seal,
+    puis sauvegarde finale — deux `await` qui rendent la main à la boucle).
+    Seul `reopen_periodic_sync()`, appelé par `vault_startup()` au début d'un
+    NOUVEAU cycle de vie, relâche ce verrou. Cf. `_sync_closed`.
+    """
+    global _sync_task, _sync_stop_event, _sync_closed
+    # Posé AVANT tout `await`, et même s'il n'y a aucune boucle à drainer :
+    # l'arrêt a commencé, plus rien ne doit démarrer.
+    _sync_closed = True
+
+    if not _sync_task:
+        return True
+
+    task = _sync_task
+    if _sync_stop_event is not None:
+        _sync_stop_event.set()
+
+    try:
+        # `shield` : l'expiration du budget ne doit surtout pas se traduire en
+        # annulation de la tâche — c'est précisément ce qu'on refuse.
+        await asyncio.wait_for(asyncio.shield(task), _DRAIN_BUDGET_SECONDS)
+        drained = True
         logger.info("⏹️ Sync périodique arrêtée")
+    except asyncio.TimeoutError:
+        drained = False
+        logger.critical(
+            "🚨 Drainage de la sync périodique NON abouti en "
+            f"{_DRAIN_BUDGET_SECONDS}s — une sauvegarde S3 peut être en vol. "
+            "L'upload final est ABANDONNÉ pour ne pas écraser une archive plus "
+            "récente. La tâche n'est PAS annulée et poursuit son travail."
+        )
+
+    if drained and _sync_task is task:
+        # Ne libérer QUE ce qu'on a réellement drainé. `_sync_closed` doit déjà
+        # interdire qu'une autre boucle prenne la place ; cette condition reste
+        # une seconde barrière indépendante, pour que la correction du nettoyage
+        # ne repose pas sur la seule justesse du verrou. Libérer une référence
+        # qu'on n'a pas drainée rendrait cette boucle invisible, et l'arrêt
+        # suivant autoriserait la sauvegarde finale pendant qu'elle écrit encore.
+        _sync_task = None
+        _sync_stop_event = None
+    # Drainage non abouti : référence CONSERVÉE (cf. docstring) —
+    # `start_periodic_sync()` refusera d'en démarrer une seconde, et un arrêt
+    # ultérieur ré-attendra celle-ci avec un budget neuf.
+    return drained
 
 
 # =============================================================================
 # Health check
 # =============================================================================
 
+def _head_bucket_blocking(settings) -> tuple[bool, str]:
+    """HEAD S3 — bloquant, destiné à `run_blocking`. Ne lève jamais."""
+    try:
+        s3 = get_s3_meta_client()  # HEAD = SigV4
+        s3.head_bucket(Bucket=settings.s3_bucket_name)
+        return True, f"S3 OK ({settings.s3_bucket_name})"
+    except Exception as e:
+        return False, f"S3 inaccessible: {type(e).__name__}"
+
+
+async def _probe_s3(settings) -> tuple[bool, str]:
+    """
+    Sonde partagée. Ne lève JAMAIS : elle est attendue par N appelants, et une
+    exception qui remonterait les frapperait tous — en plus de produire un
+    « Task exception never retrieved » si plus personne n'attend.
+    """
+    try:
+        return await run_blocking(_head_bucket_blocking, settings)
+    except Exception as e:  # noqa: BLE001
+        return False, f"S3 inaccessible: {type(e).__name__}"
+
+
 async def check_s3_connectivity() -> tuple[bool, str]:
     """
-    Vérifie la connectivité S3.
+    Vérifie la connectivité S3 — SINGLE-FLIGHT (issue #122).
+
+    `system_health` appelle cette fonction à chaque invocation. Pendant une
+    panne S3, chaque appel partait auparavant pour son propre `head_bucket`
+    bloquant : une rafale de vérifications de santé multipliait les blocages de
+    la boucle d'événements au pire moment.
+
+    Une seule sonde réelle est en vol à la fois ; les appelants suivants
+    s'y raccrochent. Chacun attend avec sa PROPRE échéance
+    (`s3_connect_timeout` — une sonde n'a pas de raison d'attendre plus longtemps
+    qu'une tentative de connexion), et cette échéance n'annule PAS la sonde
+    partagée : `wait_for` annule le `shield`, jamais la tâche derrière.
+
+    PAS de cache de résultat : `system_health` doit refléter l'état observé, pas
+    un état vieux de quelques secondes. Un cache permettrait de répondre
+    « S3 OK » après la panne — une régression de contrat, pas une optimisation.
 
     Returns:
         (ok, detail)
@@ -607,9 +885,17 @@ async def check_s3_connectivity() -> tuple[bool, str]:
     if not settings.s3_endpoint_url:
         return False, "S3 non configuré"
 
+    state = _state_for_loop()
+    async with state["probe_lock"]:
+        task = state["probe_task"]
+        if task is None or task.done():
+            task = asyncio.create_task(_probe_s3(settings))
+            state["probe_task"] = task
+
     try:
-        s3 = get_s3_meta_client()  # HEAD = SigV4
-        s3.head_bucket(Bucket=settings.s3_bucket_name)
-        return True, f"S3 OK ({settings.s3_bucket_name})"
-    except Exception as e:
-        return False, f"S3 inaccessible: {type(e).__name__}"
+        return await asyncio.wait_for(asyncio.shield(task),
+                                      settings.s3_connect_timeout)
+    except asyncio.TimeoutError:
+        # Seule `TimeoutError` est capturée : une annulation de L'APPELANT doit
+        # se propager normalement (ce n'est pas un résultat de sonde).
+        return False, "S3 inaccessible: sonde en cours (délai dépassé)"

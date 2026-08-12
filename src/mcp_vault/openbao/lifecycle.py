@@ -28,6 +28,7 @@ from typing import Optional
 
 import hvac
 
+from ..async_offload import run_blocking
 from ..config import get_settings
 from .crypto import encrypt_with_bootstrap_key, decrypt_with_bootstrap_key
 from .manager import get_hvac_client
@@ -243,7 +244,10 @@ async def initialize_vault() -> dict:
 
     # ── Chiffrer et uploader sur S3 (Option C) ──
     try:
-        _upload_encrypted_keys_to_s3(init_data)
+        # Offloadé hors de la boucle d'événements (issue #122) : PUT S3 ET
+        # dérivation PBKDF2 (600 000 itérations) sont bloquants — le second
+        # gèle la boucle même quand le réseau va bien.
+        await run_blocking(_upload_encrypted_keys_to_s3, init_data)
     except Exception as e:
         # CRITIQUE : si l'upload S3 échoue, on ne peut pas continuer
         # car on ne sauvegarde PAS en local (invariant Option C)
@@ -302,14 +306,16 @@ async def unseal_vault() -> dict:
 
     # Source 2 : migration ancien fichier local → S3 chiffré
     if not init_keys:
-        init_keys = _check_and_migrate_legacy_keys()
+        # Offloadé (issue #122) : lit un fichier local puis chiffre et uploade.
+        init_keys = await run_blocking(_check_and_migrate_legacy_keys)
         if init_keys:
             logger.info("🔑 Clés récupérées par migration legacy → S3")
 
     # Source 3 : téléchargement depuis S3 (cas nominal)
     if not init_keys:
         try:
-            init_keys = _download_encrypted_keys_from_s3()
+            # Offloadé (issue #122) : GET S3 + déchiffrement PBKDF2.
+            init_keys = await run_blocking(_download_encrypted_keys_from_s3)
             if init_keys:
                 logger.info("🔑 Clés déchiffrées depuis S3")
         except ValueError as e:

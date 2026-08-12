@@ -100,6 +100,9 @@ def _settings(data_dir):
         vault_s3_sync_interval=60,
         s3_endpoint_url="http://localhost:0",
         s3_region_name="fr1",
+        # Échéance locale de la sonde single-flight (issue #122) : chaque
+        # appelant attend au plus une tentative de connexion.
+        s3_connect_timeout=5,
     )
 
 
