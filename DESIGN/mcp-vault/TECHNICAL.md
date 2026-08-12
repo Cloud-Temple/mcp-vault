@@ -620,7 +620,7 @@ de `resolved_mission_aud`). Le fichier-par-instance réduit le last-write-wins c
 
 **Singleton** : `init_mission_binding_store()` (lifecycle, après Policy Store) — actif si S3 configuré
 ET `resolved_mission_aud` non vide ; `get_mission_binding_store()` (getter). Warning au boot si
-`MCP_AUTH_MODE ≠ bearer` sans store (PEP actif mais aucun octroi possible → deny-all).
+`MCP_AUTH_MODE` ∈ {`jwt`, `dual-stack`} sans store (PEP actif mais aucun octroi possible → deny-all). Cf. `Settings.mission_pep_active` (#116) : la formulation `≠ bearer` était fausse dès l'ajout d'un 4e mode.
 
 **Modèle de données** :
 

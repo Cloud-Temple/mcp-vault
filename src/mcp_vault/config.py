@@ -193,7 +193,7 @@ class Settings(BaseSettings):
              être identiques (une seule vérité d'audience — anti config-drift).
           3. Si une des deux portes est active : mission_jwks_url ET
              resolved_mission_aud requis (sinon aucun mission_token n'est vérifiable).
-          4. Si le PEP transport est actif (mode != bearer) : l'enforcement C18 doit
+          4. Si le PEP transport est actif (mode ∈ {jwt, dual-stack}) : l'enforcement C18 doit
              l'être aussi (sinon secret_consume reste permissif malgré le PEP).
           5. Si une des deux portes est active : mission_status_url requis (sinon une
              mission abortée garde l'accès jusqu'à expiration du token, jusqu'à 1h),
@@ -250,7 +250,7 @@ class Settings(BaseSettings):
             if not self.mission_status_url:
                 return False, (
                     "MISSION_STATUS_URL requis dès que la validation mission_token "
-                    "est active (MCP_AUTH_MODE != bearer, ou "
+                    "est active (MCP_AUTH_MODE ∈ {jwt, dual-stack}, ou "
                     "ENFORCE_MISSION_TOKEN_VALIDATION=true) — sans cela, une mission "
                     "abortée garde l'accès jusqu'à expiration du mission_token "
                     "(jusqu'à 1h). Doit contenir le placeholder '{mission_id}', ex : "
