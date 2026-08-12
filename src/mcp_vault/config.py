@@ -130,7 +130,11 @@ class Settings(BaseSettings):
 
     # --- PEP mission JWT (issue #47) — validation du bearer entrant sur /mcp ---
     # Mode d'authentification de l'endpoint MCP :
-    #   "bearer"     : bearer opaque uniquement (défaut — comportement historique, zéro impact).
+    #   "bearer"     : bearer opaque VALIDE EXIGÉ (défaut) — sans jeton, ou jeton
+    #                  invalide, refus 401 au middleware (issue #116).
+    #   "bearer-anonymous" : ⚠️ MODE D'EXCEPTION — ancien comportement de "bearer" :
+    #                  un appelant sans identité atteint les outils. CRITICAL au
+    #                  démarrage. Repli temporaire uniquement.
     #   "jwt"        : mission_token JWT ES256 obligatoire sur /mcp (bearer opaque refusé).
     #   "dual-stack" : accepte un JWT valide OU un bearer opaque (mode de migration).
     mcp_auth_mode: str = "bearer"
@@ -142,6 +146,23 @@ class Settings(BaseSettings):
 
     # Type de composant pour la validation component_id[kind] == instance_id (contrat mcp-mission).
     mcp_component_kind: str = "vault"
+
+    @property
+    def mission_pep_active(self) -> bool:
+        """Le PEP mission JWT est-il actif ? (modes `jwt` et `dual-stack` SEULS)
+
+        Cette propriété existe parce que la formulation historique
+        `mcp_auth_mode != "bearer"` était un PIÈGE LATENT (issue #116) : elle
+        range du côté « PEP actif » TOUT mode qui n'est pas exactement
+        `bearer`. L'ajout de `bearer-anonymous` aurait donc exigé de lui un
+        JWKS, une audience et `ENFORCE_MISSION_TOKEN_VALIDATION=true` — rendant
+        inutilisable le seul geste de repli offert à un exploitant dont un
+        client anonyme se casse.
+
+        Nommer l'intention ferme le piège pour tout mode futur : c'est une
+        appartenance à un ensemble explicite, jamais une négation.
+        """
+        return self.mcp_auth_mode in {"jwt", "dual-stack"}
 
     @property
     def resolved_mission_aud(self) -> str:
@@ -167,12 +188,12 @@ class Settings(BaseSettings):
         de rester permissif (c'était exactement le scénario du finding CRITIQUE).
 
         Règles :
-          1. mcp_auth_mode ∈ {bearer, jwt, dual-stack}.
+          1. mcp_auth_mode ∈ {bearer, bearer-anonymous, jwt, dual-stack}.
           2. mcp_instance_id et mission_token_aud, si tous deux renseignés, doivent
              être identiques (une seule vérité d'audience — anti config-drift).
           3. Si une des deux portes est active : mission_jwks_url ET
              resolved_mission_aud requis (sinon aucun mission_token n'est vérifiable).
-          4. Si le PEP transport est actif (mode != bearer) : l'enforcement C18 doit
+          4. Si le PEP transport est actif (mode ∈ {jwt, dual-stack}) : l'enforcement C18 doit
              l'être aussi (sinon secret_consume reste permissif malgré le PEP).
           5. Si une des deux portes est active : mission_status_url requis (sinon une
              mission abortée garde l'accès jusqu'à expiration du token, jusqu'à 1h),
@@ -184,7 +205,7 @@ class Settings(BaseSettings):
         Returns:
             (True, "") si OK, (False, message) sinon.
         """
-        valid_modes = {"bearer", "jwt", "dual-stack"}
+        valid_modes = {"bearer", "bearer-anonymous", "jwt", "dual-stack"}
         if self.mcp_auth_mode not in valid_modes:
             return False, (
                 f"MCP_AUTH_MODE invalide : '{self.mcp_auth_mode}' — "
@@ -199,14 +220,14 @@ class Settings(BaseSettings):
                 "une seule audience mission doit être configurée (config drift)."
             )
 
-        pep_active = self.mcp_auth_mode != "bearer"
+        pep_active = self.mission_pep_active
         mission_validation_active = pep_active or self.enforce_mission_token_validation
 
         if mission_validation_active:
             if not self.mission_jwks_url:
                 return False, (
                     "MISSION_JWKS_URL requis dès que la validation mission_token est "
-                    "active (MCP_AUTH_MODE != bearer, ou "
+                    "active (MCP_AUTH_MODE ∈ {jwt, dual-stack}, ou "
                     "ENFORCE_MISSION_TOKEN_VALIDATION=true) — URL du JWKS public de "
                     "mcp-mission."
                 )
@@ -229,7 +250,7 @@ class Settings(BaseSettings):
             if not self.mission_status_url:
                 return False, (
                     "MISSION_STATUS_URL requis dès que la validation mission_token "
-                    "est active (MCP_AUTH_MODE != bearer, ou "
+                    "est active (MCP_AUTH_MODE ∈ {jwt, dual-stack}, ou "
                     "ENFORCE_MISSION_TOKEN_VALIDATION=true) — sans cela, une mission "
                     "abortée garde l'accès jusqu'à expiration du mission_token "
                     "(jusqu'à 1h). Doit contenir le placeholder '{mission_id}', ex : "

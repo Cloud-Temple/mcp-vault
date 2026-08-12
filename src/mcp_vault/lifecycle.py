@@ -205,7 +205,7 @@ async def vault_startup() -> bool:
         init_mission_binding_store()
         # Mode dégradé OBSERVABLE : le PEP mission JWT est actif mais aucun octroi
         # n'est possible → toutes les identités mission seront refusées (deny-all).
-        if settings.mcp_auth_mode != "bearer" and get_mission_binding_store() is None:
+        if settings.mission_pep_active and get_mission_binding_store() is None:
             logger.warning(
                 "⚠️  MCP_AUTH_MODE=%s mais Mission Binding Store non configuré : "
                 "toutes les identités mission JWT seront refusées (deny-all, aucun périmètre "

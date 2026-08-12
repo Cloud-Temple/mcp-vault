@@ -209,7 +209,10 @@ JWT authentique mais destiné à une autre instance (aud multiple, `component_id
 différent) est rejeté de façon identique aux deux portes, plus seulement à celle-ci.
 Piloté par `MCP_AUTH_MODE` :
 
-- `bearer` *(défaut)* — comportement historique, **zéro impact** ;
+- `bearer` *(défaut)* — bearer opaque **valide exigé** : sans jeton, ou jeton
+  invalide, **401** au middleware (#116, cf. §11.3e) ;
+- `bearer-anonymous` — ⚠️ **mode d'exception** : ancien comportement de `bearer`,
+  un appelant sans identité atteint les outils. `CRITICAL` au démarrage ;
 - `jwt` — `mission_token` JWT ES256 obligatoire (bearer opaque refusé) ;
 - `dual-stack` — JWT valide **ou** bearer opaque valide (migration).
 
@@ -2283,6 +2286,57 @@ de budget n'a été ajouté : il aurait produit une assurance fausse.
 
 **Hors périmètre**, traité au lot 3 (#123) : les magasins d'autorisation. Les
 appels hvac synchrones du cycle de vie OpenBao restent également hors périmètre.
+
+### 11.3e Le mode par défaut exige une identité *(#116)*
+
+**Le défaut.** En mode `bearer` — le **défaut** — le middleware injectait
+`token_info=None` et poursuivait quand aucun jeton n'était présenté, ou quand
+il était invalide. Les gardes répondent à « *cette* identité a-t-elle le
+droit ? » ; celles des outils **alors exposés** ne posaient jamais « y a-t-il
+seulement une identité ? » : `get_listing_filter(None)` rend `visible: True`,
+`check_policy(None)` rend « autorisé », et les gardes mission/wrap refusent des
+identités *particulières* sans exiger d'être authentifié. `check_access` fait
+exception et refuse bien sans identité — c'est ce qui a protégé les secrets.
+
+Conséquence, relevée par un tiers sur une instance en service : divulgation non
+authentifiée de l'inventaire des coffres, des **certificats émis — donc des
+noms de domaine et adresses du parc**, du nom du bucket, de l'adresse interne
+d'OpenBao et des versions. Aucune lecture de secret (`check_access` refuse) :
+c'est une divulgation, pas une compromission.
+
+**Le correctif est à l'entrée, pas dans les outils.** Refuser au middleware
+ferme la surface des outils MCP d'un seul geste — `initialize` et `tools/list`
+compris, donc **aussi tout outil ajouté plus tard**. Une correction outil par
+outil aurait rouvert le trou au prochain ajout, en donnant l'illusion d'être
+exhaustive.
+
+| Mode | Comportement |
+| --- | --- |
+| `bearer` *(défaut)* | Jeton valide **exigé**. Absent ou invalide ⇒ `401` + `WWW-Authenticate: Bearer`, motif fermé en audit, réponse générique (jamais un oracle distinguant les deux causes). |
+| `bearer-anonymous` | Ancien comportement, **mode d'exception**. `CRITICAL` au démarrage. N'exige aucun paramètre mission, pour rester utilisable en urgence. |
+| `jwt` / `dual-stack` | Inchangés. |
+
+**Ce qui reste joignable sans jeton**, par conception et vérifié dans le code —
+aucune de ces surfaces n'expose d'outil MCP :
+
+| Surface | Traitée par | Pourquoi |
+| --- | --- | --- |
+| `/acme/*`, `/v1/_sys_pki_int/acme/*` | `PkiMiddleware` | Protocole ACME : le client n'a pas encore de certificat |
+| `/pki/ca/*.pem` | `PkiMiddleware` | Chaîne de confiance publique par nature |
+| `/admin`, `/admin/` et ses fichiers statiques | `AdminMiddleware` | La SPA elle-même ; **son API `/admin/api/*` exige un jeton admin** |
+| `OPTIONS /admin/api/*` | `AdminMiddleware` | Préflight CORS, sans effet de bord |
+| `/health`, `/healthz`, `/ready`, `/` | `HealthCheckMiddleware` | Sondes d'orchestrateur |
+| `/favicon.ico` | `AuthMiddleware` (`PUBLIC_PATHS`) | Ressource inerte |
+
+La formule exacte est donc « toute la surface des **outils MCP** », jamais
+« toute la surface ».
+
+**Piège latent fermé au passage.** `MCP_AUTH_MODE != "bearer"` décidait
+« PEP mission actif ? » en trois endroits — une négation qui range du côté
+« actif » tout mode futur. Le mode de repli aurait donc exigé un JWKS et une
+audience, c'est-à-dire aurait été inutilisable au moment précis où on en a
+besoin. Remplacé par `Settings.mission_pep_active`, une appartenance explicite
+à `{jwt, dual-stack}`.
 
 ### 11.4 Menaces et mitigations
 

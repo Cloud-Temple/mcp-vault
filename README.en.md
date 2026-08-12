@@ -196,7 +196,8 @@ Second enforcement point (PEP) for the mcp-mission `mission_token` (ES256 JWT), 
 
 | Mode | `/mcp` behaviour |
 | --- | --- |
-| `bearer` *(default)* | Opaque bearer only — historical behaviour, **zero impact**. |
+| `bearer` *(default)* | Opaque bearer **required**: a request with no token, or an invalid one, gets `401` at the middleware (#116). |
+| `bearer-anonymous` | ⚠️ **Exception mode** — former `bearer` behaviour: an unauthenticated caller reaches the tools. Temporary fallback only; `CRITICAL` at startup. |
 | `jwt` | `mission_token` JWT ES256 **required** (opaque bearer rejected). Also requires `ENFORCE_MISSION_TOKEN_VALIDATION=true` and `MISSION_STATUS_URL` (fail-fast, #86). |
 | `dual-stack` | Valid JWT **or** valid opaque bearer (migration). Same requirements as `jwt` above. |
 
@@ -372,7 +373,7 @@ fewer, and it is enforced by
 | **OpenBao** | `OPENBAO_ADDR`, `OPENBAO_SHARES`, `OPENBAO_THRESHOLD`, `OPENBAO_DATA_DIR`, `OPENBAO_CONFIG_DIR` | No |
 | **PKI** *(v0.5.x)* | `PKI_BASE_URL` | No — empty derives it from the first FQDN; overrides the ACME URL in Docker tests |
 | **Mission JWT** *(v0.6.x)* | `ENFORCE_MISSION_TOKEN_VALIDATION`, `MISSION_JWKS_URL`, `MISSION_TOKEN_AUD`, `MISSION_JWKS_CACHE_TTL`, `MISSION_JWKS_MAX_REFRESH_PER_MIN`, `MISSION_TOKEN_LEEWAY_SECONDS`, `MISSION_STATUS_URL`, `MISSION_STATUS_CACHE_TTL` | No — standalone without mcp-mission |
-| **Mission JWT PEP** *(v0.8.0)* | `MCP_AUTH_MODE` (`bearer`/`jwt`/`dual-stack`), `MCP_INSTANCE_ID`, `MCP_COMPONENT_KIND` | No — default `bearer` = zero impact. `jwt`/`dual-stack` require `MISSION_JWKS_URL`, `MCP_INSTANCE_ID`, `MISSION_STATUS_URL` and `ENFORCE_MISSION_TOKEN_VALIDATION` set to `true` (fail-fast at boot, #86) |
+| **Mission JWT PEP** *(v0.8.0)* | `MCP_AUTH_MODE` (`bearer`/`bearer-anonymous`/`jwt`/`dual-stack`), `MCP_INSTANCE_ID`, `MCP_COMPONENT_KIND` | ⚠️ **Yes since #116** — the `bearer` default now requires a valid token (401 otherwise). Fallback: `bearer-anonymous` (exception mode). |
 
 > **Sensitive CLI tokens — these are NOT server variables.** `VAULT_WRAP_TOKEN`
 > and `VAULT_MISSION_TOKEN` are read only by the CLI (`scripts/cli/`) and are not

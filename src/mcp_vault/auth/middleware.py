@@ -127,9 +127,16 @@ class AuthMiddleware:
     bearer/bootstrap-only, qui ne dispatch JAMAIS les JWT).
 
     Modes (settings.mcp_auth_mode) :
-      - "bearer" (défaut)  : comportement historique STRICTEMENT inchangé —
-        bearer opaque validé (bootstrap key / Token Store), token_info ou None
-        injecté, les outils vérifient.
+      - "bearer" (défaut)  : bearer opaque VALIDE EXIGÉ (issue #116). Absent ou
+        invalide → refus ACTIF 401 au middleware, l'aval n'est jamais atteint.
+        La bootstrap key admin reste acceptée (break-glass).
+      - "bearer-anonymous" : ⚠️ MODE D'EXCEPTION — ancien comportement de
+        "bearer" : token_info ou None injecté, les outils vérifient. Les
+        gardes des outils ALORS EXPOSÉS ne contrôlent pas l'EXISTENCE d'une
+        identité (get_listing_filter et check_policy concluent « rien à
+        vérifier ») — un appelant anonyme les atteint. check_access, lui,
+        refuse bien sans identité : les secrets restent protégés. Repli
+        temporaire, CRITICAL au démarrage.
       - "jwt"        : mission_token JWT ES256 OBLIGATOIRE. Refus ACTIF au
         middleware : 401 (token absent/opaque/JWT invalide), 403 (token authentique
         mais aud/component_id ≠ instance, mission inactive), 503 (JWKS indisponible,
@@ -165,9 +172,35 @@ class AuthMiddleware:
         token = self._extract_token(scope)
         settings = get_settings()
 
-        if settings.mcp_auth_mode == "bearer":
-            # ── Comportement historique (inchangé) ─────────────────────────
+        if settings.mcp_auth_mode == "bearer-anonymous":
+            # ── Mode d'exception EXPLICITE (issue #116) ────────────────────
+            # Comportement historique : un appelant sans jeton — ou avec un
+            # jeton invalide — atteint les outils dont les gardes ne contrôlent
+            # pas l'EXISTENCE d'une identité. Conservé UNIQUEMENT comme repli
+            # documenté, jamais comme défaut. Voir l'avertissement CRITICAL
+            # émis par `create_app()`.
             token_info = self._validate_token(token) if token else None
+        elif settings.mcp_auth_mode == "bearer":
+            # ── Refus ACTIF (issue #116) ──────────────────────────────────
+            # Le défaut historique injectait `None` et poursuivait. Les gardes
+            # des outils ALORS EXPOSÉS (`get_listing_filter`, `check_policy`,
+            # gardes mission et wrap) répondent à « CETTE identité a-t-elle le
+            # droit ? » sans jamais poser « y a-t-il seulement une identité ? ».
+            # `check_access` fait exception et refuse sans identité — c'est ce
+            # qui a protégé les secrets pendant que l'inventaire fuyait.
+            # Un appelant anonyme obtenait donc l'inventaire des coffres, les
+            # certificats émis (donc les FQDN du parc), le nom du bucket et
+            # l'état des backends.
+            #
+            # Refuser ICI ferme la surface des outils MCP d'un seul geste —
+            # `initialize` et `tools/list` compris, et donc AUSSI tout outil
+            # ajouté plus tard. Une correction outil par outil aurait rouvert
+            # le trou au prochain ajout.
+            token_info = self._validate_token(token) if token else None
+            if token_info is None:
+                self._audit_bearer_deny("missing_token" if not token
+                                        else "invalid_token")
+                return await self._deny_response(scope, send, 401)
         else:
             # ── PEP mission JWT (modes jwt / dual-stack) ───────────────────
             token_info, deny = await self._resolve_pep(token, settings)
@@ -359,6 +392,22 @@ class AuthMiddleware:
         except Exception:
             pass
         print(f"🛡️  PEP deny: {' '.join(detail_parts)}", file=sys.stderr)
+
+    def _audit_bearer_deny(self, reason: str):
+        """Audit d'un refus bearer (issue #116).
+
+        `reason` est un code FERMÉ (`missing_token` / `invalid_token`) : ni le
+        jeton présenté, ni aucune de ses dérivées, ne doit apparaître dans
+        l'audit, les logs ou la réponse. Un jeton invalide est souvent un jeton
+        VALIDE d'un autre environnement — le journaliser le divulguerait.
+        """
+        try:
+            from ..audit import log_audit
+            log_audit("bearer_auth", "denied", detail=f"reason={reason}",
+                      client_name="?")
+        except Exception:
+            pass
+        print(f"🛡️  Bearer deny: reason={reason}", file=sys.stderr)
 
     @staticmethod
     async def _deny_response(scope, send, status):
