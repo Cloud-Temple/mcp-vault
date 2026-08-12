@@ -23,7 +23,7 @@ MCP Vault is an [MCP](https://modelcontextprotocol.io/) server that provides a s
 | [**ARCHITECTURE.md**](DESIGN/mcp-vault/ARCHITECTURE.md) | Full specification — vision, 6-layer ASGI architecture, vaults, SSH CA, MCP policies (6 ready-to-use examples), unseal key security (3 factors), HSM roadmap                  |
 | [**TECHNICAL.md**](DESIGN/mcp-vault/TECHNICAL.md)       | Technical documentation — source modules (incl. PKI v0.5.1), 6-layer ASGI stack, Docker, tests, dependencies, roadmap                                                         |
 | [**SECURITY_AUDIT.md**](DESIGN/mcp-vault/SECURITY_AUDIT.md) | Consolidated security audit report — 60 V2.1 findings, 28 fixed, 13 residual documented                                                                                   |
-| [**scripts/README.md**](scripts/README.md)              | Full CLI guide — 7 command groups, interactive shell, examples                                                                                                               |
+| [**scripts/README.md**](scripts/README.md)              | Full CLI guide — command groups, examples, day-to-day ergonomics                                                                                                               |
 | [**tests/README.md**](tests/README.md)                  | Test execution guide — 4 levels, ~600 tests, commands for auditors                                                                                                           |
 | [**TEST_CATALOG.md**](tests/TEST_CATALOG.md)            | e2e test catalog — 15 categories, 349 assertions, purpose of each section (for auditors)                                                                                     |
 
@@ -301,7 +301,7 @@ Authorization: Bearer <token>
 
 ## 🖥️ CLI
 
-MCP Vault includes a full CLI with Click + Rich + interactive shell:
+MCP Vault includes a full CLI with Click + Rich:
 
 ```bash
 # Scriptable commands
@@ -331,10 +331,13 @@ python scripts/mcp_cli.py pki setup --lab --domains '*.lesur.lan,lesur.lan'
 python scripts/mcp_cli.py pki ca-key
 python scripts/mcp_cli.py pki certs
 python scripts/mcp_cli.py pki revoke 12:34:ab:cd:ef:12:34:56
-
-# Interactive shell
-python scripts/mcp_cli.py shell
 ```
+
+> The **interactive shell was removed** in v0.11.0 (issue #128): its hand-rolled
+> argument parser silently ignored unrecognised options, so a typo ran a
+> *different* operation from the one typed. Click rejects those inputs. See
+> [scripts/README.md](scripts/README.md) for how to keep an interactive-feeling
+> session.
 
 > The `--help` of each command explains the 3-layer security model and guides the user.
 
@@ -375,7 +378,7 @@ fewer, and it is enforced by
 > and `VAULT_MISSION_TOKEN` are read only by the CLI (`scripts/cli/`) and are not
 > `Settings` fields: putting them in `.env` would make the server fail to start.
 > They change on every operation (single-use, short TTL) — pass them inline in
-> front of the command, never in a file, or they leak into the shell history:
+> front of the command, never in a file, or they leak into your system shell history:
 > ```bash
 > VAULT_WRAP_TOKEN=hvs.CAES... mcp-vault secret consume op-123
 > ```
@@ -511,12 +514,11 @@ mcp-vault/
 ├── scripts/
 │   ├── mcp_cli.py            # CLI entry point
 │   ├── README.md             # CLI documentation
-│   └── cli/                  # CLI module (Click + Rich + prompt-toolkit)
+│   └── cli/                  # CLI module (Click + Rich)
 │       ├── __init__.py       # Config (.env, BASE_URL, TOKEN)
 │       ├── client.py         # MCPClient (Streamable HTTP)
-│       ├── commands.py       # 7 Click groups
-│       ├── display.py        # Rich display
-│       └── shell.py          # Interactive shell
+│       ├── commands.py       # Click groups
+│       └── display.py        # Rich display
 ├── src/mcp_vault/
 │   ├── config.py             # pydantic-settings configuration
 │   ├── server.py             # FastMCP + 39 MCP tools + lifecycle + audit

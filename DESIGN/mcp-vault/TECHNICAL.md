@@ -480,7 +480,7 @@ points d'entrée génériques pour éviter un paramètre de confiance fragile.
 retournent/ne journalisent plus le message brut d'une exception OpenBao (type
 d'exception seul en log, message constant au client).
 
-Les surfaces MCP, REST, Click, shell et Web délèguent toutes à
+Les surfaces MCP, REST, Click et Web délèguent toutes à
 `request_operator_ssh_access()` ; aucune ne possède sa propre logique
 d'autorisation. L'audit conserve l'empreinte, la cible, le principal, le motif
 et le résultat, jamais la clé publique complète.
@@ -651,7 +651,7 @@ lève `MissionBindingStoreUnavailable` (→ `503` au PEP), les mutations sont re
 **Endpoints admin** (bearer/bootstrap-only) : `GET/POST /admin/api/mission-bindings`,
 `GET/DELETE /admin/api/mission-bindings/{tenant_id}`, `POST /admin/api/mission-bindings/purge`
 (route `/purge` déclarée avant le segment variable). Audit des mutations avec `decision_id` en tête.
-CLI/shell : groupe `mission-binding` (create/list/get/delete/purge).
+CLI Click : groupe `mission-binding` (create/list/get/delete/purge).
 
 ### 3.13 `openbao/` — OpenBao Process Manager
 
@@ -881,6 +881,30 @@ docker compose exec mcp-vault python tests/test_e2e.py --test ssh_ca
 # Verbose
 docker compose exec mcp-vault python tests/test_e2e.py --verbose
 ```
+
+---
+
+### 5.x Opérations destructives du CLI — `tests/cli/test_purge_destructive.py`
+
+**40 tests**, paramétrés sur `token purge-revoked` ET `mission-binding purge`.
+Portés depuis les tests du shell interactif lors de sa suppression (#128), et
+complétés : trois des garanties qu'ils vérifient n'étaient couvertes par **aucune**
+surface — ni le shell, ni Click.
+
+Chaque protection est prouvée par une mutation mesurée :
+
+| Mutation appliquée à `scripts/cli/commands.py` | Échecs |
+| --- | --- |
+| aperçu retiré (`dry_run=True` → `False`) | 22 |
+| `if n == 0` au lieu d'une preuve positive stricte | 12 |
+| `abort=True` → `abort=False` | 2 |
+| rétention par défaut `30` → `0` | 2 |
+| borne `IntRange(min=0)` retirée | 2 |
+| en-têtes d'authentification retirés | 2 |
+| endpoint tokens dirigé vers celui des bindings | 1 |
+| reprise ajoutée après échec réseau de la purge | 1 |
+
+Détail des garanties et fenêtre TOCTOU non fermée : ARCHITECTURE.md §11.3c.
 
 ---
 

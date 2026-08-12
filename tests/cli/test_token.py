@@ -135,3 +135,60 @@ def test_token():
     check_value("Exit code", r.exit_code, 0)
     check("DELETE appelé", mock_http_r.delete.called)
     check("hash_prefix dans URL", "abc123" in str(mock_http_r.delete.call_args))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Contrat #65 — compléments portés depuis les tests du shell interactif (#128)
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# La section agrégée ci-dessus couvrait déjà les six valeurs invalides et le cas
+# `0` (illimité explicite). Trois invariants n'étaient verrouillés que par
+# `tests/cli/test_token_create_shell.py`, supprimé avec le shell : la valeur
+# ABSENTE, une borne valide réellement TRANSMISE, et le défaut implicite.
+#
+# La protection elle-même n'a pas bougé : elle vit dans `_ExpiresDaysType`
+# (`scripts/cli/commands.py`), un `click.ParamType` sans coercition. Seule la
+# couverture change de surface.
+
+def _poste_token(argv):
+    """Exécute `token create` en interceptant le POST réellement émis."""
+    resp = MagicMock()
+    resp.json.return_value = {"status": "created", "hash": "abc123def456",
+                              "expires_at": None, "client_name": "agent-x"}
+    http = AsyncMock()
+    http.post = AsyncMock(return_value=resp)
+    http.__aenter__ = AsyncMock(return_value=http)
+    http.__aexit__ = AsyncMock(return_value=None)
+    with patch("httpx.AsyncClient", return_value=http):
+        r = run_cli(argv)
+    envoye = http.post.call_args[1].get("json", {}) if http.post.call_args else None
+    return r, envoye
+
+
+def test_token_create_expires_valeur_absente_ne_poste_rien():
+    """
+    FAIL-CLOSE : `--expires` sans valeur ne doit produire AUCUN POST. Une
+    expiration devinée créerait un jeton de durée de vie différente de celle
+    demandée — le cas que tout le contrat #65 cherche à empêcher.
+    """
+    r, envoye = _poste_token(["token", "create", "agent-x", "--expires"])
+    assert r.exit_code != 0
+    assert envoye is None, f"POST émis malgré une expiration absente : {envoye}"
+
+
+def test_token_create_expires_borne_valide_transmise():
+    """Une valeur valide doit atteindre l'API telle quelle, sans réinterprétation."""
+    r, envoye = _poste_token(["token", "create", "agent-x", "--expires", "365",
+                              "--permissions", "read"])
+    assert r.exit_code == 0
+    assert envoye.get("expires_in_days") == 365
+
+
+def test_token_create_sans_expires_defaut_90():
+    """
+    Le défaut implicite est 90 jours, pas « illimité ». Un défaut permissif
+    créerait des jetons éternels à chaque oubli de l'option.
+    """
+    r, envoye = _poste_token(["token", "create", "agent-x", "--permissions", "read"])
+    assert r.exit_code == 0
+    assert envoye.get("expires_in_days") == 90

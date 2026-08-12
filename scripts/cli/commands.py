@@ -7,7 +7,7 @@ Usage :
     python scripts/mcp_cli.py about
     python scripts/mcp_cli.py vault list
     python scripts/mcp_cli.py secret write myvault test/key --data '{"user":"me"}'
-    python scripts/mcp_cli.py shell
+    python scripts/mcp_cli.py token purge-revoked --older-than 30
 """
 
 import asyncio
@@ -1257,8 +1257,8 @@ def token_revoke_cmd(ctx, hash_prefix, output_json):
 
 
 @token_group.command("purge-revoked")
-@click.option("--older-than", type=int, default=30, show_default=True,
-              help="Ne purger que les tokens révoqués depuis plus de N jours")
+@click.option("--older-than", type=click.IntRange(min=0), default=30, show_default=True,
+              help="Ne purger que les tokens révoqués depuis plus de N jours (0 = sans condition d'âge)")
 @click.option("--dry-run", is_flag=True, help="Lister les candidats sans rien supprimer")
 @click.option("--yes", "-y", is_flag=True, help="Confirmer la purge sans prompt")
 @click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
@@ -1282,11 +1282,16 @@ def token_purge_revoked_cmd(ctx, older_than, dry_run, yes, output_json):
         n = preview.get("count", 0)
         if dry_run:
             return show_json(preview) if output_json else show_token_result(preview)
-        if n == 0:
+        # PREUVE POSITIVE STRICTE : on ne purge que sur un décompte entier
+        # strictement positif. `if n == 0` seul laissait passer `-1`, `True`
+        # (bool est un int en Python) et `"0"` — trois formes qui déclenchaient
+        # une suppression sur un aperçu qu'on n'a pas su lire.
+        if not isinstance(n, int) or isinstance(n, bool) or n <= 0:
             if output_json:
                 show_json(preview)
             else:
-                click.echo(f"Aucun token révoqué depuis plus de {older_than} jours à purger.")
+                click.echo(f"Aucun token à purger (décompte de l'aperçu : {n!r})." if n != 0
+                           else f"Aucun token révoqué depuis plus de {older_than} jours à purger.")
             return
         if not yes:
             click.confirm(f"Purger DÉFINITIVEMENT {n} token(s) révoqué(s) depuis >{older_than}j ? Irréversible.",
@@ -1431,8 +1436,8 @@ def mission_binding_delete_cmd(ctx, tenant_id, output_json):
 
 
 @mission_binding_group.command("purge")
-@click.option("--older-than", type=int, default=30, show_default=True,
-              help="Ne purger que les bindings expirés depuis plus de N jours")
+@click.option("--older-than", type=click.IntRange(min=0), default=30, show_default=True,
+              help="Ne purger que les bindings expirés depuis plus de N jours (0 = sans condition d'âge)")
 @click.option("--dry-run", is_flag=True, help="Lister les candidats sans rien supprimer")
 @click.option("--yes", "-y", is_flag=True, help="Confirmer la purge sans prompt")
 @click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
@@ -1456,11 +1461,14 @@ def mission_binding_purge_cmd(ctx, older_than, dry_run, yes, output_json):
         n = preview.get("count", 0)
         if dry_run:
             return show_json(preview) if output_json else show_mission_binding_result(preview)
-        if n == 0:
+        # PREUVE POSITIVE STRICTE — voir `token purge-revoked` : `-1`, `True` et
+        # `"0"` passaient tous `if n == 0` et déclenchaient une suppression.
+        if not isinstance(n, int) or isinstance(n, bool) or n <= 0:
             if output_json:
                 show_json(preview)
             else:
-                click.echo(f"Aucun binding expiré depuis plus de {older_than} jours à purger.")
+                click.echo(f"Aucun binding à purger (décompte de l'aperçu : {n!r})." if n != 0
+                           else f"Aucun binding expiré depuis plus de {older_than} jours à purger.")
             return
         if not yes:
             click.confirm(f"Purger DÉFINITIVEMENT {n} binding(s) expiré(s) depuis >{older_than}j ? Irréversible.",
@@ -1535,15 +1543,3 @@ def logs_cmd(ctx):
             result = {"status": "error", "message": str(e)}
         show_json(result)
     asyncio.run(_run())
-
-
-# =============================================================================
-# Shell interactif
-# =============================================================================
-
-@cli.command("shell")
-@click.pass_context
-def shell_cmd(ctx):
-    """🐚 Lancer le shell interactif MCP Vault."""
-    from .shell import run_shell
-    asyncio.run(run_shell(ctx.obj["url"], ctx.obj["token"]))

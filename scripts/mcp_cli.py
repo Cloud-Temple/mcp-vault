@@ -13,7 +13,6 @@ Usage :
     VAULT_WRAP_TOKEN=hvs.CAES... python scripts/mcp_cli.py secret consume <operation_id>
     python scripts/mcp_cli.py pki ca-key
     python scripts/mcp_cli.py pki certs
-    python scripts/mcp_cli.py shell
 
 Variables d'environnement :
     MCP_URL   — URL du serveur (défaut: http://localhost:8085)

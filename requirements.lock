@@ -73,7 +73,6 @@ python-multipart==0.0.22
 # --- CLI ---
 click==8.3.1
 rich==14.3.3
-prompt_toolkit==3.0.52
 python-dotenv==1.2.2
 
 # --- Common dependencies ---
@@ -94,7 +93,6 @@ six==1.17.0
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 urllib3==2.6.3
-wcwidth==0.6.0
 
 # --- JSON Schema (transitive) ---
 jsonschema==4.26.0

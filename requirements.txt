@@ -36,7 +36,6 @@ uvicorn[standard]==0.42.0
 # --- CLI (scripts/mcp_cli.py) ---
 click>=8.1
 rich>=13.0
-prompt-toolkit>=3.0
 python-dotenv>=1.0
 
 # --- Tests (intégration réelle, pas de mocking) ---
