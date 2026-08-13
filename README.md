@@ -523,8 +523,8 @@ mcp-vault/
 ├── requirements.lock         # Dépendances pinnées (versions exactes)
 ├── VERSION                   # version courante du service
 ├── DESIGN/mcp-vault/
-│   ├── ARCHITECTURE.md       # Spécification détaillée (v0.11.0)
-│   ├── TECHNICAL.md          # Documentation technique (v0.11.0)
+│   ├── ARCHITECTURE.md       # Spécification détaillée (v0.12.0)
+│   ├── TECHNICAL.md          # Documentation technique (v0.12.0)
 │   └── SECURITY_AUDIT.md     # Rapport d'audit consolidé (60 findings V2.1)
 ├── scripts/
 │   ├── mcp_cli.py            # CLI entry point
@@ -580,4 +580,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.11.0
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.12.0

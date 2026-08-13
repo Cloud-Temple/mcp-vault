@@ -1,6 +1,73 @@
 # Changelog — MCP Vault
 
-## [Non publié]
+## [0.12.0] — 2026-08-14
+
+> ### ⚠️ À FAIRE AVANT DE DÉPLOYER
+>
+> Cette version porte **cinq ruptures**, toutes dans le domaine du *wrapping*
+> (livraison de secrets à usage unique aux missions). Elle ne touche à rien
+> d'autre.
+>
+> **1. Variables d'environnement : AUCUN CHANGEMENT.** Ni ajout, ni retrait, ni
+> renommage. Le contrat `.env.example` reste à **46 clés — 23 actives et
+> 23 commentées**. Rien à faire côté configuration.
+>
+> **2. Deux outils MCP changent de signature** — c'est la rupture qui casse un
+> appelant au démarrage :
+>
+> | Outil | Avant | Après |
+> | --- | --- | --- |
+> | `secret_wrap_lookup` | `(operation_id)` | `(operation_id, mission_id)` |
+> | `secret_wrap_status` | `(operation_id)` | `(operation_id, mission_id)` |
+>
+> ⚠️ **`mcp-mission` est concerné** : son *CredentialBrokerService* appelle ces
+> deux outils. **Déployer cette version sans mettre à jour son broker casse sa
+> compensation d'orphelins et son diagnostic.** Aucun contournement n'est prévu :
+> un paramètre optionnel aurait laissé la révocation inter-missions comme
+> comportement **par défaut** sur un outil destructif. Les commandes CLI
+> `secret wrap-lookup` et `secret wrap-status` exigent aussi `--mission-id`.
+>
+> **3. Le contrat d'erreurs de `secret_consume` évolue** — trois changements. Les
+> codes `wrap_unusable`, `consume_outcome_unknown` et `empty_secret` sont
+> **non réessayables** : provisionner un nouveau wrap si l'accès reste
+> nécessaire. `secret_wrap_lookup` peut désormais répondre `status: "error"` avec
+> `consume_terminal` — un appelant qui assimile `status: "ok"` à « compensation
+> achevée » doit être adapté. Nouveau code `operation_pending` : ne pas rejouer
+> une clé `(operation_id, mission_id)` déjà en cours, repartir avec un nouvel
+> `operation_id`.
+>
+> **3 bis. En mode durci uniquement** (`ENFORCE_MISSION_TOKEN_VALIDATION=true`
+> — porte **indépendante** du mode d'authentification, elle peut être active en
+> `bearer`) :
+>
+> - **`secret_wrap` exige `tenant_id`**. Le serveur ne peut pas le déduire : un
+>   locataire inventé serait un faux binding. Il refuse aussi une audience
+>   désignant une AUTRE instance (`binding_mismatch`), et une configuration
+>   incohérente (`misconfigured`) ;
+> - ⚠️ **les wraps historiques au binding incomplet deviennent inconsommables**
+>   (`binding_incomplete`). Personne ne peut leur ajouter le binding manquant
+>   après coup : il faut les **reprovisionner** ou les laisser expirer. Hors mode
+>   durci, ils restent consommables — comportement inchangé.
+>
+> **3 ter. `secret_wrap_status` peut rendre deux états de plus** : `unusable` et
+> `consume_outcome_unknown`. Ils ne portent **pas** `expires_at` — il n'a de sens
+> que pour un état vivant. Un consommateur qui énumère les statuts, ou qui
+> suppose ce champ présent, doit être adapté.
+>
+> **4. Ce que cette version CORRIGE en production**, et qui justifie de ne pas
+> attendre :
+>
+> - **un défaut destructif** : compenser un accès abandonné d'une mission
+>   révoquait l'accès **vivant** d'une autre mission partageant l'identifiant
+>   d'opération ;
+> - **un succès mensonger** : un secret sans contenu exploitable était rendu avec
+>   `status: "ok"` et aucun credential ;
+> - **un registre qui mentait** : après un échange interrompu, un jeton
+>   peut-être déjà consommé était réinscrit comme disponible.
+>
+> **5. Contrôle post-déploiement** : viser `/health` et attendre **200** (pas
+> `/healthz`, qui répond 200 même coffre indisponible — voir v0.11.0).
+
 
 ### RUPTURE — cloisonnement inter-missions du registre de wraps
 
