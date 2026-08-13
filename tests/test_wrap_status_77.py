@@ -79,14 +79,14 @@ def test_status_maps_each_known_state():
     for st in ("pending", "active", "consuming", "consumed", "revoked", "failed"):
         reg = _registry_with([_entry(st)])
         with patch.object(w, "get_wrap_registry", return_value=reg):
-            res = _run(w.status_by_operation_id("op-1"))
+            res = _run(w.status_by_operation_id("op-1", "m1"))
         assert res["status"] == "ok" and res["state"] == st, f"{st} → {res}"
 
 
 def test_status_not_found():
     from mcp_vault.vault import wrapping as w
     with patch.object(w, "get_wrap_registry", return_value=_registry_with([])):
-        res = _run(w.status_by_operation_id("op-none"))
+        res = _run(w.status_by_operation_id("op-none", "m1"))
     assert res["status"] == "ok" and res["state"] == "not_found"
 
 
@@ -94,7 +94,7 @@ def test_status_ambiguous_when_multiple_entries():
     from mcp_vault.vault import wrapping as w
     reg = _registry_with([_entry("active"), _entry("revoked")])
     with patch.object(w, "get_wrap_registry", return_value=reg):
-        res = _run(w.status_by_operation_id("op-1"))
+        res = _run(w.status_by_operation_id("op-1", "m1"))
     assert res["state"] == "ambiguous"
     # ne divulgue pas le compte / l'activité interne
     assert "entries_found" not in res and "count" not in res
@@ -104,14 +104,14 @@ def test_status_registry_inconsistent_on_unknown_status():
     from mcp_vault.vault import wrapping as w
     reg = _registry_with([_entry("weird_unknown_status")])
     with patch.object(w, "get_wrap_registry", return_value=reg):
-        res = _run(w.status_by_operation_id("op-1"))
+        res = _run(w.status_by_operation_id("op-1", "m1"))
     assert res["state"] == "registry_inconsistent"
 
 
 def test_status_backend_unavailable_when_no_registry():
     from mcp_vault.vault import wrapping as w
     with patch.object(w, "get_wrap_registry", return_value=None):
-        res = _run(w.status_by_operation_id("op-1"))
+        res = _run(w.status_by_operation_id("op-1", "m1"))
     assert res["status"] == "error" and res.get("error_type") == "backend_unavailable"
 
 
@@ -126,7 +126,7 @@ def test_status_backend_unavailable_on_s3_refresh_failure():
     from mcp_vault.vault import wrapping as w
     reg = _registry_with([_entry("active")], last_load_ok=False)
     with patch.object(w, "get_wrap_registry", return_value=reg):
-        res = _run(w.status_by_operation_id("op-1"))
+        res = _run(w.status_by_operation_id("op-1", "m1"))
     assert res["status"] == "error" and res.get("error_type") == "backend_unavailable"
 
 
@@ -138,14 +138,14 @@ def test_status_registry_inconsistent_on_malformed_entry_anywhere():
     from mcp_vault.vault import wrapping as w
     reg = _registry_with([{"garbage": True}, _entry("active")])
     with patch.object(w, "get_wrap_registry", return_value=reg):
-        res = _run(w.status_by_operation_id("op-1"))
+        res = _run(w.status_by_operation_id("op-1", "m1"))
     assert res["status"] == "ok" and res["state"] == "registry_inconsistent"
 
 
 def test_status_registry_inconsistent_on_non_dict_entry():
     from mcp_vault.vault import wrapping as w
     with patch.object(w, "get_wrap_registry", return_value=_registry_with([None])):
-        res = _run(w.status_by_operation_id("op-1"))
+        res = _run(w.status_by_operation_id("op-1", "m1"))
     assert res["state"] == "registry_inconsistent"
 
 
@@ -161,7 +161,7 @@ def test_status_survives_malformed_entry_via_real_registry():
     reg._cache_time = 9e18     # cache "frais" → pas de refresh S3
     reg._last_load_ok = True
     with patch.object(w, "get_wrap_registry", return_value=reg):
-        res = _run(w.status_by_operation_id("op-1"))
+        res = _run(w.status_by_operation_id("op-1", "m1"))
     assert res["status"] == "ok" and res["state"] == "registry_inconsistent"
 
 
@@ -175,7 +175,7 @@ def test_status_registry_inconsistent_on_non_str_status():
         entry = _entry("active")
         entry["status"] = bad
         with patch.object(w, "get_wrap_registry", return_value=_registry_with([entry])):
-            res = _run(w.status_by_operation_id("op-1"))
+            res = _run(w.status_by_operation_id("op-1", "m1"))
         assert res["status"] == "ok" and res["state"] == "registry_inconsistent", f"{bad!r} → {res}"
 
 
@@ -199,7 +199,7 @@ def test_status_never_leaks_accessor_or_token():
     from mcp_vault.vault import wrapping as w
     reg = _registry_with([_entry("active", accessor="ACC-SECRET-XYZ")])
     with patch.object(w, "get_wrap_registry", return_value=reg):
-        res = _run(w.status_by_operation_id("op-1"))
+        res = _run(w.status_by_operation_id("op-1", "m1"))
     assert "accessor" not in res and "wrap_token" not in res
     assert "ACC-SECRET-XYZ" not in str(res), "fuite de l'accessor dans la sortie !"
 
@@ -215,7 +215,7 @@ def test_status_does_not_mutate_registry_entry():
     before = copy.deepcopy(entry)
     reg = _registry_with([entry])
     with patch.object(w, "get_wrap_registry", return_value=reg):
-        res = _run(w.status_by_operation_id("op-1"))
+        res = _run(w.status_by_operation_id("op-1", "m1"))
     # entrée intacte
     assert entry == before, "status a muté l'entrée du registre !"
     # aucune écriture ni révocation déclenchée
@@ -232,10 +232,10 @@ def test_status_expires_at_only_for_live_states():
     from mcp_vault.vault import wrapping as w
     for st in ("pending", "active", "consuming"):
         with patch.object(w, "get_wrap_registry", return_value=_registry_with([_entry(st)])):
-            assert "expires_at" in _run(w.status_by_operation_id("op-1")), f"{st} devrait exposer expires_at"
+            assert "expires_at" in _run(w.status_by_operation_id("op-1", "m1")), f"{st} devrait exposer expires_at"
     for st in ("consumed", "revoked", "failed"):
         with patch.object(w, "get_wrap_registry", return_value=_registry_with([_entry(st)])):
-            assert "expires_at" not in _run(w.status_by_operation_id("op-1")), f"{st} ne devrait pas exposer expires_at"
+            assert "expires_at" not in _run(w.status_by_operation_id("op-1", "m1")), f"{st} ne devrait pas exposer expires_at"
 
 
 def test_status_expires_at_rejects_non_iso_value():
@@ -247,14 +247,14 @@ def test_status_expires_at_rejects_non_iso_value():
     entry = _entry("active")
     entry["expires_at"] = "ACC-SECRET-SMUGGLED"          # arbitraire, non-ISO
     with patch.object(w, "get_wrap_registry", return_value=_registry_with([entry])):
-        res = _run(w.status_by_operation_id("op-1"))
+        res = _run(w.status_by_operation_id("op-1", "m1"))
     assert res["state"] == "active"
     assert "expires_at" not in res, "un expires_at non-ISO ne doit pas être reflété"
     assert "ACC-SECRET-SMUGGLED" not in str(res)
     # une date ISO valide reste exposée
     entry["expires_at"] = "2099-01-01T00:00:00+00:00"
     with patch.object(w, "get_wrap_registry", return_value=_registry_with([entry])):
-        res2 = _run(w.status_by_operation_id("op-1"))
+        res2 = _run(w.status_by_operation_id("op-1", "m1"))
     assert res2.get("expires_at") == "2099-01-01T00:00:00+00:00"
 
 
@@ -271,7 +271,7 @@ def test_mcp_secret_wrap_status_denies_read_token():
                   "allowed_resources": ["v"], "policy_id": ""}
     with auth_context(read_token), \
          patch("mcp_vault.vault.wrapping.status_by_operation_id", new=AsyncMock()) as mock_status:
-        res = _run(secret_wrap_status("op-1"))
+        res = _run(secret_wrap_status("op-1", "m1"))
     assert res["status"] == "error" and "wrap" in res["message"]
     mock_status.assert_not_called()
 
@@ -281,7 +281,7 @@ def test_mcp_secret_wrap_status_rejects_invalid_operation_id():
     Identité admin (fixture) : les gardes d'autz passent, la validation refuse."""
     from mcp_vault.server import secret_wrap_status
     with patch("mcp_vault.vault.wrapping.status_by_operation_id", new=AsyncMock()) as mock_status:
-        res = _run(secret_wrap_status("bad\nop"))
+        res = _run(secret_wrap_status("bad\nop", "m1"))
     assert res["status"] == "error" and res.get("error_type") == "invalid_input"
     mock_status.assert_not_called()
 
@@ -291,9 +291,12 @@ def test_mcp_secret_wrap_status_happy_path_calls_core():
     core_ret = {"status": "ok", "state": "active", "expires_at": "2099-01-01T00:00:00+00:00"}
     with patch("mcp_vault.vault.wrapping.status_by_operation_id",
                new=AsyncMock(return_value=core_ret)) as mock_status:
-        res = _run(secret_wrap_status("op-valid-1"))
+        res = _run(secret_wrap_status("op-valid-1", "m1"))
     assert res["state"] == "active"
-    mock_status.assert_called_once_with("op-valid-1")
+    # Cloisonnement inter-missions : la primitive reçoit le COUPLE, et le test
+    # le vérifie explicitement — un outil qui laisserait tomber la mission
+    # rouvrirait la fuite inter-missions sans faire échouer le reste du banc.
+    mock_status.assert_called_once_with("op-valid-1", "m1")
 
 
 if __name__ == "__main__":

@@ -107,8 +107,11 @@ class WrapRegistry:
 
     Pattern write-ahead :
         1. register_pending(op_id, ...) AVANT l'appel OpenBao → status="pending"
-        2. mark_active(op_id, accessor)  APRÈS succès OpenBao → status="active"
-        3. mark_failed(op_id)            si OpenBao échoue    → status="failed"
+        2. mark_active(op_id, mission_id, accessor)  APRÈS succès OpenBao → "active"
+        3. mark_failed(op_id, mission_id)            si OpenBao échoue → "failed"
+
+        Le COUPLE (op_id, mission_id) identifie une provision : un operation_id
+        n'est pas unique entre missions (cloisonnement inter-missions).
 
     En cas de crash entre 1 et 2 : l'entrée reste en "pending", visible lors du
     lookup → état "found_unattached" (le TTL côté OpenBao fera expirer le wrap).
@@ -242,27 +245,139 @@ class WrapRegistry:
             return False
         return True
 
-    def mark_active(self, operation_id: str, accessor: str) -> bool:
+    def _pending_unique(self, operation_id: str, mission_id: str, quoi: str):
         """
-        Met à jour la dernière entrée "pending" de cet operation_id vers "active"
-        avec l'accessor reçu d'OpenBao après un wrap réussi.
-        """
-        self._maybe_refresh()
-        for entry in reversed(self._wraps):
-            if entry["operation_id"] == operation_id and entry["status"] == "pending":
-                entry["accessor"] = accessor
-                entry["status"] = "active"
-                break
-        return self._save()
+        L'UNIQUE entrée `pending` du couple `(operation_id, mission_id)`, ou None.
 
-    def mark_failed(self, operation_id: str) -> None:
-        """Marque la dernière entrée "pending" comme "failed" (OpenBao a échoué)."""
+        Cloisonnement inter-missions. Les transitions de provisionnement
+        sélectionnaient « la dernière entrée `pending` de cet `operation_id` »,
+        SANS la mission — alors que la consommation et les transitions terminales
+        utilisent le couple depuis toujours. Deux provisions partageant un
+        identifiant d'opération pouvaient donc se croiser : le succès OpenBao de
+        A écrivait l'accessor de A sur l'entrée de B.
+
+        L'ambiguïté (plusieurs candidats) est traitée comme une ABSENCE, même
+        politique que `get_by_composite_key` : on ne devine pas laquelle est la
+        bonne. Aucune mutation, et surtout AUCUNE sauvegarde — un `_save()` no-op
+        réécrirait l'état mémoire par-dessus une version S3 possiblement plus
+        récente d'une autre instance (last-write-wins, pas de CAS : #51).
+        """
+        candidats = [
+            e for e in self._wraps
+            if _entry_well_formed(e)
+            and e.get("operation_id") == operation_id
+            and e.get("mission_id") == mission_id
+            and e.get("status") == "pending"
+        ]
+        if len(candidats) == 1:
+            return candidats[0]
+        logger.warning(
+            # %r : op/mission peuvent venir d'une entrée S3 historique.
+            "⚠️ WrapRegistry.%s : %d entrée(s) pending (op=%r, mission=%r) — "
+            "aucune mutation, aucune sauvegarde",
+            quoi, len(candidats), operation_id[:16], mission_id[:16],
+        )
+        return None
+
+    def has_pending(self, operation_id: str, mission_id: str) -> bool:
+        """
+        Une provision est-elle DÉJÀ en cours pour ce couple ?
+
+        Rejouer une clé `(operation_id, mission_id)` dont une entrée est encore
+        `pending` est refusé : après un plantage on ne sait pas si OpenBao a déjà
+        créé un wrap, et rattacher une nouvelle provision au même `pending`
+        rendrait la première orpheline ET non compensable. Un retry après
+        `failed` reste permis.
+
+        ⚠️ RÉSIDUS ASSUMÉS, tous deux relevés en revue et volontairement NON
+        traités dans ce lot :
+
+        1. **Un `pending` bloqué bloque la clé durablement.** Deux causes, et la
+           seconde n'exige AUCUN plantage (précisée en revue — mon explication
+           initiale la passait sous silence) :
+
+           - un plantage entre l'enregistrement de l'intention et sa résolution ;
+           - une **indisponibilité S3 pendant la résolution** : `mark_failed` et
+             `mark_active` restaurent l'état mémoire quand leur sauvegarde
+             échoue, donc l'entrée redevient `pending`. L'appel de résolution a
+             bien lieu — c'est sa PERSISTANCE qui n'est pas garantie.
+
+           La restauration reste le bon comportement : laisser un `failed` ou un
+           `active` en mémoire alors que S3 porte encore `pending` serait un
+           mensonge d'état, précisément la famille de défauts fermée par #78.
+
+           La reprise se fait avec un NOUVEL `operation_id`, ce que le message
+           prescrit explicitement.
+
+           J'avais d'abord libéré la clé sur l'échéance de l'entrée. Écarté après
+           revue, pour trois raisons mesurées : (a) la libération ne suffisait
+           pas — la nouvelle intention créait une SECONDE entrée `pending`, donc
+           une ambiguïté, donc un refus plus loin ; (b) le plafond de TTL que je
+           croyais dur à 300 s est celui du broker `mcp-mission`, PAS le nôtre
+           (`secret_wrap` accepte 60–3600 s) ; (c) `expires_at` est calculé AVANT
+           l'appel OpenBao, dont le TTL court depuis l'émission — l'échéance du
+           registre ne borne donc pas la durée de vie réelle du wrap. Une reprise
+           correcte exige une transition persistée et une échéance qui borne
+           vraiment : c'est un lot distinct.
+
+        2. **Pas de garantie d'unicité distribuée.** Sans CAS/ETag S3 (#51), deux
+           instances peuvent lire l'absence puis écrire toutes les deux. Ce
+           contrôle ferme le rejeu séquentiel, pas la course.
+        """
         self._maybe_refresh()
-        for entry in reversed(self._wraps):
-            if entry["operation_id"] == operation_id and entry["status"] == "pending":
-                entry["status"] = "failed"
-                break
-        self._save()
+        return any(
+            _entry_well_formed(e)
+            and e.get("operation_id") == operation_id
+            and e.get("mission_id") == mission_id
+            and e.get("status") == "pending"
+            for e in self._wraps
+        )
+
+    def mark_active(self, operation_id: str, mission_id: str, accessor: str) -> bool:
+        """
+        Passe l'entrée `pending` du couple `(operation_id, mission_id)` à `active`
+        avec l'accessor reçu d'OpenBao.
+
+        Rend **False** si aucune entrée du couple n'a pu être mise à jour — y
+        compris quand la sauvegarde S3 aurait réussi. L'ancien code rendait le
+        résultat de `_save()` seul : sans correspondance, il annonçait « succès »
+        et l'appelant en concluait que la provision était corrélée et
+        compensable, alors qu'aucune entrée `active` n'existait. `wrap_secret`
+        sait déjà traiter False (révocation d'urgence de l'accessor) — ce chemin
+        de repli existait mais n'était jamais emprunté.
+        """
+        self._maybe_refresh()
+        entry = self._pending_unique(operation_id, mission_id, "mark_active")
+        if entry is None:
+            return False
+
+        avant = (entry.get("accessor"), entry.get("status"))
+        entry["accessor"] = accessor
+        entry["status"] = "active"
+        if not self._save():
+            # Restaurer l'état mémoire : sans cela l'instance garde un `active`
+            # FANTÔME qu'une écriture ultérieure persisterait, alors que
+            # l'appelant va révoquer l'accessor en urgence.
+            entry["accessor"], entry["status"] = avant
+            return False
+        return True
+
+    def mark_failed(self, operation_id: str, mission_id: str) -> None:
+        """
+        Marque l'entrée `pending` du couple comme `failed` (OpenBao a échoué).
+
+        Retour `None` conservé : aucun appelant ne l'exploite, et un échec
+        OpenBao ne crée pas d'accessor à compenser. Absence ou ambiguïté sont
+        journalisées et n'écrivent rien.
+        """
+        self._maybe_refresh()
+        entry = self._pending_unique(operation_id, mission_id, "mark_failed")
+        if entry is None:
+            return
+        avant = entry.get("status")
+        entry["status"] = "failed"
+        if not self._save():
+            entry["status"] = avant
 
     def mark_revoked(self, accessor: str) -> bool:
         """Marque les entrées portant cet accessor comme "revoked". Retourne True si trouvé."""
@@ -520,6 +635,17 @@ async def wrap_secret(
     if registry is None:
         return {"status": "error", "error_type": "registry_unavailable",
                 "message": "Registre de compensation non configuré (S3 requis)"}
+    # Rejeu d'une clé dont une provision est encore `pending` : refusé AVANT toute
+    # écriture. Après un plantage, on ne sait pas si OpenBao a déjà créé un wrap ;
+    # en rattacher un second au même couple rendrait le premier orphelin ET non
+    # compensable. Un retry après `failed` reste permis.
+    if registry.has_pending(operation_id, mission_id):
+        logger.warning("wrap_secret : provision déjà en cours (op=%r, mission=%r) — refusé",
+                       operation_id[:16], mission_id[:16])
+        return {"status": "error", "error_type": "operation_pending",
+                "message": "Une provision est déjà en cours pour cette opération et "
+                           "cette mission — ne pas rejouer la même clé : repartir "
+                           "avec un nouvel operation_id"}
     if not registry.register_pending(operation_id, mission_id, vault_id, secret_path, ttl_seconds,
                                      tenant_id=tenant_id, expected_aud=expected_aud):
         # S3 indisponible → compensation impossible → refuser le wrap
@@ -536,7 +662,7 @@ async def wrap_secret(
                        vault_id, len(secret_path), type(e).__name__)
         # Marquer le pending comme failed (pas d'accessor à révoquer)
         if registry:
-            registry.mark_failed(operation_id)
+            registry.mark_failed(operation_id, mission_id)
         err_type = "not_found" if any(k in str(e) for k in ("404", "Not Found", "No value")) \
                    else "backend_error"
         return {"status": "error", "error_type": err_type,
@@ -546,7 +672,7 @@ async def wrap_secret(
     if not wrap_info:
         logger.warning("wrap_secret: réponse sans wrap_info pour vault=%s", vault_id)
         if registry:
-            registry.mark_failed(operation_id)
+            registry.mark_failed(operation_id, mission_id)
         return {"status": "error", "error_type": "backend_error",
                 "message": "Réponse wrap inattendue (voir logs serveur)"}
 
@@ -555,12 +681,12 @@ async def wrap_secret(
 
     if not wrap_token or not accessor:
         if registry:
-            registry.mark_failed(operation_id)
+            registry.mark_failed(operation_id, mission_id)
         return {"status": "error", "error_type": "backend_error",
                 "message": "wrap_info incomplet (voir logs serveur)"}
 
     # ── Mettre à jour "pending" → "active" avec l'accessor ──────────
-    if not registry.mark_active(operation_id, accessor):
+    if not registry.mark_active(operation_id, mission_id, accessor):
         # S3 indisponible au passage active : le wrap_token existe côté OpenBao
         # mais n'est pas corrélé → révoquer immédiatement pour éviter une provision
         # non compensable, et retourner une erreur au broker.
@@ -610,7 +736,8 @@ def _entry_well_formed(entry) -> bool:
 
 
 def _select_wrap_entries(wraps, *, accessor: str = None,
-                         operation_id: str = None) -> tuple:
+                         operation_id: str = None,
+                         mission_id: str = None) -> tuple:
     """
     Sélection défensive : retourne (entrées_valides_matchantes, saw_malformed).
 
@@ -628,6 +755,13 @@ def _select_wrap_entries(wraps, *, accessor: str = None,
         if accessor is not None and entry.get("accessor") != accessor:
             continue
         if operation_id is not None and entry.get("operation_id") != operation_id:
+            continue
+        # Cloisonnement inter-missions : un `operation_id` n'est PAS unique entre
+        # missions — c'est le couple qui identifie une provision. Sans ce filtre,
+        # la compensation d'un orphelin de la mission A révoquait la provision
+        # VIVANTE de la mission B. Le filtre d'identité (#115) ne sépare rien
+        # ici : le broker porte un seul jeton pour toutes les missions.
+        if mission_id is not None and entry.get("mission_id") != mission_id:
             continue
         valid.append(entry)
     return valid, saw_malformed
@@ -768,12 +902,22 @@ async def _revoke_accessor_selected(registry, accessor: str, selection: list) ->
                 "message": "Erreur de révocation (réessayer)"}
 
 
-async def lookup_and_revoke_by_operation_id(operation_id: str) -> dict:
+async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) -> dict:
     """
-    Retrouve et révoque les wraps créés avec un operation_id donné.
+    Retrouve et révoque les wraps du couple `(operation_id, mission_id)`.
+
+    ⚠️ `mission_id` est REQUIS. Cette primitive sélectionnait auparavant par
+    `operation_id` SEUL, puis révoquait. Un `operation_id` n'étant pas unique
+    entre missions, **compenser un orphelin de la mission A révoquait la
+    provision VIVANTE de la mission B** — atteignable en mono-instance, après
+    deux provisions séquentielles partageant la clé. Le filtre d'identité (#115)
+    ne protégeait pas : le broker porte un seul jeton pour toutes les missions.
+
+    Un paramètre optionnel aurait laissé la révocation inter-missions comme
+    comportement par DÉFAUT sur un outil destructif — d'où la rupture assumée.
 
     États retournés (idempotent) :
-        not_found        — aucune provision pour cet operation_id
+        not_found        — aucune provision pour ce couple
         found_unattached — provision "pending" trouvée sans accessor (crash window) ;
                            pas de révocation possible, le TTL Vault gérera l'expiration
         already_revoked  — toutes les provisions déjà révoquées
@@ -799,7 +943,8 @@ async def lookup_and_revoke_by_operation_id(operation_id: str) -> dict:
     if getattr(registry, "_last_load_ok", True) is False:
         return {"status": "error", "error_type": "backend_unavailable",
                 "message": "Registre non rafraîchi (S3 injoignable) — compensation refusée (réessayer)"}
-    all_matching, _ = _select_wrap_entries(registry._wraps, operation_id=operation_id)
+    all_matching, _ = _select_wrap_entries(registry._wraps, operation_id=operation_id,
+                                           mission_id=mission_id)
     entries = _visible_entries(all_matching)
 
     if not entries:
@@ -1039,8 +1184,14 @@ def _usable_kv2_secret(unwrap_response) -> Optional[dict]:
     return envelope
 
 
-async def status_by_operation_id(operation_id: str) -> dict:
+async def status_by_operation_id(operation_id: str, mission_id: str) -> dict:
     """
+    ⚠️ `mission_id` est REQUIS (cloisonnement inter-missions) : sans lui, cette
+    lecture divulguait à une mission l'existence, l'état et la durée de vie
+    restante des provisions d'une AUTRE mission partageant l'identifiant
+    d'opération. Le filtre d'identité (#115) ne sépare pas les missions — le
+    broker porte un seul jeton pour toutes.
+
     Consulte l'état des wraps d'un operation_id — **lecture seule, aucune
     révocation ni écriture durable** (issue #77). À l'inverse de
     `lookup_and_revoke_by_operation_id`, cette fonction ne modifie rien.
@@ -1074,7 +1225,7 @@ async def status_by_operation_id(operation_id: str) -> dict:
     # comme une entrée hors de son périmètre vault+chemins.
     registry._maybe_refresh()
     all_matching, saw_malformed = _select_wrap_entries(
-        registry._wraps, operation_id=operation_id)
+        registry._wraps, operation_id=operation_id, mission_id=mission_id)
 
     is_admin = _caller_is_admin()
     if is_admin and saw_malformed:

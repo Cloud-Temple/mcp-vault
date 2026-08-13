@@ -657,9 +657,17 @@ async def secret_revoke_wrap(lease_id: str) -> dict:
 
 
 @mcp.tool()
-async def secret_wrap_lookup(operation_id: str) -> dict:
+async def secret_wrap_lookup(operation_id: str, mission_id: str) -> dict:
     """
-    ⚠️ RÉVOQUE les wraps créés avec un operation_id donné (effet de bord destructif).
+    ⚠️ RÉVOQUE les wraps du couple (operation_id, mission_id) — effet de bord destructif.
+
+    ⚠️ RUPTURE — `mission_id` est REQUIS (cloisonnement inter-missions). Un
+    `operation_id` n'est PAS unique entre missions : sans ce paramètre, la
+    sélection portait sur toutes les provisions partageant l'identifiant, toutes
+    missions confondues. Le filtre d'identité (#115) ne protégeait pas — le
+    broker porte un seul jeton pour toutes les missions.
+    Auparavant, compenser un orphelin de la mission A révoquait la provision
+    VIVANTE de la mission B.
 
     Utilisé par mcp-mission pour compenser les provisions orphelines (#74) :
     si le broker crashe entre un wrap réussi côté Vault et sa confirmation,
@@ -679,6 +687,10 @@ async def secret_wrap_lookup(operation_id: str) -> dict:
 
     Args:
         operation_id: Identifiant de corrélation write-ahead
+        mission_id: Mission propriétaire — REQUIS. Un operation_id n'est pas
+            unique entre missions, et cet outil RÉVOQUE : sans lui, la
+            compensation d'un orphelin détruisait la provision vivante d'une
+            autre mission.
 
     Returns:
         {status: "ok", state, operation_id, count_revoked, entries_found}
@@ -707,20 +719,37 @@ async def secret_wrap_lookup(operation_id: str) -> dict:
     if wrap_perm_err:
         return wrap_perm_err
 
-    # #78/D6 : validation stricte (fullmatch, via is_safe_id) AVANT tout audit.
+    # #78/D6 : validation stricte (fullmatch, via is_safe_id) avant tout audit
+    # PORTANT CES IDENTIFIANTS. Les gardes d'autorisation ci-dessus auditent,
+    # elles, un refus — mais elles ne reçoivent NI `operation_id` NI
+    # `mission_id` (signatures `check_policy(tool_name)` /
+    # `check_wrap_permission()`), donc aucune valeur non validée n'atteint un
+    # journal avant ce point. Précision apportée en revue pré-commit : l'ordre
+    # autorisation-puis-validation est VOULU, la garantie porte sur les valeurs.
     if not is_safe_id(operation_id):
         return {"status": "error", "error_type": "invalid_input",
                 "message": "operation_id invalide (alphanum + _-:., 1-256 chars)"}
+    if not is_safe_id(mission_id):
+        return {"status": "error", "error_type": "invalid_input",
+                "message": "mission_id invalide (alphanum + _-:., 1-256 chars)"}
 
-    result = await lookup_and_revoke_by_operation_id(operation_id)
+    result = await lookup_and_revoke_by_operation_id(operation_id, mission_id)
     _r("secret_wrap_lookup", result, detail=f"op={operation_id[:32]}")
     return result
 
 
 @mcp.tool()
-async def secret_wrap_status(operation_id: str) -> dict:
+async def secret_wrap_status(operation_id: str, mission_id: str) -> dict:
     """
-    Consulte l'état d'un secret partagé (wrap) par operation_id — LECTURE SEULE.
+    Consulte l'état d'un wrap par (operation_id, mission_id) — LECTURE SEULE.
+
+    ⚠️ RUPTURE — `mission_id` est REQUIS (cloisonnement inter-missions). Un
+    `operation_id` n'est PAS unique entre missions : sans ce paramètre, la
+    sélection portait sur toutes les provisions partageant l'identifiant, toutes
+    missions confondues. Le filtre d'identité (#115) ne protégeait pas — le
+    broker porte un seul jeton pour toutes les missions.
+    Sans lui, cette lecture divulguait à une mission l'existence, l'état et la
+    durée de vie restante des provisions d'une AUTRE mission.
 
     Contrairement à `secret_wrap_lookup` (qui RÉVOQUE — compensation orpheline #74),
     cet outil ne modifie rien : il retourne un **instantané best-effort** du
@@ -747,6 +776,7 @@ async def secret_wrap_status(operation_id: str) -> dict:
 
     Args:
         operation_id: Identifiant de corrélation write-ahead.
+        mission_id: Mission propriétaire — REQUIS (cloisonnement inter-missions).
 
     Returns:
         {status, state, expires_at?} — jamais d'accessor ni de wrap_token.
@@ -763,12 +793,21 @@ async def secret_wrap_status(operation_id: str) -> dict:
     if wrap_perm_err:
         return wrap_perm_err
 
-    # #78/D6 : validation stricte (fullmatch, via is_safe_id) AVANT tout audit.
+    # #78/D6 : validation stricte (fullmatch, via is_safe_id) avant tout audit
+    # PORTANT CES IDENTIFIANTS. Les gardes d'autorisation ci-dessus auditent,
+    # elles, un refus — mais elles ne reçoivent NI `operation_id` NI
+    # `mission_id` (signatures `check_policy(tool_name)` /
+    # `check_wrap_permission()`), donc aucune valeur non validée n'atteint un
+    # journal avant ce point. Précision apportée en revue pré-commit : l'ordre
+    # autorisation-puis-validation est VOULU, la garantie porte sur les valeurs.
     if not is_safe_id(operation_id):
         return {"status": "error", "error_type": "invalid_input",
                 "message": "operation_id invalide (alphanum + _-:., 1-256 chars)"}
+    if not is_safe_id(mission_id):
+        return {"status": "error", "error_type": "invalid_input",
+                "message": "mission_id invalide (alphanum + _-:., 1-256 chars)"}
 
-    result = await status_by_operation_id(operation_id)
+    result = await status_by_operation_id(operation_id, mission_id)
     _r("secret_wrap_status", result, detail=f"op={operation_id[:32]}")
     return result
 

@@ -1163,6 +1163,15 @@ les quatre outils wrap exigeaient `admin` — inacceptable en moindre privilège
 > absente ou blanche est en revanche **enrichie** depuis la configuration : elle
 > a une source serveur, le locataire non.
 
+> ⚠️ **Cloisonnement inter-missions** : `secret_wrap_lookup` et
+> `secret_wrap_status` exigent désormais `mission_id`. Le scoping d'identité
+> ci-dessous borne au VAULT et aux CHEMINS, **pas à la mission** — le broker
+> porte un seul jeton pour toutes. Sans le couple, la compensation d'un orphelin
+> révoquait la provision vivante d'une autre mission, et la lecture d'état la
+> divulguait. `mark_active`/`mark_failed` sélectionnent aussi le couple ;
+> absence ou ambiguïté n'écrivent RIEN (une sauvegarde no-op écraserait l'état
+> d'une autre instance — last-write-wins, #51).
+
 **Séquence de gardes des 4 outils** (`secret_wrap`, `secret_revoke_wrap`,
 `secret_wrap_lookup`, `secret_wrap_status`) :
 

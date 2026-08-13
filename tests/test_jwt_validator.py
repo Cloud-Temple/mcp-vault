@@ -613,7 +613,7 @@ class TestWrapRegistryC18Extensions:
         """Lookup (op_id, mission_id) retourne l'entrée active."""
         r = self._make_registry()
         r.register_pending("op-1", "m-1", "vault-a", "path/key", 300)
-        r.mark_active("op-1", "accessor-xyz")
+        r.mark_active("op-1", "m-1", "accessor-xyz")
 
         entry = r.get_by_composite_key("op-1", "m-1")
         assert entry is not None
@@ -624,7 +624,7 @@ class TestWrapRegistryC18Extensions:
         """Lookup avec mission_id incorrect → None (anti-collision)."""
         r = self._make_registry()
         r.register_pending("op-1", "m-1", "vault-a", "path/key", 300)
-        r.mark_active("op-1", "accessor-xyz")
+        r.mark_active("op-1", "m-1", "accessor-xyz")
 
         entry = r.get_by_composite_key("op-1", "m-WRONG")
         assert entry is None
@@ -633,7 +633,7 @@ class TestWrapRegistryC18Extensions:
         """try_mark_consuming passe "active" → "consuming"."""
         r = self._make_registry()
         r.register_pending("op-1", "m-1", "vault-a", "path/key", 300)
-        r.mark_active("op-1", "accessor-xyz")
+        r.mark_active("op-1", "m-1", "accessor-xyz")
 
         result = r.try_mark_consuming("op-1", "m-1")
         assert result is True
@@ -645,7 +645,7 @@ class TestWrapRegistryC18Extensions:
         """Deuxième try_mark_consuming sur même entry → False (anti-replay)."""
         r = self._make_registry()
         r.register_pending("op-1", "m-1", "vault-a", "path/key", 300)
-        r.mark_active("op-1", "accessor-xyz")
+        r.mark_active("op-1", "m-1", "accessor-xyz")
 
         r.try_mark_consuming("op-1", "m-1")  # Premier
         result = r.try_mark_consuming("op-1", "m-1")  # Deuxième
@@ -655,7 +655,7 @@ class TestWrapRegistryC18Extensions:
         """mark_consumed finalise l'état "consuming" → "consumed"."""
         r = self._make_registry()
         r.register_pending("op-1", "m-1", "vault-a", "path/key", 300)
-        r.mark_active("op-1", "accessor-xyz")
+        r.mark_active("op-1", "m-1", "accessor-xyz")
         r.try_mark_consuming("op-1", "m-1")
 
         result = r.mark_consumed("op-1", "m-1")
@@ -686,7 +686,7 @@ class TestWrapRegistryC18Extensions:
                                   ("consume_outcome_unknown", "mark_outcome_unknown")):
             r._wraps = []
             r.register_pending("op-1", "m-1", "vault-a", "path/key", 300)
-            r.mark_active("op-1", "accessor-xyz")
+            r.mark_active("op-1", "m-1", "accessor-xyz")
             r.try_mark_consuming("op-1", "m-1")
 
             getattr(r, methode)("op-1", "m-1")
@@ -699,7 +699,7 @@ class TestWrapRegistryC18Extensions:
         """Aucune transition ne sort d'un état terminal de consommation."""
         r = self._make_registry()
         r.register_pending("op-1", "m-1", "vault-a", "path/key", 300)
-        r.mark_active("op-1", "accessor-xyz")
+        r.mark_active("op-1", "m-1", "accessor-xyz")
         r.try_mark_consuming("op-1", "m-1")
         r.mark_unusable("op-1", "m-1")
 

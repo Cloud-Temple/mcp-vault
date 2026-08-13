@@ -122,6 +122,12 @@ python scripts/mcp_cli.py secret wrap prod db/pg \
   --mission-id m-42 --operation-id op-1 \
   --tenant-id t-7 --expected-aud mcp-vault:prod
 
+# ⚠️ wrap-lookup et wrap-status exigent --mission-id : un operation_id n'est pas
+# unique entre missions. Sans lui, la compensation d'un orphelin révoquait la
+# provision VIVANTE d'une autre mission, et la lecture d'état la divulguait.
+python scripts/mcp_cli.py secret wrap-lookup op-1 --mission-id m-42
+python scripts/mcp_cli.py secret wrap-status op-1 --mission-id m-42
+
 # Révoquer un wrap (idempotent — introuvable = succès)
 # Révocation idempotente : introuvable DANS UN REGISTRE DISPONIBLE = succès.
 # Registre non initialisé → error/registry_unavailable (#120) : rien n'a été tenté.

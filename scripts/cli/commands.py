@@ -511,18 +511,26 @@ def secret_revoke_wrap_cmd(ctx, lease_id, output_json):
 
 @secret_group.command("wrap-lookup")
 @click.argument("operation_id")
+@click.option("--mission-id", "mission_id", required=True,
+              help="Mission propriétaire — OBLIGATOIRE : un operation_id n'est pas "
+                   "unique entre missions, et cette commande RÉVOQUE")
 @click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
 @click.pass_context
-def secret_wrap_lookup_cmd(ctx, operation_id, output_json):
-    """Retrouver et RÉVOQUER les wraps d'un operation_id (compensation orphelins).
+def secret_wrap_lookup_cmd(ctx, operation_id, mission_id, output_json):
+    """Retrouver et RÉVOQUER les wraps d'un couple (operation_id, mission_id).
 
     \b
     OPERATION_ID : identifiant d'opération à rechercher dans le registry.
     ⚠️ Révoque les wraps trouvés. Pour consulter sans effet de bord : wrap-status.
+    ⚠️ --mission-id est OBLIGATOIRE : sans lui, la compensation d'un orphelin
+    d'une mission révoquait la provision VIVANTE d'une autre mission partageant
+    le même operation_id.
     """
     async def _run():
         client = MCPClient(ctx.obj["url"], ctx.obj["token"])
-        result = await client.call_tool("secret_wrap_lookup", {"operation_id": operation_id})
+        result = await client.call_tool("secret_wrap_lookup",
+                                        {"operation_id": operation_id,
+                                         "mission_id": mission_id})
         if output_json:
             show_json(result)
         else:
@@ -532,18 +540,24 @@ def secret_wrap_lookup_cmd(ctx, operation_id, output_json):
 
 @secret_group.command("wrap-status")
 @click.argument("operation_id")
+@click.option("--mission-id", "mission_id", required=True,
+              help="Mission propriétaire — OBLIGATOIRE : sans lui, l'état des "
+                   "provisions d'une autre mission était divulgué")
 @click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
 @click.pass_context
-def secret_wrap_status_cmd(ctx, operation_id, output_json):
-    """Consulter l'état d'un wrap par operation_id (LECTURE SEULE, ne révoque pas).
+def secret_wrap_status_cmd(ctx, operation_id, mission_id, output_json):
+    """Consulter l'état d'un wrap par (operation_id, mission_id) — LECTURE SEULE.
 
     \b
     OPERATION_ID : identifiant d'opération à consulter dans le registry.
     Instantané best-effort ; contrairement à wrap-lookup, ne révoque rien (#77).
+    ⚠️ --mission-id est OBLIGATOIRE (cloisonnement inter-missions).
     """
     async def _run():
         client = MCPClient(ctx.obj["url"], ctx.obj["token"])
-        result = await client.call_tool("secret_wrap_status", {"operation_id": operation_id})
+        result = await client.call_tool("secret_wrap_status",
+                                        {"operation_id": operation_id,
+                                         "mission_id": mission_id})
         if output_json:
             show_json(result)
         else:

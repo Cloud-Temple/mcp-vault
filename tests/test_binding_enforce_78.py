@@ -81,7 +81,7 @@ def _registre(tenant_id: str, expected_aud: str):
     r = EnMemoire()
     r.register_pending(OP, MISSION, "vault-a", "chemin/cle", 300,
                        tenant_id=tenant_id, expected_aud=expected_aud)
-    r.mark_active(OP, "accessor-xyz")
+    r.mark_active(OP, MISSION, "accessor-xyz")
     return r
 
 

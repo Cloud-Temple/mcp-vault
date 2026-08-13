@@ -147,12 +147,36 @@ def test_secret():
     check_value("lease_id transmis", args.get("lease_id"), "ACC-XYZ")
 
     # ── secret wrap-lookup ──────────────────────────────────────────────────────
-    section("secret wrap-lookup — appelle secret_wrap_lookup avec operation_id")
-    r, mock = run_cli_mocked(["secret", "wrap-lookup", "op-42"], _LOOKUP_OK)
+    section("secret wrap-lookup — transmet le COUPLE (operation_id, mission_id)")
+    r, mock = run_cli_mocked(
+        ["secret", "wrap-lookup", "op-42", "--mission-id", "m-42"], _LOOKUP_OK)
     check_value("Exit code", r.exit_code, 0)
     args = mock.call_args[0][1] if mock.call_args else {}
     check("secret_wrap_lookup appelé", mock.call_args is not None and mock.call_args[0][0] == "secret_wrap_lookup")
     check_value("operation_id transmis", args.get("operation_id"), "op-42")
+    # Cloisonnement inter-missions : la mission DOIT être transmise. Sans cette
+    # vérification, une CLI qui l'oublierait rouvrirait la révocation croisée.
+    check_value("mission_id transmis", args.get("mission_id"), "m-42")
+
+    # ── Non-complaisant : la mission est OBLIGATOIRE sur un chemin destructif ────
+    section("secret wrap-lookup — refuse sans --mission-id (outil destructif)")
+    r_sans, mock_sans = run_cli_mocked(["secret", "wrap-lookup", "op-42"], _LOOKUP_OK)
+    check("Exit code non nul sans mission", r_sans.exit_code != 0)
+    check("secret_wrap_lookup NON appelé sans mission", mock_sans.call_args is None)
+
+    # ── secret wrap-status ──────────────────────────────────────────────────────
+    section("secret wrap-status — transmet le COUPLE et exige --mission-id")
+    r, mock = run_cli_mocked(
+        ["secret", "wrap-status", "op-42", "--mission-id", "m-42"], _LOOKUP_OK)
+    check_value("Exit code", r.exit_code, 0)
+    args = mock.call_args[0][1] if mock.call_args else {}
+    check("secret_wrap_status appelé", mock.call_args is not None and mock.call_args[0][0] == "secret_wrap_status")
+    check_value("operation_id transmis", args.get("operation_id"), "op-42")
+    check_value("mission_id transmis", args.get("mission_id"), "m-42")
+
+    r_sans, mock_sans = run_cli_mocked(["secret", "wrap-status", "op-42"], _LOOKUP_OK)
+    check("Exit code non nul sans mission (status)", r_sans.exit_code != 0)
+    check("secret_wrap_status NON appelé sans mission", mock_sans.call_args is None)
 
     # ── Non-complaisant : wrap_token jamais dans l'affichage stdout en clair sans alerte ─
     section("secret wrap — wrap_token affiché avec alerte SENSIBLE")

@@ -2,6 +2,100 @@
 
 ## [Non publié]
 
+### RUPTURE — cloisonnement inter-missions du registre de wraps
+
+**Un `operation_id` n'est PAS unique entre missions.** C'est le couple
+`(operation_id, mission_id)` qui identifie une provision — la consommation et les
+transitions terminales l'utilisaient depuis toujours, **quatre autres chemins
+non**.
+
+**Le plus grave est destructif et était atteignable en mono-instance**, après deux
+provisions séquentielles partageant l'identifiant : la compensation d'un orphelin
+(`secret_wrap_lookup`) sélectionnait par `operation_id` seul, puis **révoquait**.
+Compenser un orphelin de la mission A **détruisait la provision VIVANTE de la
+mission B**.
+
+⚠️ Le filtre d'identité de #115 ne protégeait pas : le broker porte **un seul
+jeton pour toutes les missions**, donc toutes les entrées lui sont visibles. C'est
+la cause du fail-close sur `ambiguous` qu'`mcp-mission` avait dû adopter, au prix
+d'orphelins non compensés.
+
+#### Ce qui change — deux outils MCP prennent un paramètre REQUIS
+
+| Outil | Avant | Après |
+| --- | --- | --- |
+| `secret_wrap_lookup` | `(operation_id)` | `(operation_id, mission_id)` |
+| `secret_wrap_status` | `(operation_id)` | `(operation_id, mission_id)` |
+
+Un paramètre **optionnel** aurait laissé la révocation inter-missions comme
+comportement **par défaut** sur un outil destructif : la rupture est assumée. Les
+commandes CLI `secret wrap-lookup` et `secret wrap-status` exigent désormais
+`--mission-id`.
+
+`secret_wrap_status` cloisonné ferme aussi une **divulgation** : une mission
+lisait l'existence, l'état et la durée de vie restante des provisions d'une autre.
+
+#### Transitions de provisionnement
+
+`mark_active` et `mark_failed` prenaient « la dernière entrée `pending` de cet
+`operation_id` » : le succès OpenBao de A pouvait écrire l'accessor de A sur
+l'entrée de B, laissant celle de A `pending` pour toujours. Elles sélectionnent
+désormais le couple, et l'ambiguïté est traitée comme une absence — on ne devine
+pas laquelle est la bonne.
+
+#### Deux défauts d'honnêteté fermés au passage
+
+- **`mark_active` ne peut plus mentir** : elle rendait le résultat de `_save()`
+  seul, donc « succès » même sans aucune entrée mise à jour — l'appelant en
+  concluait que la provision était corrélée et compensable. Elle rend désormais
+  `False`, et `wrap_secret` emprunte enfin son chemin de repli (révocation
+  d'urgence de l'accessor), qui existait sans jamais servir ;
+- **plus aucune sauvegarde no-op** : absence ou ambiguïté n'écrivent plus rien.
+  Une écriture no-op réécrit l'état mémoire par-dessus une version S3 possiblement
+  plus récente d'une autre instance (last-write-wins, pas de CAS — #51). Et si la
+  sauvegarde d'une transition échoue, l'état mémoire est **restauré** : plus
+  d'`active` fantôme qu'une écriture ultérieure aurait persisté.
+
+#### Nouveau code d'erreur `operation_pending`
+
+Rejouer une clé `(operation_id, mission_id)` dont une provision est encore
+`pending` est refusé **avant toute écriture et avant tout appel OpenBao**. Après
+un plantage on ne sait pas si un wrap a déjà été créé ; en rattacher un second
+rendrait le premier orphelin **et** non compensable. Un retry après `failed` reste
+permis, et le `pending` d'une **autre** mission ne bloque rien.
+
+> ⚠️ **Reprise après un `pending` bloqué** : elle se fait avec un **nouvel
+> `operation_id`**, pas par attente — le message le prescrit. Deux causes, et la
+> seconde n'exige **aucun plantage** : un arrêt brutal entre l'enregistrement de
+> l'intention et sa résolution, **ou une indisponibilité S3 pendant cette
+> résolution** — `mark_active`/`mark_failed` restaurent alors l'état mémoire, donc
+> l'entrée redevient `pending`. L'appel de résolution a bien lieu ; c'est sa
+> PERSISTANCE qui n'est pas garantie. La restauration reste le bon comportement :
+> laisser un `active` en mémoire alors que S3 porte `pending` serait un mensonge
+> d'état. Une libération
+> automatique par échéance a été écrite puis **retirée** après revue : elle ne
+> suffisait pas (la nouvelle intention créait une seconde entrée `pending`, donc
+> une ambiguïté, donc un refus plus loin), le plafond de TTL « dur à 300 s »
+> qu'elle invoquait est celui du broker `mcp-mission` et **non le nôtre**
+> (`secret_wrap` accepte 60–3600 s), et `expires_at` est calculé AVANT l'appel
+> OpenBao — il ne borne donc pas la durée de vie réelle du wrap. Une reprise
+> correcte demande une transition persistée et une échéance qui borne vraiment :
+> lot distinct, à instruire.
+
+> ⚠️ **Résidu assumé** : ce refus n'est PAS une garantie d'unicité distribuée.
+> Sans CAS/ETag S3 (#51), deux instances peuvent lire l'absence puis écrire toutes
+> les deux. Il ferme le rejeu séquentiel, pas la course.
+
+#### Variables d'environnement
+
+**Aucun changement** — le contrat `.env.example` reste à **46 clés (23 actives,
+23 commentées)**.
+
+**Tests** : `tests/test_cloisonnement_missions.py` (32 tests), plus la surface
+CLI et les bancs opt-in OpenBao réels (7 tests rejoués contre OpenBao 2.5.1).
+**8 mutations mesurées, 8 détectées** — dont le défaut destructif, attrapé par
+5 tests. Suite : 1363 passed / 33 skipped / 0 failed.
+
 ### RUPTURE de contrat d'erreurs — la consommation d'un wrap ne peut plus mentir (issue #78, findings 2 et 3)
 
 **Ce qui était faux.** `secret_consume` passe l'entrée du registre de `active` à
