@@ -125,7 +125,7 @@ def test_status_does_not_destroy_wrap_then_consumable(real_client):
         wr = _run(wrap_secret(_MOUNT, "db/x", "m1", "op-live-77", 300))
         assert wr["status"] == "ok", wr
         wrap_token = wr["wrap_token"]
-        st = _run(status_by_operation_id("op-live-77"))
+        st = _run(status_by_operation_id("op-live-77", "m1"))
         assert st["status"] == "ok" and st["state"] == "active", st
     # HORS patch : un unwrap réel doit réussir → le status n'a rien consommé/révoqué
     assert _fresh_unwrap_ok(wrap_token), "le wrap devrait rester consommable après status"
@@ -142,7 +142,7 @@ def test_lookup_revokes_wrap_then_not_consumable(real_client):
         wr = _run(wrap_secret(_MOUNT, "db/x", "m1", "op-revoke-77", 300))
         assert wr["status"] == "ok", wr
         wrap_token = wr["wrap_token"]
-        rev = _run(lookup_and_revoke_by_operation_id("op-revoke-77"))
+        rev = _run(lookup_and_revoke_by_operation_id("op-revoke-77", "m1"))
         assert rev["status"] == "ok" and rev["state"] in ("revoked", "ambiguous"), rev
     assert not _fresh_unwrap_ok(wrap_token), "un wrap révoqué ne doit plus être consommable"
 
@@ -161,7 +161,7 @@ def test_status_after_consume_reflects_no_longer_active(real_client):
         assert wr["status"] == "ok", wr
         # consommation externe du token
         assert _fresh_unwrap_ok(wr["wrap_token"])
-        st = _run(status_by_operation_id("op-consumed-77"))
+        st = _run(status_by_operation_id("op-consumed-77", "m1"))
     # lecture robuste (pas d'exception) ; l'état registre est un instantané
     assert st["status"] == "ok" and st["state"] in ("active", "consumed"), st
 

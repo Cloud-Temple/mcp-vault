@@ -362,8 +362,8 @@ def test_read_token_denied_on_all_four_tools():
         (server.secret_wrap, dict(vault_id="mcp-mission", secret_path="missions/x",
                                   mission_id="m", operation_id="op-1")),
         (server.secret_revoke_wrap, dict(lease_id="ACC1")),
-        (server.secret_wrap_lookup, dict(operation_id="op-1")),
-        (server.secret_wrap_status, dict(operation_id="op-1")),
+        (server.secret_wrap_lookup, dict(operation_id="op-1", mission_id="m")),
+        (server.secret_wrap_status, dict(operation_id="op-1", mission_id="m")),
     ]
     with auth_context(_read_token()), _patch_store(BROKER_POLICY):
         for fn, kwargs in tools:
@@ -461,8 +461,8 @@ def test_mission_jwt_denied_on_wrap_tools():
             (server.secret_wrap, dict(vault_id="mcp-mission", secret_path="x",
                                       mission_id="m", operation_id="op-1")),
             (server.secret_revoke_wrap, dict(lease_id="ACC1")),
-            (server.secret_wrap_lookup, dict(operation_id="op-1")),
-            (server.secret_wrap_status, dict(operation_id="op-1")),
+            (server.secret_wrap_lookup, dict(operation_id="op-1", mission_id="m")),
+            (server.secret_wrap_status, dict(operation_id="op-1", mission_id="m")),
         ]:
             res = _run(fn(**kwargs))
             assert res["status"] == "error" and "mission" in res["message"], \
@@ -476,7 +476,7 @@ def test_admin_token_unchanged_on_wrap_tools():
     core = AsyncMock(return_value={"status": "ok", "state": "not_found"})
     with admin_auth_context(), \
          patch("mcp_vault.vault.wrapping.status_by_operation_id", new=core):
-        res = _run(server.secret_wrap_status("op-1"))
+        res = _run(server.secret_wrap_status("op-1", "m"))
     assert res["status"] == "ok"
     core.assert_called_once()
 
@@ -530,9 +530,9 @@ def test_registry_out_of_vault_scope_is_not_found_and_openbao_untouched():
     with stack, auth_context(_wrap_token()), _patch_store(BROKER_POLICY):
         res = _run(w.revoke_wrap("ACC1"))
         assert res["state"] == "not_found"
-        res2 = _run(w.lookup_and_revoke_by_operation_id("op-1"))
+        res2 = _run(w.lookup_and_revoke_by_operation_id("op-1", "m"))
         assert res2["state"] == "not_found"
-        res3 = _run(w.status_by_operation_id("op-1"))
+        res3 = _run(w.status_by_operation_id("op-1", "m"))
         assert res3["state"] == "not_found"
     client.auth.token.revoke_accessor.assert_not_called()
     assert reg.saved == 0, "aucune mutation ne doit être persistée"
@@ -546,8 +546,8 @@ def test_registry_cross_path_same_vault_is_not_found():
     stack, client = _patch_wrapping(reg)
     with stack, auth_context(_wrap_token()), _patch_store(BROKER_POLICY):
         assert _run(w.revoke_wrap("ACC1"))["state"] == "not_found"
-        assert _run(w.lookup_and_revoke_by_operation_id("op-1"))["state"] == "not_found"
-        assert _run(w.status_by_operation_id("op-1"))["state"] == "not_found"
+        assert _run(w.lookup_and_revoke_by_operation_id("op-1", "m"))["state"] == "not_found"
+        assert _run(w.status_by_operation_id("op-1", "m"))["state"] == "not_found"
     client.auth.token.revoke_accessor.assert_not_called()
 
 
@@ -585,8 +585,8 @@ def test_registry_malformed_entries_invisible_for_non_admin():
                          _entry("op-ok", "ACCOK", "active")])
     stack, client = _patch_wrapping(reg)
     with stack, auth_context(_wrap_token()), _patch_store(BROKER_POLICY):
-        assert _run(w.status_by_operation_id("op-ok"))["state"] == "active"
-        assert _run(w.status_by_operation_id("op-ghost"))["state"] == "not_found"
+        assert _run(w.status_by_operation_id("op-ok", "m"))["state"] == "active"
+        assert _run(w.status_by_operation_id("op-ghost", "m"))["state"] == "not_found"
         assert _run(w.revoke_wrap("ACC-GHOST"))["state"] == "not_found"
     client.auth.token.revoke_accessor.assert_not_called()
 
@@ -598,7 +598,7 @@ def test_registry_admin_still_sees_registry_inconsistent_on_malformed():
     reg = _mem_registry([{}, _entry("op-ok", "ACCOK", "active")])
     stack, _ = _patch_wrapping(reg)
     with stack, admin_auth_context():
-        res = _run(w.status_by_operation_id("op-ok"))
+        res = _run(w.status_by_operation_id("op-ok", "m"))
     assert res["state"] == "registry_inconsistent"
 
 
@@ -609,8 +609,8 @@ def test_registry_absent_context_is_fail_close():
     stack, client = _patch_wrapping(reg)
     with stack:
         assert _run(w.revoke_wrap("ACC1"))["state"] == "not_found"
-        assert _run(w.lookup_and_revoke_by_operation_id("op-1"))["state"] == "not_found"
-        assert _run(w.status_by_operation_id("op-1"))["state"] == "not_found"
+        assert _run(w.lookup_and_revoke_by_operation_id("op-1", "m"))["state"] == "not_found"
+        assert _run(w.status_by_operation_id("op-1", "m"))["state"] == "not_found"
     client.auth.token.revoke_accessor.assert_not_called()
 
 
@@ -639,14 +639,14 @@ def test_registry_refresh_called_and_s3_outage_detected():
     reg.load = counting_load
     stack, _ = _patch_wrapping(reg)
     with stack, admin_auth_context():
-        _run(w.status_by_operation_id("op-1"))
+        _run(w.status_by_operation_id("op-1", "m"))
     assert refreshed["n"] >= 1, "le refresh du registre a été perdu (R3-F2)"
 
     reg2 = _mem_registry([_entry("op-1", "ACC1", "active")])
     reg2._last_load_ok = False
     stack2, _ = _patch_wrapping(reg2)
     with stack2, admin_auth_context():
-        res = _run(w.status_by_operation_id("op-1"))
+        res = _run(w.status_by_operation_id("op-1", "m"))
     assert res["status"] == "error" and res.get("error_type") == "backend_unavailable"
 
 
@@ -662,7 +662,7 @@ def test_registry_fail_close_on_s3_refresh_failure_for_revoke_and_lookup():
     with stack, admin_auth_context():
         res = _run(w.revoke_wrap("ACC1"))
         assert res["status"] == "error" and res.get("error_type") == "backend_unavailable", res
-        res2 = _run(w.lookup_and_revoke_by_operation_id("op-1"))
+        res2 = _run(w.lookup_and_revoke_by_operation_id("op-1", "m"))
         assert res2["status"] == "error" and res2.get("error_type") == "backend_unavailable", res2
     client.auth.token.revoke_accessor.assert_not_called()
     assert reg.saved == 0, "aucune écriture ne doit persister un cache ambigu"
@@ -688,7 +688,7 @@ def test_registry_lookup_duplicated_accessor_failure_counts_nothing():
     failing.auth.token.revoke_accessor.side_effect = Exception("connection reset 503")
     stack, client = _patch_wrapping(reg, client=failing)
     with stack, admin_auth_context():
-        res = _run(w.lookup_and_revoke_by_operation_id("op-1"))
+        res = _run(w.lookup_and_revoke_by_operation_id("op-1", "m"))
     assert res["status"] == "error" and res.get("error_type") == "partial_revocation", res
     assert res["count_revoked"] == 0, f"aucune entrée ne doit être comptée : {res}"
     failing.auth.token.revoke_accessor.assert_called_once()
@@ -699,7 +699,7 @@ def test_registry_lookup_duplicated_accessor_failure_counts_nothing():
     reg2 = _two_dupes()
     stack2, client2 = _patch_wrapping(reg2)
     with stack2, admin_auth_context():
-        res2 = _run(w.lookup_and_revoke_by_operation_id("op-1"))
+        res2 = _run(w.lookup_and_revoke_by_operation_id("op-1", "m"))
     assert res2["status"] == "ok" and res2["count_revoked"] == 2, res2
     client2.auth.token.revoke_accessor.assert_called_once()
     assert all(e["status"] == "revoked" for e in reg2._wraps)
@@ -715,7 +715,7 @@ def test_registry_lookup_counts_only_visible_entries():
     ])
     stack, client = _patch_wrapping(reg)
     with stack, auth_context(_wrap_token()), _patch_store(BROKER_POLICY):
-        res = _run(w.lookup_and_revoke_by_operation_id("op-1"))
+        res = _run(w.lookup_and_revoke_by_operation_id("op-1", "m"))
     assert res["entries_found"] == 1, "l'entrée hors scope ne doit pas être comptée"
     assert res["count_revoked"] == 1
     assert reg._wraps[1]["status"] == "active", "l'entrée hors scope ne doit pas être révoquée"

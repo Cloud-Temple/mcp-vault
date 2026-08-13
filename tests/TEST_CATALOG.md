@@ -479,6 +479,32 @@ du registre, et **secret sans paire exploitable**.
 > évolution de ce périmètre doit être rejouée contre un OpenBao réel, jamais
 > contre des simulacres seuls.
 
+### 18. Cloisonnement inter-missions (32 tests)
+
+`test_cloisonnement_missions.py`. Un `operation_id` n'est PAS unique entre
+missions : c'est le couple qui identifie une provision.
+
+> ⚠️ **À AUDITER EN PRIORITÉ — défaut DESTRUCTIF et atteignable.** La
+> compensation d'un orphelin (`secret_wrap_lookup`) sélectionnait par
+> `operation_id` seul puis RÉVOQUAIT : compenser un orphelin de la mission A
+> détruisait la provision vivante de la mission B, en mono-instance, après deux
+> provisions séquentielles. Le filtre d'identité de #115 ne protégeait pas — le
+> broker porte un seul jeton pour toutes les missions.
+
+Couvre les quatre chemins : compensation (destructif), lecture d'état
+(divulgation), et les deux transitions de provisionnement. Plus les deux défauts
+d'honnêteté fermés au passage : `mark_active` ne peut plus annoncer « succès »
+sans avoir rien mis à jour, et absence/ambiguïté n'écrivent plus rien.
+
+Garde-fous anti-complaisance explicites : deux entrées de la MÊME mission restent
+`ambiguous` ; le `pending` d'une AUTRE mission ne bloque pas une provision (sinon
+on remplace une corruption par un déni de service) ; le cas nominal mono-mission
+et le retry après `failed` restent permis.
+
+**8 mutations mesurées, 8 détectées** — le défaut destructif est attrapé par 5
+tests. Les bancs opt-in OpenBao ont été rejoués contre un moteur 2.5.1 réel :
+leurs appels portaient l'ancienne signature et SKIPaient en silence.
+
 ---
 
 ## Comment lancer les tests

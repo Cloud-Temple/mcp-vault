@@ -94,7 +94,7 @@ def _registre(echec_a_partir_de: int = 0):
 
     r = EnMemoire()
     r.register_pending(OP, MISSION, "vault-a", "chemin/cle", 300)
-    r.mark_active(OP, "accessor-xyz")
+    r.mark_active(OP, MISSION, "accessor-xyz")
     return r
 
 
@@ -461,7 +461,7 @@ class TestRevocationSurEtatTerminal:
 
         with patch.object(wrapping, "get_wrap_registry", return_value=registre), \
              patch.object(wrapping, "_caller_is_admin", return_value=True):
-            return run(wrapping.lookup_and_revoke_by_operation_id(OP))
+            return run(wrapping.lookup_and_revoke_by_operation_id(OP, MISSION))
 
     @pytest.mark.parametrize("terminal", ["unusable", "consume_outcome_unknown"])
     def test_un_etat_terminal_n_est_pas_annonce_already_revoked(self, terminal):
@@ -533,7 +533,7 @@ class TestConsultationEtat:
 
         with patch.object(wrapping, "get_wrap_registry", return_value=registre), \
              patch.object(wrapping, "_caller_is_admin", return_value=True):
-            return run(wrapping.status_by_operation_id(OP))
+            return run(wrapping.status_by_operation_id(OP, MISSION))
 
     @pytest.mark.parametrize("terminal", ["unusable", "consume_outcome_unknown"])
     def test_l_etat_terminal_est_restitue_tel_quel(self, terminal):
@@ -627,12 +627,22 @@ class TestRevocationMixteTerminalEtActif:
         with patch.object(wrapping, "get_wrap_registry", return_value=registre), \
              patch.object(wrapping, "_caller_is_admin", return_value=True), \
              patch.object(wrapping, "_get_client", return_value=client):
-            return run(wrapping.lookup_and_revoke_by_operation_id(OP))
+            return run(wrapping.lookup_and_revoke_by_operation_id(OP, MISSION))
 
     def _monter_terminal_plus_actif(self):
+        """
+        Deux entrées de la MÊME mission partageant l'operation_id : l'une figée
+        sur un état terminal, l'autre encore active.
+
+        ⚠️ Ce montage utilisait `mission_id = "autre-mission"` pour obtenir deux
+        entrées — commode, mais faux depuis le cloisonnement inter-missions : la
+        compensation ne voit plus que le couple `(operation_id, mission_id)`,
+        donc l'entrée d'une autre mission est (à raison) invisible et le test
+        mesurait alors zéro révocation. Le sujet ici est le mélange
+        terminal/actif, pas la frontière de mission — celle-ci a son propre banc.
+        """
         registre = _registre()
         actif = dict(registre._wraps[0])
-        actif["mission_id"] = "autre-mission"
         actif["status"] = "active"
         registre._wraps.append(actif)
         registre._wraps[0]["status"] = "unusable"

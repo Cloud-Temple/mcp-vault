@@ -229,38 +229,38 @@ def test_lookup_and_revoke_by_operation_id():
 
     c_ok = MagicMock(); c_ok.auth.token.revoke_accessor.return_value = None
 
-    def lookup(registry):
-        with patch("mcp_vault.vault.wrapping.get_wrap_registry", return_value=registry), \
-             patch("mcp_vault.vault.wrapping._get_client", return_value=c_ok):
-            return run(lookup_and_revoke_by_operation_id(registry._wraps[0]["operation_id"]
-                       if registry._wraps else "op-none"))
+    # NB : un helper local `lookup(registry)` existait ici sans être JAMAIS appelé.
+    # Retiré au passage du cloisonnement inter-missions : sa signature mono-clé
+    # était devenue fausse et rien ne l'aurait signalé — un piège pour le prochain
+    # qui l'aurait cru utilisable. Chaque cas ci-dessous appelle la primitive
+    # directement, avec le couple.
 
     # not_found
     r = _make_registry(); r._wraps = []
     with patch("mcp_vault.vault.wrapping.get_wrap_registry", return_value=r), \
          patch("mcp_vault.vault.wrapping._get_client", return_value=c_ok):
-        res = run(lookup_and_revoke_by_operation_id("op-none"))
+        res = run(lookup_and_revoke_by_operation_id("op-none", "m"))
     assert res["state"] == "not_found"
 
     # found_unattached (pending sans accessor)
     r2 = _make_registry(); r2._wraps = [_entry("op-pend", None, "pending")]
     with patch("mcp_vault.vault.wrapping.get_wrap_registry", return_value=r2), \
          patch("mcp_vault.vault.wrapping._get_client", return_value=c_ok):
-        res = run(lookup_and_revoke_by_operation_id("op-pend"))
+        res = run(lookup_and_revoke_by_operation_id("op-pend", "m"))
     assert res["state"] == "found_unattached"
 
     # already_revoked
     r3 = _make_registry(); r3._wraps = [_entry("op-done", "ACC", "revoked")]
     with patch("mcp_vault.vault.wrapping.get_wrap_registry", return_value=r3), \
          patch("mcp_vault.vault.wrapping._get_client", return_value=c_ok):
-        res = run(lookup_and_revoke_by_operation_id("op-done"))
+        res = run(lookup_and_revoke_by_operation_id("op-done", "m"))
     assert res["state"] == "already_revoked"
 
     # revoked
     r4 = _make_registry(); r4._wraps = [_entry("op-orph", "ACC-ORPH", "active")]
     with patch("mcp_vault.vault.wrapping.get_wrap_registry", return_value=r4), \
          patch("mcp_vault.vault.wrapping._get_client", return_value=c_ok):
-        res = run(lookup_and_revoke_by_operation_id("op-orph"))
+        res = run(lookup_and_revoke_by_operation_id("op-orph", "m"))
     assert res["state"] == "revoked" and res["count_revoked"] == 1
 
     # ambiguous
@@ -268,7 +268,7 @@ def test_lookup_and_revoke_by_operation_id():
     r5._wraps = [_entry("op-dup", "ACC-D1", "active"), _entry("op-dup", "ACC-D2", "active")]
     with patch("mcp_vault.vault.wrapping.get_wrap_registry", return_value=r5), \
          patch("mcp_vault.vault.wrapping._get_client", return_value=c_ok):
-        res = run(lookup_and_revoke_by_operation_id("op-dup"))
+        res = run(lookup_and_revoke_by_operation_id("op-dup", "m"))
     assert res["state"] == "ambiguous" and res["count_revoked"] == 2
 
     print("  ✅ TEST 4 — not_found | found_unattached | already_revoked | revoked | ambiguous")
@@ -415,7 +415,7 @@ def test_found_unattached_state():
 
     with patch("mcp_vault.vault.wrapping.get_wrap_registry", return_value=registry), \
          patch("mcp_vault.vault.wrapping._get_client", return_value=MagicMock()):
-        r = run(lookup_and_revoke_by_operation_id("op-crash"))
+        r = run(lookup_and_revoke_by_operation_id("op-crash", "m"))
 
     assert r["state"] == "found_unattached"
     assert r["count_revoked"] == 0
@@ -565,7 +565,7 @@ def test_server_lookup_validates_operation_id():
                        "op-crlf\r\n", "a" * 300, "op#bad"]
         for bad_id in invalid_ids:
             mock_lookup.reset_mock()
-            r = run(secret_wrap_lookup(bad_id))
+            r = run(secret_wrap_lookup(bad_id, "m"))
             assert r["status"] == "error", \
                 f"operation_id invalide '{bad_id[:30]}' aurait dû être rejeté: {r}"
             mock_lookup.assert_not_called(), \
@@ -573,7 +573,7 @@ def test_server_lookup_validates_operation_id():
 
         # ID valide → lookup appelé (validation passe)
         mock_lookup.reset_mock()
-        r = run(secret_wrap_lookup("op-valid-001"))
+        r = run(secret_wrap_lookup("op-valid-001", "m"))
         mock_lookup.assert_called_once()
 
     print("  ✅ TEST 15 — server.secret_wrap_lookup : IDs invalides rejetés sans appeler lookup")
