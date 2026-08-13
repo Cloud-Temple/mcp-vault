@@ -9,6 +9,8 @@
 
 > **Audits post-V2.1** (hors périmètre du présent rapport, revus séparément via Codex multi-passe) :
 > PKI interne CA + ACME (v0.5.x), JIT Wrap Broker + consommation médiée C18 anti-confused-deputy (issue #26, v0.6.0), hardening C18 — singleton JWT + binding complet tenant_id/aud (issue #29, v0.6.1).
+>
+> **Durcissement C18, suite (issue #78)** : (a) le binding est exigé **aux deux bouts** en mode durci — `secret_wrap` refuse la création sans `tenant_id` (aucune source serveur ne peut le déduire ; le déduire serait un binding *attesté à tort*), et `secret_consume` refuse une entrée au binding incomplet avant tout appel OpenBao ; (b) **deux gardes étaient mortes en production** faute de correspondre à la réalité d'OpenBao — `invalid_wrap_token`/`wrap_expired` (OpenBao répond 400, le code ne testait que 403/404) et `empty_secret` (la garde testait l'enveloppe externe KV v2, qui porte toujours `metadata` et n'est donc jamais vide : un secret sans paire exploitable sortait en `status: "ok"`). Reproduit puis vérifié rouge sans correctif **contre OpenBao 2.5.1 réel**. Leçon transverse : une garde écrite contre une forme de réponse supposée, et couverte par un simulacre de cette même forme supposée, est verte et inopérante.
 
 ---
 

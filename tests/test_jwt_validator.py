@@ -911,6 +911,12 @@ class TestSecretConsumeEndToEnd:
                     vault_id="prod", secret_path="db/pass",
                     mission_id="m-1", operation_id="op-1",
                     # expected_aud NON fourni → doit être auto-enrichi
+                    # #78 finding 4 : tenant_id est OBLIGATOIRE en mode durci — le
+                    # serveur ne peut pas le déduire. Il est fourni ici pour que ce
+                    # test continue de porter sur l'enrichissement de l'AUDIENCE,
+                    # et non sur le refus de binding incomplet (couvert par
+                    # tests/test_binding_enforce_78.py).
+                    tenant_id="tenant-1",
                 ))
         finally:
             object.__setattr__(settings, "enforce_mission_token_validation", orig_enforce)

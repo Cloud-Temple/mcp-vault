@@ -1829,7 +1829,12 @@ class TestResolvedAudSingleSourceC18:
         with patch.object(server, "settings", s), \
              _ContextVarGuard(admin_info), \
              patch.dict(sys.modules, {"mcp_vault.vault.wrapping": mock_wrapping}):
+            # #78 finding 4 : tenant_id OBLIGATOIRE en mode durci (le serveur ne
+            # peut pas le déduire). Fourni ici pour que le test porte bien sur
+            # l'enrichissement de l'AUDIENCE — le refus de binding incomplet est
+            # couvert par tests/test_binding_enforce_78.py.
             result = _run(fn(vault_id="v1", secret_path="web/x",
-                             mission_id="mis_1", operation_id="op_1", ttl_seconds=60))
+                             mission_id="mis_1", operation_id="op_1", ttl_seconds=60,
+                             tenant_id="tenant-1"))
         assert result.get("error_type") != "misconfigured", result
         assert captured.get("expected_aud") == "vault-x"

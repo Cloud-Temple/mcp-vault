@@ -1002,6 +1002,43 @@ def _openbao_says_wrap_is_dead(exc: BaseException) -> bool:
     return False
 
 
+def _usable_kv2_secret(unwrap_response) -> Optional[dict]:
+    """
+    Rend l'enveloppe KV v2 si elle porte un secret EXPLOITABLE, sinon `None`.
+
+    Issue #78. `wrap_secret` enveloppe une lecture KV v2
+    (`{vault_id}/data/{secret_path}`) et `hvac.sys.unwrap()` **n'aplatit pas** la
+    réponse : la forme réelle est
+
+        {"data": {"data": <paires>, "metadata": {...}}}
+
+    Le secret en clair est donc à `data.data`, jamais à `data`.
+
+    ⚠️ NE JAMAIS revenir à un test sur `data` seul. L'enveloppe porte TOUJOURS
+    `metadata`, donc `unwrap_response["data"]` est toujours vrai en production :
+    c'est ce qui rendait la garde `empty_secret` **inatteignable**. Une version
+    sans aucune paire, ou supprimée (KV v2 rend alors `data: null`), sortait en
+    `status: "ok"` — l'appelant lisait « succès » sans avoir de secret. Même
+    famille que le finding 3, où `invalid_wrap_token`/`wrap_expired` étaient
+    inatteignables faute de correspondre à la réalité d'OpenBao.
+
+    Toute forme non conforme est traitée FAIL-CLOSED (`None`), y compris une
+    réponse qui n'est pas un dict : OpenBao A RÉPONDU, donc le jeton à usage
+    unique est brûlé de toute façon. Un refus honnête vaut mieux qu'un succès
+    sans secret, et cette décision-là est CERTAINE — ne pas la confondre avec
+    l'issue indéterminée d'un appel qui a échoué.
+    """
+    if not isinstance(unwrap_response, dict):
+        return None
+    envelope = unwrap_response.get("data")
+    if not isinstance(envelope, dict):
+        return None
+    pairs = envelope.get("data")
+    if not isinstance(pairs, dict) or not pairs:
+        return None
+    return envelope
+
+
 async def status_by_operation_id(operation_id: str) -> dict:
     """
     Consulte l'état des wraps d'un operation_id — **lecture seule, aucune
@@ -1178,6 +1215,32 @@ async def consume_wrap_secret(
     # Vérification AVANT try_mark_consuming : pas d'état "consuming" orphelin si mismatch.
     # tenant_id et expected_aud sont optionnels (rétrocompat wraps legacy).
     # En mode enforce=True : les wraps sans expected_aud sont refusés (binding incomplet).
+    # La COMPLÉTUDE est évaluée AVANT les mismatches (issue #78, relevé en revue
+    # pré-commit). Dans l'autre ordre, une entrée historique dont le champ vaut
+    # des espaces blancs tombait en `binding_mismatch` — diagnostic trompeur :
+    # le défaut n'est pas que l'appelant présente la mauvaise valeur, c'est que
+    # l'entrée n'atteste rien. Un exploitant lisant « mismatch » chercherait une
+    # erreur d'appel là où il faut reprovisionner.
+    if enforce:
+        # Finding 4 : le binding C18 repose sur DEUX champs. N'exiger que
+        # `expected_aud` rendait le contrôle d'appartenance au locataire
+        # inopérant précisément quand le champ manque — c'est-à-dire dans le seul
+        # cas où il aurait servi. Les deux sont désormais requis en mode durci.
+        # Les espaces blancs ne valent pas un binding : un champ vide déguisé
+        # n'atteste rien.
+        manquants = [c for c in ("tenant_id", "expected_aud")
+                     if not (entry.get(c) or "").strip()]
+        if manquants:
+            logger.warning(
+                "⚠️ consume_wrap_secret : binding incomplet en mode enforced "
+                "op=%r — %s manquant(s), rejeté",
+                operation_id[:16], ", ".join(manquants),
+            )
+            return {"status": "error", "error_type": "binding_incomplete",
+                    "message": "binding incomplet en mode enforced "
+                               f"({', '.join(manquants)} manquant(s)) — "
+                               "reprovisionner un wrap"}
+
     if entry.get("tenant_id") and tenant_id != entry["tenant_id"]:
         logger.warning(
             "⚠️ consume_wrap_secret : binding mismatch (tenant_id) op=%r — confused-deputy rejeté",
@@ -1192,13 +1255,6 @@ async def consume_wrap_secret(
         )
         return {"status": "error", "error_type": "binding_mismatch",
                 "message": "binding mismatch"}
-    if enforce and not entry.get("expected_aud"):
-        logger.warning(
-            "⚠️ consume_wrap_secret : wrap sans expected_aud en mode enforced op=%r — rejeté",
-            operation_id[:16],
-        )
-        return {"status": "error", "error_type": "binding_incomplete",
-                "message": "binding incomplet (expected_aud manquant)"}
 
     # ── 2. Atomic try_mark_consuming ────────────────────────────────
     if not registry.try_mark_consuming(operation_id, mission_id):
@@ -1226,22 +1282,14 @@ async def consume_wrap_secret(
     # À PARTIR D'ICI, AUCUN RETOUR À "active" (issue #78, finding 2). Le CAS est
     # franchi et l'appel part : quoi qu'il advienne, on ne peut plus prouver que
     # le jeton n'a pas été consommé côté OpenBao.
+    # Le `try` ne couvre QUE l'appel (issue #78). Mêler l'inspection du CONTENU
+    # à la capture d'exception rangeait une réponse illisible en « issue
+    # indéterminée » alors que l'issue est CONNUE : OpenBao a répondu.
     try:
         # Utiliser un client éphémère avec le wrap_token comme token d'auth
         import hvac as _hvac
         ephemeral_client = _hvac.Client(url=settings.openbao_addr, token=wrap_token)
         unwrap_response = ephemeral_client.sys.unwrap()
-
-        secret_data = unwrap_response.get("data", {})
-        if not secret_data:
-            # OpenBao a RÉPONDU : le jeton a donc été présenté et traité, il est
-            # brûlé. L'ancien code faisait ici un rollback vers "active" —
-            # doublement faux : le jeton était consommé, et le client était
-            # invité à réessayer un wrap à usage unique.
-            registry.mark_consumed(operation_id, mission_id)
-            return {"status": "error", "error_type": "empty_secret",
-                    "message": "Le wrap a retourné des données vides "
-                               "(consommé, non réessayable)"}
 
     except Exception as e:
         # Classification par CLASSE d'exception hvac, jamais par recherche de
@@ -1269,6 +1317,21 @@ async def consume_wrap_secret(
                 "message": "Issue de la consommation indéterminée — le wrap a "
                            "pu être consommé. Ne pas réessayer ; provisionner "
                            "un nouveau wrap si l'accès reste nécessaire"}
+
+    # ── 3b. Verdict sur le CONTENU de la réponse (issue #78) ────────
+    # L'appel a abouti : le jeton à usage unique est brûlé, quoi que porte la
+    # réponse. Il reste à dire honnêtement s'il y a un secret EXPLOITABLE. Un
+    # « succès » sans secret est un mensonge de contrat, pas une commodité.
+    secret_data = _usable_kv2_secret(unwrap_response)
+    if secret_data is None:
+        registry.mark_consumed(operation_id, mission_id)
+        logger.warning(
+            "consume_wrap_secret : réponse sans secret exploitable (op=%r) — "
+            "jeton brûlé, marqué consommé", operation_id[:16],
+        )
+        return {"status": "error", "error_type": "empty_secret",
+                "message": "Le wrap n'a retourné aucun secret exploitable "
+                           "(consommé, non réessayable)"}
 
     # ── 4. Marquer consumed ─────────────────────────────────────────
     registry.mark_consumed(operation_id, mission_id)

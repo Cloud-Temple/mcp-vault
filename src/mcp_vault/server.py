@@ -529,18 +529,64 @@ async def secret_wrap(
     # En mode ENFORCE=true + JWKS configuré : enrichir expected_aud automatiquement
     # pour garantir le binding complet côté secret_consume (ÉLEVÉ — issue #29).
     # Les wraps créés sans expected_aud auraient un binding mission_id-only.
-    if settings.enforce_mission_token_validation and settings.mission_jwks_url:
-        if not expected_aud:
-            # Source unique d'audience (#47) : mcp_instance_id (canonique) ou
-            # mission_token_aud (alias legacy). Cohérence garantie par
-            # check_mission_pep_config au boot.
-            resolved_aud = settings.resolved_mission_aud
-            if resolved_aud:
-                expected_aud = resolved_aud
-            else:
-                return {"status": "error", "error_type": "misconfigured",
-                        "message": "expected_aud requis en mode ENFORCE=true "
-                                   "(configurer MCP_INSTANCE_ID ou MISSION_TOKEN_AUD)"}
+    # ⚠️ La porte est `enforce` SEUL, plus `enforce AND jwks` (issue #78, relevé
+    # au 3e tour de revue pré-commit). L'ancienne conjonction créait un trou
+    # exact : avec `ENFORCE=true` et JWKS vide, tout le durcissement était
+    # contourné ici, `secret_wrap` créait le wrap — et `secret_consume` le
+    # refusait SYSTÉMATIQUEMENT en `misconfigured` (« ENFORCE=true mais
+    # MISSION_JWKS_URL vide »). Une provision morte-née à chaque appel. Le
+    # fail-fast au boot rend la configuration improbable en production, mais un
+    # chemin qui fabrique de l'inconsommable n'est pas correct pour autant.
+    if settings.enforce_mission_token_validation:
+        # ── 1. CONFIGURATION INVALIDE D'ABORD ────────────────────────
+        # Priorité à la cause que l'exploitant doit corriger : inutile d'envoyer
+        # l'appelant vérifier ses paramètres quand c'est le serveur qui est
+        # incohérent. Mêmes verdicts que `secret_consume`, pour que les deux
+        # surfaces racontent la même histoire.
+        if not settings.mission_jwks_url:
+            return {"status": "error", "error_type": "misconfigured",
+                    "message": "ENFORCE_MISSION_TOKEN_VALIDATION=true mais "
+                               "MISSION_JWKS_URL vide"}
+        # Source unique d'audience (#47) : mcp_instance_id (canonique) ou
+        # mission_token_aud (alias legacy). Cohérence garantie par
+        # check_mission_pep_config au boot.
+        resolved_aud = settings.resolved_mission_aud
+        if not resolved_aud:
+            return {"status": "error", "error_type": "misconfigured",
+                    "message": "expected_aud requis en mode ENFORCE=true "
+                               "(configurer MCP_INSTANCE_ID ou MISSION_TOKEN_AUD)"}
+
+        # ── 2. ENTRÉE DE L'APPELANT ──────────────────────────────────
+        # Finding 4 — SECOND BOUT du binding. `expected_aud` a une source
+        # serveur et peut être complété ; `tenant_id` N'EN A AUCUNE. Le déduire
+        # serait un FAUX binding : le coffre attesterait une appartenance qu'il
+        # a inventée. Seul l'appelant connaît le locataire, donc le refus est la
+        # seule réponse correcte.
+        #
+        # Sans ce refus, le coffre créait des provisions au binding incomplet
+        # que `consume_wrap_secret` rejette ensuite en mode durci — l'incident se
+        # découvrait au pire moment, quand la mission réclame son credential.
+        if not (tenant_id or "").strip():
+            return {"status": "error", "error_type": "binding_incomplete",
+                    "message": "tenant_id requis en mode ENFORCE=true — il ne "
+                               "peut pas être déduit côté serveur (binding C18)"}
+        # Issue #78, relevé en DEUX tours de revue pré-commit. `secret_consume`
+        # compare l'audience stockée à `resolved_mission_aud` de CETTE instance,
+        # toujours — l'appelant ne choisit pas la valeur comparée. Donc :
+        #
+        #   - une audience blanche est ABSENTE, pas fournie : on l'enrichit.
+        #     Stockée telle quelle, elle rendait le wrap inconsommable ;
+        #   - une audience non blanche DIFFÉRENTE de cette instance produit un
+        #     wrap définitivement inconsommable (`binding_mismatch` garanti à la
+        #     consommation). La refuser ICI est le seul comportement honnête —
+        #     l'écraser silencieusement serait pire : le coffre attesterait une
+        #     audience que l'appelant n'a pas demandée.
+        if not (expected_aud or "").strip():
+            expected_aud = resolved_aud
+        elif expected_aud != resolved_aud:
+            return {"status": "error", "error_type": "binding_mismatch",
+                    "message": "expected_aud ne désigne pas cette instance de "
+                               "coffre — le wrap serait inconsommable"}
 
     # Vérification d'accès au vault (owner/allowed_resources) + policy path.
     access_err = check_access(vault_id)

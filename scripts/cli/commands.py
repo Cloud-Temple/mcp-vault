@@ -433,8 +433,13 @@ def secret_consume_cmd(ctx, operation_id, wrap_token, mission_token, output_json
 @click.option("--mission-id", "mission_id", required=True, help="Identifiant de mission (scope)")
 @click.option("--operation-id", "operation_id", required=True, help="Corrélation write-ahead (compensation)")
 @click.option("--ttl", "ttl_seconds", type=int, default=300, help="TTL du wrap token en secondes (60-3600)")
-@click.option("--tenant-id", "tenant_id", default="", help="Binding C18 — tenant_id attendu (optionnel)")
-@click.option("--expected-aud", "expected_aud", default="", help="Binding C18 — audience attendue (optionnel)")
+@click.option("--tenant-id", "tenant_id", default="",
+              help="Binding C18 — locataire propriétaire. OBLIGATOIRE en mode durci "
+                   "(ENFORCE_MISSION_TOKEN_VALIDATION=true) : le serveur ne peut pas "
+                   "le déduire. Optionnel sinon (issue #78)")
+@click.option("--expected-aud", "expected_aud", default="",
+              help="Binding C18 — audience attendue. Complétée par le serveur en mode "
+                   "durci si absente ; optionnelle sinon")
 @click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
 @click.pass_context
 def secret_wrap_cmd(ctx, vault_id, secret_path, mission_id, operation_id,
@@ -447,6 +452,14 @@ def secret_wrap_cmd(ctx, vault_id, secret_path, mission_id, operation_id,
     SENSIBLE (single-use, à ne jamais logguer).
     Permission requise : `wrap` (ou admin). Un token wrap non-admin doit porter
     une allow-list de vaults ET une policy explicite (issue #115).
+
+    \b
+    ⚠️ Mode durci (ENFORCE_MISSION_TOKEN_VALIDATION=true) : --tenant-id est
+    OBLIGATOIRE (issue #78). Le serveur refuse de créer une provision au binding
+    incomplet plutôt que d'inventer un locataire — un tenant déduit attesterait
+    une appartenance fausse, et la consommation la rejetterait de toute façon.
+    --expected-aud est complétée par le serveur si absente ; en fournir une qui
+    désigne une AUTRE instance est refusé (le wrap serait inconsommable).
 
     \b
     Exemples :

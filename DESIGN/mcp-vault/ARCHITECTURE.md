@@ -1154,6 +1154,15 @@ Quatrième flag de permission (non hiérarchique, aux côtés de `read`/`write`/
 les quatre outils wrap exigeaient `admin` — inacceptable en moindre privilège
 (le flag `admin` court-circuite policies et chemins partout).
 
+> ⚠️ **Depuis #78, en mode durci** (`ENFORCE_MISSION_TOKEN_VALIDATION=true`, porte
+> **indépendante** du PEP transport — elle peut être active en mode `bearer`) :
+> `secret_wrap` **refuse** un appel sans `tenant_id` (`binding_incomplete`), et
+> `secret_consume` refuse une entrée dont `tenant_id` **ou** `expected_aud`
+> manque — avant `try_mark_consuming` et avant tout appel OpenBao, donc sans
+> brûler le wrap ni laisser d'état `consuming` orphelin. Une `expected_aud`
+> absente ou blanche est en revanche **enrichie** depuis la configuration : elle
+> a une source serveur, le locataire non.
+
 **Séquence de gardes des 4 outils** (`secret_wrap`, `secret_revoke_wrap`,
 `secret_wrap_lookup`, `secret_wrap_status`) :
 

@@ -73,15 +73,128 @@ qu'un état terminal de consommation **n'est pas une révocation attestée**.
 > quand d'autres entrées ont réellement été révoquées : une seule entrée non
 > attestée interdit d'affirmer que tout l'a été.
 
+### RUPTURE — un secret vide ne sortait pas en erreur mais en SUCCÈS (issue #78)
+
+**Défaut découvert en rendant les simulacres de test fidèles**, et **reproduit
+contre un OpenBao 2.5.1 réel** — la version en production.
+
+`secret_wrap` enveloppe une lecture KV v2, et `hvac.sys.unwrap()` **n'aplatit
+pas** la réponse : la forme réelle est `{"data": {"data": <paires>, "metadata":
+{…}}}`. Le secret en clair est donc à `data.data`. Or la garde « secret vide »
+testait l'enveloppe **externe**, qui porte **toujours** `metadata` et n'est donc
+**jamais** vide. La garde était **morte en production**.
+
+Conséquence mesurée : un secret sans aucune paire exploitable sortait en
+
+```
+{"status": "ok", "data": {"data": {}, "metadata": {…}}}
+```
+
+L'appelant lisait « succès » et n'avait **aucun credential**. C'est la même
+famille de défaut que le finding 3 — une garde écrite contre une forme
+qu'OpenBao ne produit pas.
+
+**Ce qui change.** `empty_secret` conserve son nom mais sa condition est
+redéfinie : sont refusées l'enveloppe absente, mal formée, ou dont `data.data`
+n'est pas un dictionnaire non vide. Une réponse qui n'est **pas** un
+dictionnaire est désormais elle aussi **terminale** (`empty_secret`) et non
+« indéterminée » : OpenBao **a répondu**, donc le jeton à usage unique est brûlé
+— l'issue est connue, c'est la réponse qui est inutilisable. Dans tous ces cas
+l'entrée est marquée `consumed`, non réessayable.
+
+**La forme de sortie du cas nominal NE change PAS** : `result["data"]` reste
+l'enveloppe complète (`data` + `metadata`), contrat déjà communiqué à
+`mcp-agent`. Un test d'intégration contre OpenBao réel le verrouille, pour qu'un
+futur durcissement ne l'aplatisse pas au passage.
+
+### RUPTURE en mode durci — le binding de mission exigé aux DEUX bouts (issue #78, finding 4)
+
+Le binding anti-confused-deputy repose sur **deux** champs : `tenant_id` (quel
+locataire) et `expected_aud` (quelle instance de coffre). En mode durci
+(`ENFORCE_MISSION_TOKEN_VALIDATION=true`), seul `expected_aud` était exigé — le
+contrôle d'appartenance au locataire ne s'appliquait donc que lorsque le champ
+était présent, c'est-à-dire **jamais quand il manquait**.
+
+**Ce qui change**, symétriquement :
+
+- **à la consommation** : en mode durci, une entrée sans `tenant_id` **ou** sans
+  `expected_aud` est refusée (`binding_incomplete`), **avant** `try_mark_consuming`
+  et avant tout appel à OpenBao — le wrap n'est donc **pas brûlé** et aucun état
+  `consuming` orphelin n'est laissé. ⚠️ Il n'est pas pour autant rattrapable :
+  personne ne peut ajouter après coup un binding manquant. Une entrée historique
+  incomplète doit être **reprovisionnée** (ou laissée expirer) ; le message le dit
+  explicitement. Ce contrôle passe **avant** la comparaison de binding, sinon un
+  champ d'espaces blancs sortait en `binding_mismatch` — diagnostic trompeur qui
+  envoyait chercher une erreur d'appel là où il faut reprovisionner ;
+- **à la création** : `secret_wrap` refuse en mode durci un appel sans
+  `tenant_id`. Le serveur complète `expected_aud` depuis sa configuration, mais
+  **il n'a aucune source pour le locataire** : le déduire serait un **faux
+  binding**, attestant une appartenance inventée. Sans ce refus, le coffre
+  fabriquait des provisions qu'il rejette ensuite à la consommation — l'incident
+  se découvrant au pire moment, quand la mission réclame son credential.
+
+**Les espaces blancs ne valent pas un binding**, mais le traitement diffère selon
+le champ, et cette asymétrie est délibérée : un `tenant_id` blanc est **refusé**
+(aucune source serveur ne peut le suppléer), tandis qu'une `expected_aud` blanche
+est traitée comme **absente et enrichie** depuis la configuration. Avant, elle
+était stockée telle quelle et rendait le wrap inconsommable à la consommation —
+la même provision vouée à l'échec, par l'autre champ.
+
+**Et une audience qui désigne une AUTRE instance est désormais refusée à la
+création** (`binding_mismatch`). `secret_consume` compare toujours l'audience
+stockée à celle de **cette** instance — l'appelant ne choisit pas la valeur
+comparée. Une audience non blanche différente produisait donc un wrap
+**définitivement inconsommable**. La refuser est le seul comportement honnête :
+l'écraser silencieusement serait pire, le coffre attesterait une audience que
+l'appelant n'a jamais demandée. En mode durci, une audience non résoluble côté
+serveur reste `misconfigured`.
+
+**Et le mode durci ne peut plus être contourné par une configuration
+incomplète.** La porte du durcissement était `ENFORCE=true` **et** JWKS
+configuré. Avec `ENFORCE=true` et JWKS vide, tout le contrôle était donc sauté à
+la création — alors que `secret_consume` refuse **systématiquement** dans cette
+configuration (`misconfigured`). Le coffre fabriquait une provision morte-née à
+chaque appel. La porte est désormais `ENFORCE=true` **seul**, et les causes de
+configuration (`MISSION_JWKS_URL` vide, audience non résoluble) sont évaluées
+**avant** les paramètres de l'appelant : inutile de l'envoyer vérifier son appel
+quand c'est le serveur qui est incohérent. Les deux surfaces rendent désormais le
+même verdict.
+
+> ⚠️ **Mode durci uniquement.** Hors `enforce`, le comportement est **inchangé**
+> et les wraps historiques sans binding restent consommables (rétrocompatibilité
+> assumée). ⚠️ `ENFORCE_MISSION_TOKEN_VALIDATION` est une porte **indépendante**
+> du PEP transport : elle peut être active en mode d'authentification `bearer`.
+> Ne pas déduire de « la production tourne en bearer » que ce chemin dort.
+
+**CLI** : l'aide de `secret wrap` annonce désormais `--tenant-id` comme
+obligatoire en mode durci ; elle le présentait comme « optionnel » sans nuance.
+
 #### Pour les appelants
 
-`wrap_unusable` et `consume_outcome_unknown` **ne doivent pas être réessayés**.
-Si l'accès reste nécessaire, provisionner un nouveau wrap. Le contrat d'erreurs
-de `secret_consume` était explicitement annoncé comme « à versionner à l'issue de
-ce durcissement » (#78) : c'est cette version.
+`wrap_unusable`, `consume_outcome_unknown` et `empty_secret` **ne doivent pas
+être réessayés** : dans les trois cas le jeton à usage unique est perdu. Si
+l'accès reste nécessaire, provisionner un nouveau wrap. Le contrat d'erreurs de
+`secret_consume` était explicitement annoncé comme « à versionner à l'issue de ce
+durcissement » (#78) : c'est cette version.
 
-**Tests** : `tests/test_consume_outcome_78.py` — 29 tests. **11 mutations
-mesurées, toutes détectées.** Suite : 1285 passed / 29 skipped / 0 failed.
+En mode durci, **fournir `tenant_id` à `secret_wrap`**.
+
+#### Variables d'environnement
+
+**Aucun changement** : aucune variable ajoutée, retirée ni renommée. Le contrat
+`.env.example` reste à **46 clés — 23 actives et 23 commentées** (décomposition
+donnée explicitement : le pipeline de qualification d'`agentic-platform` contrôle
+le NOMBRE de variables, et un total re-dérivé autrement diverge).
+
+**Tests** : `tests/test_consume_outcome_78.py` (56 tests, dont un contrat de
+forme d'enveloppe figé à la main), `tests/test_binding_enforce_78.py`
+(19 tests, les deux bouts), et `tests/test_consume_openbao_78.py` — **4 tests
+d'intégration contre un OpenBao 2.5.1 réel** (opt-in, `MCP_VAULT_TEST_OPENBAO_ADDR`
++ `_TOKEN`). Le défaut de forme a été prouvé **rouge sans le correctif contre le
+moteur réel**, pas seulement contre des simulacres. **16 mutations mesurées sur
+les gardes de ce lot, toutes détectées** (instrument validant `ast.parse` avant
+chaque essai et vérifiant que la mutation mord). Suite : 1331 passed /
+33 skipped / 0 failed.
 
 ## [0.11.0] — 2026-08-13
 

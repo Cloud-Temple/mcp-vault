@@ -110,10 +110,14 @@ Outils machine-to-machine du `CredentialBrokerService`, exposés au CLI pour le 
 
 ```bash
 # Créer un wrap token single-use (retourne un wrap_token SENSIBLE)
+# ⚠️ HORS MODE DURCI uniquement : si ENFORCE_MISSION_TOKEN_VALIDATION=true, cet
+# appel est REFUSÉ (binding_incomplete) — --tenant-id devient obligatoire (#78).
 python scripts/mcp_cli.py secret wrap prod db/postgres \
   --mission-id m-42 --operation-id op-1 --ttl 600
 
-# Binding C18 complet (tenant_id + audience attendue)
+# Binding C18 complet (tenant_id + audience attendue) — forme EXIGÉE en mode durci.
+# --expected-aud est complétée par le serveur si omise ; en fournir une qui désigne
+# une AUTRE instance est refusé (binding_mismatch : le wrap serait inconsommable).
 python scripts/mcp_cli.py secret wrap prod db/pg \
   --mission-id m-42 --operation-id op-1 \
   --tenant-id t-7 --expected-aud mcp-vault:prod

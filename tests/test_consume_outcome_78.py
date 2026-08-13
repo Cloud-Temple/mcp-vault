@@ -239,12 +239,48 @@ class TestIssueIndeterminee:
 # 3) `empty_secret` — même famille de défaut
 # =============================================================================
 
+def _enveloppe(paires, metadata=None):
+    """Construit la réponse RÉELLE de `sys.unwrap()` pour une lecture KV v2.
+
+    `wrap_secret` enveloppe `client.read("{vault_id}/data/{secret_path}")` — donc
+    une lecture KV v2 — et `hvac.sys.unwrap()` N'APLATIT PAS la réponse. La forme
+    réelle est donc :
+
+        {"data": {"data": <paires>, "metadata": {...}}}
+
+    Le secret en clair est à `data.data`, JAMAIS à `data`. Forme établie
+    empiriquement contre OpenBao **2.5.1** — la version en production — par
+    `tests/test_consume_openbao_78.py` ; corroborée par
+    `tests/test_wrap_status_openbao_77.py`. (La mémoire projet cite une
+    observation antérieure sur 2.6.0 ; c'est 2.5.1 qui fait foi ici, c'est ce qui
+    est déployé.)
+
+    C'est tout l'enjeu de ce bloc : les simulacres APLATIS de `test_wrap.py`
+    rendaient la garde `empty_secret` testable et donc verte, alors qu'en
+    production l'enveloppe porte TOUJOURS `metadata` alors elle n'est jamais
+    vide — la garde était morte.
+    """
+    return {"data": {
+        "data": paires,
+        "metadata": metadata if metadata is not None else {
+            "created_time": "2026-08-13T17:00:00Z",
+            "version": 1,
+            "destroyed": False,
+            "deletion_time": "",
+            "custom_metadata": None,
+        },
+    }}
+
+
 class TestSecretVide:
 
     def test_une_reponse_vide_marque_consomme_pas_actif(self):
         """
         OpenBao a RÉPONDU : le jeton a été présenté et traité, il est brûlé.
         L'ancien code faisait un rollback vers `active` — doublement faux.
+
+        Ici l'enveloppe externe est absente/vide : forme NON conforme à KV v2,
+        traitée fail-closed.
         """
         registre = _registre()
         r = _consommer(registre, ClientFactice(reponse={"data": {}}))
@@ -252,6 +288,76 @@ class TestSecretVide:
         assert r["error_type"] == "empty_secret", r
         assert _statut(registre) == "consumed"
         assert _statut(registre) != "active"
+
+    @pytest.mark.parametrize("paires,cas", [
+        ({},        "version sans aucune paire"),
+        (None,      "version supprimée : KV v2 rend data=null"),
+        ([],        "data.data non-dict (liste)"),
+        ("s3cr3t",  "data.data non-dict (chaîne)"),
+        (0,         "data.data non-dict (entier)"),
+    ])
+    def test_enveloppe_kv2_sans_secret_exploitable_ne_sort_pas_en_ok(self, paires, cas):
+        """
+        CŒUR DU DÉFAUT DE FORME. RED avant le correctif : l'enveloppe KV v2
+        porte toujours `metadata`, donc `unwrap_response["data"]` est TOUJOURS
+        vrai — la garde ne pouvait pas se déclencher et ces cas sortaient en
+        `status: "ok"`. L'appelant lisait « succès » sans avoir de secret.
+
+        Le jeton est brûlé (OpenBao a répondu) : `consumed`, non réessayable.
+        """
+        registre = _registre()
+        r = _consommer(registre, ClientFactice(reponse=_enveloppe(paires)))
+
+        assert r["status"] == "error", f"{cas} : sorti en succès sans secret — {r}"
+        assert r["error_type"] == "empty_secret", f"{cas} — {r}"
+        assert _statut(registre) == "consumed", (
+            f"{cas} : OpenBao a répondu, le jeton est brûlé — statut "
+            f"{_statut(registre)!r}")
+
+    def test_enveloppe_sans_clef_data_ne_sort_pas_en_ok(self):
+        """`metadata` seule, sans clef `data` : pas de secret, donc pas `ok`."""
+        registre = _registre()
+        r = _consommer(registre, ClientFactice(
+            reponse={"data": {"metadata": {"version": 3}}}))
+
+        assert r["status"] == "error", r
+        assert r["error_type"] == "empty_secret", r
+        assert _statut(registre) == "consumed"
+
+    @pytest.mark.parametrize("reponse", [None, "pas un dict", 42, []])
+    def test_reponse_non_dict_est_terminale_pas_indeterminee(self, reponse):
+        """
+        OpenBao A RÉPONDU, même de façon illisible : le jeton est brûlé. L'accès
+        naïf `.get()` levait ici une exception, ce qui rangeait le cas en
+        « issue indéterminée » — trop indulgent, et surtout FAUX : l'issue est
+        connue, c'est la réponse qui est inutilisable.
+        """
+        registre = _registre()
+        r = _consommer(registre, ClientFactice(reponse=reponse))
+
+        assert r["status"] == "error", r
+        assert r["error_type"] == "empty_secret", (
+            f"réponse {reponse!r} classée {r.get('error_type')!r} au lieu de "
+            f"terminale")
+        assert _statut(registre) == "consumed"
+
+    def test_le_cas_nominal_reste_intact_et_rend_l_enveloppe(self):
+        """
+        ANTI-COMPLAISANCE : la garde ne doit pas mordre sur un secret valide, et
+        la FORME de sortie ne change pas — `result["data"]` reste l'enveloppe
+        complète (`data` + `metadata`), contrat déjà communiqué à mcp-agent.
+        Durcir la garde ne doit PAS aplatir la réponse au passage.
+        """
+        registre = _registre()
+        enveloppe = _enveloppe({"password": "s3cr3t"})
+        r = _consommer(registre, ClientFactice(reponse=enveloppe))
+
+        assert r["status"] == "ok", r
+        assert r["data"] == enveloppe["data"], (
+            "la forme de sortie a changé — rupture non annoncée du contrat")
+        assert r["data"]["data"] == {"password": "s3cr3t"}
+        assert "metadata" in r["data"]
+        assert _statut(registre) == "consumed"
 
 
 # =============================================================================
@@ -567,3 +673,64 @@ class TestRevocationMixteTerminalEtActif:
         assert r["count_consume_terminal"] == 1, r
         assert "count_already_revoked" in r, r
         assert "terminal" in r["message"].lower(), r
+
+
+# =============================================================================
+# 7) Contrat de FORME de l'enveloppe KV v2 — garde anti-régression
+# =============================================================================
+
+class TestContratFormeEnveloppe:
+    """
+    Test de CONTRAT sur `_usable_kv2_secret`. La liste des formes est figée À LA
+    MAIN, volontairement : la dériver du code testé ne contrôlerait rien (leçon
+    du 12/08 — « un test dont l'attendu vient de ce qu'il contrôle ne contrôle
+    rien »).
+
+    Raison d'être : le défaut d'origine n'était pas dans le code de production
+    mais dans les SIMULACRES, qui rendaient une forme aplatie qu'OpenBao ne
+    produit jamais. Cette garde rend explicite qu'une réponse aplatie n'est PAS
+    une réponse KV v2 valide — et fera tomber toute tentative future d'en
+    réintroduire une.
+    """
+
+    FORMES_SANS_SECRET = [
+        ({"data": {"data": {}, "metadata": {}}},          "version sans paire"),
+        ({"data": {"data": None, "metadata": {}}},        "version supprimée"),
+        ({"data": {"metadata": {}}},                      "metadata seule"),
+        ({"data": {}},                                    "enveloppe vide"),
+        ({},                                              "réponse vide"),
+        ({"data": None},                                  "data nul"),
+        ({"data": "s3cr3t"},                              "data non-dict"),
+        ({"data": {"data": []}},                          "paires en liste"),
+        ({"data": {"data": "s3cr3t"}},                    "paires en chaîne"),
+        ({"password": "s3cr3t"},                          "sans clef data"),
+        # ⚠️ LA FORME QUI A CAUSÉ LE DÉFAUT — simulacre aplati.
+        ({"data": {"password": "s3cr3t"}},                "APLATIE (ex-simulacre)"),
+        (None,                                            "réponse None"),
+        ("pas un dict",                                   "réponse chaîne"),
+        (42,                                              "réponse entière"),
+    ]
+
+    @pytest.mark.parametrize("reponse,cas", FORMES_SANS_SECRET)
+    def test_aucune_de_ces_formes_ne_porte_de_secret(self, reponse, cas):
+        from mcp_vault.vault.wrapping import _usable_kv2_secret
+
+        assert _usable_kv2_secret(reponse) is None, (
+            f"{cas} : acceptée comme secret exploitable — {reponse!r}")
+
+    def test_la_seule_forme_acceptee_est_l_enveloppe_kv2_avec_paires(self):
+        from mcp_vault.vault.wrapping import _usable_kv2_secret
+
+        enveloppe = {"data": {"password": "s3cr3t"}, "metadata": {"version": 1}}
+        assert _usable_kv2_secret({"data": enveloppe}) is enveloppe, (
+            "l'enveloppe complète doit être rendue TELLE QUELLE — l'aplatir "
+            "serait une rupture non annoncée du contrat de mcp-agent")
+
+    def test_une_seule_paire_suffit(self):
+        """Anti-complaisance : la garde ne doit pas exiger plusieurs paires."""
+        from mcp_vault.vault.wrapping import _usable_kv2_secret
+
+        assert _usable_kv2_secret(
+            {"data": {"data": {"k": ""}, "metadata": {}}}) is not None, (
+            "une paire à valeur vide reste un secret présent — la garde porte "
+            "sur l'ABSENCE de paire, pas sur le contenu des valeurs")
