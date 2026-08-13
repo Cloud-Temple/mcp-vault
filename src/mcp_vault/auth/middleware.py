@@ -8,6 +8,7 @@ Pile d'exécution (ordre) :
 
 import hmac
 import json
+import logging
 import sys
 import time
 import hashlib
@@ -16,6 +17,18 @@ from typing import Optional
 from .context import current_token_info
 from .token_store import get_token_store
 from ..config import get_settings
+
+logger = logging.getLogger("mcp-vault.health")
+
+# Dernier état de disponibilité JOURNALISÉ, pour ne tracer que les transitions
+# (issue #103). `None` = rien encore journalisé.
+_dernier_etat_journalise: Optional[str] = None
+
+
+def _reset_journal_sante() -> None:
+    """Réarme la trace de transition. Réservé aux tests."""
+    global _dernier_etat_journalise
+    _dernier_etat_journalise = None
 
 
 # =============================================================================
@@ -38,10 +51,22 @@ class HealthCheckMiddleware:
     """
     Middleware ASGI pour les health checks.
 
-    Intercepte /health, /healthz, /ready et retourne 200 OK directement.
+    Deux questions DISTINCTES, deux contrats (issue #103) :
+
+    - `/healthz` — LIVENESS : « le processus répond-il ? ». Toujours 200, et
+      **ne sonde jamais** OpenBao. C'est la porte de sortie sûre pour une sonde
+      de liveness ou un autoheal : rendre ce chemin rouge sur une dépendance
+      indisponible ferait redémarrer en boucle un coffre SCELLÉ, ce qui ne le
+      descelle pas et aggrave l'incident.
+    - `/health` et `/ready` — DISPONIBILITÉ : « le coffre peut-il servir ? ».
+      200 si disponible, **503** sinon. `/health` est la cible du `HEALTHCHECK`
+      du Dockerfile : c'est ce chemin qui rend l'indisponibilité observable de
+      l'extérieur, ce qui était l'objet de l'issue.
     """
 
-    HEALTH_PATHS = {"/health", "/healthz", "/ready"}
+    LIVENESS_PATHS = {"/healthz"}
+    AVAILABILITY_PATHS = {"/health", "/ready"}
+    HEALTH_PATHS = LIVENESS_PATHS | AVAILABILITY_PATHS
 
     def __init__(self, app):
         self.app = app
@@ -50,9 +75,13 @@ class HealthCheckMiddleware:
         if scope["type"] == "http" and scope.get("path", "") == "/":
             return await self._root_response(send)
 
-        if scope["type"] == "http" and scope.get("path", "") in self.HEALTH_PATHS:
-            return await self._health_response(send)
+        path = scope.get("path", "") if scope["type"] == "http" else ""
 
+        if path in self.LIVENESS_PATHS:
+            return await self._liveness_response(send)
+
+        if path in self.AVAILABILITY_PATHS:
+            return await self._availability_response(send)
 
         await self.app(scope, receive, send)
 
@@ -89,8 +118,18 @@ class HealthCheckMiddleware:
         })
         await send({"type": "http.response.body", "body": body})
 
-    async def _health_response(self, send):
-        """GET /health → format aligné sur les autres services MCP Cloud Temple."""
+    @staticmethod
+    def _health_payload(status: str) -> bytes:
+        """
+        Corps commun aux trois sondes. Format aligné sur les autres services MCP
+        Cloud Temple, et INCHANGÉ depuis l'origine hormis la valeur de `status`
+        (la CI asserte `version` dans ce corps).
+
+        ⚠️ Ce corps est PUBLIC et non authentifié : il ne porte QUE l'état, dans
+        un vocabulaire fermé. Aucun détail de dépendance, aucun message
+        d'exception, aucune adresse. Le diagnostic vit dans les journaux et sur
+        `/admin/api/health`.
+        """
         from pathlib import Path
 
         settings = get_settings()
@@ -99,19 +138,51 @@ class HealthCheckMiddleware:
         if vf.exists():
             version = vf.read_text().strip()
 
-        body = json.dumps({
-            "status": "healthy",
+        return json.dumps({
+            "status": status,
             "service": settings.mcp_server_name,
             "version": version,
             "transport": "streamable-http",
         }).encode()
 
+    async def _send_health(self, send, status_code: int, body: bytes):
         await send({
             "type": "http.response.start",
-            "status": 200,
+            "status": status_code,
             "headers": [[b"content-type", b"application/json"]],
         })
         await send({"type": "http.response.body", "body": body})
+
+    async def _liveness_response(self, send):
+        """GET /healthz → LIVENESS. Toujours 200, aucune sonde (issue #103)."""
+        from ..lifecycle import HEALTH_ALIVE
+
+        await self._send_health(send, 200, self._health_payload(HEALTH_ALIVE))
+
+    async def _availability_response(self, send):
+        """GET /health, /ready → DISPONIBILITÉ. 200 si `healthy`, 503 sinon."""
+        from ..lifecycle import HEALTH_HEALTHY, availability_status
+
+        status, detail = await availability_status()
+
+        # Journalisation sur TRANSITION uniquement. `/health` est public et non
+        # authentifié : une ligne par réponse dégradée donnerait à n'importe qui
+        # un levier d'amplification de journal (famille #111, DoS sur les
+        # surfaces hors `/mcp`). Le diagnostic reste ICI — journal serveur —,
+        # jamais dans la réponse : c'est la ligne de partage posée par #116.
+        global _dernier_etat_journalise
+        if status != _dernier_etat_journalise:
+            if status != HEALTH_HEALTHY:
+                logger.warning("sonde de disponibilité : %s — %s", status, detail)
+            elif _dernier_etat_journalise is not None:
+                # Uniquement un VRAI rétablissement : la première sonde saine
+                # d'un processus n'est pas un retour à la normale, c'est
+                # l'amorçage du suivi.
+                logger.info("sonde de disponibilité : rétabli (%s)", status)
+            _dernier_etat_journalise = status
+
+        code = 200 if status == HEALTH_HEALTHY else 503
+        await self._send_health(send, code, self._health_payload(status))
 
 
 # =============================================================================

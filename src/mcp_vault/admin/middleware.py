@@ -3,7 +3,8 @@
 AdminMiddleware ASGI — Console d'administration web (/admin).
 
 Intercepte les routes /admin, /admin/static/*, /admin/api/*
-AVANT l'auth MCP (l'admin gère sa propre auth Bearer admin).
+AVANT l'auth MCP (l'admin gère sa propre auth Bearer ; l'autorisation dépend
+ensuite de la route : lecture, `write` ou `admin`).
 """
 
 import json

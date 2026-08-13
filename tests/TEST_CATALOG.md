@@ -187,7 +187,7 @@
 
 | #         | Test                                         | Comportement attendu           |
 | --------- | -------------------------------------------- | ------------------------------ |
-| 11.1      | `GET /admin/api/health`                      | `status=ok`, `tools_count > 0` |
+| 11.1      | `GET /admin/api/health`                      | `status=ok` (`degraded` si OpenBao l'est — #103), `tools_count > 0` |
 | 11.2      | `GET /admin/api/whoami`                      | `client_name` présent          |
 | 11.3      | `GET /admin/api/generate-password`           | 24 chars, `status=ok`          |
 | 11.4      | Unicité CSPRNG (2 mots de passe)             | Différents                     |

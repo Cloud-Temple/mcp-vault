@@ -7,12 +7,22 @@ async function api(endpoint, opts = {}) {
     return r.json();
 }
 
+/* Un coffre DÉGRADÉ doit rester administrable — c'est même le moment où la
+   console est la plus utile (diagnostiquer, desceller). Depuis l'issue #103,
+   /admin/api/health renvoie `degraded` quand la disponibilité ne l'est pas :
+   refuser cette valeur enfermerait l'exploitant dehors pendant l'incident.
+   Seule une réponse qui n'est NI `ok` NI `degraded` (jeton invalide, refus,
+   corps inattendu) invalide l'authentification. */
+function healthAllowsLogin(status) {
+    return status === 'ok' || status === 'degraded';
+}
+
 /* ─── Login ─── */
 async function doLogin(token) {
     STATE.token = token;
     try {
         const health = await api('/health');
-        if (health.status !== 'ok') throw new Error('bad');
+        if (!healthAllowsLogin(health.status)) throw new Error('bad');
         STATE.version = health.version || 'dev';
 
         // Get permissions via whoami
@@ -61,3 +71,8 @@ function tryAutoLogin() {
 /* ─── Modal helpers ─── */
 function openModal(id) { document.getElementById(id).classList.add('active'); }
 function closeModal(id) { document.getElementById(id).classList.remove('active'); }
+
+/* Export pour le test Node ; ignoré dans le navigateur (module y est undefined). */
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { healthAllowsLogin: healthAllowsLogin };
+}

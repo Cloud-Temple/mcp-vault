@@ -1586,15 +1586,21 @@ def _install_vault_lifespan(inner_app) -> None:
 
     @contextlib.asynccontextmanager
     async def _combined_lifespan(app):
-        from .lifecycle import vault_startup, vault_shutdown
+        from .lifecycle import (mark_startup_ready, mark_startup_starting,
+                                vault_shutdown, vault_startup)
 
         from .openbao.lifecycle import UnsealKeysUnrecoverable
 
         ok = False
+        # Ouvre la génération AVANT toute tentative : un lifespan précédent ne
+        # doit jamais laisser son « prêt » en héritage à celui-ci (issue #103).
+        mark_startup_starting()
         try:
             try:
                 ok = await vault_startup()
-                if not ok:
+                if ok:
+                    mark_startup_ready()
+                else:
                     logger.warning("⚠️ Démarrage en mode dégradé (OpenBao indisponible)")
             except UnsealKeysUnrecoverable as e:
                 # #121 : ÉCHEC BRUYANT — le service NE DOIT PAS servir avec un
@@ -1674,6 +1680,12 @@ def create_app():
     if not s3_ok:
         raise RuntimeError(f"Bornes S3 invalides — démarrage refusé : {s3_msg}")
 
+    health_ok, health_msg = settings.check_openbao_health_bounds()
+    if not health_ok:
+        raise RuntimeError(
+            f"Borne de sonde de santé invalide — démarrage refusé : {health_msg}"
+        )
+
     from .auth.middleware import AuthMiddleware, LoggingMiddleware, HealthCheckMiddleware
     from .admin.middleware import AdminMiddleware
     from .pki_middleware import PkiMiddleware
@@ -1738,6 +1750,11 @@ def main():
     operator_ok, operator_msg = settings.check_operator_ssh_jit_config()
     if not operator_ok:
         logger.error(f"❌ Config SSH JIT opérateur invalide : {operator_msg}")
+        logger.error("   Démarrage refusé (fail-fast sécurité).")
+        sys.exit(1)
+    health_ok, health_msg = settings.check_openbao_health_bounds()
+    if not health_ok:
+        logger.error(f"❌ Borne de sonde de santé invalide : {health_msg}")
         logger.error("   Démarrage refusé (fail-fast sécurité).")
         sys.exit(1)
     if settings.mission_pep_active:

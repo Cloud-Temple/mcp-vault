@@ -54,6 +54,94 @@ def _reset_shutdown_state() -> None:
 _reset_shutdown_state_for_tests = _reset_shutdown_state
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# État de démarrage — second terme du prédicat de disponibilité (issue #103)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Une sonde OpenBao verte NE PROUVE PAS que le service peut servir : le
+# démarrage comprend aussi la restauration S3 et l'initialisation des magasins.
+# `/health` doit donc conjuguer DEUX termes, et ce drapeau porte le second.
+#
+# L'état est LATCHÉ : il n'est jamais promu par une sonde verte, seulement par
+# un `vault_startup()` qui a abouti. Après un démarrage manqué, le signal ne
+# repasse donc pas au vert tout seul — un redémarrage est requis, et c'est une
+# information d'exploitation, pas un défaut.
+#
+# ⚠️ Ne PAS généraliser la justification : dans le cas d'une restauration S3
+# ambiguë, `vault_startup()` renvoie False AVANT de démarrer OpenBao, qui n'est
+# donc jamais lancé. Mais d'autres échecs (init, unseal) surviennent APRÈS son
+# démarrage — le latch y reste sûr sans être « exact ».
+_startup_ready: bool = False
+
+
+def mark_startup_starting() -> None:
+    """Ouvre une génération de démarrage. Appelé au DÉBUT de chaque lifespan."""
+    global _startup_ready
+    _startup_ready = False
+
+
+def mark_startup_ready() -> None:
+    """Marque le démarrage abouti. Appelé UNIQUEMENT après `vault_startup() is True`."""
+    global _startup_ready
+    _startup_ready = True
+
+
+def startup_is_ready() -> bool:
+    """True si la génération de démarrage courante a abouti."""
+    return _startup_ready
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Prédicat de disponibilité (issue #103)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Énumération FERMÉE. Ces trois valeurs — et aucune autre — peuvent atteindre
+# une surface PUBLIQUE non authentifiée. Le projet a déjà tranché cette forme
+# d'arbitrage en #78 (allow-list de raisons internes, message externe
+# générique) : ce qui est interdit, c'est le texte libre reflété, pas le fait
+# de nommer un état dans un vocabulaire fermé.
+HEALTH_HEALTHY = "healthy"
+HEALTH_SEALED = "sealed"
+HEALTH_UNAVAILABLE = "unavailable"
+
+# Vocabulaire DISTINCT de la liveness : `/healthz` répond à une autre question
+# (« le processus répond-il ? »), il ne doit donc jamais emprunter le
+# vocabulaire de disponibilité — dire `healthy` pendant que `/health` dit
+# `sealed` serait une contradiction entre deux surfaces du même service.
+HEALTH_ALIVE = "alive"
+
+
+async def availability_status() -> tuple[str, str]:
+    """
+    Calcule l'état de disponibilité — source UNIQUE pour toutes les surfaces.
+
+        sealed       ⇔ sonde : OpenBao joignable ET scellé
+        healthy      ⇔ démarrage abouti ET sonde : initialisé ET descellé
+        unavailable  ⇔ tous les autres cas
+
+    `sealed` est prioritaire : « joignable mais scellé » est l'information
+    actionnable, et elle reste vraie que le démarrage ait abouti ou non.
+
+    Returns:
+        (status, detail) — `status` appartient à l'énumération fermée
+        ci-dessus et peut être exposé publiquement ; `detail` est un
+        DIAGNOSTIC réservé aux surfaces authentifiées et aux journaux.
+    """
+    from .openbao.manager import probe_openbao
+
+    probe = await probe_openbao()
+    if probe.sealed:
+        return HEALTH_SEALED, probe.detail
+    if probe.ok:
+        if startup_is_ready():
+            return HEALTH_HEALTHY, probe.detail
+        # OpenBao répond, mais la séquence de démarrage n'a pas abouti (par
+        # exemple restauration S3 ambiguë, magasins non chargés). Fail-close :
+        # le service ne peut pas garantir qu'il sert un état correct.
+        return HEALTH_UNAVAILABLE, "démarrage non abouti — redémarrage requis"
+    return HEALTH_UNAVAILABLE, probe.detail
+
+
 def _check_local_data_status(data_dir: Path) -> bool:
     """
     Détermine si `data_dir` contient une donnée locale FIABLE (crash recovery),
