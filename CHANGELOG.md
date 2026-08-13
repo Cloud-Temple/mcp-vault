@@ -1,6 +1,30 @@
 # Changelog — MCP Vault
 
-## [Non publié] — cible v0.11.0
+## [0.11.0] — 2026-08-13
+
+> ### ⚠️ À FAIRE AVANT DE DÉPLOYER
+>
+> Cette version porte **trois ruptures**. Chacune a un chemin de migration ; les
+> ignorer casse des appelants en service.
+>
+> 1. **Authentification** — le mode `bearer` (le **défaut**) exige désormais un
+>    jeton valide. Vérifiez que **chaque appelant de `/mcp` porte un bearer
+>    valide**. Si vous découvrez un client sans jeton et que vous ne pouvez pas
+>    le migrer tout de suite, posez `MCP_AUTH_MODE=bearer-anonymous` — mode
+>    d'exception **temporaire** qui rouvre délibérément la divulgation corrigée
+>    par #116, et qui émet un `CRITICAL` au démarrage.
+> 2. **CLI** — le shell interactif est supprimé. **Recensez vos scripts** qui
+>    l'utilisent et migrez-les vers les commandes Click ; les 50 opérations ont
+>    toutes un équivalent, mais la syntaxe change (tableau plus bas).
+> 3. **Sondes de santé** — `/health` et `/ready` renvoient maintenant **503**
+>    quand le coffre ne peut pas servir. **Ne basculez pas mécaniquement vos
+>    sondes vers `/healthz`** : choisissez selon la question posée.
+>    - « le coffre est-il **utilisable** ? » (déploiement, readiness, contrôle
+>      post-déploiement) → **`/health` ou `/ready`, attendre `200`** ;
+>    - « le processus **vit-il** ? » (liveness, autoheal) → **`/healthz`**.
+>
+> Après un démarrage non abouti, l'état de disponibilité est **latché** : le
+> signal ne repasse pas au vert tout seul, un redémarrage est requis.
 
 ### RUPTURE — les sondes de santé disent la vérité (issue #103)
 
@@ -66,11 +90,24 @@ de répondre « disponible » après la panne.
 
 - Le `HEALTHCHECK` du conteneur vise `/health` : un coffre indisponible apparaît
   maintenant `unhealthy` dans `docker ps`. C'est l'objet de la correction.
-- Toute sonde ou script qui faisait `curl -sf /health` pour attendre le démarrage
-  doit viser `/healthz`.
+- **Choisissez l'endpoint selon la question posée — ne basculez pas
+  mécaniquement vers `/healthz`.**
+
+  | Ce que fait votre sonde ou votre script | Endpoint | Attendu |
+  | --- | --- | --- |
+  | Attendre que le coffre soit **utilisable** (script de déploiement, readiness, contrôle post-déploiement) | `/health` ou `/ready` | **`200`** — continuez d'attendre tant que c'est `503` |
+  | Vérifier que le **processus vit** (liveness, autoheal, redémarrage automatique) | `/healthz` | `200` |
+
+  ⚠️ `/healthz` répond `200` **même quand le coffre est indisponible** : y
+  basculer un script d'attente de démarrage le ferait poursuivre sur un coffre
+  qui ne peut servir aucun secret. À l'inverse, brancher un autoheal sur
+  `/health` redémarrerait en boucle un coffre **scellé** — ce qui ne le
+  descelle pas.
 - L'étape de CI qui exigeait `200` sur `/health` avec un S3 mort encodait
   exactement le défaut corrigé ici ; elle exige désormais `503` et
-  `status: unavailable`.
+  `status: unavailable`. Elle attend le démarrage sur `/healthz` parce qu'elle
+  vérifie précisément un mode dégradé — ce n'est **pas** un modèle à recopier
+  pour un déploiement.
 
 Enfin, `sealed` n'est affirmé que s'il est **explicitement présent** dans la
 réponse de santé. À défaut, une réponse incomplète est classée `unavailable` :

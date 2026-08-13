@@ -1,6 +1,6 @@
 # Catalogue des Tests E2E — MCP Vault
 
-> **Version** : v0.10.2 — Résolution reproductible des dépendances Python : le verrou fait foi + garde d'import à la construction (#125), CI d'exécution des tests (#113), stub `hvac` fidèle (#98)
+> **Version** : v0.11.0 — Sondes de santé honnêtes (#103), le mode `bearer` exige un jeton valide (#116), appels S3 du cycle de vie hors boucle d'événements (#122), shell interactif supprimé au profit de Click (#128)
 > **Dernière exécution** : 349 assertions e2e sur 15 catégories (+ 18 tests crypto)
 > **Décompte reproductible** : comptage AST des appels `check` / `check_true` / `check_value` / `check_traversed` dans les fonctions `test_*` de `tests/test_e2e.py`, boucles littérales expansées
 > **Durée** : ~5 secondes (e2e) + <1s (crypto)
