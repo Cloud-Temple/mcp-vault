@@ -418,6 +418,21 @@ PkiMiddleware → AdminMiddleware → HealthCheckMiddleware → AuthMiddleware �
 
 `PkiMiddleware` (v0.5.0) est la couche la plus externe — intercepte `/acme/*` et `/pki/ca/*.pem` avant l'auth (endpoints publics par design PKI/ACME).
 
+### Sondes de santé *(v0.11.0, #103)*
+
+Deux questions distinctes, deux contrats :
+
+| Endpoint | Question | Sain | Dégradé |
+| --- | --- | --- | --- |
+| `/healthz` | *liveness* — le processus répond-il ? | `200` `alive` | **`200` `alive`** |
+| `/health`, `/ready` | *disponibilité* — le coffre peut-il servir ? | `200` `healthy` | **`503`** |
+
+`status` appartient à une énumération fermée, une par question : `healthy` \| `sealed` \| `unavailable` pour la disponibilité, `alive` pour la liveness. Un coffre scellé est donc identifiable de l'extérieur, sans qu'aucun détail de dépendance ne soit exposé — le diagnostic reste dans les journaux et sur `/admin/api/health`, qui exige un bearer valide.
+
+Le `HEALTHCHECK` du conteneur vise `/health` : un coffre indisponible apparaît désormais `unhealthy`. Branchez une éventuelle sonde de *liveness* ou un autoheal sur `/healthz`, jamais sur `/health` — redémarrer un coffre **scellé** ne le descelle pas.
+
+Après un démarrage non abouti, l'état est **latché** : le signal ne repasse pas au vert tout seul, un redémarrage est requis.
+
 ### Lifecycle OpenBao
 ```
 STARTUP:  S3 download (3 états : restauré / absence confirmée / échec ambigu —
@@ -508,8 +523,8 @@ mcp-vault/
 ├── requirements.lock         # Dépendances pinnées (versions exactes)
 ├── VERSION                   # version courante du service
 ├── DESIGN/mcp-vault/
-│   ├── ARCHITECTURE.md       # Spécification détaillée (v0.10.2)
-│   ├── TECHNICAL.md          # Documentation technique (v0.10.2)
+│   ├── ARCHITECTURE.md       # Spécification détaillée (v0.11.0)
+│   ├── TECHNICAL.md          # Documentation technique (v0.11.0)
 │   └── SECURITY_AUDIT.md     # Rapport d'audit consolidé (60 findings V2.1)
 ├── scripts/
 │   ├── mcp_cli.py            # CLI entry point
@@ -565,4 +580,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.10.2
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.11.0

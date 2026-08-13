@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     openbao_threshold: int = 1
     openbao_data_dir: str = "/openbao/file"
     openbao_config_dir: str = "/openbao/config"
+    # Borne de la sonde de santé OpenBao (issue #103). `/health` est PUBLIC et
+    # non authentifié : sans borne, un OpenBao qui accepte la connexion sans
+    # répondre immobiliserait un thread de l'exécuteur par sonde. Cette valeur
+    # borne À LA FOIS l'appel hvac (`timeout=`) et l'attente de l'appelant.
+    openbao_health_timeout: int = 2
 
     # --- S3 Vault Storage Sync ---
     vault_s3_prefix: str = "_storage"
@@ -290,6 +295,20 @@ class Settings(BaseSettings):
         if self.s3_max_attempts < 1:
             return False, (f"S3_MAX_ATTEMPTS={self.s3_max_attempts} invalide — doit "
                            "être >= 1 (nombre TOTAL de tentatives, 1 = aucun retry)")
+        return True, ""
+
+    def check_openbao_health_bounds(self) -> tuple[bool, str]:
+        """Valide la borne de la sonde de santé OpenBao (fail-fast, issue #103).
+
+        Même raisonnement que `check_s3_timeouts` : une valeur nulle ou négative
+        signifierait « pas de borne ». Or `/health` est servi SANS
+        authentification — une sonde non bornée y est une prise directe sur
+        l'exécuteur. On refuse de démarrer plutôt que de servir une sonde
+        publique illimitée.
+        """
+        if self.openbao_health_timeout <= 0:
+            return False, (f"OPENBAO_HEALTH_TIMEOUT={self.openbao_health_timeout} "
+                           "invalide — doit être > 0 (secondes)")
         return True, ""
 
     def check_operator_ssh_jit_config(self) -> tuple[bool, str]:

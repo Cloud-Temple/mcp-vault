@@ -1,6 +1,6 @@
 # Documentation Technique — MCP Vault
 
-> **Version** : 0.10.2 | **Date** : 2026-08-11 | **Auteur** : Cloud Temple
+> **Version** : 0.11.0 | **Date** : 2026-08-11 | **Auteur** : Cloud Temple
 > **Licence** : Apache 2.0 | **Statut** : ✅ Production-ready (audit V2.1 complété + PKI interne v0.5.1)
 
 ---
@@ -78,7 +78,7 @@ Les requêtes traversent 6 couches middleware dans cet ordre :
 | --- | ----------------------- | ------------------------------------- | ------------------------------- |
 | 0   | `PkiMiddleware`         | Proxy non-auth ACME + distribution CA | `/acme/*`, `/pki/ca/*.pem`      |
 | 1   | `AdminMiddleware`       | Console admin web + API REST          | `/admin`, `/admin/api/*`        |
-| 2   | `HealthCheckMiddleware` | Health checks (200 OK direct)         | `/health`, `/healthz`, `/ready` |
+| 2   | `HealthCheckMiddleware` | Liveness 200 / disponibilité 200-503  | `/health`, `/healthz`, `/ready` |
 | 3   | `AuthMiddleware`        | Extraction et validation Bearer token | Toutes sauf publiques           |
 | 4   | `LoggingMiddleware`     | Log stderr + ring buffer mémoire      | Toutes les requêtes HTTP        |
 | 5   | `FastMCP`               | Outils MCP via Streamable HTTP        | `/mcp`                          |
@@ -793,7 +793,9 @@ Stage 2: python:3.12-slim → installe deps + copie source + OpenBao binary
 **Particularités** :
 - `setcap cap_ipc_lock=+ep` sur le binaire `bao` (verrouillage mémoire)
 - User non-root `mcp` pour l'exécution
-- Health check via `curl` sur `/admin/api/health`
+- Health check via `curl -sf` sur `/health` (et non `/admin/api/health`, qui
+  exige un bearer valide) — depuis #103, cette sonde devient **rouge** quand le
+  coffre ne peut pas servir
 
 ### 4.2 Docker Compose
 

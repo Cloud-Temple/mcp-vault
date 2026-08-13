@@ -419,6 +419,21 @@ PkiMiddleware → AdminMiddleware → HealthCheckMiddleware → AuthMiddleware �
 
 `PkiMiddleware` (v0.5.0) is the outermost layer — it intercepts `/acme/*` and `/pki/ca/*.pem` before auth (public endpoints by PKI/ACME design).
 
+### Health probes *(v0.11.0, #103)*
+
+Two distinct questions, two contracts:
+
+| Endpoint | Question | Healthy | Degraded |
+| --- | --- | --- | --- |
+| `/healthz` | *liveness* — is the process answering? | `200` `alive` | **`200` `alive`** |
+| `/health`, `/ready` | *availability* — can the vault serve? | `200` `healthy` | **`503`** |
+
+`status` belongs to a closed enumeration, one per question: `healthy` \| `sealed` \| `unavailable` for availability, `alive` for liveness. A sealed vault is therefore identifiable from the outside, without exposing any dependency detail — diagnostics stay in the logs and on `/admin/api/health`, which requires a valid bearer.
+
+The container `HEALTHCHECK` targets `/health`: an unavailable vault now shows as `unhealthy`. Point any *liveness* probe or autoheal at `/healthz`, never at `/health` — restarting a **sealed** vault does not unseal it.
+
+After a failed startup the state is **latched**: the signal does not turn green again on its own, a restart is required.
+
 ### OpenBao lifecycle
 ```
 STARTUP:  S3 download (3-state result: restored / confirmed absent / ambiguous
@@ -509,8 +524,8 @@ mcp-vault/
 ├── requirements.lock         # Pinned dependencies (exact versions)
 ├── VERSION                   # current service version
 ├── DESIGN/mcp-vault/
-│   ├── ARCHITECTURE.md       # Detailed specification (v0.10.2)
-│   ├── TECHNICAL.md          # Technical documentation (v0.10.2)
+│   ├── ARCHITECTURE.md       # Detailed specification (v0.11.0)
+│   ├── TECHNICAL.md          # Technical documentation (v0.11.0)
 │   └── SECURITY_AUDIT.md     # Consolidated audit report (60 V2.1 findings)
 ├── scripts/
 │   ├── mcp_cli.py            # CLI entry point
@@ -568,4 +583,4 @@ mcp-vault/
 
 ---
 
-**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.10.2
+**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.11.0

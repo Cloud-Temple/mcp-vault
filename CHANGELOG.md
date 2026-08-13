@@ -1,6 +1,129 @@
 # Changelog — MCP Vault
 
-## [Non publié] — cible v0.11.0
+## [0.11.0] — 2026-08-13
+
+> ### ⚠️ À FAIRE AVANT DE DÉPLOYER
+>
+> Cette version porte **trois ruptures**. Chacune a un chemin de migration ; les
+> ignorer casse des appelants en service.
+>
+> 1. **Authentification** — le mode `bearer` (le **défaut**) exige désormais un
+>    jeton valide. Vérifiez que **chaque appelant de `/mcp` porte un bearer
+>    valide**. Si vous découvrez un client sans jeton et que vous ne pouvez pas
+>    le migrer tout de suite, posez `MCP_AUTH_MODE=bearer-anonymous` — mode
+>    d'exception **temporaire** qui rouvre délibérément la divulgation corrigée
+>    par #116, et qui émet un `CRITICAL` au démarrage.
+> 2. **CLI** — le shell interactif est supprimé. **Recensez vos scripts** qui
+>    l'utilisent et migrez-les vers les commandes Click ; les 50 opérations ont
+>    toutes un équivalent, mais la syntaxe change (tableau plus bas).
+> 3. **Sondes de santé** — `/health` et `/ready` renvoient maintenant **503**
+>    quand le coffre ne peut pas servir. **Ne basculez pas mécaniquement vos
+>    sondes vers `/healthz`** : choisissez selon la question posée.
+>    - « le coffre est-il **utilisable** ? » (déploiement, readiness, contrôle
+>      post-déploiement) → **`/health` ou `/ready`, attendre `200`** ;
+>    - « le processus **vit-il** ? » (liveness, autoheal) → **`/healthz`**.
+>
+> Après un démarrage non abouti, l'état de disponibilité est **latché** : le
+> signal ne repasse pas au vert tout seul, un redémarrage est requis.
+
+### RUPTURE — les sondes de santé disent la vérité (issue #103)
+
+**Ce qui était faux.** `/health` renvoyait le littéral
+`{"status": "healthy", ...}`. Il ne consultait **rien**. Un conteneur démarré en
+mode dégradé — qui journalise pourtant « ⚠️ Démarrage en mode dégradé (OpenBao
+indisponible) » — répondait donc `healthy` au `HEALTHCHECK` Docker, qui le
+rapportait sain. L'information existait, elle n'était simplement pas propagée au
+signal de santé. `/admin/api/health` avait le même défaut (`"status": "ok"` en
+dur), et mentait donc aussi à la console d'administration.
+
+Conséquences : un rolling update pouvait retirer l'instance saine et garder la
+dégradée, puisque les deux se déclaraient saines ; aucune alerte fondée sur
+`/health` ne se déclenchait ; le diagnostic était reporté au premier appel métier
+échoué, loin de la cause.
+
+**Deux questions distinctes, deux contrats.**
+
+| Endpoint | Question | Sain | Dégradé |
+| --- | --- | --- | --- |
+| `/healthz` | *liveness* — le processus répond-il ? | `200` `alive` | **`200` `alive`** |
+| `/health`, `/ready` | *disponibilité* — le coffre peut-il servir ? | `200` `healthy` | **`503`** |
+
+`/healthz` ne sonde **jamais** OpenBao. C'est délibéré : rendre la *liveness*
+rouge sur une dépendance indisponible ferait redémarrer en boucle un coffre
+**scellé** par un autoheal ou une sonde Kubernetes — et redémarrer ne descelle
+pas, cela aggrave l'incident. Branchez la liveness sur `/healthz`, la
+disponibilité sur `/health`.
+
+**Un coffre scellé est identifiable de l'extérieur**, sans divulgation. `status`
+appartient à une **énumération fermée**, une par question — `healthy`, `sealed`,
+`unavailable` pour la disponibilité, `alive` pour la liveness — et rien d'autre
+ne peut sortir : aucun message d'exception, aucune adresse, aucune version
+d'OpenBao, aucun texte libre. Le diagnostic reste dans les journaux et sur
+`/admin/api/health`, qui exige un bearer valide (route « tout token », pas
+réservée aux admins) et porte désormais `availability` et `availability_detail`.
+
+La **console d'administration accepte l'état dégradé** : elle refusait tout
+`status` différent de `ok`, ce qui aurait enfermé l'exploitant dehors au moment
+précis où la console sert à diagnostiquer et à desceller.
+
+Les réponses dégradées sont journalisées **sur transition**, pas par requête :
+`/health` étant public, une ligne par appel offrirait un levier d'amplification
+de journal (famille #111).
+
+**La disponibilité exige deux termes réunis** : la séquence de démarrage doit
+avoir abouti **et** la sonde courante doit voir OpenBao initialisé et descellé.
+Une sonde verte seule ne suffit pas — le démarrage comprend aussi la restauration
+S3 et le chargement des magasins. L'état est **latché** : après un démarrage non
+abouti, le signal ne repasse pas au vert tout seul, un redémarrage est requis.
+C'est exact dans le cas d'une restauration S3 ambiguë, où `vault_startup()`
+renvoie `False` **avant** de démarrer OpenBao — qui n'est donc jamais lancé.
+
+**La sonde ne peut pas geler le service.** L'appel hvac était synchrone et sans
+timeout ; le brancher tel quel sur un endpoint public aurait recréé le défaut de
+disponibilité de #110. Il est désormais offloadé hors de la boucle d'événements,
+borné par `OPENBAO_HEALTH_TIMEOUT` (défaut 2 s, une valeur ≤ 0 refuse le
+démarrage), et **single-flight** : une seule sonde réelle en vol, quelle que soit
+la rafale de requêtes sur cet endpoint public. Aucun cache — un cache permettrait
+de répondre « disponible » après la panne.
+
+#### Ce qui change pour l'exploitation
+
+- Le `HEALTHCHECK` du conteneur vise `/health` : un coffre indisponible apparaît
+  maintenant `unhealthy` dans `docker ps`. C'est l'objet de la correction.
+- **Choisissez l'endpoint selon la question posée — ne basculez pas
+  mécaniquement vers `/healthz`.**
+
+  | Ce que fait votre sonde ou votre script | Endpoint | Attendu |
+  | --- | --- | --- |
+  | Attendre que le coffre soit **utilisable** (script de déploiement, readiness, contrôle post-déploiement) | `/health` ou `/ready` | **`200`** — continuez d'attendre tant que c'est `503` |
+  | Vérifier que le **processus vit** (liveness, autoheal, redémarrage automatique) | `/healthz` | `200` |
+
+  ⚠️ `/healthz` répond `200` **même quand le coffre est indisponible** : y
+  basculer un script d'attente de démarrage le ferait poursuivre sur un coffre
+  qui ne peut servir aucun secret. À l'inverse, brancher un autoheal sur
+  `/health` redémarrerait en boucle un coffre **scellé** — ce qui ne le
+  descelle pas.
+- L'étape de CI qui exigeait `200` sur `/health` avec un S3 mort encodait
+  exactement le défaut corrigé ici ; elle exige désormais `503` et
+  `status: unavailable`. Elle attend le démarrage sur `/healthz` parce qu'elle
+  vérifie précisément un mode dégradé — ce n'est **pas** un modèle à recopier
+  pour un déploiement.
+
+Enfin, `sealed` n'est affirmé que s'il est **explicitement présent** dans la
+réponse de santé. À défaut, une réponse incomplète est classée `unavailable` :
+déduire le scellement d'une valeur par défaut ferait annoncer « descellez-moi »
+sur une réponse qui ne le dit pas.
+
+**Tests** : `tests/test_health_honesty_103.py` — 43 tests ; contrat frontend
+`tests/js/health_login_contract.test.js` — 14 cas sous Node. **13 mutations
+mesurées, toutes détectées** : littéral `healthy` réintroduit, 2ᵉ terme du
+prédicat retiré, `sealed` fondu dans `unavailable`, timeout hvac retiré,
+single-flight cassé, offload retiré, `/healthz` mis à sonder, diagnostic recopié
+dans le corps public, cache réintroduit, réponse inexploitable promue en sain,
+`sealed` déduit d'un défaut, console refusant de nouveau l'état dégradé, journal
+par requête.
+
+Suite : 1255 passed / 29 skipped / 0 failed.
 
 ### RUPTURE — le mode `bearer` exige désormais un jeton valide (issue #116)
 
@@ -32,7 +155,8 @@ outil aurait rouvert le trou au prochain ajout.
 n'expose d'outil MCP : `/acme/*` et `/v1/_sys_pki_int/acme/*` (protocole ACME),
 `/pki/ca/*.pem` (chaîne de confiance publique), `/admin` et ses fichiers
 statiques ainsi que le préflight `OPTIONS /admin/api/*` — **l'API
-`/admin/api/*` exige toujours un jeton admin** —, `/health`, `/healthz`,
+`/admin/api/*` exige toujours un jeton valide**, l'autorisation dépendant
+ensuite de la route (lecture, `write`, ou `admin`) —, `/health`, `/healthz`,
 `/ready`, `/` (sondes) et `/favicon.ico`. La clé `ADMIN_BOOTSTRAP_KEY` reste
 acceptée (break-glass).
 

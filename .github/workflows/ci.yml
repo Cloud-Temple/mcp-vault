@@ -72,10 +72,14 @@ jobs:
       # démarre et passe sa sonde de santé. » Construire et importer ne le
       # démontre pas. S3 est injoignable ici (endpoint mort) : le coffre démarre
       # donc en mode DÉGRADÉ, ce qui exerce au passage le chemin de lifespan
-      # rétabli au lot 1 de #110. `/health` est servi par un middleware et reste
-      # disponible dans ce mode ; on vérifie en plus que la version servie est
-      # bien celle du dépôt, ce qui prouve que l'image testée est la bonne.
-      - name: Démarrer le conteneur et vérifier la sonde de santé
+      # rétabli au lot 1 de #110.
+      #
+      # Depuis #103, les deux sondes ont des contrats DISTINCTS et cette étape
+      # vérifie les deux : `/healthz` (liveness) répond 200 sans rien sonder,
+      # `/health` (disponibilité) répond 503 `unavailable`. On vérifie en plus
+      # que la version servie est celle du dépôt, ce qui prouve que l'image
+      # testée est la bonne.
+      - name: Démarrer le conteneur et vérifier les sondes de santé
         run: |
           set -euo pipefail
           key="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
@@ -84,16 +88,31 @@ jobs:
             -e S3_ENDPOINT_URL=http://127.0.0.1:1 \
             -e S3_ACCESS_KEY_ID=ci -e S3_SECRET_ACCESS_KEY=ci -e S3_BUCKET_NAME=ci \
             -p 18030:8030 mcp-vault:ci
+          # L'attente porte sur /healthz (LIVENESS) : il répond 200 dès que le
+          # processus sert, sans sonder OpenBao. `curl -sf` sur /health ne
+          # convient plus — /health est LÉGITIMEMENT 503 ici depuis #103.
           for _ in $(seq 40); do
-            if curl -sf -o /dev/null http://localhost:18030/health; then break; fi
+            if curl -sf -o /dev/null http://localhost:18030/healthz; then break; fi
             if [ "$(docker inspect -f '{{.State.Running}}' vault-probe)" != "true" ]; then
               echo "::error::le conteneur s'est arrêté avant de répondre"; exit 1
             fi
             sleep 3
           done
-          body="$(curl -sf http://localhost:18030/health)" || {
-            echo "::error::/health ne répond pas"; exit 1; }
-          echo "$body"
+          curl -sf -o /dev/null http://localhost:18030/healthz || {
+            echo "::error::/healthz ne répond pas"; exit 1; }
+
+          # S3 est injoignable : `vault_startup()` refuse de démarrer sur une
+          # restauration ambiguë AVANT même de lancer OpenBao. L'état attendu est
+          # donc DÉTERMINISTE — indisponible. Asserter 200 ici reviendrait à
+          # réencoder le défaut que #103 corrige : c'est exactement ce que
+          # faisait l'ancienne étape, et c'est pourquoi le mensonge a survécu.
+          code="$(curl -s -o /tmp/health.json -w '%{http_code}' http://localhost:18030/health)"
+          body="$(cat /tmp/health.json)"
+          echo "HTTP ${code} — ${body}"
+          [ "$code" = "503" ] || {
+            echo "::error::/health doit répondre 503 en mode dégradé (reçu ${code})"; exit 1; }
+          echo "$body" | grep -q '"status": "unavailable"' || {
+            echo "::error::/health n'annonce pas status=unavailable"; exit 1; }
           expected="$(cat VERSION)"
           echo "$body" | grep -q "\"version\": \"${expected}\"" || {
             echo "::error::/health n'annonce pas la version ${expected}"; exit 1; }

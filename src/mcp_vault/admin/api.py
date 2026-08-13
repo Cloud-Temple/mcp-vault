@@ -2,7 +2,11 @@
 """
 API REST admin — Endpoints pour la console d'administration.
 
-Tous les endpoints requièrent un Bearer token admin.
+Tous les endpoints requièrent un Bearer token valide ; l'autorisation dépend
+ENSUITE de la route (lecture seule, `write`, ou `admin` — voir le routage).
+Quelques routes système sont ouvertes à tout token valide (`health`, `whoami`,
+`generate-password`, `pki/status`, `pki/roles`). Les tokens wrap-only sont
+refusés dès l'entrée, quelle que soit la route (#115).
 Routage depuis AdminMiddleware pour /admin/api/*.
 """
 
@@ -479,7 +483,20 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
 # =============================================================================
 
 async def _api_health(send, mcp):
-    """GET /admin/api/health — État du serveur."""
+    """GET /admin/api/health — État du serveur.
+
+    Surface AUTHENTIFIÉE — un bearer valide non wrap-only, pas nécessairement
+    admin (route « tout token »). Contrairement à `/health`, elle a donc droit au
+    diagnostic, mais le seuil reste « avoir une identité », pas « être admin ». Elle partage le MÊME prédicat que la sonde publique (issue
+    #103) — deux implémentations divergentes finissent par se contredire, et
+    c'est exactement ce qui a laissé `/health` annoncer `healthy` pendant que le
+    service tournait en mode dégradé.
+
+    `status` reste `ok`/`degraded` : la console consomme cette valeur. L'état fin
+    est porté par `availability` et `availability_detail`.
+    """
+    from ..lifecycle import HEALTH_HEALTHY, availability_status
+
     settings = get_settings()
     version = "dev"
     vf = Path(__file__).parent.parent.parent.parent / "VERSION"
@@ -488,8 +505,12 @@ async def _api_health(send, mcp):
 
     tools = [t.name for t in mcp._tool_manager.list_tools()] if mcp else []
 
+    availability, availability_detail = await availability_status()
+
     await _json_response(send, 200, {
-        "status": "ok",
+        "status": "ok" if availability == HEALTH_HEALTHY else "degraded",
+        "availability": availability,
+        "availability_detail": availability_detail,
         "service_name": settings.mcp_server_name,
         "version": version,
         "python_version": platform.python_version(),

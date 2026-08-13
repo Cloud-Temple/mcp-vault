@@ -1,6 +1,6 @@
 # Architecture — MCP Vault
 
-> **Version** : 0.10.2 | **Date** : 2026-08-11 | **Auteur** : Cloud Temple  
+> **Version** : 0.11.0 | **Date** : 2026-08-11 | **Auteur** : Cloud Temple
 > **Projet** : mcp-vault | **Licence** : Apache 2.0  
 > **Statut** : ✅ Implémenté — Production-ready (PKI interne v0.5.x + C18 v0.6.x)
 
@@ -188,11 +188,31 @@ def create_app():
 
 **HealthCheckMiddleware** — Middleware ASGI dédié qui intercepte les endpoints
 de health check et retourne un JSON directement, **sans passer par MCP** ni par
-l'auth. Ceci permet au WAF/load balancer de vérifier l'état du service :
+l'auth. Ceci permet au WAF/load balancer de vérifier l'état du service.
+
+Depuis l'issue #103, ces endpoints répondent à **deux questions distinctes** :
+
+| Endpoint | Question | Sain | Dégradé |
+| --- | --- | --- | --- |
+| `/healthz` | *liveness* — le processus répond-il ? | 200 `alive` | **200 `alive`** |
+| `/health`, `/ready` | *disponibilité* — le coffre peut-il servir ? | 200 `healthy` | **503** |
 
 ```json
-{"status": "healthy", "service": "mcp-vault", "version": "0.8.0", "transport": "streamable-http"}
+{"status": "healthy", "service": "mcp-vault", "version": "0.11.0", "transport": "streamable-http"}
 ```
+
+`status` appartient à une **énumération fermée**, une par question :
+
+- disponibilité (`/health`, `/ready`) : `healthy` | `sealed` | `unavailable` ;
+- liveness (`/healthz`) : `alive`.
+
+Aucun détail de dépendance n'est exposé sur ces surfaces publiques — le
+diagnostic vit dans les journaux et sur `/admin/api/health`, qui exige un bearer
+valide (route « tout token », pas réservée aux admins).
+
+`/healthz` ne sonde **jamais** OpenBao : c'est la cible sûre pour une sonde de
+liveness ou un autoheal. Rendre ce chemin rouge sur une dépendance indisponible
+ferait redémarrer en boucle un coffre **scellé**, ce qui ne le descelle pas.
 
 **AuthMiddleware + ContextVar** — Le middleware stocke les infos du token
 authentifié dans un `contextvars.ContextVar` Python, accessible ensuite par
@@ -284,7 +304,9 @@ AdminMiddleware (ASGI, derrière PkiMiddleware)
     │
     ├── GET /admin           → SPA HTML (admin.html)
     ├── GET /admin/static/*  → fichiers statiques (CSS, JS, images)
-    └── */admin/api/*        → API REST admin (auth Bearer admin requise)
+    └── */admin/api/*        → API REST admin (Bearer valide requis ;
+                               autorisation selon la route : lecture, `write`
+                               ou `admin`)
             │
             ├── GET  /admin/api/health          → état du serveur + OpenBao status
             ├── GET  /admin/api/vaults          → lister les vaults
@@ -2323,7 +2345,7 @@ aucune de ces surfaces n'expose d'outil MCP :
 | --- | --- | --- |
 | `/acme/*`, `/v1/_sys_pki_int/acme/*` | `PkiMiddleware` | Protocole ACME : le client n'a pas encore de certificat |
 | `/pki/ca/*.pem` | `PkiMiddleware` | Chaîne de confiance publique par nature |
-| `/admin`, `/admin/` et ses fichiers statiques | `AdminMiddleware` | La SPA elle-même ; **son API `/admin/api/*` exige un jeton admin** |
+| `/admin`, `/admin/` et ses fichiers statiques | `AdminMiddleware` | La SPA elle-même ; **son API `/admin/api/*` exige un jeton valide**, l'autorisation dépendant de la route |
 | `OPTIONS /admin/api/*` | `AdminMiddleware` | Préflight CORS, sans effet de bord |
 | `/health`, `/healthz`, `/ready`, `/` | `HealthCheckMiddleware` | Sondes d'orchestrateur |
 | `/favicon.ico` | `AuthMiddleware` (`PUBLIC_PATHS`) | Ressource inerte |
@@ -2718,7 +2740,7 @@ Le Caddyfile injecte les headers de sécurité suivants sur toutes les réponses
 
 > **Note** : `unsafe-inline` est nécessaire dans `script-src` et `style-src`
 > car la SPA admin utilise du JavaScript et CSS inline. C'est mitigé par le fait
-> que la console admin est protégée par authentification Bearer admin.
+> que la console admin est protégée par authentification Bearer.
 
 #### 11.6.6 Configuration réseau et timeouts
 
@@ -2859,4 +2881,4 @@ result = await vault_client.call("ssh_sign_key", {
 
 ---
 
-*Document mis à jour le 12 août 2026 — MCP Vault v0.10.2, cible v0.11.0 (39 outils MCP, suppression du shell interactif au profit d'une seule analyse d'arguments côté CLI et sûreté d'état des purges (#128),  reproductibilité de l'image : verrou consommé par le Dockerfile et garde d'import à la construction (#125), CI d'exécution des tests, avec démarrage du conteneur et sonde de santé (#113), bornes réseau S3 et chemin d'arrêt porté par le lifespan ASGI (#110 lot 1), échec bruyant sur clés d'unseal inexploitables (#121), permission dédiée `wrap` non-admin pour le broker JIT (verrou wrap-only, policy stricte obligatoire, registre scopé vault+chemins, #115), WAF Coraza v3.7.0 avec parsing JSON borné sur /mcp (profondeur, taille, refus des corps non analysables) et exclusions de cibles anti-évasion, accès SSH JIT opérateur (bearer nominatif + policy dédiée, clé publique pré-enrôlée), pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer, écriture create-only atomique (CAS), sync S3 conditionnelle, contrat de configuration `.env.example` déterministe et testé)*
+*Document mis à jour le 13 août 2026 — MCP Vault v0.11.0 (39 outils MCP, sondes de santé honnêtes : liveness `/healthz` toujours verte, disponibilité `/health`/`/ready` en 503 avec énumération fermée healthy|sealed|unavailable, sonde OpenBao offloadée, bornée et single-flight (#103), mode `bearer` exigeant un jeton valide (#116), appels S3 du cycle de vie hors boucle d'événements (#122), suppression du shell interactif au profit d'une seule analyse d'arguments côté CLI et sûreté d'état des purges (#128), reproductibilité de l'image : verrou consommé par le Dockerfile et garde d'import à la construction (#125), CI d'exécution des tests, avec démarrage du conteneur et sonde de santé (#113), bornes réseau S3 et chemin d'arrêt porté par le lifespan ASGI (#110 lot 1), échec bruyant sur clés d'unseal inexploitables (#121), permission dédiée `wrap` non-admin pour le broker JIT (verrou wrap-only, policy stricte obligatoire, registre scopé vault+chemins, #115), WAF Coraza v3.7.0 avec parsing JSON borné sur /mcp (profondeur, taille, refus des corps non analysables) et exclusions de cibles anti-évasion, accès SSH JIT opérateur (bearer nominatif + policy dédiée, clé publique pré-enrôlée), pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer, écriture create-only atomique (CAS), sync S3 conditionnelle, contrat de configuration `.env.example` déterministe et testé)*
