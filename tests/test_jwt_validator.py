@@ -664,17 +664,52 @@ class TestWrapRegistryC18Extensions:
         entry = next(e for e in r._wraps if e["operation_id"] == "op-1")
         assert entry["status"] == "consumed"
 
-    def test_rollback_consuming_restores_active(self):
-        """rollback_consuming après échec OpenBao → retour "active" (retry possible)."""
+    def test_aucun_retour_a_active_apres_le_cas(self):
+        """
+        REMPLACE `test_rollback_consuming_restores_active` (issue #78, finding 2).
+
+        L'ancien test asseyait le défaut : il exigeait qu'un échec d'unwrap
+        ramène l'entrée à "active", donc « réessayable ». Or une fois le CAS
+        franchi, l'appel est parti — OpenBao a pu consommer le jeton avant que
+        la réponse ne se perde. Réinscrire "active" annonce disponible une
+        provision peut-être brûlée.
+
+        La primitive de retour arrière n'existe donc plus, et aucune transition
+        ne ramène à "active" depuis "consuming".
+        """
+        r = self._make_registry()
+        assert not hasattr(r, "rollback_consuming"), (
+            "rollback_consuming est réintroduit — le registre peut de nouveau "
+            "annoncer disponible un wrap potentiellement consommé")
+
+        for terminal, methode in (("unusable", "mark_unusable"),
+                                  ("consume_outcome_unknown", "mark_outcome_unknown")):
+            r._wraps = []
+            r.register_pending("op-1", "m-1", "vault-a", "path/key", 300)
+            r.mark_active("op-1", "accessor-xyz")
+            r.try_mark_consuming("op-1", "m-1")
+
+            getattr(r, methode)("op-1", "m-1")
+
+            entry = next(e for e in r._wraps if e["operation_id"] == "op-1")
+            assert entry["status"] == terminal
+            assert entry["status"] != "active"
+
+    def test_les_etats_terminaux_sont_definitifs(self):
+        """Aucune transition ne sort d'un état terminal de consommation."""
         r = self._make_registry()
         r.register_pending("op-1", "m-1", "vault-a", "path/key", 300)
         r.mark_active("op-1", "accessor-xyz")
         r.try_mark_consuming("op-1", "m-1")
+        r.mark_unusable("op-1", "m-1")
 
-        r.rollback_consuming("op-1", "m-1")
+        # Ni une seconde consommation, ni une révocation ne doivent le muter.
+        assert r.try_mark_consuming("op-1", "m-1") is False
+        assert r.mark_consumed("op-1", "m-1") is False
+        assert r.mark_revoked("accessor-xyz") is False
 
         entry = next(e for e in r._wraps if e["operation_id"] == "op-1")
-        assert entry["status"] == "active"
+        assert entry["status"] == "unusable"
 
     def test_register_pending_stores_tenant_id_and_aud(self):
         """register_pending stocke tenant_id et expected_aud (issue #26)."""

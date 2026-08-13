@@ -635,7 +635,19 @@ async def secret_wrap_lookup(operation_id: str) -> dict:
         operation_id: Identifiant de corrélation write-ahead
 
     Returns:
-        {status, state, operation_id, count_revoked, entries_found}
+        {status: "ok", state, operation_id, count_revoked, entries_found}
+
+    ⚠️ Cas d'ERREUR ajouté (#78) : `status: "error"`,
+    `error_type: "consume_terminal"` dès qu'au moins une entrée est figée sur un
+    état terminal de consommation (`unusable` ou `consume_outcome_unknown`).
+    Elle n'est ni révoquée ni attestée. C'est délibérément une ERREUR et non un
+    succès : un appelant qui assimile `status: "ok"` à « compensation achevée »
+    conclurait à tort que la ressource est neutralisée. Le corps porte alors
+    `count_revoked`, `count_already_revoked` et `count_consume_terminal`.
+
+    Si une révocation échoue EN PLUS, l'erreur reste `partial_revocation` (le
+    retry est alors la bonne action), mais elle porte les mêmes compteurs et son
+    message signale les entrées terminales qu'aucun retry ne résoudra.
     """
     from .auth.context import check_policy, check_wrap_permission
     from .vault.wrapping import lookup_and_revoke_by_operation_id, is_safe_id
@@ -672,8 +684,20 @@ async def secret_wrap_status(operation_id: str) -> dict:
     Aucune révocation, aucune écriture durable (issue #77).
 
     États : not_found | pending | active | consuming | consumed | revoked |
-            failed | ambiguous | registry_inconsistent (status=ok) ;
+            failed | unusable | consume_outcome_unknown | ambiguous |
+            registry_inconsistent (status=ok) ;
             backend_unavailable (status=error).
+
+    Deux états TERMINAUX de consommation (issue #78) :
+
+    - `unusable` — la consommation a été tentée et OpenBao a répondu de façon
+      CERTAINE que le wrap est mort (invalide, expiré ou déjà consommé) ;
+    - `consume_outcome_unknown` — la consommation a été tentée mais rien ne
+      permet de savoir si OpenBao l'a consommée (délai dépassé, réseau, 5xx).
+
+    Aucun des deux n'est réessayable, et **aucun des deux n'est une révocation** :
+    personne n'a révoqué. Ils remplacent un retour à `active` qui annonçait
+    « disponible » une provision peut-être définitivement brûlée.
 
     Args:
         operation_id: Identifiant de corrélation write-ahead.

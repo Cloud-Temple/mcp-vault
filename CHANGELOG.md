@@ -1,5 +1,88 @@
 # Changelog — MCP Vault
 
+## [Non publié]
+
+### RUPTURE de contrat d'erreurs — la consommation d'un wrap ne peut plus mentir (issue #78, findings 2 et 3)
+
+**Ce qui était faux.** `secret_consume` passe l'entrée du registre de `active` à
+`consuming`, puis demande à OpenBao de déballer le secret. Sur **toute** erreur,
+l'ancien code remettait l'entrée à `active` et répondait
+`backend_error` — « Erreur lors de l'unwrap (**réessayer**) ».
+
+Deux défauts, dont c'est l'effet **combiné** qui compte :
+
+- **le retour à `active` est indémontrable** : une fois l'appel parti, OpenBao a
+  pu consommer le jeton avant que la réponse ne se perde. Le registre annonçait
+  alors « disponible » une provision peut-être définitivement brûlée ;
+- **la classification était aveugle au cas réel** : elle cherchait « 403 » ou
+  « 404 » dans le texte de l'exception, alors qu'OpenBao répond **400**
+  (« wrapping token is not valid or does not exist ») pour un jeton invalide,
+  expiré ou déjà consommé. `invalid_wrap_token` et `wrap_expired` étaient donc
+  inatteignables sur ce chemin.
+
+Ensemble : un jeton **mort** produisait « réessayer » **et** un registre qui le
+déclarait actif. Soit une boucle de retry sur un jeton qui ne pourra jamais
+aboutir, cautionnée par le registre. Relevé par l'équipe `mcp-mission`, qui
+avait déjà payé un incident voisin sur ce périmètre.
+
+#### Ce qui change
+
+**Après le passage en `consuming`, plus aucun retour à `active`.** Deux états
+terminaux, et deux `error_type` correspondants, tous deux **non réessayables** :
+
+| État de registre | `error_type` | Quand |
+| --- | --- | --- |
+| `unusable` | `wrap_unusable` | **seul cas** : OpenBao répond `400` avec son motif exact (« wrapping token is not valid or does not exist ») |
+| `consume_outcome_unknown` | `consume_outcome_unknown` | délai dépassé, réseau, 5xx, ou 400 inattendu — l'issue n'est pas établie |
+
+**La classification passe par la classe d'exception hvac**, plus par une
+recherche de sous-chaîne dans `str(e)`. Et elle est volontairement **étroite** :
+un `400` sans le motif exact reste indéterminé, et **`403`/`404` aussi**. Ces
+deux codes ne prouvent que la réponse HTTP, pas le sort du jeton — un proxy, un
+routage erroné ou un refus d'infrastructure les produit avec un wrap encore
+vivant. Le faux « indéterminé » coûte un reprovisionnement ; le faux « mort »
+ferait jeter une provision valide.
+
+**Un `consuming` résiduel n'est plus banalisé.** Si la transition terminale n'a
+pas pu être persistée, ou si une tentative a été interrompue, l'entrée reste
+`consuming` sur S3. Un appel suivant répond désormais `consume_outcome_unknown`
+et non `already_consuming` : l'issue est réellement inconnue, pas une
+concurrence passagère.
+
+**`empty_secret` n'est plus un retour arrière.** Si OpenBao a répondu, le jeton a
+été présenté et traité : l'entrée est marquée `consumed`, et l'erreur est
+non réessayable. L'ancien code y faisait un rollback vers `active` — doublement
+faux.
+
+**Le retour arrière AVANT l'appel reste, lui, légitime** : si la persistance du
+passage en `consuming` échoue, rien n'a été envoyé à OpenBao et le wrap est
+réellement toujours disponible. Cette distinction est verrouillée par un test.
+
+**Deux surfaces de lecture s'alignent** : `secret_wrap_status` restitue les deux
+nouveaux états (sans `expires_at`, qui n'a de sens que pour un état vivant), et
+`secret_wrap_lookup` rend `consume_terminal` au lieu d'`already_revoked` — parce
+qu'un état terminal de consommation **n'est pas une révocation attestée**.
+
+> ⚠️ **Deux contrats évoluent, pas un.** Outre les `error_type` de
+> `secret_consume`, `secret_wrap_lookup` peut désormais répondre
+> `status: "error"` avec `error_type: "consume_terminal"`. C'est **délibérément
+> une erreur et non un succès** : un appelant existant qui assimile tout
+> `status: "ok"` à « compensation achevée » conclurait à tort que la ressource
+> est neutralisée, alors qu'aucune révocation n'est attestée. Le rendre en
+> erreur protège le consommateur qui n'a pas encore été adapté. Cela vaut aussi
+> quand d'autres entrées ont réellement été révoquées : une seule entrée non
+> attestée interdit d'affirmer que tout l'a été.
+
+#### Pour les appelants
+
+`wrap_unusable` et `consume_outcome_unknown` **ne doivent pas être réessayés**.
+Si l'accès reste nécessaire, provisionner un nouveau wrap. Le contrat d'erreurs
+de `secret_consume` était explicitement annoncé comme « à versionner à l'issue de
+ce durcissement » (#78) : c'est cette version.
+
+**Tests** : `tests/test_consume_outcome_78.py` — 29 tests. **11 mutations
+mesurées, toutes détectées.** Suite : 1285 passed / 29 skipped / 0 failed.
+
 ## [0.11.0] — 2026-08-13
 
 > ### ⚠️ À FAIRE AVANT DE DÉPLOYER
