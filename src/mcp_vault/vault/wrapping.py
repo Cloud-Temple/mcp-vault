@@ -377,26 +377,45 @@ class WrapRegistry:
                 return self._save()
         return False
 
-    def rollback_consuming(self, operation_id: str, mission_id: str) -> bool:
+    def _mark_consume_terminal(self, operation_id: str, mission_id: str,
+                               terminal: str) -> bool:
         """
-        Rollback : "consuming" → "active" si l'unwrap OpenBao a échoué.
-        Retourne True si S3 OK, False si S3 fail (état mémoire corrigé,
-        S3 garde "consuming" jusqu'au prochain rechargement/timeout).
+        Fige une consommation qui n'a pas abouti : "consuming" → état TERMINAL.
+
+        Remplace l'ancien `rollback_consuming` (issue #78, finding 2). Celui-ci
+        ramenait l'entrée à "active" après TOUT échec d'unwrap — y compris
+        lorsque OpenBao avait pu consommer le jeton avant que la réponse ne se
+        perde. Le registre annonçait alors « disponible » une provision
+        définitivement brûlée, et le contrat d'erreur invitait à réessayer.
+
+        **Aucun retour à "active" n'est possible ici** : une fois le CAS franchi,
+        l'appel a été émis, et rien ne permet plus de prouver qu'il n'a pas été
+        traité. Les échecs DÉTERMINISTES (binding, entrée introuvable) sont
+        détectés AVANT le CAS et n'atteignent jamais cette fonction.
         """
         for entry in self._wraps:
             if (entry["operation_id"] == operation_id
                     and entry["mission_id"] == mission_id
                     and entry["status"] == "consuming"):
-                entry["status"] = "active"
+                entry["status"] = terminal
                 ok = self._save()
                 if not ok:
                     logger.warning(
-                        "⚠️ rollback_consuming S3 fail (op=%r) — "
-                        "état mémoire: active, S3: stale-consuming",
-                        operation_id[:16],
+                        "⚠️ transition terminale S3 fail (op=%r) — "
+                        "état mémoire: %s, S3: stale-consuming",
+                        operation_id[:16], terminal,
                     )
                 return ok
         return False
+
+    def mark_unusable(self, operation_id: str, mission_id: str) -> bool:
+        """"consuming" → "unusable" : OpenBao affirme le wrap mort."""
+        return self._mark_consume_terminal(operation_id, mission_id, "unusable")
+
+    def mark_outcome_unknown(self, operation_id: str, mission_id: str) -> bool:
+        """"consuming" → "consume_outcome_unknown" : issue indéterminée."""
+        return self._mark_consume_terminal(
+            operation_id, mission_id, "consume_outcome_unknown")
 
     def count(self) -> int:
         return len(self._wraps)
@@ -803,6 +822,34 @@ async def lookup_and_revoke_by_operation_id(operation_id: str) -> dict:
     active_entries = [e for e in entries if e["status"] == "active" and e.get("accessor")]
 
     if not active_entries:
+        # #78 : ne PAS annoncer `already_revoked` sur un état terminal de
+        # consommation. `unusable` et `consume_outcome_unknown` ne sont pas des
+        # révocations attestées — le premier constate un jeton mort côté
+        # OpenBao, le second ne constate rien du tout. Les confondre ferait
+        # croire à une révocation qui n'a jamais eu lieu.
+        terminaux = [e for e in entries
+                     if e.get("status") in _CONSUME_TERMINAL_STATUSES]
+        if terminaux:
+            # `status: "error"` DÉLIBÉRÉMENT (revue de diff #78). Un appelant
+            # existant qui assimile tout `status: "ok"` à « compensation
+            # achevée » conclurait à tort que la ressource est neutralisée —
+            # alors qu'aucune révocation n'est attestée et que le jeton peut
+            # être encore vivant. Le rendre en erreur force la prudence chez un
+            # consommateur qui n'a pas encore été adapté.
+            #
+            # Vaut AUSSI quand d'autres entrées sont réellement révoquées : dire
+            # `already_revoked` affirmerait que TOUT l'a été.
+            return {
+                "status": "error", "error_type": "consume_terminal",
+                "operation_id": operation_id, "count_revoked": 0,
+                "entries_found": len(entries), "count_already_revoked": count_already,
+                "count_consume_terminal": len(terminaux),
+                "message": "Au moins une entrée est figée sur un état terminal "
+                           "de consommation : elle n'est ni révoquée ni "
+                           "attestée. Le TTL OpenBao gérera son expiration si "
+                           "le jeton est encore vivant ; ne pas conclure que la "
+                           "ressource est entièrement neutralisée",
+            }
         return {
             "status": "ok", "state": "already_revoked",
             "operation_id": operation_id, "count_revoked": 0, "entries_found": len(entries),
@@ -832,11 +879,42 @@ async def lookup_and_revoke_by_operation_id(operation_id: str) -> dict:
             errors.append(result.get("error_type", "backend_error"))
 
     if errors:
+        # #78 : ce chemin porte AUSSI les compteurs. Sans eux, un appelant
+        # verrait « révocations échouées, réessayer » sans savoir qu'une entrée
+        # est en outre figée sur un état terminal — qu'aucun retry ne résoudra.
+        terminaux_partiels = [e for e in entries
+                              if e.get("status") in _CONSUME_TERMINAL_STATUSES]
+        message = f"{len(errors)} révocations échouées (réessayer)"
+        if terminaux_partiels:
+            message += (f" ; {len(terminaux_partiels)} entrée(s) figée(s) sur un "
+                        "état terminal de consommation, qu'un nouvel essai ne "
+                        "résoudra pas")
         return {
             "status": "error", "error_type": "partial_revocation",
             "operation_id": operation_id, "count_revoked": count_revoked,
-            "entries_found": len(entries),
-            "message": f"{len(errors)} révocations échouées (réessayer)",
+            "entries_found": len(entries), "count_already_revoked": count_already,
+            "count_consume_terminal": len(terminaux_partiels),
+            "message": message,
+        }
+
+    # #78, revue de diff : le mélange TERMINAL + ACTIF ne doit pas non plus
+    # sortir en succès. On vient de révoquer les entrées actives, mais une
+    # entrée figée sur un état terminal reste NON ATTESTÉE — un consommateur
+    # non adapté lirait ce `status: ok` comme « compensation achevée ».
+    # Le comptage reste fidèle : `count_revoked` dit ce qui a réellement été
+    # révoqué à l'instant.
+    terminaux_restants = [e for e in entries
+                          if e.get("status") in _CONSUME_TERMINAL_STATUSES]
+    if terminaux_restants:
+        return {
+            "status": "error", "error_type": "consume_terminal",
+            "operation_id": operation_id, "count_revoked": count_revoked,
+            "entries_found": len(entries), "count_already_revoked": count_already,
+            "count_consume_terminal": len(terminaux_restants),
+            "message": "Révocations effectuées, mais au moins une entrée est "
+                       "figée sur un état terminal de consommation : elle n'est "
+                       "ni révoquée ni attestée. Ne pas conclure que la "
+                       "ressource est entièrement neutralisée",
         }
 
     total_entries = len(entries)
@@ -856,7 +934,109 @@ async def lookup_and_revoke_by_operation_id(operation_id: str) -> dict:
 
 # États d'entrée reconnus du registre (transitions register_pending → mark_active
 # → try_mark_consuming → mark_consumed, + mark_revoked / mark_failed).
-_KNOWN_WRAP_STATUSES = frozenset({"pending", "active", "consuming", "consumed", "revoked", "failed"})
+#
+# Issue #78 (finding 2) : DEUX états TERMINAUX supplémentaires, posés après le
+# CAS `active → consuming` lorsque l'unwrap n'aboutit pas. Ils remplacent le
+# retour à `active`, qui affirmait « réessayable » sans jamais pouvoir le prouver.
+#
+#   `unusable`                — OpenBao a répondu de façon CERTAINE que le wrap
+#                               est mort (invalide / expiré / déjà consommé).
+#   `consume_outcome_unknown` — l'appel a été tenté, mais rien ne permet de
+#                               savoir si OpenBao l'a consommé (timeout, réseau,
+#                               5xx, réponse inexploitable).
+#
+# Ni l'un ni l'autre n'est `failed` (réservé à l'échec de PROVISIONNEMENT) ni
+# `revoked` (qui affirmerait une révocation attestée).
+_KNOWN_WRAP_STATUSES = frozenset({
+    "pending", "active", "consuming", "consumed", "revoked", "failed",
+    "unusable", "consume_outcome_unknown",
+})
+
+# États terminaux d'une consommation qui n'a pas abouti : plus aucune transition
+# n'en sort, et aucune primitive de révocation ne doit les muter.
+_CONSUME_TERMINAL_STATUSES = frozenset({"unusable", "consume_outcome_unknown"})
+
+
+def _openbao_says_wrap_is_dead(exc: BaseException) -> bool:
+    """
+    L'exception prouve-t-elle que le wrap est DÉFINITIVEMENT inutilisable ?
+
+    Issue #78, finding 3. Le mapping historique cherchait « 403 » / « 404 » dans
+    `str(e)` — fragile par nature, et surtout aveugle au cas réel : OpenBao
+    répond **400** avec « wrapping token is not valid or does not exist » pour un
+    jeton invalide, expiré ou déjà consommé.
+
+    **Un seul signal est assez étroit** : `InvalidRequest` (400) portant le motif
+    exact d'OpenBao. Tout le reste est INDÉTERMINÉ, y compris 403 et 404.
+
+    ⚠️ 403 et 404 ont d'abord été classés « certitude » ici, puis RETIRÉS en
+    revue. Ils ne prouvent que le code HTTP, pas le sort du jeton : un proxy, un
+    routage ou un namespace erroné, ou un refus de l'infrastructure lèvent les
+    mêmes classes **avec un wrap encore vivant**. Les classer « mort » ferait
+    annoncer inutilisable une provision valide — et pousserait l'appelant à en
+    reprovisionner une pour rien, en abandonnant celle qui marchait.
+
+    Ne JAMAIS élargir cette fonction par confort. Un faux positif ici est plus
+    coûteux qu'un faux « indéterminé » : le second fait reprovisionner, le
+    premier fait jeter du bon.
+    """
+    try:
+        import hvac as _hvac
+        exceptions = _hvac.exceptions
+    except Exception:  # noqa: BLE001 — hvac absent/stubbé : on ne conclut rien
+        return False
+
+    invalid_request = getattr(exceptions, "InvalidRequest", None)
+
+    if isinstance(invalid_request, type) and isinstance(exc, invalid_request):
+        # `errors` est la liste structurée renvoyée par OpenBao ; `str(exc)` la
+        # reprend quand elle est présente. On exige le motif connu.
+        parts = []
+        erreurs = getattr(exc, "errors", None)
+        if isinstance(erreurs, (list, tuple)):
+            parts.extend(str(x) for x in erreurs)
+        parts.append(str(exc))
+        blob = " ".join(parts).lower()
+        return "wrapping token is not valid or does not exist" in blob
+
+    return False
+
+
+def _usable_kv2_secret(unwrap_response) -> Optional[dict]:
+    """
+    Rend l'enveloppe KV v2 si elle porte un secret EXPLOITABLE, sinon `None`.
+
+    Issue #78. `wrap_secret` enveloppe une lecture KV v2
+    (`{vault_id}/data/{secret_path}`) et `hvac.sys.unwrap()` **n'aplatit pas** la
+    réponse : la forme réelle est
+
+        {"data": {"data": <paires>, "metadata": {...}}}
+
+    Le secret en clair est donc à `data.data`, jamais à `data`.
+
+    ⚠️ NE JAMAIS revenir à un test sur `data` seul. L'enveloppe porte TOUJOURS
+    `metadata`, donc `unwrap_response["data"]` est toujours vrai en production :
+    c'est ce qui rendait la garde `empty_secret` **inatteignable**. Une version
+    sans aucune paire, ou supprimée (KV v2 rend alors `data: null`), sortait en
+    `status: "ok"` — l'appelant lisait « succès » sans avoir de secret. Même
+    famille que le finding 3, où `invalid_wrap_token`/`wrap_expired` étaient
+    inatteignables faute de correspondre à la réalité d'OpenBao.
+
+    Toute forme non conforme est traitée FAIL-CLOSED (`None`), y compris une
+    réponse qui n'est pas un dict : OpenBao A RÉPONDU, donc le jeton à usage
+    unique est brûlé de toute façon. Un refus honnête vaut mieux qu'un succès
+    sans secret, et cette décision-là est CERTAINE — ne pas la confondre avec
+    l'issue indéterminée d'un appel qui a échoué.
+    """
+    if not isinstance(unwrap_response, dict):
+        return None
+    envelope = unwrap_response.get("data")
+    if not isinstance(envelope, dict):
+        return None
+    pairs = envelope.get("data")
+    if not isinstance(pairs, dict) or not pairs:
+        return None
+    return envelope
 
 
 async def status_by_operation_id(operation_id: str) -> dict:
@@ -981,10 +1161,16 @@ async def consume_wrap_secret(
     4. mark_consumed() — anti-replay
     5. Retourner le secret (jamais wrap_token dans le retour)
 
+    ⚠️ AUCUN RETOUR ARRIÈRE APRÈS L'ÉTAPE 2 (issue #78, finding 2). Une fois le
+    CAS franchi et l'appel émis, rien ne prouve plus que le jeton n'a pas été
+    consommé : tout échec fige l'entrée sur un état TERMINAL — `unusable` si
+    OpenBao affirme le wrap mort, `consume_outcome_unknown` sinon. Le retour
+    arrière ne subsiste QU'AVANT l'étape 2, quand la persistance du CAS échoue
+    et que rien n'est parti.
+
     Sécurité :
     - wrap_token jamais loggué (paramètre SENSIBLE)
     - Binding mismatch détecté AVANT try_mark_consuming (pas d'état orphelin)
-    - En cas d'échec OpenBao, rollback_consuming() pour permettre un retry
     - mission_id dans tous les logs (non-sensible, corrélation)
     """
     registry = get_wrap_registry()
@@ -1004,11 +1190,22 @@ async def consume_wrap_secret(
     if entry is None:
         # Chercher si l'entrée est consumed ou revoked (anti-replay)
         all_entries = registry.find_by_operation_id(operation_id)
-        already_consumed = any(
-            e["mission_id"] == mission_id and e["status"] in ("consumed", "revoked")
-            for e in all_entries
-        )
-        if already_consumed:
+        miennes = [e for e in all_entries if e.get("mission_id") == mission_id]
+
+        # #78 : un retry sur un état TERMINAL doit rendre l'erreur terminale
+        # correspondante — jamais `already_consumed`, qui affirmerait une
+        # consommation aboutie, et surtout jamais un second unwrap.
+        if any(e.get("status") == "unusable" for e in miennes):
+            return {"status": "error", "error_type": "wrap_unusable",
+                    "message": "Wrap inutilisable (invalide, expiré ou déjà "
+                               "consommé) — ne pas réessayer"}
+        if any(e.get("status") == "consume_outcome_unknown" for e in miennes):
+            return {"status": "error", "error_type": "consume_outcome_unknown",
+                    "message": "Issue de la consommation indéterminée — le wrap "
+                               "a pu être consommé. Ne pas réessayer ; "
+                               "provisionner un nouveau wrap si nécessaire"}
+
+        if any(e.get("status") in ("consumed", "revoked") for e in miennes):
             return {"status": "error", "error_type": "already_consumed",
                     "message": "Ce wrap a déjà été consommé"}
         return {"status": "error", "error_type": "not_found",
@@ -1018,6 +1215,32 @@ async def consume_wrap_secret(
     # Vérification AVANT try_mark_consuming : pas d'état "consuming" orphelin si mismatch.
     # tenant_id et expected_aud sont optionnels (rétrocompat wraps legacy).
     # En mode enforce=True : les wraps sans expected_aud sont refusés (binding incomplet).
+    # La COMPLÉTUDE est évaluée AVANT les mismatches (issue #78, relevé en revue
+    # pré-commit). Dans l'autre ordre, une entrée historique dont le champ vaut
+    # des espaces blancs tombait en `binding_mismatch` — diagnostic trompeur :
+    # le défaut n'est pas que l'appelant présente la mauvaise valeur, c'est que
+    # l'entrée n'atteste rien. Un exploitant lisant « mismatch » chercherait une
+    # erreur d'appel là où il faut reprovisionner.
+    if enforce:
+        # Finding 4 : le binding C18 repose sur DEUX champs. N'exiger que
+        # `expected_aud` rendait le contrôle d'appartenance au locataire
+        # inopérant précisément quand le champ manque — c'est-à-dire dans le seul
+        # cas où il aurait servi. Les deux sont désormais requis en mode durci.
+        # Les espaces blancs ne valent pas un binding : un champ vide déguisé
+        # n'atteste rien.
+        manquants = [c for c in ("tenant_id", "expected_aud")
+                     if not (entry.get(c) or "").strip()]
+        if manquants:
+            logger.warning(
+                "⚠️ consume_wrap_secret : binding incomplet en mode enforced "
+                "op=%r — %s manquant(s), rejeté",
+                operation_id[:16], ", ".join(manquants),
+            )
+            return {"status": "error", "error_type": "binding_incomplete",
+                    "message": "binding incomplet en mode enforced "
+                               f"({', '.join(manquants)} manquant(s)) — "
+                               "reprovisionner un wrap"}
+
     if entry.get("tenant_id") and tenant_id != entry["tenant_id"]:
         logger.warning(
             "⚠️ consume_wrap_secret : binding mismatch (tenant_id) op=%r — confused-deputy rejeté",
@@ -1032,46 +1255,83 @@ async def consume_wrap_secret(
         )
         return {"status": "error", "error_type": "binding_mismatch",
                 "message": "binding mismatch"}
-    if enforce and not entry.get("expected_aud"):
-        logger.warning(
-            "⚠️ consume_wrap_secret : wrap sans expected_aud en mode enforced op=%r — rejeté",
-            operation_id[:16],
-        )
-        return {"status": "error", "error_type": "binding_incomplete",
-                "message": "binding incomplet (expected_aud manquant)"}
 
     # ── 2. Atomic try_mark_consuming ────────────────────────────────
     if not registry.try_mark_consuming(operation_id, mission_id):
+        # Le CAS a échoué pour DEUX raisons possibles, qui n'ont pas du tout le
+        # même sens (issue #78) :
+        courant = registry.get_by_composite_key(operation_id, mission_id) or {}
+        if courant.get("status") == "consuming":
+            # L'entrée est RESTÉE en `consuming`. Soit une tentative précédente
+            # a été interrompue, soit sa transition terminale n'a pas pu être
+            # persistée. Dans les deux cas OpenBao a pu consommer le jeton :
+            # l'issue est inconnue, et le dire `already_consuming` laisserait
+            # croire à une simple concurrence passagère.
+            return {"status": "error", "error_type": "consume_outcome_unknown",
+                    "message": "Issue de la consommation indéterminée — une "
+                               "tentative précédente n'a pas abouti et le wrap "
+                               "a pu être consommé. Ne pas réessayer ; "
+                               "provisionner un nouveau wrap si nécessaire"}
+        # Sinon : la persistance du CAS a échoué et l'entrée est revenue à
+        # `active`. RIEN n'a été envoyé à OpenBao — le wrap est réellement
+        # toujours disponible, et un nouvel essai est légitime.
         return {"status": "error", "error_type": "already_consuming",
                 "message": "Wrap en cours de consommation ou déjà consommé"}
 
     # ── 3. Unwrap OpenBao cubbyhole ─────────────────────────────────
+    # À PARTIR D'ICI, AUCUN RETOUR À "active" (issue #78, finding 2). Le CAS est
+    # franchi et l'appel part : quoi qu'il advienne, on ne peut plus prouver que
+    # le jeton n'a pas été consommé côté OpenBao.
+    # Le `try` ne couvre QUE l'appel (issue #78). Mêler l'inspection du CONTENU
+    # à la capture d'exception rangeait une réponse illisible en « issue
+    # indéterminée » alors que l'issue est CONNUE : OpenBao a répondu.
     try:
         # Utiliser un client éphémère avec le wrap_token comme token d'auth
         import hvac as _hvac
         ephemeral_client = _hvac.Client(url=settings.openbao_addr, token=wrap_token)
         unwrap_response = ephemeral_client.sys.unwrap()
 
-        secret_data = unwrap_response.get("data", {})
-        if not secret_data:
-            registry.rollback_consuming(operation_id, mission_id)
-            return {"status": "error", "error_type": "empty_secret",
-                    "message": "Le wrap a retourné des données vides"}
-
     except Exception as e:
-        err_str = str(e).lower()
-        registry.rollback_consuming(operation_id, mission_id)
+        # Classification par CLASSE d'exception hvac, jamais par recherche de
+        # sous-chaîne dans `str(e)` (issue #78, finding 3). L'ancien mapping ne
+        # testait que « 403 »/« 404 » ; OpenBao répond **400** pour un jeton
+        # invalide, expiré ou déjà consommé — le cas réel tombait donc en
+        # `backend_error` « réessayer », sur un jeton définitivement mort.
+        certain = _openbao_says_wrap_is_dead(e)
 
-        if any(k in err_str for k in ("403", "forbidden", "bad token")):
-            return {"status": "error", "error_type": "invalid_wrap_token",
-                    "message": "Wrap token invalide ou expiré"}
-        if any(k in err_str for k in ("404", "not found")):
-            return {"status": "error", "error_type": "wrap_expired",
-                    "message": "Wrap token expiré ou déjà utilisé (single-use)"}
+        if certain:
+            registry.mark_unusable(operation_id, mission_id)
+            logger.info("consume_wrap_secret : wrap mort (op=%r, %s)",
+                        operation_id[:16], type(e).__name__)
+            return {"status": "error", "error_type": "wrap_unusable",
+                    "message": "Wrap inutilisable (invalide, expiré ou déjà "
+                               "consommé) — ne pas réessayer"}
 
-        logger.error("consume_wrap_secret OpenBao error: %s", type(e).__name__)
-        return {"status": "error", "error_type": "backend_error",
-                "message": "Erreur lors de l'unwrap (réessayer)"}
+        # Issue INDÉTERMINÉE : timeout, réseau, 5xx, ou 400 inattendu. OpenBao a
+        # pu consommer le jeton avant que la réponse ne se perde. On fige, on ne
+        # promet rien, et on n'invite PAS à réessayer.
+        registry.mark_outcome_unknown(operation_id, mission_id)
+        logger.error("consume_wrap_secret : issue indéterminée (op=%r, %s)",
+                     operation_id[:16], type(e).__name__)
+        return {"status": "error", "error_type": "consume_outcome_unknown",
+                "message": "Issue de la consommation indéterminée — le wrap a "
+                           "pu être consommé. Ne pas réessayer ; provisionner "
+                           "un nouveau wrap si l'accès reste nécessaire"}
+
+    # ── 3b. Verdict sur le CONTENU de la réponse (issue #78) ────────
+    # L'appel a abouti : le jeton à usage unique est brûlé, quoi que porte la
+    # réponse. Il reste à dire honnêtement s'il y a un secret EXPLOITABLE. Un
+    # « succès » sans secret est un mensonge de contrat, pas une commodité.
+    secret_data = _usable_kv2_secret(unwrap_response)
+    if secret_data is None:
+        registry.mark_consumed(operation_id, mission_id)
+        logger.warning(
+            "consume_wrap_secret : réponse sans secret exploitable (op=%r) — "
+            "jeton brûlé, marqué consommé", operation_id[:16],
+        )
+        return {"status": "error", "error_type": "empty_secret",
+                "message": "Le wrap n'a retourné aucun secret exploitable "
+                           "(consommé, non réessayable)"}
 
     # ── 4. Marquer consumed ─────────────────────────────────────────
     registry.mark_consumed(operation_id, mission_id)

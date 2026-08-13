@@ -447,6 +447,38 @@ chemin load S3 = preuve du fail-close de downgrade) ; harnais historiques
 `test_consume_hygiene_78.py`, `test_jwt_validator.py`) adaptés : identité admin
 explicite via ContextVar (un contexte absent n'est JAMAIS traité comme admin).
 
+### 17. Contrat de consommation d'un wrap — issue #78 (79 tests)
+
+**Ce que ces bancs prouvent, et pourquoi ils existent séparément.**
+
+`test_consume_outcome_78.py` (56 tests) — findings 2 et 3, plus le défaut de
+FORME. Après le passage en `consuming`, aucun retour à `active` ; classification
+par CLASSE d'exception hvac et non par sous-chaîne ; `403`/`404` explicitement
+NON traités comme preuves de jeton mort. Contient un **test de contrat sur la
+forme de l'enveloppe KV v2, dont la liste est figée À LA MAIN** — y compris la
+forme APLATIE qui a causé le défaut, afin qu'aucun simulacre ne la réintroduise.
+
+`test_binding_enforce_78.py` (19 tests) — finding 4, binding exigé **aux deux
+bouts** en mode durci : refus à la consommation (avant tout appel OpenBao, le
+wrap n'est pas brûlé) ET refus à la création (le serveur ne peut pas déduire le
+locataire). Inclut les garde-fous anti-complaisance : le cas nominal du mode
+durci passe, et hors mode durci la rétrocompatibilité est préservée.
+
+`test_consume_openbao_78.py` (4 tests, **OPT-IN — OpenBao réel requis**) — le
+critère d'acceptation que les simulacres ne pouvaient pas tenir. Poser
+`MCP_VAULT_TEST_OPENBAO_ADDR` + `MCP_VAULT_TEST_OPENBAO_TOKEN`, sinon SKIP.
+Couvre le flux `wrap_secret → consume_wrap_secret` de bout en bout : forme réelle
+de la sortie (`data.data` + `metadata`), usage unique, jeton révoqué dans le dos
+du registre, et **secret sans paire exploitable**.
+
+> ⚠️ **À AUDITER EN PRIORITÉ.** Le défaut de forme était invisible aux
+> simulacres : ceux de `test_wrap.py` rendaient un payload APLATI qu'OpenBao ne
+> produit jamais, ce qui rendait la garde « secret vide » VERTE alors qu'elle
+> était morte en production. Vérifié rouge sans le correctif **contre le moteur
+> réel** : le coffre répondait `status: "ok"` avec `data.data == {}`. Toute
+> évolution de ce périmètre doit être rejouée contre un OpenBao réel, jamais
+> contre des simulacres seuls.
+
 ---
 
 ## Comment lancer les tests

@@ -718,7 +718,14 @@ def test_consume_binding_correct_succeeds():
     mock_hvac = MagicMock()
     mock_ephemeral = MagicMock()
     mock_hvac.Client.return_value = mock_ephemeral
-    mock_ephemeral.sys.unwrap.return_value = {"data": {"password": "s3cr3t"}}
+    # Enveloppe KV v2 RÉELLE (issue #78) : `hvac.sys.unwrap()` n'aplatit pas la
+    # réponse. Le simulacre précédent rendait `{"data": {"password": …}}`, forme
+    # qu'OpenBao ne produit JAMAIS pour une lecture `{vault}/data/{path}` — il
+    # validait donc un comportement absent de la production.
+    mock_ephemeral.sys.unwrap.return_value = {
+        "data": {"data": {"password": "s3cr3t"},
+                 "metadata": {"version": 1, "destroyed": False}},
+    }
     cfg = MagicMock(); cfg.openbao_addr = "http://127.0.0.1:8200"
 
     with patch.dict(sys.modules, {"hvac": mock_hvac}), \
@@ -734,7 +741,9 @@ def test_consume_binding_correct_succeeds():
         ))
 
     assert result["status"] == "ok", f"Binding correct mais consume échoué: {result}"
-    assert result["data"] == {"password": "s3cr3t"}
+    # Le secret en clair est à data.data — PAS à data (contrat communiqué à mcp-agent).
+    assert result["data"]["data"] == {"password": "s3cr3t"}
+    assert "metadata" in result["data"]
     print("  ✅ TEST 16d — binding correct → consume réussit")
 
 
@@ -828,7 +837,11 @@ def test_consume_binding_empty_registry_fields_ignored():
     mock_hvac = MagicMock()
     mock_ephemeral = MagicMock()
     mock_hvac.Client.return_value = mock_ephemeral
-    mock_ephemeral.sys.unwrap.return_value = {"data": {"key": "val"}}
+    # Enveloppe KV v2 réelle (issue #78) — voir TEST 16d.
+    mock_ephemeral.sys.unwrap.return_value = {
+        "data": {"data": {"key": "val"},
+                 "metadata": {"version": 1, "destroyed": False}},
+    }
     cfg = MagicMock(); cfg.openbao_addr = "http://127.0.0.1:8200"
 
     with patch.dict(sys.modules, {"hvac": mock_hvac}), \
