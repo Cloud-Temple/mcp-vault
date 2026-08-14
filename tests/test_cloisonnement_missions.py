@@ -2,45 +2,29 @@
 """
 Cloisonnement inter-missions du registre de wraps.
 
-## Le défaut
-
 Un `operation_id` n'est PAS unique entre missions : c'est le couple
-`(operation_id, mission_id)` qui identifie une provision. La consommation et les
-transitions terminales l'utilisaient depuis toujours ; **quatre autres chemins
-non**.
+`(operation_id, mission_id)` qui identifie une provision. La consommation
+l'utilisait déjà ; quatre autres chemins non.
 
-Le plus grave est DESTRUCTIF et atteignable en mono-instance, séquentiellement :
-`lookup_and_revoke_by_operation_id` (exposé par l'outil `secret_wrap_lookup`,
-chemin de compensation des orphelins) sélectionnait par `operation_id` seul puis
-**révoquait**. Compenser un orphelin de la mission A détruisait donc la provision
-VIVANTE de la mission B.
+Le plus grave est DESTRUCTIF et atteignable en mono-instance :
+`lookup_and_revoke_by_operation_id` (outil `secret_wrap_lookup`, compensation des
+orphelins) sélectionnait par `operation_id` seul puis **révoquait**. Compenser un
+orphelin de A détruisait la provision VIVANTE de B.
 
-⚠️ Le filtre d'identité de #115 ne protégeait pas : le broker `mcp-mission-broker`
-porte **un seul jeton pour toutes les missions**, donc toutes les entrées lui sont
-visibles. C'est précisément pourquoi `mcp-mission` s'était replié sur un
-fail-close `ambiguous`, au prix d'orphelins non compensés — notre défaut était la
-cause de leur contournement.
+⚠️ Le filtre d'identité de #115 ne protégeait pas : le broker porte un seul jeton
+pour toutes les missions.
 
-Les trois autres :
+Les trois autres : `status_by_operation_id` divulguait l'état des provisions
+d'une autre mission ; `mark_active`/`mark_failed` prenaient « la dernière entrée
+pending de cet operation_id », donc pouvaient écrire l'accessor de A sur B.
 
-- `status_by_operation_id` (`secret_wrap_status`) divulguait à une mission
-  l'existence, l'état et la durée de vie restante des provisions d'une autre ;
-- `mark_active` / `mark_failed` prenaient « la dernière entrée `pending` de cet
-  `operation_id` » : le succès OpenBao de A pouvait écrire l'accessor de A sur
-  l'entrée de B.
-
-## Deux défauts d'honnêteté fermés au passage
-
-- `mark_active` rendait le résultat de `_save()` seul : sans correspondance elle
-  annonçait « succès » et l'appelant en concluait que la provision était corrélée
-  et compensable, alors qu'aucune entrée `active` n'existait ;
-- absence ou ambiguïté déclenchaient quand même un `_save()` : une écriture no-op
-  réécrit l'état mémoire par-dessus une version S3 possiblement plus récente
-  d'une autre instance (last-write-wins, pas de CAS — #51).
+Deux défauts d'honnêteté fermés au passage : `mark_active` rendait le résultat de
+`_save()` seul (« succès » sans correspondance), et absence ou ambiguïté
+sauvegardaient quand même — une écriture no-op écrase l'état d'une autre
+instance (last-write-wins, #51).
 
 Tests mockés (pas de conteneur). Stub hvac : `tests/conftest.py`.
 """
-
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -61,7 +45,8 @@ def run(coro):
 
 
 def _registre(entrees=(), *, save_ok=True, echec_a_partir_de=0):
-    """Registre en mémoire qui COMPTE ses sauvegardes.
+    """
+Registre en mémoire qui COMPTE ses sauvegardes.
 
     Le compteur est le cœur des tests d'absence/ambiguïté : il ne suffit pas
     qu'aucune mutation n'ait lieu, il faut prouver qu'aucune ÉCRITURE n'est
@@ -109,12 +94,8 @@ def _entree(mission, statut="pending", accessor=None, op=OP):
 def _de(registre, mission):
     """L'UNIQUE entrée de cette mission — échoue bruyamment s'il y en a plusieurs.
 
-    La version naïve rendait `next(...)`, donc la PREMIÈRE. Dans un montage où
-    une mission porte deux entrées (une ancienne `failed` et une nouvelle
-    `pending`, par exemple), une assertion aurait porté sur la mauvaise sans que
-    rien ne le signale — un faux vert, ou un faux rouge tout aussi trompeur.
-    Signalé en revue comme défaut supposé d'un test ; il ne l'était pas, mais le
-    piège était réel : on le ferme ici plutôt que de compter sur la vigilance.
+    Rendre `next(...)` porterait l'assertion sur une entrée arbitraire dès qu'une
+    mission a deux entrées — faux vert ou faux rouge, sans signal.
     """
     entrees = [e for e in registre._wraps if e["mission_id"] == mission]
     assert len(entrees) == 1, (
@@ -147,12 +128,8 @@ class TestCompensationCloisonnee:
             return run(w.lookup_and_revoke_by_operation_id(OP, mission)), client
 
     def test_compenser_A_ne_revoque_PAS_la_provision_vivante_de_B(self):
-        """
-        CŒUR DU DÉFAUT, et il est DESTRUCTIF. RED avant le correctif : la
-        sélection portait sur l'`operation_id` seul, donc les deux entrées
-        étaient révoquées — la mission B perdait un credential valide sans que
-        personne ne l'ait demandé.
-        """
+        """Le défaut est DESTRUCTIF : la sélection par `operation_id` seul
+        révoquait les deux entrées."""
         registre = _registre([_entree(A, "active", "ACC-A"),
                               _entree(B, "active", "ACC-B")])
         r, client = self._revoquer(registre, A)
@@ -172,12 +149,9 @@ class TestCompensationCloisonnee:
             f"jamais partir")
 
     def test_l_etat_ambiguous_ne_vient_plus_d_une_autre_mission(self):
-        """
-        Deux missions partageant la clé produisaient `ambiguous` — l'état sur
-        lequel `mcp-mission` se replie en fail-close, laissant des orphelins non
-        compensés. Cloisonné, chaque mission voit UNE entrée : la compensation
-        redevient possible.
-        """
+        """`ambiguous` est l'état sur lequel `mcp-mission` se replie en
+        fail-close, au prix d'orphelins non compensés. Cloisonné, chaque mission
+        voit UNE entrée : la compensation redevient possible."""
         registre = _registre([_entree(A, "active", "ACC-A"),
                               _entree(B, "active", "ACC-B")])
         r, _ = self._revoquer(registre, A)
@@ -222,7 +196,7 @@ class TestLectureCloisonnee:
 
     def test_A_ne_voit_pas_l_etat_de_la_provision_de_B(self):
         """
-        RED avant le correctif : la lecture révélait l'existence, l'état et la
+        la lecture révélait l'existence, l'état et la
         durée de vie restante de la provision d'une autre mission.
         """
         registre = _registre([_entree(B, "active", "ACC-B")])
@@ -257,7 +231,7 @@ class TestTransitionsCloisonnees:
 
     def test_mark_active_de_A_n_ecrit_pas_sur_l_entree_de_B(self):
         """
-        RED avant le correctif : la sélection prenait « la dernière entrée
+        la sélection prenait « la dernière entrée
         `pending` de cet `operation_id` » — donc celle de B — et lui collait
         l'accessor de A. L'entrée de A restait `pending` pour toujours.
         """
@@ -280,7 +254,7 @@ class TestTransitionsCloisonnees:
 
     def test_sans_correspondance_mark_active_rend_False_et_n_ecrit_PAS(self):
         """
-        Deux défauts d'un coup. RED avant le correctif : la méthode rendait le
+        Deux défauts d'un coup. la méthode rendait le
         résultat de `_save()` seul, donc `True` — et `wrap_secret` en concluait
         que la provision était corrélée. Elle sauvegardait AUSSI, réécrivant
         l'état mémoire par-dessus une version S3 peut-être plus récente.
@@ -303,7 +277,7 @@ class TestTransitionsCloisonnees:
 
     def test_un_echec_de_sauvegarde_ne_laisse_pas_d_active_FANTOME(self):
         """
-        Relevé en revue de plan : si `_save()` échoue après la mutation mémoire,
+        si `_save()` échoue après la mutation mémoire,
         l'instance gardait un `active` fantôme qu'une écriture ultérieure aurait
         persisté — alors que l'appelant va révoquer l'accessor en urgence.
         """
@@ -399,7 +373,7 @@ class TestPointEntreeReel:
 
 class TestSurfaceMCP:
     """
-    Relevé en revue pré-commit : les bancs existants vérifiaient « la primitive a
+    les bancs existants vérifiaient « la primitive a
     été appelée », pas AVEC QUOI. Un outil qui perdrait ou remplacerait la
     mission rouvrirait la fuite sans faire échouer un seul test.
     """
@@ -460,16 +434,11 @@ class TestSurfaceMCP:
 # =============================================================================
 
 class TestCycleDeVieDuRefus:
-    """
-    J'avais d'abord libéré la clé sur l'échéance de l'entrée `pending`. Écarté
-    après revue : la libération ne suffisait PAS (la nouvelle intention créait une
-    seconde entrée `pending`, donc une ambiguïté, donc un refus plus loin), le
-    plafond de TTL « dur à 300 s » n'existe pas dans notre code (60–3600 s), et
-    `expires_at` est calculé AVANT l'appel OpenBao — il ne borne donc pas la durée
+    """Ces tests FIGENT le comportement livré : le blocage ne dépend pas de
+    l'échéance de l'entrée. Libérer la clé sur `expires_at` ne suffirait pas (la
+    nouvelle intention créerait une seconde entrée `pending`, donc une ambiguïté),
+    et `expires_at` est calculé AVANT l'appel OpenBao — il ne borne pas la durée
     de vie réelle du wrap.
-
-    Ces tests FIGENT le comportement réellement livré, pour qu'il ne soit pas
-    confondu avec celui que j'avais annoncé à tort.
     """
 
     def _echeance(self, decalage_s):
@@ -484,9 +453,8 @@ class TestCycleDeVieDuRefus:
     ])
     def test_aucune_forme_d_echeance_ne_fait_lever_ni_deverrouiller(self, echeance, cas):
         """
-        Le blocage ne dépend PLUS de l'échéance — donc aucune de ses formes ne
-        peut ni lever ni ouvrir la porte. L'échéance naïve est le cas qui faisait
-        remonter un `TypeError` non maîtrisé dans ma première version : la
+        Le blocage ne dépend PAS de l'échéance — aucune de ses formes ne peut donc
+        lever ni ouvrir la porte. L'échéance naïve est le cas piégeux : la
         comparaison naïf/aware lève, et seul `ValueError` était intercepté.
         """
         registre = _registre([_entree(A) | {"expires_at": echeance}])
@@ -494,7 +462,7 @@ class TestCycleDeVieDuRefus:
 
     def test_une_echeance_depassee_bloque_TOUJOURS(self):
         """
-        Comportement livré, assumé et documenté : la reprise se fait avec un
+        la reprise se fait avec un
         NOUVEL operation_id, pas par attente. Ce test existe pour qu'une future
         libération par échéance soit un choix explicite, jamais un glissement.
         """
@@ -519,17 +487,9 @@ class TestCycleDeVieDuRefus:
             "le message affirme un plafond de TTL qui n'existe pas dans ce code")
 
     def test_une_indisponibilite_S3_pendant_la_resolution_bloque_AUSSI(self):
-        """
-        RELEVÉ AU 3e TOUR — mon explication du blocage était trop restrictive.
-
-        Je l'attribuais au seul plantage. Faux : si OpenBao échoue et que la
-        sauvegarde de `mark_failed` échoue à son tour, la restauration mémoire
-        (voulue) remet l'entrée en `pending`. Aucun arrêt brutal n'est
-        nécessaire — une indisponibilité S3 pendant la résolution suffit, et la
-        clé est bloquée ensuite.
-
-        Ce test FIGE ce comportement pour qu'il reste documenté plutôt que
-        découvert en production.
+        """Le blocage n'exige AUCUN plantage : si OpenBao échoue et que la
+        sauvegarde de `mark_failed` échoue aussi, la restauration mémoire
+        (voulue) remet l'entrée en `pending`, et la clé est bloquée ensuite.
         """
         from mcp_vault.vault import wrapping as w
 

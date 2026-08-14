@@ -7,16 +7,17 @@ Expose un contrat VaultClient pour le CredentialBrokerService :
     revoke(lease_id)           → idempotent (introuvable dans un registre
                                  DISPONIBLE = succès ; registre non initialisé
                                  = error/registry_unavailable, cf. #120)
-    lookup_by_operation_id(op) → états : not_found | found_unattached | already_revoked
-                                          | revoked | ambiguous | backend_unavailable
+    lookup_and_revoke_by_operation_id(operation_id, mission_id) → not_found |
+        found_unattached | already_revoked | revoked | ambiguous | backend_unavailable
 
 Architecture :
 - OpenBao response wrapping (cubbyhole single-use) garantit le single-use et le TTL.
-- Un WrapRegistry sur S3 (`_system/wrap_registry.json`) corrèle operation_id → accessor
+- Un WrapRegistry sur S3 (`_system/wrap_registry.json`) corrèle (operation_id, mission_id)
+  → accessor — un operation_id n'est PAS unique entre missions
   pour la compensation des provisions orphelines (#74).
 - Pattern write-ahead : le registry est écrit en "pending" AVANT l'appel OpenBao,
   puis mis à jour en "active" avec l'accessor après succès. Si crash entre les deux,
-  lookup_by_operation_id retourne "found_unattached" (TTL fera expirer le wrap côté Vault).
+  lookup_and_revoke_by_operation_id retourne "found_unattached" (TTL fera expirer le wrap côté Vault).
 
 Invariants de sécurité :
 - Le wrap_token (secret) n'est jamais loggué, stocké, ni inclus dans les erreurs.
@@ -130,7 +131,8 @@ class WrapRegistry:
               "secret_path": str,
               "created_at": ISO,
               "expires_at": ISO,
-              "status": "pending" | "active" | "consuming" | "consumed" | "revoked" | "failed",
+              "status": "pending" | "active" | "consuming" | "consumed" | "revoked"
+                        | "failed" | "unusable" | "consume_outcome_unknown",
               "tenant_id": str,         # optionnel — pour binding JWT C18
               "expected_aud": str,      # optionnel — vault_ref anti-confused-deputy
             }, ...
@@ -139,7 +141,10 @@ class WrapRegistry:
 
     Cycle de vie étendu (issue #26) :
         "pending" → "active" → "consuming" → "consumed"
-                                            → "revoked" (si révocation explicite)
+                                            → "unusable" (jeton mort attesté)
+                                            → "consume_outcome_unknown" (issue inconnue)
+                            → "revoked" (révocation explicite)
+                  → "failed" (échec du PROVISIONNEMENT)
 
     Limite V1 : pas de CAS S3 → last-write-wins en cas de deux brokers simultanés.
     """
@@ -289,40 +294,23 @@ class WrapRegistry:
         rendrait la première orpheline ET non compensable. Un retry après
         `failed` reste permis.
 
-        ⚠️ RÉSIDUS ASSUMÉS, tous deux relevés en revue et volontairement NON
-        traités dans ce lot :
+        ⚠️ DEUX RÉSIDUS ASSUMÉS :
 
-        1. **Un `pending` bloqué bloque la clé durablement.** Deux causes, et la
-           seconde n'exige AUCUN plantage (précisée en revue — mon explication
-           initiale la passait sous silence) :
+        1. **Le blocage est durable, et pas seulement après un plantage.** Si la
+           sauvegarde de `mark_active`/`mark_failed` échoue, elles restaurent
+           l'état mémoire et l'entrée redevient `pending` : l'appel de résolution
+           a bien eu lieu, c'est sa PERSISTANCE qui manque. La restauration reste
+           correcte — un `active` en mémoire alors que S3 porte `pending` serait
+           un mensonge d'état. La reprise se fait avec un NOUVEL `operation_id`.
 
-           - un plantage entre l'enregistrement de l'intention et sa résolution ;
-           - une **indisponibilité S3 pendant la résolution** : `mark_failed` et
-             `mark_active` restaurent l'état mémoire quand leur sauvegarde
-             échoue, donc l'entrée redevient `pending`. L'appel de résolution a
-             bien lieu — c'est sa PERSISTANCE qui n'est pas garantie.
-
-           La restauration reste le bon comportement : laisser un `failed` ou un
-           `active` en mémoire alors que S3 porte encore `pending` serait un
-           mensonge d'état, précisément la famille de défauts fermée par #78.
-
-           La reprise se fait avec un NOUVEL `operation_id`, ce que le message
-           prescrit explicitement.
-
-           J'avais d'abord libéré la clé sur l'échéance de l'entrée. Écarté après
-           revue, pour trois raisons mesurées : (a) la libération ne suffisait
-           pas — la nouvelle intention créait une SECONDE entrée `pending`, donc
-           une ambiguïté, donc un refus plus loin ; (b) le plafond de TTL que je
-           croyais dur à 300 s est celui du broker `mcp-mission`, PAS le nôtre
-           (`secret_wrap` accepte 60–3600 s) ; (c) `expires_at` est calculé AVANT
-           l'appel OpenBao, dont le TTL court depuis l'émission — l'échéance du
-           registre ne borne donc pas la durée de vie réelle du wrap. Une reprise
-           correcte exige une transition persistée et une échéance qui borne
-           vraiment : c'est un lot distinct.
+           Libérer la clé sur l'échéance de l'entrée ne suffirait pas : la
+           nouvelle intention créerait une SECONDE entrée `pending`, donc une
+           ambiguïté. Et `expires_at` est calculé AVANT l'appel OpenBao, dont le
+           TTL court depuis l'émission — il ne borne pas la durée de vie réelle
+           du wrap. Lot distinct.
 
         2. **Pas de garantie d'unicité distribuée.** Sans CAS/ETag S3 (#51), deux
-           instances peuvent lire l'absence puis écrire toutes les deux. Ce
-           contrôle ferme le rejeu séquentiel, pas la course.
+           instances peuvent lire l'absence puis écrire toutes les deux.
         """
         self._maybe_refresh()
         return any(
@@ -338,13 +326,11 @@ class WrapRegistry:
         Passe l'entrée `pending` du couple `(operation_id, mission_id)` à `active`
         avec l'accessor reçu d'OpenBao.
 
-        Rend **False** si aucune entrée du couple n'a pu être mise à jour — y
+        Rend **False** si aucune entrée du couple n'a pu être mise à jour, y
         compris quand la sauvegarde S3 aurait réussi. L'ancien code rendait le
-        résultat de `_save()` seul : sans correspondance, il annonçait « succès »
-        et l'appelant en concluait que la provision était corrélée et
-        compensable, alors qu'aucune entrée `active` n'existait. `wrap_secret`
-        sait déjà traiter False (révocation d'urgence de l'accessor) — ce chemin
-        de repli existait mais n'était jamais emprunté.
+        résultat de `_save()` seul : il couvrait donc déjà l'échec S3 (et
+        `wrap_secret` révoquait l'accessor en urgence), mais annonçait « succès »
+        quand AUCUNE entrée pending unique ne correspondait.
         """
         self._maybe_refresh()
         entry = self._pending_unique(operation_id, mission_id, "mark_active")
@@ -515,6 +501,15 @@ class WrapRegistry:
                 entry["status"] = terminal
                 ok = self._save()
                 if not ok:
+                    # L'état mémoire GARDE le verdict terminal, contrairement aux
+                    # transitions de provisionnement qui restaurent le leur. Ce
+                    # n'est pas une incohérence : le verdict a été acquis APRÈS
+                    # l'appel OpenBao, et revenir à `consuming` détruirait cette
+                    # connaissance. ⚠️ S3 conserve un `consuming` périmé, et un
+                    # rafraîchissement peut le RECHARGER par-dessus le verdict —
+                    # rien ne le répare automatiquement. Un appel ultérieur sur ce
+                    # `consuming` résiduel rend `consume_outcome_unknown`, ce qui
+                    # reste honnête.
                     logger.warning(
                         "⚠️ transition terminale S3 fail (op=%r) — "
                         "état mémoire: %s, S3: stale-consuming",
@@ -756,11 +751,8 @@ def _select_wrap_entries(wraps, *, accessor: str = None,
             continue
         if operation_id is not None and entry.get("operation_id") != operation_id:
             continue
-        # Cloisonnement inter-missions : un `operation_id` n'est PAS unique entre
-        # missions — c'est le couple qui identifie une provision. Sans ce filtre,
-        # la compensation d'un orphelin de la mission A révoquait la provision
-        # VIVANTE de la mission B. Le filtre d'identité (#115) ne sépare rien
-        # ici : le broker porte un seul jeton pour toutes les missions.
+        # Cloisonnement : le filtre d'identité (#115) ne sépare PAS les missions
+        # — le broker porte un seul jeton pour toutes.
         if mission_id is not None and entry.get("mission_id") != mission_id:
             continue
         valid.append(entry)
@@ -906,15 +898,10 @@ async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) 
     """
     Retrouve et révoque les wraps du couple `(operation_id, mission_id)`.
 
-    ⚠️ `mission_id` est REQUIS. Cette primitive sélectionnait auparavant par
-    `operation_id` SEUL, puis révoquait. Un `operation_id` n'étant pas unique
-    entre missions, **compenser un orphelin de la mission A révoquait la
-    provision VIVANTE de la mission B** — atteignable en mono-instance, après
-    deux provisions séquentielles partageant la clé. Le filtre d'identité (#115)
-    ne protégeait pas : le broker porte un seul jeton pour toutes les missions.
-
-    Un paramètre optionnel aurait laissé la révocation inter-missions comme
-    comportement par DÉFAUT sur un outil destructif — d'où la rupture assumée.
+    ⚠️ `mission_id` est REQUIS : sans lui, compenser un orphelin d'une mission
+    révoquait la provision VIVANTE d'une autre. Un paramètre optionnel aurait
+    laissé cette révocation croisée comme comportement par DÉFAUT sur un outil
+    destructif.
 
     États retournés (idempotent) :
         not_found        — aucune provision pour ce couple
@@ -922,7 +909,9 @@ async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) 
                            pas de révocation possible, le TTL Vault gérera l'expiration
         already_revoked  — toutes les provisions déjà révoquées
         revoked          — révocation effectuée (1 entrée)
-        ambiguous        — plusieurs provisions révoquées (potentielle duplication)
+        ambiguous        — plusieurs entrées pour le couple. La révocation part
+                           des seules entrées `active` MUNIES d'un accessor ; une
+                           `pending` n'est marquée que si elle partage cet accessor
 
     Returns:
         {status, state, operation_id, count_revoked, entries_found}
@@ -1082,16 +1071,15 @@ async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) 
 #
 # Issue #78 (finding 2) : DEUX états TERMINAUX supplémentaires, posés après le
 # CAS `active → consuming` lorsque l'unwrap n'aboutit pas. Ils remplacent le
-# retour à `active`, qui affirmait « réessayable » sans jamais pouvoir le prouver.
+#   `unusable`                — OpenBao atteste le wrap mort (invalide, expiré,
+#                               déjà consommé).
+#   `consume_outcome_unknown` — toute exception SAUF un `InvalidRequest` portant
+#                               le motif exact : timeout, réseau, 5xx, 403, 404,
+#                               400 au motif non reconnu. Un retour NORMAL de
+#                               `unwrap()` sans secret exploitable rend
+#                               `empty_secret`, pas cet état.
 #
-#   `unusable`                — OpenBao a répondu de façon CERTAINE que le wrap
-#                               est mort (invalide / expiré / déjà consommé).
-#   `consume_outcome_unknown` — l'appel a été tenté, mais rien ne permet de
-#                               savoir si OpenBao l'a consommé (timeout, réseau,
-#                               5xx, réponse inexploitable).
-#
-# Ni l'un ni l'autre n'est `failed` (réservé à l'échec de PROVISIONNEMENT) ni
-# `revoked` (qui affirmerait une révocation attestée).
+# Ni `failed` (échec de PROVISIONNEMENT) ni `revoked` (révocation attestée).
 _KNOWN_WRAP_STATUSES = frozenset({
     "pending", "active", "consuming", "consumed", "revoked", "failed",
     "unusable", "consume_outcome_unknown",
@@ -1186,11 +1174,8 @@ def _usable_kv2_secret(unwrap_response) -> Optional[dict]:
 
 async def status_by_operation_id(operation_id: str, mission_id: str) -> dict:
     """
-    ⚠️ `mission_id` est REQUIS (cloisonnement inter-missions) : sans lui, cette
-    lecture divulguait à une mission l'existence, l'état et la durée de vie
-    restante des provisions d'une AUTRE mission partageant l'identifiant
-    d'opération. Le filtre d'identité (#115) ne sépare pas les missions — le
-    broker porte un seul jeton pour toutes.
+    ⚠️ `mission_id` est REQUIS : sans lui, cette lecture divulguait l'état des
+    provisions d'une AUTRE mission.
 
     Consulte l'état des wraps d'un operation_id — **lecture seule, aucune
     révocation ni écriture durable** (issue #77). À l'inverse de
@@ -1201,14 +1186,15 @@ async def status_by_operation_id(operation_id: str, mission_id: str) -> dict:
     - `active` signifie « actif dans l'instantané » — **pas** une garantie de
       consommabilité (un wrap expiré côté OpenBao peut encore ressortir `active`,
       et une consommation concurrente peut invalider l'instantané) ;
-    - la lecture peut rafraîchir le cache mémoire (`find_by_operation_id` →
-      `_maybe_refresh`), mais n'écrit jamais sur S3 et ne révoque jamais ;
+    - la lecture appelle `registry._maybe_refresh()` directement, mais n'écrit
+      jamais sur S3 et ne révoque jamais ;
     - `backend_unavailable` signale que le DERNIER rafraîchissement S3 a échoué ;
       une panne S3 survenant PENDANT la fenêtre de cache (`CACHE_TTL`) n'est pas
       détectée — l'état renvoyé peut alors être périmé (best-effort assumé).
 
     États : `not_found | pending | active | consuming | consumed | revoked |
-    failed | ambiguous | registry_inconsistent` (OK) ; `backend_unavailable`
+    failed | unusable | consume_outcome_unknown | ambiguous |
+    registry_inconsistent` (OK) ; `backend_unavailable`
     (status=error). Ne renvoie **jamais** d'`accessor` ni de `wrap_token`.
     """
     registry = get_wrap_registry()
@@ -1364,21 +1350,16 @@ async def consume_wrap_secret(
 
     # ── 1b. Vérification binding C18 complet (P1 — issue #29) ───────
     # Vérification AVANT try_mark_consuming : pas d'état "consuming" orphelin si mismatch.
-    # tenant_id et expected_aud sont optionnels (rétrocompat wraps legacy).
-    # En mode enforce=True : les wraps sans expected_aud sont refusés (binding incomplet).
-    # La COMPLÉTUDE est évaluée AVANT les mismatches (issue #78, relevé en revue
-    # pré-commit). Dans l'autre ordre, une entrée historique dont le champ vaut
-    # des espaces blancs tombait en `binding_mismatch` — diagnostic trompeur :
-    # le défaut n'est pas que l'appelant présente la mauvaise valeur, c'est que
-    # l'entrée n'atteste rien. Un exploitant lisant « mismatch » chercherait une
-    # erreur d'appel là où il faut reprovisionner.
+    # Hors enforce : les deux champs sont optionnels (rétrocompat wraps legacy).
+    # En enforce=True : tenant_id ET expected_aud sont requis, non blancs.
+    # La COMPLÉTUDE passe AVANT les mismatches : sinon une entrée dont le champ
+    # vaut des espaces blancs sort en `binding_mismatch`, ce qui envoie chercher
+    # une erreur d'appel là où l'entrée n'atteste rien et où il faut
+    # reprovisionner.
     if enforce:
-        # Finding 4 : le binding C18 repose sur DEUX champs. N'exiger que
-        # `expected_aud` rendait le contrôle d'appartenance au locataire
-        # inopérant précisément quand le champ manque — c'est-à-dire dans le seul
-        # cas où il aurait servi. Les deux sont désormais requis en mode durci.
-        # Les espaces blancs ne valent pas un binding : un champ vide déguisé
-        # n'atteste rien.
+        # N'exiger que `expected_aud` rendait le contrôle d'appartenance au
+        # locataire inopérant précisément quand le champ manque. Un champ
+        # d'espaces blancs n'atteste rien : il compte comme absent.
         manquants = [c for c in ("tenant_id", "expected_aud")
                      if not (entry.get(c) or "").strip()]
         if manquants:
@@ -1409,8 +1390,11 @@ async def consume_wrap_secret(
 
     # ── 2. Atomic try_mark_consuming ────────────────────────────────
     if not registry.try_mark_consuming(operation_id, mission_id):
-        # Le CAS a échoué pour DEUX raisons possibles, qui n'ont pas du tout le
-        # même sens (issue #78) :
+        # `try_mark_consuming` rend False dans PLUSIEURS cas : aucune entrée
+        # `active` pour le couple (absente, `pending`, terminale, `failed`,
+        # `consumed`, `revoked`), ou échec S3. Avec plusieurs entrées `active`
+        # elle prend la PREMIÈRE et peut rendre True. On relit l'état pour
+        # distinguer ce qui est indéterminé du reste.
         courant = registry.get_by_composite_key(operation_id, mission_id) or {}
         if courant.get("status") == "consuming":
             # L'entrée est RESTÉE en `consuming`. Soit une tentative précédente
@@ -1423,9 +1407,9 @@ async def consume_wrap_secret(
                                "tentative précédente n'a pas abouti et le wrap "
                                "a pu être consommé. Ne pas réessayer ; "
                                "provisionner un nouveau wrap si nécessaire"}
-        # Sinon : la persistance du CAS a échoué et l'entrée est revenue à
-        # `active`. RIEN n'a été envoyé à OpenBao — le wrap est réellement
-        # toujours disponible, et un nouvel essai est légitime.
+        # Sinon : rien n'a été envoyé à OpenBao. Un nouvel essai n'est prouvé sûr
+        # que si l'état relu est `active` — les autres cas (entrée absente ou non
+        # active) ne garantissent pas un wrap disponible.
         return {"status": "error", "error_type": "already_consuming",
                 "message": "Wrap en cours de consommation ou déjà consommé"}
 
@@ -1443,11 +1427,10 @@ async def consume_wrap_secret(
         unwrap_response = ephemeral_client.sys.unwrap()
 
     except Exception as e:
-        # Classification par CLASSE d'exception hvac, jamais par recherche de
-        # sous-chaîne dans `str(e)` (issue #78, finding 3). L'ancien mapping ne
-        # testait que « 403 »/« 404 » ; OpenBao répond **400** pour un jeton
-        # invalide, expiré ou déjà consommé — le cas réel tombait donc en
-        # `backend_error` « réessayer », sur un jeton définitivement mort.
+        # Classification par CLASSE d'exception hvac (`InvalidRequest`) PUIS motif
+        # OpenBao exact, recherché dans `errors` et `str(exc)`. L'ancien mapping
+        # cherchait « 403 »/« 404 » sans contrainte de classe ; OpenBao répond
+        # **400** pour un jeton mort, qui tombait donc en `backend_error`.
         certain = _openbao_says_wrap_is_dead(e)
 
         if certain:

@@ -454,14 +454,6 @@ def secret_wrap_cmd(ctx, vault_id, secret_path, mission_id, operation_id,
     une allow-list de vaults ET une policy explicite (issue #115).
 
     \b
-    ⚠️ Mode durci (ENFORCE_MISSION_TOKEN_VALIDATION=true) : --tenant-id est
-    OBLIGATOIRE (issue #78). Le serveur refuse de créer une provision au binding
-    incomplet plutôt que d'inventer un locataire — un tenant déduit attesterait
-    une appartenance fausse, et la consommation la rejetterait de toute façon.
-    --expected-aud est complétée par le serveur si absente ; en fournir une qui
-    désigne une AUTRE instance est refusé (le wrap serait inconsommable).
-
-    \b
     Exemples :
       mcp-vault secret wrap prod db/postgres --mission-id m-42 --operation-id op-1
       mcp-vault secret wrap prod db/pg --mission-id m-42 --operation-id op-1 --tenant-id t-7 --expected-aud mcp-vault:prod
@@ -522,9 +514,6 @@ def secret_wrap_lookup_cmd(ctx, operation_id, mission_id, output_json):
     \b
     OPERATION_ID : identifiant d'opération à rechercher dans le registry.
     ⚠️ Révoque les wraps trouvés. Pour consulter sans effet de bord : wrap-status.
-    ⚠️ --mission-id est OBLIGATOIRE : sans lui, la compensation d'un orphelin
-    d'une mission révoquait la provision VIVANTE d'une autre mission partageant
-    le même operation_id.
     """
     async def _run():
         client = MCPClient(ctx.obj["url"], ctx.obj["token"])
@@ -551,7 +540,6 @@ def secret_wrap_status_cmd(ctx, operation_id, mission_id, output_json):
     \b
     OPERATION_ID : identifiant d'opération à consulter dans le registry.
     Instantané best-effort ; contrairement à wrap-lookup, ne révoque rien (#77).
-    ⚠️ --mission-id est OBLIGATOIRE (cloisonnement inter-missions).
     """
     async def _run():
         client = MCPClient(ctx.obj["url"], ctx.obj["token"])

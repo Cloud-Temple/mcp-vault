@@ -2,44 +2,22 @@
 """
 Issue #78, findings 2 et 3 — la consommation d'un wrap ne peut plus mentir.
 
-## Le défaut, et pourquoi les deux findings sont indissociables
+Avant : sur TOUTE exception d'unwrap, l'entrée revenait à `active` et l'erreur
+était classée par recherche de sous-chaîne dans `str(e)` (« 403 », « 404 »).
+Deux défauts dont l'effet combiné compte : un jeton **mort** produisait
+« réessayer » ET un registre qui le déclarait disponible.
 
-`consume_wrap_secret` passe l'entrée de `active` à `consuming` (CAS), puis
-appelle `sys.unwrap()`. Sur **toute** exception, l'ancien code appelait
-`rollback_consuming()` → retour à `active`, puis classait l'erreur par recherche
-de sous-chaîne dans `str(e)` :
+Après le CAS, plus aucun retour à `active`. Deux états terminaux, non
+réessayables : `unusable` (OpenBao atteste le jeton mort) et
+`consume_outcome_unknown` (issue indéterminée). Classification par classe
+d'exception hvac PUIS motif OpenBao exact.
 
-- `403`/`forbidden`/`bad token` → `invalid_wrap_token`
-- `404`/`not found`            → `wrap_expired`
-- sinon                        → `backend_error`, « réessayer »
-
-Deux défauts, dont l'effet combiné est le vrai problème :
-
-**F2** — le retour à `active` est indémontrable. Une fois l'appel parti, OpenBao
-a pu consommer le jeton avant que la réponse ne se perde. Le registre annonçait
-alors « disponible » une provision peut-être définitivement brûlée.
-
-**F3** — OpenBao répond **400** (« wrapping token is not valid or does not
-exist ») pour un jeton invalide, expiré ou déjà consommé. Le mapping ne testait
-que 403/404 : le cas réel tombait donc en `backend_error`.
-
-**Combinés** : un jeton mort produisait « réessayer » ET un registre qui le
-déclarait actif. Soit une boucle de retry sur un jeton qui ne pourra jamais
-aboutir, cautionnée par le registre.
-
-## Le contrat désormais
-
-Après le CAS, **aucun retour à `active`**. Deux états terminaux :
-
-- `unusable` — OpenBao affirme le jeton mort → `wrap_unusable`, non-réessayable ;
-- `consume_outcome_unknown` — issue indéterminée → même nom, non-réessayable.
-
-Et `empty_secret` n'est plus un rollback : si OpenBao a répondu, le jeton a été
-présenté et traité → `consumed`.
+`empty_secret` couvre désormais une réponse REÇUE sans secret exploitable :
+l'enveloppe KV v2 porte toujours `metadata`, donc tester `data` seul rendait la
+garde inatteignable en production.
 
 Tests mockés (pas de conteneur). Stub hvac : `tests/conftest.py`.
 """
-
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -60,7 +38,8 @@ def run(coro):
 
 
 def _registre(echec_a_partir_de: int = 0):
-    """Registre en mémoire portant une entrée `active` prête à consommer.
+    """
+Registre en mémoire portant une entrée `active` prête à consommer.
 
     `echec_a_partir_de` = numéro de sauvegarde (1-indexé, montage compris) à
     partir duquel `_save()` échoue ; 0 = jamais.
@@ -144,10 +123,6 @@ def _statut(registre):
 class TestJetonMort:
 
     def test_400_openbao_est_classe_mort_et_non_reessayable(self):
-        """
-        CŒUR DE F3. RED avant le correctif : ce cas tombait en `backend_error`
-        « réessayer », et le registre repassait à `active`.
-        """
         import hvac
 
         registre = _registre()
@@ -159,14 +134,10 @@ class TestJetonMort:
         assert _statut(registre) == "unusable"
 
     def test_403_et_404_ne_sont_PAS_des_certitudes(self):
-        """
-        Retiré en revue de diff : 403/404 ne prouvent que le code HTTP, pas le
-        sort du jeton. Un proxy, un routage ou un namespace erroné, ou un refus
-        d'infrastructure lèvent les mêmes classes AVEC un wrap encore vivant.
-
-        Les classer « mort » ferait jeter une provision valide. Le faux
-        « indéterminé » coûte un reprovisionnement ; le faux « mort » coûte
-        l'abandon de ce qui marchait.
+        """403/404 ne prouvent que le code HTTP : un proxy, un routage erroné ou
+        un refus d'infrastructure les lèvent AVEC un wrap vivant. Asymétrie de
+        coût : le faux « indéterminé » coûte un reprovisionnement, le faux
+        « mort » fait jeter ce qui marchait.
         """
         import hvac
 
@@ -177,10 +148,8 @@ class TestJetonMort:
             assert _statut(registre) == "consume_outcome_unknown"
 
     def test_la_classification_ne_depend_pas_du_texte_de_l_exception(self):
-        """
-        Non-complaisance : une exception QUELCONQUE dont le texte contient
-        « 403 » ne doit PAS être classée morte. L'ancien mapping le faisait.
-        """
+        """Non-complaisance : le texte SEUL, sans la classe d'exception attendue,
+        ne doit rien décider."""
         registre = _registre()
         r = _consommer(registre, ClientFactice(
             exception=RuntimeError("connexion perdue (code 403 dans le texte)")))
@@ -213,10 +182,7 @@ class TestIssueIndeterminee:
         RuntimeError("500 Internal Server Error"),
     ])
     def test_aucun_echec_ambigu_ne_ramene_a_active(self, exc):
-        """
-        CŒUR DE F2. RED avant le correctif : chacun de ces cas remettait
-        l'entrée à `active`.
-        """
+
         registre = _registre()
         r = _consommer(registre, ClientFactice(exception=exc))
 
@@ -298,7 +264,7 @@ class TestSecretVide:
     ])
     def test_enveloppe_kv2_sans_secret_exploitable_ne_sort_pas_en_ok(self, paires, cas):
         """
-        CŒUR DU DÉFAUT DE FORME. RED avant le correctif : l'enveloppe KV v2
+        l'enveloppe KV v2
         porte toujours `metadata`, donc `unwrap_response["data"]` est TOUJOURS
         vrai — la garde ne pouvait pas se déclencher et ces cas sortaient en
         `status: "ok"`. L'appelant lisait « succès » sans avoir de secret.
@@ -412,7 +378,7 @@ class TestPersistanceEnEchec:
 
     def test_le_rollback_AVANT_le_cas_reste_legitime(self):
         """
-        Nuance essentielle, découverte en écrivant le test précédent : si la
+        si la
         sauvegarde du CAS échoue, RIEN n'a été envoyé à OpenBao. Le retour à
         `active` est alors la seule réponse correcte — le wrap est réellement
         toujours disponible.
@@ -451,7 +417,7 @@ class TestCheminNominal:
 
 class TestRevocationSurEtatTerminal:
     """
-    Ajouté après un test de mutation : la garde existait mais AUCUN test ne la
+    la garde existait mais AUCUN test ne la
     couvrait. Un « 0 échec » sous mutation signale une protection non couverte,
     pas une protection inutile.
     """
@@ -488,7 +454,7 @@ class TestRevocationSurEtatTerminal:
 
     def test_cas_mixte_terminal_plus_revoque_ne_dit_pas_tout_revoque(self):
         """
-        Relevé en revue : avec UNE entrée terminale et UNE réellement révoquée,
+        avec UNE entrée terminale et UNE réellement révoquée,
         l'ancien code répondait `already_revoked` — affirmant que TOUT l'avait
         été. Une seule entrée non attestée suffit à interdire cette conclusion.
         """
@@ -523,7 +489,7 @@ class TestRevocationSurEtatTerminal:
 
 class TestConsultationEtat:
     """
-    Ajouté après une seconde mutation non détectée : retirer les nouveaux états
+    retirer les nouveaux états
     de l'énumération reconnue les faisait passer pour un registre corrompu
     (`registry_inconsistent`) — sans qu'aucun test ne s'en aperçoive.
     """
@@ -564,7 +530,7 @@ class TestConsultationEtat:
 
 class TestConsumingResiduel:
     """
-    Relevé en revue de diff : si la transition terminale ne peut pas être
+    si la transition terminale ne peut pas être
     PERSISTÉE, S3 conserve `consuming`. Après rechargement, l'ancien code
     répondait `already_consuming` indéfiniment — ce qui laisse croire à une
     concurrence passagère, alors que l'issue est en réalité inconnue.
@@ -600,7 +566,7 @@ class TestConsumingResiduel:
 
 class TestRevocationMixteTerminalEtActif:
     """
-    Relevé au 3e tour de revue : la garde ne s'exécutait QUE si aucune entrée
+    la garde ne s'exécutait QUE si aucune entrée
     active n'existait. Avec une entrée terminale ET une active, le code révoquait
     l'active et rendait un succès — un consommateur non adapté y aurait lu une
     compensation achevée, alors qu'une entrée restait non attestée.
@@ -609,7 +575,7 @@ class TestRevocationMixteTerminalEtActif:
     def _revoquer_reel(self, registre, echec=False):
         """
         Exerce le VRAI `_revoke_accessor_selected` avec un client OpenBao
-        factice — le faux de la première version ne reproduisait pas la
+        factice : un faux court-circuitant la fonction ne reproduirait pas la
         mutation réelle (relevé en revue : avec un accessor partagé,
         l'implémentation marque TOUTE la sélection visible).
         """
@@ -672,7 +638,7 @@ class TestRevocationMixteTerminalEtActif:
 
     def test_echec_de_revocation_signale_aussi_le_terminal(self):
         """
-        Relevé en revue : `partial_revocation` renvoyait sans compteurs. Un
+        `partial_revocation` renvoyait sans compteurs. Un
         appelant lisait « réessayer » sans savoir qu'une entrée est figée sur
         un état terminal, qu'aucun retry ne résoudra.
         """

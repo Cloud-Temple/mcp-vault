@@ -1,42 +1,22 @@
 # -*- coding: utf-8 -*-
 """
-Contrat MCP des signatures d'outils — la preuve sur laquelle repose l'ordre de
-déploiement de v0.12.0.
-
-## Pourquoi ce banc existe
+Contrat MCP des signatures d'outils — la preuve dont dépend l'ordre de déploiement
+de v0.12.0.
 
 v0.12.0 rend `mission_id` OBLIGATOIRE sur `secret_wrap_lookup` et
-`secret_wrap_status` (cloisonnement inter-missions). La question posée par
-`agentic-platform` était : faut-il une fenêtre de maintenance pour basculer Vault
-et le broker `mcp-mission` ensemble ?
+`secret_wrap_status`. Faut-il une fenêtre de maintenance pour basculer Vault et le
+broker `mcp-mission` ensemble ? Non — et cela tient à une propriété **observée et
+verrouillée de notre pile MCP/FastMCP** (`mcp==1.26.0`, identique entre v0.11.0 et
+v0.12.0), pas à une garantie normative du protocole : un paramètre surnuméraire est
+IGNORÉ, un paramètre requis manquant est REFUSÉ. Une release Mission qui envoie
+toujours `mission_id` fonctionne donc contre les deux versions.
 
-**Réponse : non, et elle tient à UNE propriété observée et verrouillée de notre
-pile MCP/FastMCP** (`mcp==1.26.0`, identique entre v0.11.0 et v0.12.0) — et non à
-une garantie normative du protocole MCP : un paramètre
-surnuméraire est **ignoré**, un paramètre requis manquant est **refusé**. Une
-release Mission qui envoie TOUJOURS `mission_id` fonctionne donc contre l'ancienne
-version du coffre (paramètre ignoré) comme contre la nouvelle. D'où l'ordre
-retenu : Mission d'abord, Vault ensuite, sans arrêt de service.
+Le banc exerce le vrai chemin d'invocation — session client MCP en mémoire,
+`tools/call` réel — et lit les schémas par l'API publique `list_tools()`.
 
-⚠️ Cette propriété n'était établie que par une **mesure manuelle**, et la
-plateforme l'a relevé : elle a demandé à `mcp-mission` de produire le test durable,
-faute de l'avoir chez nous. C'était notre affirmation, sur notre couche — ce banc
-la ramène de notre côté.
-
-## Ce que ce banc couvre, et ce qu'il ne couvre PAS
-
-Il exerce le **vrai chemin d'invocation** : une session client MCP en mémoire émet
-un `tools/call` réel, et l'on observe le `CallToolResult` rendu. Les schémas sont
-lus via l'**API publique** `list_tools()`, donc la surface effectivement annoncée
-aux appelants.
-
-Il ne couvre pas les ruptures de transport ou de version de protocole : une montée
-de `mcp` qui changerait la négociation, la sérialisation ou le cadrage des erreurs
-peut casser la compatibilité **sans** faire échouer ces tests. Ils protègent la
-propriété de tolérance aux paramètres, pas la compatibilité protocolaire dans son
-ensemble.
-
-Mesuré avec `mcp==1.26.0` (verrou de v0.12.0).
+Il ne couvre PAS les ruptures de transport ou de version de protocole : une montée
+de `mcp` changeant la négociation ou le cadrage des erreurs peut casser la
+compatibilité sans faire échouer ces tests.
 """
 
 import pytest
@@ -46,12 +26,11 @@ from mcp.shared.memory import create_connected_server_and_client_session
 
 
 def _serveur_deux_signatures():
-    """Un serveur portant l'ANCIENNE et la NOUVELLE signature, plus un témoin
-    d'exécution : il prouve si le corps de l'outil a tourné, et avec quoi.
+    """Ancienne et nouvelle signature, plus un témoin d'exécution.
 
-    Le témoin est le cœur du banc. Sans lui, un refus FABRIQUÉ par le corps de
-    l'outil (donc après y être entré) serait indiscernable d'un refus à la
-    validation — or c'est cette distinction qui borne les dégâts.
+    Sans le témoin, un refus FABRIQUÉ par le corps de l'outil serait
+    indiscernable d'un refus à la validation — or c'est cette distinction qui
+    borne les dégâts.
     """
     srv = FastMCP("contrat-signatures")
     vus: list = []
@@ -76,14 +55,12 @@ def _serveur_deux_signatures():
 class TestToleranceAuxParametresParLeProtocole:
 
     async def test_un_parametre_surnumeraire_est_IGNORE(self):
-        """
-        LA PROPRIÉTÉ CENTRALE — c'est elle qui permet de déployer le broker AVANT
-        le coffre : un broker déjà migré envoie `mission_id` à une ancienne
-        version, qui l'ignore au lieu de refuser l'appel.
+        """LA PROPRIÉTÉ CENTRALE : elle permet de déployer le broker AVANT le
+        coffre.
 
         ⚠️ Si ce test tombe, l'ordre « Mission d'abord » communiqué par écrit à
-        `agentic-platform` et à `mcp-mission` devient FAUX : il faut les prévenir,
-        pas seulement corriger le test.
+        `agentic-platform` et à `mcp-mission` devient FAUX : il faut les
+        PRÉVENIR, pas seulement corriger le test.
         """
         srv, vus = _serveur_deux_signatures()
         async with create_connected_server_and_client_session(srv) as session:
@@ -97,14 +74,10 @@ class TestToleranceAuxParametresParLeProtocole:
             f"le corps n'a pas reçu exactement l'argument attendu : {vus!r}")
 
     async def test_un_parametre_requis_manquant_est_REFUSE_avant_le_corps(self):
-        """
-        L'AUTRE MOITIÉ DE LA PREUVE : elle borne les dégâts si un ancien broker
-        appelle la nouvelle signature. Le refus intervient à la validation des
-        arguments — **le corps ne tourne pas**, donc aucune écriture de registre,
-        aucun appel au coffre, aucune révocation.
-
-        C'est cette forme d'échec que nous avons annoncée à Mission : une erreur
-        d'invocation MCP (`isError`), pas une enveloppe métier `{status: error}`.
+        """Borne les dégâts si un ancien broker appelle la nouvelle signature :
+        le corps ne tourne pas, donc aucune écriture, aucun appel au coffre,
+        aucune révocation. Forme annoncée à Mission : erreur d'invocation MCP
+        (`isError`), pas une enveloppe métier.
         """
         srv, vus = _serveur_deux_signatures()
         async with create_connected_server_and_client_session(srv) as session:
@@ -135,14 +108,9 @@ class TestToleranceAuxParametresParLeProtocole:
 # =============================================================================
 
 class TestContratPublieDesOutilsWrap:
-    """
-    Le bloc précédent établit la propriété du PROTOCOLE sur des outils
-    synthétiques. Celui-ci porte sur les outils réellement annoncés par notre
-    serveur — sinon on prouverait une propriété générique sans prouver que NOTRE
-    contrat s'en sert.
-
-    Les listes attendues sont figées **à la main**, jamais dérivées du schéma
-    qu'on contrôle : les dériver reviendrait à comparer le code à lui-même.
+    """Les outils réellement annoncés par notre serveur, et non des outils
+    synthétiques. Listes attendues figées À LA MAIN : les dériver du schéma
+    reviendrait à comparer le code à lui-même.
     """
 
     # (outil → paramètres requis attendus). Figé à la main, volontairement.
@@ -171,12 +139,8 @@ class TestContratPublieDesOutilsWrap:
             f"liste est une RUPTURE pour mcp-mission, à annoncer AVANT livraison")
 
     async def test_les_deux_outils_cloisonnes_exigent_bien_la_mission(self):
-        """
-        Redondant avec le test paramétré, et c'est VOULU : c'est l'assertion que
-        cite la note de déploiement. Rendre `mission_id` optionnel rouvrirait la
-        révocation inter-missions comme comportement PAR DÉFAUT sur un outil
-        destructif — le défaut corrigé en v0.12.0.
-        """
+        """Rendre `mission_id` optionnel rouvrirait la révocation inter-missions
+        comme comportement PAR DÉFAUT sur un outil destructif."""
         schemas = await self._schemas()
         for outil in ("secret_wrap_lookup", "secret_wrap_status"):
             assert "mission_id" in schemas[outil].get("required", []), (
@@ -184,18 +148,12 @@ class TestContratPublieDesOutilsWrap:
                 f"inter-missions est rouvert")
 
     async def test_secret_consume_n_expose_PAS_mission_id(self):
-        """
-        POINT DE CONTRAT, et sa justification exacte — corrigée en revue.
+        """La mission est extraite du claim, donc PROUVÉE et non déclarée.
 
-        `secret_consume` n'expose pas `mission_id` : la mission est **extraite du
-        claim** du jeton de mission, donc PROUVÉE, pas déclarée par l'appelant.
-
-        ⚠️ Formulation à ne pas durcir : ajouter ce paramètre ne créerait pas
-        mécaniquement un contournement du binding C18 — le handler continuerait
-        d'extraire la mission du claim. Le risque réel est une **double source
-        d'identité** dans le contrat : deux valeurs pouvant divergir, dont un
-        appelant pourrait croire que la sienne fait foi. C'est cette ambiguïté
-        que ce test interdit.
+        ⚠️ Ajouter ce paramètre ne contournerait pas mécaniquement le binding C18
+        — le handler lirait toujours le claim. Le risque est une DOUBLE SOURCE
+        d'identité dans le contrat, dont un appelant croirait que la sienne fait
+        foi. C'est cette ambiguïté que le test interdit.
         """
         schemas = await self._schemas()
         requis = schemas["secret_consume"].get("required", [])

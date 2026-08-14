@@ -1,25 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Test d'INTÉGRATION #78 — le flux `wrap_secret → consume_wrap_secret` contre un
-OpenBao RÉEL.
+Test d'INTÉGRATION #78 — `wrap_secret → consume_wrap_secret` contre un OpenBao RÉEL.
 
-## Pourquoi ce test est un critère d'acceptation, pas un confort
+Le défaut de forme de #78 était invisible aux simulacres : ceux de `test_wrap.py`
+rendaient un payload APLATI, forme qu'OpenBao ne produit jamais pour une lecture
+KV v2. La garde « secret vide » testait donc un comportement absent de la
+production, où l'enveloppe porte toujours `metadata`.
 
-Le défaut de forme de #78 était INVISIBLE aux simulacres : ceux de `test_wrap.py`
-rendaient un payload APLATI (`{"data": {"password": …}}`), forme qu'OpenBao ne
-produit jamais pour une lecture KV v2. La garde « secret vide » testait donc un
-comportement absent de la production, où l'enveloppe réelle
-(`{"data": {"data": …, "metadata": …}}`) porte TOUJOURS `metadata` et n'est donc
-jamais vide.
+`test_wrap_status_openbao_77.py` atteste la forme, mais unwrap avec un client
+neuf : il ne traverse PAS `consume_wrap_secret`.
 
-Seul un moteur réel prouve la forme. `test_wrap_status_openbao_77.py` l'atteste
-déjà indirectement, mais il unwrap avec un client neuf — il ne traverse PAS
-`consume_wrap_secret`, donc il ne couvre pas le chemin de #78.
-
-Opt-in (pattern e2e du repo) : SKIP sauf si l'environnement fournit
-  - MCP_VAULT_TEST_OPENBAO_ADDR  (ex: http://127.0.0.1:18201)
-  - MCP_VAULT_TEST_OPENBAO_TOKEN (root/dev token)
+Opt-in : SKIP sauf si l'environnement fournit `MCP_VAULT_TEST_OPENBAO_ADDR` et
+`MCP_VAULT_TEST_OPENBAO_TOKEN`.
 """
 import os
 import sys
@@ -121,7 +114,7 @@ def _statut(registry, op):
 
 def test_flux_reel_rend_l_enveloppe_kv2_et_marque_consomme(real_client):
     """
-    Preuve empirique du contrat de sortie : `result["data"]` est l'ENVELOPPE
+    `result["data"]` est l'ENVELOPPE
     (`data` + `metadata`), et le secret en clair est à `result["data"]["data"]`.
 
     Ce test est la seule chose qui empêche de « corriger » le code en aplatissant
@@ -174,7 +167,7 @@ def test_le_jeton_est_bien_a_usage_unique_contre_le_moteur(real_client):
 
 def test_un_jeton_mort_est_classe_terminal_par_le_moteur_reel(real_client):
     """
-    CŒUR DU FINDING 3, contre le moteur réel. Un wrap_token révoqué côté OpenBao
+    Un wrap_token révoqué côté OpenBao
     doit produire `wrap_unusable` — pas `backend_error` « réessayer », et surtout
     pas un retour à `active`.
 
@@ -214,8 +207,6 @@ def test_un_jeton_mort_est_classe_terminal_par_le_moteur_reel(real_client):
 
 def test_secret_sans_paire_ne_sort_pas_en_succes(real_client):
     """
-    LE CAS QUE LES SIMULACRES NE POUVAIENT PAS PRODUIRE.
-
     Un secret KV v2 sans aucune paire : l'enveloppe existe (elle porte
     `metadata`), mais il n'y a rien à utiliser. Avant le correctif, la garde
     testait l'enveloppe externe — toujours vraie — donc le coffre répondait
