@@ -1,5 +1,53 @@
 # Changelog — MCP Vault
 
+## [Non publié]
+
+### Le contrat des signatures d'outils devient démontrable, plus seulement mesuré
+
+L'ordre de déploiement de v0.12.0 communiqué à `agentic-platform` et à
+`mcp-mission` — **Mission d'abord, Vault ensuite, sans fenêtre de maintenance** —
+repose sur une propriété **observée et verrouillée de notre pile MCP/FastMCP**
+(`mcp==1.26.0`), et non sur une garantie normative du protocole : un paramètre **surnuméraire est
+ignoré**, un paramètre **requis manquant est refusé**. Une release Mission qui
+envoie toujours `mission_id` fonctionne donc contre v0.11.0 comme contre v0.12.0.
+
+Cette propriété n'était établie que par une **mesure manuelle**. La plateforme l'a
+relevé et a demandé à `mcp-mission` de produire le test durable, faute de l'avoir
+chez nous. C'était notre affirmation, sur notre couche : `tests/test_contrat_mcp_signatures.py`
+la ramène de notre côté.
+
+Le banc fige aussi le **contrat publié** de nos cinq outils du chemin wrap
+(paramètres requis exacts, listes figées à la main) et deux propriétés de sécurité :
+`secret_wrap_lookup` / `secret_wrap_status` exigent `mission_id` — le rendre
+optionnel rouvrirait la révocation inter-missions comme comportement par défaut —
+et **`secret_consume` ne l'expose PAS** en paramètre : la mission reste extraite du
+claim du jeton, donc prouvée et non déclarée. ⚠️ Formulation resserrée en revue :
+l'ajouter ne créerait pas mécaniquement un contournement du binding C18 — le
+handler continuerait de lire le claim — mais une **double source d'identité** dans
+le contrat, dont un appelant pourrait croire que la sienne fait foi. C'est cette
+ambiguïté que le test interdit.
+
+Le banc exerce le **vrai chemin protocolaire** — une session client MCP en mémoire
+émet un `tools/call` réel — et lit les schémas par l'**API publique** `list_tools()`,
+donc la surface effectivement annoncée aux appelants.
+
+⚠️ Si une montée de version de `mcp` changeait la tolérance aux paramètres, ces
+tests échoueront — et **la séquence de déploiement annoncée à deux équipes
+deviendrait fausse**. La conséquence n'est pas locale, d'où le banc. En revanche ils
+ne couvrent **pas** les ruptures de transport ou de version de protocole : une
+montée qui changerait la négociation, la sérialisation ou le cadrage des erreurs
+peut casser la compatibilité sans les faire échouer.
+
+**Tests** : `tests/test_contrat_mcp_signatures.py` (10 tests). **3 mutations
+mesurées, 3 détectées** (`mission_id` rendu optionnel sur chacun des deux outils,
+et ajouté en paramètre de `secret_consume`).
+
+### Correction documentaire
+
+`scripts/README.md` portait encore un exemple `secret wrap-lookup op-1` **sans**
+`--mission-id`, livré tel quel dans v0.12.0. Signalé de nous-mêmes à la
+plateforme, corrigé ici.
+
 ## [0.12.0] — 2026-08-14
 
 > ### ⚠️ À FAIRE AVANT DE DÉPLOYER

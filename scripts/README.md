@@ -133,8 +133,10 @@ python scripts/mcp_cli.py secret wrap-status op-1 --mission-id m-42
 # Registre non initialisé → error/registry_unavailable (#120) : rien n'a été tenté.
 python scripts/mcp_cli.py secret revoke-wrap <accessor>
 
-# Retrouver/révoquer les wraps d'un operation_id (compensation orphelins)
-python scripts/mcp_cli.py secret wrap-lookup op-1
+# Retrouver/révoquer les wraps d'un couple (operation_id, mission_id) — compensation
+# orphelins. ⚠️ --mission-id est OBLIGATOIRE : sans lui, cette commande révoquait
+# la provision VIVANTE d'une autre mission partageant l'operation_id (#cloisonnement).
+python scripts/mcp_cli.py secret wrap-lookup op-1 --mission-id m-42
 
 # Consommer un wrap (validation JWT C18) — tokens via env
 VAULT_WRAP_TOKEN=hvs.CAES... VAULT_MISSION_TOKEN=eyJ... \
