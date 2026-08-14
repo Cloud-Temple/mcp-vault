@@ -494,6 +494,14 @@ async def secret_wrap(
         mission_id: Identifiant de la mission (scope)
         operation_id: Corrélation write-ahead pour compensation des orphelins (#74)
         ttl_seconds: TTL du wrap token en secondes (défaut: 300s = 5 min)
+        tenant_id: Locataire propriétaire (binding C18). Optionnel hors mode
+            durci ; **REQUIS** si ENFORCE_MISSION_TOKEN_VALIDATION=true — aucune
+            source serveur ne peut le suppléer, un locataire déduit attesterait
+            une appartenance inventée.
+        expected_aud: Audience attendue (binding C18). Optionnelle : en mode
+            durci, une valeur absente ou blanche est complétée depuis la
+            configuration, et une audience désignant une AUTRE instance est
+            refusée — le wrap serait inconsommable.
 
     Returns:
         {status, wrap_token (SENSIBLE), secret_id, accessor, vault_url, expires_at, intended_use}
@@ -526,23 +534,16 @@ async def secret_wrap(
         return {"status": "error", "error_type": "invalid_input",
                 "message": "mission_id invalide (alphanum + _-:., 1-256 chars)"}
 
-    # En mode ENFORCE=true + JWKS configuré : enrichir expected_aud automatiquement
-    # pour garantir le binding complet côté secret_consume (ÉLEVÉ — issue #29).
-    # Les wraps créés sans expected_aud auraient un binding mission_id-only.
-    # ⚠️ La porte est `enforce` SEUL, plus `enforce AND jwks` (issue #78, relevé
-    # au 3e tour de revue pré-commit). L'ancienne conjonction créait un trou
-    # exact : avec `ENFORCE=true` et JWKS vide, tout le durcissement était
-    # contourné ici, `secret_wrap` créait le wrap — et `secret_consume` le
-    # refusait SYSTÉMATIQUEMENT en `misconfigured` (« ENFORCE=true mais
-    # MISSION_JWKS_URL vide »). Une provision morte-née à chaque appel. Le
-    # fail-fast au boot rend la configuration improbable en production, mais un
-    # chemin qui fabrique de l'inconsommable n'est pas correct pour autant.
+    # En mode ENFORCE : valider JWKS et audience serveur, exiger `tenant_id`, puis
+    # compléter ou valider `expected_aud`. Le binding complet porte sur les trois
+    # champs mission_id + tenant_id + expected_aud (issue #29, durci #78).
+    # ⚠️ La porte est `enforce` SEUL, jamais `enforce AND jwks` : avec JWKS vide,
+    # `secret_consume` refuse systématiquement en `misconfigured`, donc créer le
+    # wrap ici fabriquerait une provision morte-née à chaque appel.
     if settings.enforce_mission_token_validation:
-        # ── 1. CONFIGURATION INVALIDE D'ABORD ────────────────────────
-        # Priorité à la cause que l'exploitant doit corriger : inutile d'envoyer
-        # l'appelant vérifier ses paramètres quand c'est le serveur qui est
-        # incohérent. Mêmes verdicts que `secret_consume`, pour que les deux
-        # surfaces racontent la même histoire.
+        # Configuration invalide d'abord : mêmes verdicts que `secret_consume`,
+        # pour ne pas envoyer l'appelant vérifier ses paramètres quand c'est le
+        # serveur qui est incohérent.
         if not settings.mission_jwks_url:
             return {"status": "error", "error_type": "misconfigured",
                     "message": "ENFORCE_MISSION_TOKEN_VALIDATION=true mais "
@@ -570,9 +571,9 @@ async def secret_wrap(
             return {"status": "error", "error_type": "binding_incomplete",
                     "message": "tenant_id requis en mode ENFORCE=true — il ne "
                                "peut pas être déduit côté serveur (binding C18)"}
-        # Issue #78, relevé en DEUX tours de revue pré-commit. `secret_consume`
-        # compare l'audience stockée à `resolved_mission_aud` de CETTE instance,
-        # toujours — l'appelant ne choisit pas la valeur comparée. Donc :
+        # `secret_consume` compare toujours l'audience stockée à
+        # `resolved_mission_aud` de CETTE instance : l'appelant ne choisit pas la
+        # valeur comparée. Donc :
         #
         #   - une audience blanche est ABSENTE, pas fournie : on l'enrichit.
         #     Stockée telle quelle, elle rendait le wrap inconsommable ;
@@ -683,7 +684,7 @@ async def secret_wrap_lookup(operation_id: str, mission_id: str) -> dict:
                            révoquée (le TTL OpenBao l'expirera)
         already_revoked  — déjà révoqué lors d'un appel précédent
         revoked          — révocation effectuée maintenant
-        ambiguous        — plusieurs provisions (toutes révoquées)
+        ambiguous        — plusieurs entrées ; seules les révocables l'ont été
 
     Args:
         operation_id: Identifiant de corrélation write-ahead
@@ -719,13 +720,9 @@ async def secret_wrap_lookup(operation_id: str, mission_id: str) -> dict:
     if wrap_perm_err:
         return wrap_perm_err
 
-    # #78/D6 : validation stricte (fullmatch, via is_safe_id) avant tout audit
-    # PORTANT CES IDENTIFIANTS. Les gardes d'autorisation ci-dessus auditent,
-    # elles, un refus — mais elles ne reçoivent NI `operation_id` NI
-    # `mission_id` (signatures `check_policy(tool_name)` /
-    # `check_wrap_permission()`), donc aucune valeur non validée n'atteint un
-    # journal avant ce point. Précision apportée en revue pré-commit : l'ordre
-    # autorisation-puis-validation est VOULU, la garantie porte sur les valeurs.
+    # #78/D6 : valider les deux identifiants avant tout audit qui les inclut. Les
+    # gardes d'autorisation ci-dessus auditent un refus, mais ne reçoivent aucun
+    # des deux — l'ordre autorisation-puis-validation est donc voulu.
     if not is_safe_id(operation_id):
         return {"status": "error", "error_type": "invalid_input",
                 "message": "operation_id invalide (alphanum + _-:., 1-256 chars)"}
@@ -793,13 +790,9 @@ async def secret_wrap_status(operation_id: str, mission_id: str) -> dict:
     if wrap_perm_err:
         return wrap_perm_err
 
-    # #78/D6 : validation stricte (fullmatch, via is_safe_id) avant tout audit
-    # PORTANT CES IDENTIFIANTS. Les gardes d'autorisation ci-dessus auditent,
-    # elles, un refus — mais elles ne reçoivent NI `operation_id` NI
-    # `mission_id` (signatures `check_policy(tool_name)` /
-    # `check_wrap_permission()`), donc aucune valeur non validée n'atteint un
-    # journal avant ce point. Précision apportée en revue pré-commit : l'ordre
-    # autorisation-puis-validation est VOULU, la garantie porte sur les valeurs.
+    # #78/D6 : valider les deux identifiants avant tout audit qui les inclut. Les
+    # gardes d'autorisation ci-dessus auditent un refus, mais ne reçoivent aucun
+    # des deux — l'ordre autorisation-puis-validation est donc voulu.
     if not is_safe_id(operation_id):
         return {"status": "error", "error_type": "invalid_input",
                 "message": "operation_id invalide (alphanum + _-:., 1-256 chars)"}

@@ -42,6 +42,26 @@ peut casser la compatibilité sans les faire échouer.
 mesurées, 3 détectées** (`mission_id` rendu optionnel sur chacun des deux outils,
 et ajouté en paramètre de `secret_consume`).
 
+### Deux affirmations de la section v0.12.0 étaient plus fortes que la réalité
+
+Relevées en auditant nos propres commentaires. Elles figurent aussi dans les
+messages de commit et les demandes de fusion correspondantes ; nous les corrigeons
+ici plutôt que de les laisser courir.
+
+1. **« Le chemin de repli existait sans jamais servir »** (à propos de
+   `mark_active` et de la révocation d'urgence). **Faux** : en v0.11.0,
+   `mark_active` finissait par `return self._save()` — un échec S3 rendait donc
+   déjà `False` et déclenchait bien la révocation d'urgence. Ce que v0.12.0
+   ajoute est plus étroit : `False` lorsque **aucune entrée `pending` unique** ne
+   correspond au couple.
+
+2. **« La classification passe par la classe d'exception, plus par une recherche
+   de sous-chaîne »**. **Trop fort** : elle exige la classe `InvalidRequest`
+   **puis** cherche le motif OpenBao exact dans `errors` et `str(exc)`.
+   L'amélioration est réelle — l'ancien mapping cherchait « 403 »/« 404 » sans
+   contrainte de classe — mais le texte de l'exception n'a pas disparu du
+   raisonnement : c'est le texte **seul** qui ne décide plus rien.
+
 ### Correction documentaire
 
 `scripts/README.md` portait encore un exemple `secret wrap-lookup op-1` **sans**

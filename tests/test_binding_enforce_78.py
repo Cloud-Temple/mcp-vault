@@ -1,40 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-Issue #78, finding 4 — le binding de mission doit être complet AUX DEUX BOUTS.
+Issue #78, finding 4 — le binding de mission exigé AUX DEUX BOUTS en mode durci.
 
-## Le défaut
+Le binding C18 repose sur `tenant_id` ET `expected_aud`. Seul `expected_aud`
+était exigé : le contrôle d'appartenance au locataire ne s'appliquait donc jamais
+quand le champ manquait.
 
-Le binding C18 anti-confused-deputy repose sur DEUX champs : `tenant_id` (à quel
-locataire appartient la provision) et `expected_aud` (à quelle instance de coffre
-elle est destinée). En mode durci (`ENFORCE_MISSION_TOKEN_VALIDATION=true`), seul
-`expected_aud` était exigé :
+- à la CONSOMMATION, une entrée sans `tenant_id` passait la garde ;
+- à la CRÉATION, `expected_aud` était complété depuis la configuration mais pas
+  `tenant_id` — aucune source serveur ne peut le suppléer. Le coffre fabriquait
+  des provisions qu'il refuse ensuite.
 
-- à la CONSOMMATION, une entrée sans `tenant_id` passait la garde
-  `binding_incomplete` — le contrôle d'appartenance ne s'appliquait donc que si
-  le champ était présent, c'est-à-dire jamais quand il manque ;
-- à la CRÉATION, `secret_wrap` complétait automatiquement `expected_aud` depuis
-  la configuration du serveur mais **pas** `tenant_id` — aucune source
-  serveur ne peut l'inventer. Le coffre fabriquait donc des provisions au
-  binding incomplet, qu'il faudrait ensuite refuser à la consommation.
-
-Fermer un seul bout ne suffit pas : ne durcir que la consommation laisse le
-coffre créer des provisions vouées à l'échec, et l'incident se découvre au pire
-moment — quand la mission réclame son credential.
-
-## Ce qui N'EST PAS durci, volontairement
-
-Hors mode durci, le comportement est INCHANGÉ : les wraps historiques sans
-binding restent consommables (rétrocompatibilité assumée et documentée). Le
-durcissement est la contrepartie explicite du mode `enforce`.
+Hors mode durci, comportement INCHANGÉ : les wraps historiques sans binding
+restent consommables.
 
 ⚠️ `ENFORCE_MISSION_TOKEN_VALIDATION` est une porte INDÉPENDANTE du PEP
-transport : elle peut être active en mode d'authentification `bearer`
-(cf. `config.py`, issue #86 finding 1). Ne pas déduire de « la production tourne
-en bearer » que ce chemin dort.
+transport : elle peut être active en mode `bearer`.
 
 Tests mockés (pas de conteneur). Stub hvac : `tests/conftest.py`.
 """
-
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -60,7 +44,8 @@ def run(coro):
 # =============================================================================
 
 def _registre(tenant_id: str, expected_aud: str):
-    """Registre en mémoire portant une entrée `active` au binding choisi."""
+    """
+Registre en mémoire portant une entrée `active` au binding choisi."""
     from mcp_vault.vault.wrapping import WrapRegistry
 
     class EnMemoire(WrapRegistry):
@@ -121,7 +106,7 @@ class TestConsommationBindingIncomplet:
 
     def test_sans_tenant_id_le_mode_durci_refuse(self):
         """
-        CŒUR DU FINDING 4. RED avant le correctif : seul `expected_aud` était
+        CŒUR DU FINDING 4. seul `expected_aud` était
         exigé, donc une entrée sans `tenant_id` était consommée sans que
         l'appartenance au locataire soit jamais vérifiée.
         """
@@ -152,15 +137,9 @@ class TestConsommationBindingIncomplet:
         assert client.unwraps == 0
 
     def test_une_entree_historique_a_champ_BLANC_dit_incomplet_pas_mismatch(self):
-        """
-        RELEVÉ AU 2e TOUR DE REVUE — question de DIAGNOSTIC, pas de sécurité.
-
-        Une entrée historique dont l'audience vaut des espaces blancs tombait en
-        `binding_mismatch` parce que la comparaison précédait le contrôle de
-        complétude. Diagnostic trompeur : l'exploitant cherche une erreur d'appel
-        alors que l'entrée n'atteste rien et qu'il faut REPROVISIONNER — aucun
-        appelant ne peut ajouter le binding manquant après coup.
-        """
+        """Question de DIAGNOSTIC : un champ d'espaces blancs sortait en
+        `binding_mismatch`, ce qui fait chercher une erreur d'appel alors que
+        l'entrée n'atteste rien et qu'il faut REPROVISIONNER."""
         registre = _registre(tenant_id="   ", expected_aud=AUD)
         client = _ClientCompteur()
         r = _consommer(registre, client, tenant_id=TENANT,
@@ -241,7 +220,7 @@ class TestCreationBindingIncomplet:
 
     def test_en_mode_durci_sans_tenant_id_la_creation_est_refusee(self):
         """
-        CŒUR DU SECOND BOUT. RED avant le correctif : `expected_aud` était
+        CŒUR DU SECOND BOUT. `expected_aud` était
         complété automatiquement, `tenant_id` restait vide, et le coffre créait
         une provision qu'il refusera lui-même à la consommation.
         """
@@ -283,18 +262,10 @@ class TestCreationBindingIncomplet:
 
     @pytest.mark.parametrize("aud_fourni", ["", "   ", "\t\n"])
     def test_une_audience_d_espaces_blancs_est_traitee_comme_ABSENTE(self, aud_fourni):
-        """
-        RELEVÉ EN REVUE PRÉ-COMMIT — le symétrique manquait.
-
-        `expected_aud` d'espaces blancs était stocké TEL QUEL : le wrap devenait
-        inconsommable (`binding_mismatch` à la consommation, l'audience réelle ne
-        pouvant jamais valoir « des espaces »). C'est exactement la provision
-        vouée à l'échec que ce lot supprime — le durcissement de `tenant_id` la
-        laissait passer par l'autre champ.
-
-        Le bon traitement n'est PAS un refus : une audience absente a une source
-        serveur, donc elle est ENRICHIE. Seul le locataire n'en a aucune.
-        """
+        """Une audience d'espaces blancs stockée telle quelle rend le wrap
+        inconsommable. Le bon traitement n'est PAS un refus : l'audience a une
+        source serveur, donc elle est ENRICHIE — seul le locataire n'en a
+        aucune."""
         r, coeur = _appeler_secret_wrap(tenant_id=TENANT, enforce=True,
                                         expected_aud=aud_fourni)
 
@@ -305,21 +276,10 @@ class TestCreationBindingIncomplet:
             f"wrap sera inconsommable : {coeur.call_args.kwargs!r}")
 
     def test_une_audience_visant_une_AUTRE_instance_est_refusee(self):
-        """
-        RELEVÉ AU 2e TOUR DE REVUE PRÉ-COMMIT — mon test précédent verrouillait un
-        défaut.
-
-        J'avais écrit un test « une audience fournie n'est pas réécrite », qui
-        exigeait donc que `autre-instance` soit ACCEPTÉE et stockée. Or
-        `secret_consume` compare toujours l'audience stockée à celle de CETTE
-        instance : un tel wrap est **définitivement inconsommable**
-        (`binding_mismatch` garanti). Mon anti-complaisance protégeait la
-        fabrication d'une provision morte-née.
-
-        Le refus à la création est le seul comportement honnête. L'écraser
-        silencieusement serait pire : le coffre attesterait une audience que
-        l'appelant n'a jamais demandée.
-        """
+        """`secret_consume` compare toujours l'audience stockée à celle de CETTE
+        instance : une autre valeur rend le wrap définitivement inconsommable.
+        Le refus à la création est donc le seul comportement honnête — l'écraser
+        en silence attesterait une audience non demandée."""
         r, coeur = _appeler_secret_wrap(tenant_id=TENANT, enforce=True,
                                         expected_aud="autre-instance")
 
@@ -344,22 +304,11 @@ class TestCreationBindingIncomplet:
 
     @pytest.mark.parametrize("tenant", ["", TENANT])
     def test_enforce_sans_jwks_refuse_car_la_provision_serait_morte_nee(self, tenant):
-        """
-        RELEVÉ AU 3e TOUR DE REVUE — mon test précédent verrouillait le trou.
-
-        J'avais écrit « sans JWKS le durcissement ne s'applique pas » et exigé
-        `status: "ok"`, en raisonnant sur la porte du bloc EXISTANT. Mesuré depuis :
-        avec `ENFORCE=true` et JWKS vide, `secret_consume` refuse
-        **systématiquement** en `misconfigured` (« ENFORCE=true mais
-        MISSION_JWKS_URL vide »). Le coffre fabriquait donc une provision
-        inconsommable À CHAQUE APPEL, et mon test l'exigeait.
-
-        Le fail-fast au démarrage rend cette configuration improbable en
-        production — ce n'est pas une raison pour qu'un chemin produise de
-        l'inconsommable. Le verdict doit être le MÊME que celui de la
-        consommation, y compris quand le locataire est fourni : c'est la
-        configuration qui est en cause, pas l'appel.
-        """
+        """Avec `ENFORCE=true` et JWKS vide, `secret_consume` refuse
+        SYSTÉMATIQUEMENT en `misconfigured` : créer le wrap fabriquerait une
+        provision inconsommable à chaque appel. Le verdict doit être le même que
+        celui de la consommation, même quand le locataire est fourni — c'est la
+        configuration qui est en cause, pas l'appel."""
         r, coeur = _appeler_secret_wrap(tenant_id=tenant, enforce=True, jwks="")
 
         assert r["status"] == "error", (
@@ -371,17 +320,9 @@ class TestCreationBindingIncomplet:
         coeur.assert_not_called()
 
     def test_une_config_invalide_PRIME_sur_l_entree_de_l_appelant(self):
-        """
-        RELEVÉ AU 3e TOUR DE REVUE — question de diagnostic exploitable.
-
-        Audience serveur non résoluble ET locataire absent : le verdict doit être
-        `misconfigured`, pas `binding_incomplete`. Sinon on envoie l'appelant
-        vérifier SES paramètres alors que c'est le serveur qui est incohérent —
-        et il corrigerait son appel pour se heurter ensuite au vrai problème.
-
-        Le contrôle du locataire est donc placé APRÈS la validation de la
-        configuration.
-        """
+        """Audience serveur non résoluble ET locataire absent : le verdict doit
+        être `misconfigured`, sinon on envoie l'appelant vérifier SES paramètres
+        alors que le serveur est incohérent."""
         r, coeur = _appeler_secret_wrap(tenant_id="", enforce=True, instance="")
 
         assert r["status"] == "error", r
