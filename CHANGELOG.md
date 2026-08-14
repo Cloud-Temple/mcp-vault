@@ -2,6 +2,84 @@
 
 ## [Non publié]
 
+## [0.12.1] — 2026-08-14
+
+### Un code d'erreur qui annonçait « rien n'a été créé » alors qu'un wrap existait
+
+`secret_wrap` rendait `registry_unavailable` sur **trois** situations. Ce code
+promet à l'appelant qu'aucune ressource n'a été créée, et c'est vrai de deux
+d'entre elles : registre non configuré, intention non enregistrable. **La
+troisième survient APRÈS qu'OpenBao a créé le wrap** — l'échec de `mark_active`.
+Le broker y lisait « provisionnement propre, rien à compenser » alors qu'un jeton
+pouvait rester actif jusqu'à son TTL, sans qu'il en ait l'accessor.
+
+Ce chemin rend désormais **deux codes distincts**, et la frontière est l'issue de
+la **révocation d'urgence** — la seule chose qui décide s'il reste quelque chose à
+compenser :
+
+| Code | Ce qu'il atteste | Conduite appelant |
+| --- | --- | --- |
+| `wrap_created_revoked` | wrap créé, **révocation confirmée** | rien à compenser ; ne pas rejouer cette clé |
+| `wrap_created_orphaned` | wrap créé, **révocation NON confirmée** | ressource possiblement active jusqu'au TTL, **non compensable** (aucun accessor n'est exposé) ; ne pas rejouer cette clé |
+
+Cette information n'existait que dans un log serveur : les deux équipes clientes
+devaient traiter tout échec comme une fuite de provision possible. Défaut relevé
+en produisant la **matrice d'effet externe** demandée par `mcp-mission` et
+`mcp-agent`, désormais publiée au README.
+
+⚠️ **Rupture de valeur, non de forme** : un appelant qui filtrait `registry_unavailable`
+sur ce chemin voit deux valeurs neuves. Aucune signature ne change, aucun champ ne
+disparaît, et les deux nouveaux codes **échouent plus prudemment** que celui qu'ils
+remplacent — d'où un correctif de patch et non une version mineure.
+
+### Des refus rendaient une enveloppe d'erreur sans `error_type`
+
+`ttl_seconds` hors de la plage 60–3600, et **tous les refus des gardes
+d'autorisation partagées**, rendaient `{"status": "error", "message": …}` sans
+code. Un appelant qui clé sur `error_type` y lisait `None`. Ils portent désormais
+un code d'une taxonomie fermée : `unauthenticated`, `permission_denied`,
+`access_denied`, `invalid_input`, `invalid_token`, `policy_store_unavailable`.
+
+⚠️ **Portée bornée, à ne pas surestimer** : la promesse couvre les gardes de
+`auth/context.py`. Des refus de **validation** propres à des outils hors périmètre
+wrapping (`secret_list`, surfaces `/admin/api`) en sortent encore sans code.
+**Testez `status` avant `error_type`.**
+
+### Un défaut de rejeu documenté, PAS corrigé
+
+Quand `secret_wrap` échoue **après** l'appel OpenBao — `backend_error` sur
+coupure réseau, ou réponse sans `wrap_info` exploitable — l'intention passe
+`failed` **si sa persistance aboutit**, et la clé `(operation_id, mission_id)`
+**redevient alors rejouable** alors qu'un wrap a pu être créé sans que nous en
+ayons l'accessor. Un rejeu automatique y créerait un **second** wrap, le premier
+restant orphelin. ⚠️ Si cette persistance échoue à son tour, l'entrée revient
+`pending` et la clé est au contraire **bloquée** (`operation_pending`) : les deux
+issues existent, et l'appelant ne peut pas les prévoir.
+
+Le comportement est **exercé par deux tests** — le rejeu effectif, et la
+compensation — et signalé aux deux équipes clientes avec la seule protection
+disponible : **ne pas rejouer la même clé, repartir sur un nouvel
+`operation_id`**.
+
+⚠️ **Un mensonge de contrat corrigé sur ce même chemin.** Une entrée `failed` est
+précisément celle que l'appelant rencontre en compensant — et
+`secret_wrap_lookup` lui répondait `already_revoked` : il **affirmait une
+révocation qui n'avait jamais eu lieu**, alors qu'un wrap peut être vivant et
+inconnu. Elle rend désormais `found_unattached` (aucun accessor, aucune
+révocation possible, seul le TTL borne la ressource) — même famille de mensonge
+que celle fermée par #78 pour les états terminaux de consommation, restée ouverte
+ici. Le nouveau verdict est **pessimiste** quand OpenBao avait réellement refusé
+la lecture : il annonce une ressource possible là où il n'y en a aucune. Une
+prudence inutile coûte moins qu'une fausse assurance.
+
+Il n'est pas fermé dans ce lot, et c'est un arbitrage explicite : bloquer la clé
+la bloquerait **définitivement** — rien ne libère une clé chez nous, et une
+libération par échéance créerait une seconde entrée `pending`, donc une ambiguïté.
+On échangerait un incident rare (panne exactement après création) contre un
+incident fréquent (toute coupure réseau condamne la clé). La reprise correcte
+exige une transition persistée : lot distinct, et une question posée à
+`mcp-mission` — repartent-ils déjà avec un nouvel identifiant après un échec ?
+
 ### Le contrat des signatures d'outils devient démontrable, plus seulement mesuré
 
 L'ordre de déploiement de v0.12.0 communiqué à `agentic-platform` et à

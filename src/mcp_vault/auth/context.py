@@ -38,7 +38,8 @@ def check_access(resource_id: str) -> Optional[dict]:
 
     # Pas de token → accès refusé
     if token_info is None:
-        return {"status": "error", "message": "Authentification requise"}
+        return {"status": "error", "error_type": "unauthenticated",
+                "message": "Authentification requise"}
 
     # Admin → accès total
     if "admin" in token_info.get("permissions", []):
@@ -58,6 +59,7 @@ def check_access(resource_id: str) -> Optional[dict]:
     if not is_valid_vault_id(resource_id):
         return {
             "status": "error",
+            "error_type": "invalid_input",
             "message": f"Identifiant de coffre invalide : '{resource_id}'",
         }
 
@@ -71,6 +73,7 @@ def check_access(resource_id: str) -> Optional[dict]:
         if resource_id not in allowed:
             return {
                 "status": "error",
+                "error_type": "access_denied",
                 "message": f"Accès refusé à '{resource_id}'",
                 "allowed_vaults": allowed,
             }
@@ -85,6 +88,7 @@ def check_access(resource_id: str) -> Optional[dict]:
     if token_info.get("auth_type") == "mission_jwt":
         return {
             "status": "error",
+            "error_type": "access_denied",
             "message": f"Accès refusé à '{resource_id}' "
                        "(aucun périmètre vault provisionné pour cette identité mission)",
         }
@@ -97,12 +101,14 @@ def check_access(resource_id: str) -> Optional[dict]:
         # (fail-close : ne jamais autoriser sur une identité inexploitable).
         return {
             "status": "error",
+            "error_type": "access_denied",
             "message": f"Accès refusé à '{resource_id}' (identité incomplète)",
         }
     from ..vault.spaces import check_vault_owner
     if not check_vault_owner(resource_id, client_name):
         return {
             "status": "error",
+            "error_type": "access_denied",
             "message": f"Accès refusé à '{resource_id}' (vous n'en êtes pas le propriétaire)",
         }
 
@@ -214,6 +220,7 @@ def enforce_mission_jwt_tool(tool_name: str) -> Optional[dict]:
 
     return {
         "status": "error",
+        "error_type": "permission_denied",
         "message": f"Outil '{tool_name}' non autorisé pour une identité mission",
     }
 
@@ -228,11 +235,13 @@ def check_write_permission() -> Optional[dict]:
     token_info = current_token_info.get()
 
     if token_info is None:
-        return {"status": "error", "message": "Authentification requise"}
+        return {"status": "error", "error_type": "unauthenticated",
+                "message": "Authentification requise"}
 
     permissions = token_info.get("permissions", [])
     if "write" not in permissions and "admin" not in permissions:
-        return {"status": "error", "message": "Permission d'écriture requise"}
+        return {"status": "error", "error_type": "permission_denied",
+                "message": "Permission d'écriture requise"}
 
     return None
 
@@ -247,10 +256,12 @@ def check_admin_permission() -> Optional[dict]:
     token_info = current_token_info.get()
 
     if token_info is None:
-        return {"status": "error", "message": "Authentification requise"}
+        return {"status": "error", "error_type": "unauthenticated",
+                "message": "Authentification requise"}
 
     if "admin" not in token_info.get("permissions", []):
-        return {"status": "error", "message": "Permission admin requise"}
+        return {"status": "error", "error_type": "permission_denied",
+                "message": "Permission admin requise"}
 
     return None
 
@@ -323,6 +334,7 @@ def enforce_wrap_only_token(tool_name: str) -> Optional[dict]:
 
     return {
         "status": "error",
+        "error_type": "permission_denied",
         "message": f"Outil '{tool_name}' non autorisé pour un token wrap "
                    "(périmètre limité au broker JIT)",
     }
@@ -349,14 +361,16 @@ def check_wrap_permission() -> Optional[dict]:
     token_info = current_token_info.get()
 
     if token_info is None:
-        return {"status": "error", "message": "Authentification requise"}
+        return {"status": "error", "error_type": "unauthenticated",
+                "message": "Authentification requise"}
 
     permissions = token_info.get("permissions", [])
     if "admin" in permissions:
         return None
 
     if "wrap" not in permissions:
-        return {"status": "error", "message": "Permission wrap (ou admin) requise"}
+        return {"status": "error", "error_type": "permission_denied",
+                "message": "Permission wrap (ou admin) requise"}
 
     client = token_info.get("client_name", "?")
 
@@ -364,6 +378,7 @@ def check_wrap_permission() -> Optional[dict]:
     if not isinstance(allowed, list) or not allowed:
         return {
             "status": "error",
+            "error_type": "permission_denied",
             "message": "Un token wrap exige une allow-list de vaults non vide "
                        "(allowed_resources) — pas de fallback owner-based",
         }
@@ -372,6 +387,7 @@ def check_wrap_permission() -> Optional[dict]:
     if not isinstance(policy_id, str) or not policy_id:
         return {
             "status": "error",
+            "error_type": "permission_denied",
             "message": "Un token wrap exige une policy applicative explicite "
                        "(policy_id)",
         }
@@ -400,6 +416,7 @@ def check_wrap_permission() -> Optional[dict]:
                       "explicites — requis pour un token wrap", client)
         return {
             "status": "error",
+            "error_type": "permission_denied",
             "message": f"La policy '{policy_id}' doit déclarer des allowed_tools "
                        "explicites pour un token wrap (une policy sans allow-list "
                        "d'outils serait permissive)",
@@ -432,7 +449,8 @@ def check_wrap_path_policy(vault_id: str, secret_path: str,
     token_info = current_token_info.get()
 
     if token_info is None:
-        return {"status": "error", "message": "Authentification requise"}
+        return {"status": "error", "error_type": "unauthenticated",
+                "message": "Authentification requise"}
 
     if "admin" in token_info.get("permissions", []):
         return None
@@ -442,7 +460,7 @@ def check_wrap_path_policy(vault_id: str, secret_path: str,
     if not isinstance(policy_id, str) or not policy_id:
         # check_wrap_permission (appelée avant) refuse déjà ce cas ; garde
         # conservée pour les appels directs (filtre registre) — fail-close.
-        return {"status": "error",
+        return {"status": "error", "error_type": "permission_denied",
                 "message": "Un token wrap exige une policy applicative explicite"}
 
     from .policies import get_policy_store, PolicyStoreUnavailable
@@ -478,6 +496,7 @@ def check_wrap_path_policy(vault_id: str, secret_path: str,
                       vault_id=vault_id)
     return {
         "status": "error",
+        "error_type": "permission_denied",
         "message": f"Accès refusé au chemin '{secret_path}' dans '{vault_id}' "
                    f"(policy '{policy_id}', évaluation stricte : une path_rule "
                    "matchante avec allowed_paths explicites est requise)",
@@ -549,7 +568,7 @@ def check_policy(tool_name: str) -> Optional[dict]:
     # Défense en profondeur au dernier point de décision, indépendamment de la
     # façon dont la donnée corrompue serait arrivée jusqu'ici.
     if not isinstance(policy_id, str):
-        return {"status": "error",
+        return {"status": "error", "error_type": "invalid_token",
                 "message": "Token corrompu (policy_id invalide) — accès refusé"}
     # Pas de policy_id assignée → tout autorisé
     if not policy_id:
@@ -609,6 +628,7 @@ def check_policy(tool_name: str) -> Optional[dict]:
 
     return {
         "status": "error",
+        "error_type": "permission_denied",
         "message": f"Outil '{tool_name}' refusé par la policy '{policy_id}'",
         "policy_id": policy_id,
     }
@@ -643,7 +663,7 @@ def check_path_policy(vault_id: str, path: str,
     # issue #86 Lot 3 (round 3 diff review) : voir check_policy() — même défense
     # en profondeur contre un policy_id de type invalide dans le token.
     if not isinstance(policy_id, str):
-        return {"status": "error",
+        return {"status": "error", "error_type": "invalid_token",
                 "message": "Token corrompu (policy_id invalide) — accès refusé"}
     if not policy_id:
         return None  # Pas de policy → pas de restriction
@@ -699,6 +719,7 @@ def check_path_policy(vault_id: str, path: str,
 
     return {
         "status": "error",
+        "error_type": "permission_denied",
         "message": (
             f"Accès refusé au chemin '{path}' dans '{vault_id}' (policy '{policy_id}')"
             if path else

@@ -608,6 +608,15 @@ async def wrap_secret(
 
     Le wrap_token retourné ne doit jamais être loggué côté broker.
 
+    Codes d'erreur et effet externe — ce que l'appelant doit pouvoir en déduire :
+    - AVANT tout appel OpenBao, donc rien de créé : `invalid_input`,
+      `backend_unavailable`, `operation_pending`, `registry_unavailable`.
+    - APRÈS l'appel, donc un wrap PEUT exister sans accessor exposé :
+      `not_found`, `backend_error`.
+    - APRÈS création certaine du wrap : `wrap_created_revoked` (révocation
+      d'urgence confirmée, rien à compenser) et `wrap_created_orphaned`
+      (révocation non confirmée, ressource possiblement active jusqu'au TTL).
+
     Returns:
         {status: "ok", wrap_token (SENSIBLE), secret_id, accessor, vault_url, expires_at, intended_use}
     """
@@ -682,18 +691,35 @@ async def wrap_secret(
 
     # ── Mettre à jour "pending" → "active" avec l'accessor ──────────
     if not registry.mark_active(operation_id, mission_id, accessor):
-        # S3 indisponible au passage active : le wrap_token existe côté OpenBao
-        # mais n'est pas corrélé → révoquer immédiatement pour éviter une provision
-        # non compensable, et retourner une erreur au broker.
-        logger.error("wrap_secret: mark_active S3 failed pour op=%r — révocation immédiate",
+        # Le wrap_token EXISTE côté OpenBao mais n'est pas corrélé au registre
+        # (échec S3, ou entrée d'intention absente/ambiguë) → révoquer
+        # immédiatement pour éviter une provision non compensable.
+        logger.error("wrap_secret: mark_active a échoué pour op=%r — révocation immédiate",
                      operation_id[:32])
+        # L'issue de cette révocation décide s'il reste une ressource à
+        # compenser côté appelant — mcp-mission et mcp-agent nous ont demandé
+        # précisément cette distinction. La laisser dans un log seulement les
+        # obligeait à traiter tout échec comme une fuite de provision possible.
+        # Deux codes DISTINCTS, jamais l'ancien `registry_unavailable` : celui-ci
+        # promettait « rien n'a été créé », ce qui est faux sur ce chemin.
         try:
             client.auth.token.revoke_accessor(accessor=accessor)
         except Exception as rev_e:
             logger.error("wrap_secret: révocation d'urgence échouée: %s — "
                          "wrap token orphelin possible (TTL=%ss)", type(rev_e).__name__, ttl_seconds)
-        return {"status": "error", "error_type": "registry_unavailable",
-                "message": "Wrap créé mais non persisté — révoqué pour intégrité"}
+            # Révocation NON CONFIRMÉE. Elle a pu aboutir malgré l'exception
+            # (perte de réponse) : on annonce donc l'incertitude, pas l'orphelin
+            # certain. L'appelant n'a pas l'accessor — aucune compensation
+            # possible de son côté, seul le TTL borne la ressource.
+            return {"status": "error", "error_type": "wrap_created_orphaned",
+                    "message": "Wrap créé mais non persisté, et sa révocation "
+                               f"n'est pas confirmée — il peut rester actif jusqu'à "
+                               f"{ttl_seconds}s. Aucun accessor n'est exposé : "
+                               "cette ressource n'est pas compensable. Ne pas "
+                               "rejouer cette clé"}
+        return {"status": "error", "error_type": "wrap_created_revoked",
+                "message": "Wrap créé mais non persisté — révocation confirmée, "
+                           "aucune ressource à compenser. Ne pas rejouer cette clé"}
 
     expires_at_dt = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
 
@@ -942,9 +968,24 @@ async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) 
             "operation_id": operation_id, "count_revoked": 0, "entries_found": 0,
         }
 
-    # Détecter les pending sans accessor (crash window)
-    pending_no_accessor = [e for e in entries if e["status"] == "pending" and not e.get("accessor")]
-    if pending_no_accessor and all(e["status"] in ("pending", "failed") for e in entries):
+    # Détecter les intentions sans accessor (fenêtre de plantage).
+    #
+    # `failed` compte AUTANT que `pending` : un échec de provisionnement survenu
+    # APRÈS l'appel OpenBao (délai dépassé, coupure, réponse sans `wrap_info`)
+    # marque l'intention `failed` alors qu'un wrap a pu être créé — et nous n'en
+    # avons pas l'accessor. Sans cette ligne, une entrée `failed` seule tombait en
+    # `already_revoked` : le contrat AFFIRMAIT une révocation qui n'a jamais eu
+    # lieu, sur le chemin même que l'appelant emprunte pour compenser. Même
+    # famille de mensonge que celle fermée par #78 pour les états terminaux de
+    # consommation, restée ouverte ici.
+    #
+    # `found_unattached` est PESSIMISTE pour un `failed` dont OpenBao a réellement
+    # refusé la lecture (404, rien de créé) : il annonce une ressource possible là
+    # où il n'y en a aucune. C'est le sens du compromis — nous ne distinguons pas
+    # les deux, et une prudence inutile coûte moins qu'une fausse assurance.
+    sans_accessor = [e for e in entries
+                     if e["status"] in ("pending", "failed") and not e.get("accessor")]
+    if sans_accessor and all(e["status"] in ("pending", "failed") for e in entries):
         return {
             "status": "ok", "state": "found_unattached",
             "operation_id": operation_id, "count_revoked": 0,

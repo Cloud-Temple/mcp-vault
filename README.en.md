@@ -190,6 +190,82 @@ Contract for the mcp-mission `CredentialBrokerService`: single-use credential de
 > ⚠️ *(#86)* As soon as `ENFORCE_MISSION_TOKEN_VALIDATION=true` (standalone, or via the `/mcp` PEP below), `MISSION_JWKS_URL`, `MCP_INSTANCE_ID`/`MISSION_TOKEN_AUD` **and** `MISSION_STATUS_URL` become mandatory (fail-fast at boot) — otherwise an aborted mission would keep access until the `mission_token` expires.
 > ⚠️ *(#86)* The validator now applies EXACTLY the same contract as the `/mcp` PEP below (same required claims, same `component_id` check) — a genuine JWT meant for another vault instance is now rejected by both enforcement points, not just the first one.
 
+#### External-effect matrix — what an error code lets you DEDUCE *(v0.12.1)*
+
+**Every business error code arrives as an ENVELOPE, `isError = false`.** A caller
+that only looks at `isError` reads them all as successes. **Read `status`, then
+`error_type`** — in that order, because some refusals still carry no code (see the
+closing note).
+
+`isError = true` signals only two things: a **schema violation** (required
+parameter missing **or** of the wrong type — the tool body never ran, so no write,
+no OpenBao call, no revocation), or an unexpected defect. A parameter that is
+schema-valid but **semantically refused** comes back as an envelope.
+
+**`secret_wrap`** — the code name is not enough: a resource may exist.
+
+| Code | OpenBao call | Resource to compensate |
+| --- | --- | --- |
+| `invalid_input`, `backend_unavailable`, `operation_pending` | **none** | no, for this call |
+| `registry_unavailable` | **none** | no |
+| `wrap_created_revoked` | **wrap created** | no — revocation confirmed |
+| `wrap_created_orphaned` | **wrap created** | ⚠️ **possibly** — may live until TTL, **not compensable** |
+| `not_found`, `backend_error` | **issued** | ⚠️ **unknown** — do not replay the same key |
+
+⚠️ `backend_error` may follow a call OpenBao actually received (timeout, network
+cut); `not_found` is derived from a pattern searched in the exception text, hence
+unproven. In both cases the intent is marked `failed` **without an accessor** — and
+the key then becomes replayable, which would create a second wrap. ⚠️ If persisting
+that marking fails in turn, the entry reverts to `pending` and the key is instead
+**blocked** (`operation_pending`): both outcomes exist and are not predictable from
+the caller's side. **Start over with a new `operation_id`**, never replay the same key.
+
+> A `failed` (or `pending`) intent without an accessor returns `found_unattached` on `secret_wrap_lookup`: no revocation is possible, only the TTL bounds the possible resource. ⚠️ That verdict does **not** state that a resource exists — it states that we cannot rule it out. *(v0.12.1: this case used to answer `already_revoked`, asserting a revocation that never happened.)*
+
+**The other four tools**, on the unavailability codes:
+
+| Tool | External effect | Conduct |
+| --- | --- | --- |
+| `secret_revoke_wrap` — `registry_unavailable`, `backend_unavailable` | **none**, no revocation attempted | retry safe **and required** |
+| `secret_revoke_wrap` — `backend_error` | call **issued**, effect **unknown** | retry safe (revocation is idempotent) |
+| `secret_wrap_lookup` — `backend_unavailable` | **none**: both fail-close guards precede any revocation | wait then retry, safe |
+| `secret_wrap_lookup` — `partial_revocation` | **unknown** for uncounted entries (`count_revoked` states what landed) | retry safe, but it will not resolve frozen entries |
+| `secret_wrap_status` — `backend_unavailable` | **none**: registry absent or last S3 refresh failed | retry always safe |
+
+> `secret_wrap_status` mutates neither OpenBao nor the registry (the memory cache and audit log do change). It does **not** distinguish transient from durable failure: best-effort snapshot, and an S3 outage during the cache window is not even detected.
+
+**`secret_consume`** — "no call issued" does **not** mean "token intact": on these
+paths we never look at the token, which may have expired or been consumed
+concurrently.
+
+| Code | Did this invocation present the wrap? | Token state |
+| --- | --- | --- |
+| `invalid_input`, `misconfigured`, `jwt_invalid`, `mission_inactive` | no | **not observed** |
+| `registry_unavailable`, `backend_unavailable` | no | **not observed** |
+| `binding_mismatch`, `not_found`, `already_consuming` | no | **not observed** |
+| `binding_incomplete` | no | unconsumable in enforced mode → **reprovision** |
+| `already_consumed` | no | spent or revoked |
+| `wrap_unusable` | depends on the path | **dead** |
+| `consume_outcome_unknown` | **possible** | treat as **lost** |
+| `empty_secret` | **yes** | **burned** |
+
+⚠️ Where the state is **"not observed"**, destroying the access of your own accord
+is a pure loss. But a fresh attempt **is not a probe**: if the cause of the refusal
+is lifted, it **may consume** the wrap.
+⚠️ `backend_error` is **not reachable** on `secret_consume` (any unwrap exception
+lands on `wrap_unusable` or `consume_outcome_unknown`), and `wrap_expired` **does
+not exist** — it wrongly appeared in an earlier version of this contract.
+⚠️ `already_consumed` covers `consumed` **and** `revoked`; `secret_wrap_status`
+disambiguates only when there is **exactly one** entry, otherwise it returns
+`ambiguous`.
+
+> **Refusals without `error_type`** — the closed taxonomy (`unauthenticated`,
+> `permission_denied`, `access_denied`, `invalid_input`, `invalid_token`,
+> `policy_store_unavailable`) covers the shared authorization guards. Tool-specific
+> **validation** refusals outside the wrapping scope (`secret_list`, `/admin/api`
+> surfaces) still return an envelope with no code. **Test `status` before
+> `error_type`.**
+
 ### Mission JWT PEP — `/mcp` front door *(v0.8.0, #47 + #69)*
 
 Second enforcement point (PEP) for the mcp-mission `mission_token` (ES256 JWT), **at the `/mcp` front door** (the first one being `secret_consume`/C18, at consumption). Driven by `MCP_AUTH_MODE`:
@@ -583,4 +659,4 @@ mcp-vault/
 
 ---
 
-**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.12.0
+**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.12.1

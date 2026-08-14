@@ -191,6 +191,83 @@ Contrat pour le `CredentialBrokerService` de mcp-mission : livraison de credenti
 > ⚠️ *(#86)* Dès que `ENFORCE_MISSION_TOKEN_VALIDATION=true` (seul, ou via le PEP `/mcp` ci-dessous), `MISSION_JWKS_URL`, `MCP_INSTANCE_ID`/`MISSION_TOKEN_AUD` **et** `MISSION_STATUS_URL` deviennent obligatoires (fail-fast au boot) — sans quoi une mission abortée conserverait l'accès jusqu'à expiration du `mission_token`.
 > ⚠️ *(#86)* Le validateur applique désormais EXACTEMENT le même contrat que le PEP `/mcp` ci-dessous (mêmes claims requis, même vérification `component_id`) — un JWT authentique mais destiné à une autre instance vault est rejeté par les deux points d'application, pas seulement le premier.
 
+#### Matrice d'effet externe — ce qu'un code d'erreur permet de DÉDUIRE *(v0.12.1)*
+
+**Tous les codes métier arrivent en ENVELOPPE, `isError = false`.** Un appelant qui
+ne regarde que `isError` les prend pour des succès. **Lire `status`, puis
+`error_type`** — dans cet ordre, car certains refus n'ont pas encore de code
+(voir la note en fin de section).
+
+`isError = true` ne signale que deux choses : une **non-conformité au schéma**
+(paramètre requis absent **ou** de mauvais type — le corps de l'outil n'a pas
+tourné, donc aucune écriture, aucun appel OpenBao, aucune révocation), ou un
+défaut non prévu. Un paramètre conforme au schéma mais **refusé sémantiquement**
+revient en enveloppe.
+
+**`secret_wrap`** — le nom du code ne suffit pas : une ressource peut exister.
+
+| Code | Appel OpenBao | Ressource à compenser |
+| --- | --- | --- |
+| `invalid_input`, `backend_unavailable`, `operation_pending` | **absent** | non, pour cet appel |
+| `registry_unavailable` | **absent** | non |
+| `wrap_created_revoked` | **wrap créé** | non — révocation confirmée |
+| `wrap_created_orphaned` | **wrap créé** | ⚠️ **possiblement** — active jusqu'au TTL, **non compensable** |
+| `not_found`, `backend_error` | **émis** | ⚠️ **inconnu** — ne pas rejouer la même clé |
+
+⚠️ `backend_error` peut suivre un appel qu'OpenBao a reçu (délai dépassé, coupure) ;
+`not_found` est déduit d'un motif cherché dans le texte de l'exception, donc non
+prouvé. Dans les deux cas l'intention passe `failed` **sans accessor** — et la clé
+redevient alors rejouable, ce qui créerait un second wrap. ⚠️ Si la persistance de
+ce marquage échoue à son tour, l'entrée revient `pending` et la clé est au
+contraire **bloquée** (`operation_pending`) : les deux issues existent et ne sont
+pas prévisibles côté appelant. **Repartir sur un nouvel `operation_id`**, jamais
+rejouer la même clé.
+
+> Une intention `failed` (ou `pending`) sans accessor rend `found_unattached` sur `secret_wrap_lookup` : aucune révocation n'est possible, seul le TTL borne la ressource éventuelle. ⚠️ Ce verdict ne dit **pas** qu'une ressource existe — il dit que nous ne pouvons pas l'exclure. *(v0.12.1 : ce cas répondait `already_revoked`, affirmant une révocation inexistante.)*
+
+**Les quatre autres outils**, sur les codes d'indisponibilité :
+
+| Outil | Effet externe | Conduite |
+| --- | --- | --- |
+| `secret_revoke_wrap` — `registry_unavailable`, `backend_unavailable` | **absent**, aucune révocation tentée | rejeu sûr **et nécessaire** |
+| `secret_revoke_wrap` — `backend_error` | appel **émis**, effet **inconnu** | rejeu sûr (révocation idempotente) |
+| `secret_wrap_lookup` — `backend_unavailable` | **absent** : les deux gardes fail-close précèdent toute révocation | attente puis rejeu, sûr |
+| `secret_wrap_lookup` — `partial_revocation` | **inconnu** sur les entrées non comptées (`count_revoked` dit ce qui a abouti) | rejeu sûr, mais il ne résoudra pas les entrées figées |
+| `secret_wrap_status` — `backend_unavailable` | **absent** : registre absent ou dernier rafraîchissement S3 échoué | rejeu toujours sûr |
+
+> `secret_wrap_status` ne mute ni OpenBao ni le registre (cache et journal d'audit, eux, bougent). Il ne distingue **pas** le transitoire du durable : instantané best-effort, et une panne S3 pendant la fenêtre de cache n'est même pas détectée.
+
+**`secret_consume`** — « aucun appel émis » ne veut **pas** dire « jeton intact » :
+sur ces chemins nous ne regardons pas le jeton, qui peut avoir expiré ou avoir été
+consommé en parallèle.
+
+| Code | Cette invocation a présenté le wrap ? | État du jeton |
+| --- | --- | --- |
+| `invalid_input`, `misconfigured`, `jwt_invalid`, `mission_inactive` | non | **non constaté** |
+| `registry_unavailable`, `backend_unavailable` | non | **non constaté** |
+| `binding_mismatch`, `not_found`, `already_consuming` | non | **non constaté** |
+| `binding_incomplete` | non | inconsommable en mode durci → **reprovisionner** |
+| `already_consumed` | non | dépensé ou révoqué |
+| `wrap_unusable` | selon le chemin | **mort** |
+| `consume_outcome_unknown` | **possible** | à considérer comme **perdu** |
+| `empty_secret` | **oui** | **brûlé** |
+
+⚠️ Là où l'état est **« non constaté »**, détruire l'accès de son propre fait est
+une perte sèche. Mais une nouvelle tentative **n'est pas une sonde** : si la cause
+du refus est levée, elle **peut consommer** le wrap.
+⚠️ `backend_error` n'est **pas atteignable** sur `secret_consume` (toute exception
+d'unwrap tombe en `wrap_unusable` ou `consume_outcome_unknown`), et `wrap_expired`
+**n'existe pas** — il a figuré à tort dans une version antérieure de ce contrat.
+⚠️ `already_consumed` regroupe `consumed` **et** `revoked` ; `secret_wrap_status`
+ne désambiguïse que s'il n'existe **qu'une** entrée, sinon il rend `ambiguous`.
+
+> **Refus sans `error_type`** — la taxonomie fermée (`unauthenticated`,
+> `permission_denied`, `access_denied`, `invalid_input`, `invalid_token`,
+> `policy_store_unavailable`) couvre les gardes d'autorisation partagées. Des
+> refus de **validation** propres à des outils hors périmètre wrapping
+> (`secret_list`, surfaces `/admin/api`) rendent encore une enveloppe sans code.
+> **Tester `status` avant `error_type`.**
+
 ### PEP mission JWT — porte `/mcp` *(v0.8.0, #47 + #69)*
 
 Second point d'application (PEP) du `mission_token` JWT ES256 de mcp-mission, **à l'entrée `/mcp`** (le premier étant `secret_consume`/C18, à la consommation). Piloté par `MCP_AUTH_MODE` :
@@ -580,4 +657,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.12.0
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.12.1
