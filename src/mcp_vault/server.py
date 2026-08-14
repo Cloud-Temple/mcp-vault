@@ -524,7 +524,11 @@ async def secret_wrap(
         return wrap_perm_err
 
     if ttl_seconds < 60 or ttl_seconds > 3600:
-        return {"status": "error", "message": "ttl_seconds doit être entre 60 et 3600"}
+        # `error_type` OBLIGATOIRE : ce refus sortait en enveloppe SANS code, donc
+        # un appelant qui clé sur `error_type` y lisait `None`. Signalé aux équipes
+        # clientes comme un défaut de contrat.
+        return {"status": "error", "error_type": "invalid_input",
+                "message": "ttl_seconds doit être entre 60 et 3600"}
 
     # #78/D6 : valider les identifiants AVANT l'appel core ET l'audit (_r logge op_id[:32]).
     if not is_safe_id(operation_id):

@@ -1,6 +1,6 @@
 # Catalogue des Tests E2E — MCP Vault
 
-> **Version** : v0.12.0 — Contrat de consommation d'un wrap honnête (#78 : un secret vide ne sort plus en succès, binding de mission exigé aux deux bouts) et cloisonnement inter-missions du registre (la compensation d'une mission n'en détruit plus une autre)
+> **Version** : v0.12.1 — Codes d'erreur honnêtes sur le chemin wrap : un wrap créé mais non persisté ne s'annonce plus comme « rien n'a été créé » (`wrap_created_revoked` / `wrap_created_orphaned`), une intention `failed` ne s'annonce plus comme révoquée, et les refus portent tous un code exploitable
 > **Dernière exécution** : 349 assertions e2e sur 15 catégories (+ 18 tests crypto)
 > **Décompte reproductible** : comptage AST des appels `check` / `check_true` / `check_value` / `check_traversed` dans les fonctions `test_*` de `tests/test_e2e.py`, boucles littérales expansées
 > **Durée** : ~5 secondes (e2e) + <1s (crypto)

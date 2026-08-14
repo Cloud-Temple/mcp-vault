@@ -362,7 +362,11 @@ class TestPointEntreeReel:
         r, client = self._wrap(registre)
 
         assert r["status"] == "error", r
-        assert r["error_type"] == "registry_unavailable", r
+        # La révocation d'urgence réussit ici (client factice sans exception) :
+        # le code dit donc qu'il n'y a RIEN à compenser. Il ne dit plus
+        # `registry_unavailable`, qui promettait « aucune ressource créée » —
+        # faux sur ce chemin, où OpenBao a bel et bien créé le wrap.
+        assert r["error_type"] == "wrap_created_revoked", r
         assert "wrap_token" not in r, "un jeton non compensable a été remis"
         client.auth.token.revoke_accessor.assert_called_once()
 
@@ -536,7 +540,7 @@ class TestCycleDeVieDuRefus:
              patch.object(w, "_get_config", return_value=cfg):
             r1 = run(w.wrap_secret("mcp-mission", "missions/db", A, OP, 300))
 
-        assert r1["error_type"] == "registry_unavailable", r1
+        assert r1["error_type"] == "wrap_created_revoked", r1
         assert registre.sauvegardes == 2, (
             f"{registre.sauvegardes} sauvegarde(s) : sans cette assertion, un "
             f"chemin allant droit à l'erreur sans tenter `mark_active` resterait "

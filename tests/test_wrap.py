@@ -468,7 +468,10 @@ def test_mark_active_s3_failure_revokes():
          patch("mcp_vault.vault.wrapping.get_wrap_registry", return_value=registry):
         r = run(wrap_secret("prod", "db/p", "m1", "op-markfail", 300))
 
-    assert r["status"] == "error" and r["error_type"] == "registry_unavailable"
+    # Le wrap EXISTE côté OpenBao sur ce chemin : `registry_unavailable`, qui
+    # promet « aucune ressource créée », y était un mensonge de contrat. La
+    # révocation d'urgence réussit ici → rien à compenser.
+    assert r["status"] == "error" and r["error_type"] == "wrap_created_revoked", r
     client.auth.token.revoke_accessor.assert_called_once_with(accessor="ACCEMERGE")
     print("  ✅ TEST 12 — mark_active S3 failure → révocation urgence + erreur")
 
