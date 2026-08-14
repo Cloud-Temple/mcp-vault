@@ -245,6 +245,7 @@ consommé en parallèle.
 | --- | --- | --- |
 | `invalid_input`, `misconfigured`, `jwt_invalid`, `mission_inactive` | non | **non constaté** |
 | `registry_unavailable`, `backend_unavailable` | non | **non constaté** |
+| `permission_denied` *(v0.12.1 — remplace une enveloppe sans code)* | non | **non constaté** |
 | `binding_mismatch`, `not_found`, `already_consuming` | non | **non constaté** |
 | `binding_incomplete` | non | inconsommable en mode durci → **reprovisionner** |
 | `already_consumed` | non | dépensé ou révoqué |

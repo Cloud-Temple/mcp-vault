@@ -242,6 +242,7 @@ concurrently.
 | --- | --- | --- |
 | `invalid_input`, `misconfigured`, `jwt_invalid`, `mission_inactive` | no | **not observed** |
 | `registry_unavailable`, `backend_unavailable` | no | **not observed** |
+| `permission_denied` *(v0.12.1 — replaces an envelope with no code)* | no | **not observed** |
 | `binding_mismatch`, `not_found`, `already_consuming` | no | **not observed** |
 | `binding_incomplete` | no | unconsumable in enforced mode → **reprovision** |
 | `already_consumed` | no | spent or revoked |
