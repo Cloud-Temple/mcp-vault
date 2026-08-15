@@ -20,7 +20,8 @@ Architecture :
   lookup_and_revoke_by_operation_id retourne "found_unattached" (TTL fera expirer le wrap côté Vault).
 - ⚠️ v0.13.0 : une clé (operation_id, mission_id) déjà engagée n'est JAMAIS rejouable.
   Règle écrite à l'envers — on bloque SAUF si rien ne peut survivre : seuls
-  "revoked", "consumed" et "unusable" libèrent la clé (jeton prouvé mort). Tout
+  "revoked", "consumed" et "unusable" libèrent la clé (jeton TENU POUR mort par
+  le registre — croyance, pas preuve : cf. _ETATS_SANS_SURVIVANT). Tout
   le reste bloque, y compris un état ajouté plus tard, sous trois codes distincts
   (operation_pending / operation_failed / operation_revocable).
   Le blocage est DÉFINITIF — rien d'autre ne libère une clé.
@@ -323,9 +324,11 @@ class WrapRegistry:
 
         ⚠️ La règle est écrite À L'ENVERS, et c'est délibéré : **on bloque SAUF
         si rien ne peut survivre**. Seuls `revoked`, `consumed` et `unusable`
-        libèrent la clé — les trois états où le jeton est prouvé mort. Tout le
-        reste bloque, y compris un état que nous ajouterions demain : un
-        oubli échoue alors du côté prudent au lieu d'ouvrir un trou en silence.
+        libèrent la clé — les trois états où le registre TIENT le jeton pour
+        mort. ⚠️ C'est une croyance, pas une preuve : voir le résidu documenté
+        sur `_ETATS_SANS_SURVIVANT`. Tout le reste bloque, y compris un état que
+        nous ajouterions demain : un oubli échoue alors du côté prudent au lieu
+        d'ouvrir un trou en silence.
 
         ⚠️ `consume_outcome_unknown` BLOQUE, contrairement à ce que son
         classement parmi les « états terminaux de consommation » suggère : il

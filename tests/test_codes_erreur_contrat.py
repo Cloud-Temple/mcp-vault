@@ -310,24 +310,65 @@ class TestReponseIncompleteApresAppel:
             f"une seconde intention a été écrite pour {status!r} : {registre._wraps!r}")
 
     @pytest.mark.parametrize("status", ["revoked", "consumed", "unusable"])
-    def test_seule_une_MORT_PROUVEE_libere_la_cle(self, status):
+    def test_un_etat_TENU_POUR_MORT_libere_la_cle(self, status):
         """Garde-fou inverse — bloquer trop casserait la reprise nominale.
 
-        `mcp-mission` révoque la provision précédente PUIS en recrée une : si
-        `revoked` bloquait, cette séquence — qu'ils viennent d'arrêter par
-        contrat — deviendrait impossible, et nous aurions échangé une double
-        provision contre un déni de service.
+        ⚠️ Ces TROIS états seulement. `consume_outcome_unknown` n'en fait PAS
+        partie : une version antérieure de ce lot l'avait rangé ici, et ce test
+        verrouillait alors la régression qu'il prétendait interdire. **Un test
+        de garde-fou peut protéger un défaut.**
 
-        ⚠️ Ces TROIS états seulement, parce que le jeton y est prouvé mort.
-        `consume_outcome_unknown` n'en fait PAS partie et est couvert par le test
-        de blocage ci-dessus : une version antérieure de ce lot l'avait rangé
-        ici, et ce test verrouillait alors la régression qu'il prétendait
-        interdire. Un test de garde-fou peut protéger un défaut.
+        ⚠️ « Tenu pour mort » n'est pas « prouvé mort » — le registre rend une
+        croyance (résidu #140). Ce test épingle la RÈGLE, pas une garantie.
         """
         r, client, _ = self._wrap_sur_etat(status, accessor="ACC-1")
 
-        assert r["status"] == "ok", f"mort prouvée {status!r} bloquée à tort : {r!r}"
+        assert r["status"] == "ok", f"état {status!r} bloqué à tort : {r!r}"
         assert client.read.called, "aucun nouveau wrap créé alors que la clé est libre"
+
+    def test_la_reprise_nominale_REVOQUER_PUIS_RECREER_fonctionne_de_bout_en_bout(self):
+        """Le flux réel de `mcp-mission`, EXERCÉ et non simulé par injection.
+
+        Injecter `revoked` prouve la règle de la garde, pas que la séquence
+        marche : c'est la révocation elle-même qui doit produire l'état qui
+        libère la clé. Ici on part d'une provision `active`, on appelle la vraie
+        révocation, puis on re-provisionne la MÊME clé.
+
+        Si ce test tombe, la reprise que `mcp-mission` a arrêtée par contrat le
+        15/08/2026 est cassée — c'est un déni de service sur leur chemin
+        nominal, pas une régression cosmétique.
+        """
+        from mcp_vault.vault import wrapping as w
+        registre = _registre([{
+            "operation_id": OP, "mission_id": MISSION, "accessor": "ACC-1",
+            "vault_id": "mcp-mission", "secret_path": "missions/db",
+            "created_at": "", "expires_at": "2099-01-01T00:00:00+00:00",
+            "status": "active",
+        }])
+        client = MagicMock()
+        client.read.return_value = {"wrap_info": {"token": "s.NEW", "accessor": "ACC-2"}}
+        cfg = SimpleNamespace(openbao_addr="http://127.0.0.1:8200")
+
+        with patch.object(w, "get_wrap_registry", return_value=registre), \
+             patch.object(w, "_get_client", return_value=client), \
+             patch.object(w, "_get_config", return_value=cfg), \
+             patch.object(w, "_caller_is_admin", return_value=True):
+            # 1) la clé est bloquée tant que la provision vit
+            bloque = run(w.wrap_secret("mcp-mission", "missions/db", MISSION, OP, 300))
+            assert bloque["error_type"] == "operation_revocable", bloque
+
+            # 2) révocation RÉELLE — c'est elle qui doit produire l'état libérateur
+            rev = run(w.revoke_wrap("ACC-1"))
+            assert rev["state"] == "revoked", rev
+            client.auth.token.revoke_accessor.assert_called_once()
+            assert registre._wraps[0]["status"] == "revoked", registre._wraps
+
+            # 3) la même clé redevient utilisable
+            r = run(w.wrap_secret("mcp-mission", "missions/db", MISSION, OP, 300))
+
+        assert r["status"] == "ok", (
+            f"la reprise « révoquer puis recréer » est cassée : {r!r}")
+        assert client.read.called, "aucun nouveau wrap créé après révocation"
 
     def test_deux_entrees_le_fait_le_plus_ACTIONNABLE_prime(self):
         """Une `active` et une `failed` sous la même clé : que rendre ?
