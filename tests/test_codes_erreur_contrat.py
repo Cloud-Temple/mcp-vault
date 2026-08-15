@@ -540,3 +540,197 @@ class TestFormeDeTransport:
         assert code in charge, f"code absent de la charge utile : {charge!r}"
         assert "s.WRAPTOKEN" not in charge, (
             f"le jeton traverse le protocole sur un chemin d'erreur : {charge!r}")
+
+
+# =============================================================================
+# 5) #140 — UN EFFET CONFIRMÉ QUI N'A PAS PU ÊTRE INSCRIT SE DIT
+# =============================================================================
+
+class TestRevocationConfirmeeMaisNonPersistee:
+    """La révocation OpenBao a RÉUSSI, l'écriture du registre a ÉCHOUÉ.
+
+    Jusqu'ici le retour de `_save()` était jeté : l'appelant recevait un succès
+    muet. Au redémarrage l'entrée ressuscite `active` — dans un état que nous
+    venions de lui annoncer révoqué, et sur lequel il avait clos son propre
+    registre.
+
+    ⚠️ Ce lot ne rend PAS le fait durable — il faudrait un support disponible
+    au moment précis où le support habituel ne l'est pas (#140, critère porté à
+    #123). Il fait la seule chose possible sans second support : **le dire**.
+    """
+
+    def _entree_active(self):
+        return {
+            "operation_id": OP, "mission_id": MISSION, "accessor": "ACC-1",
+            "vault_id": "mcp-mission", "secret_path": "missions/db",
+            "created_at": "", "expires_at": "2099-01-01T00:00:00+00:00",
+            "status": "active",
+        }
+
+    def _revoquer(self, *, echec_persistance: bool):
+        from mcp_vault.vault import wrapping as w
+        registre = _registre([self._entree_active()],
+                             echec_a_partir_de=1 if echec_persistance else 0)
+        client = MagicMock()
+        with patch.object(w, "get_wrap_registry", return_value=registre), \
+             patch.object(w, "_get_client", return_value=client):
+            return run(w.revoke_wrap("ACC-1")), registre, client
+
+    def test_l_echec_de_persistance_est_ANNONCE_a_l_appelant(self):
+        r, registre, client = self._revoquer(echec_persistance=True)
+
+        client.auth.token.revoke_accessor.assert_called_once_with(accessor="ACC-1")
+        assert r["state"] == "revoked", (
+            f"la révocation OpenBao a eu lieu : l'annoncer autrement serait un "
+            f"second mensonge — {r!r}")
+        assert r.get("registry_persisted") is False, (
+            f"succès MUET sur une révocation non inscrite : l'appelant clôt son "
+            f"registre sur un fait qui ressuscitera au redémarrage — {r!r}")
+        assert "warning" in r and "redémarrage" in r["warning"], r
+        # La mémoire dit la vérité : OpenBao A révoqué. On ne la ramène pas à
+        # `active` pour « cohérence » — ce serait remplacer un fait exact par
+        # une prudence inexacte.
+        assert registre._wraps[0]["status"] == "revoked", registre._wraps
+
+    def test_une_revocation_NOMINALE_ne_porte_aucun_avertissement(self):
+        """Anti-complaisance : un champ toujours présent ne signalerait rien.
+
+        Si `registry_persisted` apparaissait aussi sur le chemin nominal, le
+        test ci-dessus resterait vert sans que le signal ait la moindre valeur.
+        """
+        r, _, _ = self._revoquer(echec_persistance=False)
+
+        assert r["state"] == "revoked", r
+        assert "registry_persisted" not in r, (
+            f"le champ apparaît sur un chemin nominal : il cesse d'être un "
+            f"signal — {r!r}")
+        assert "warning" not in r, r
+
+    def test_rien_a_muter_n_est_PAS_un_echec_de_persistance(self):
+        """Une sélection déjà `revoked` n'écrit rien : ne pas crier au loup."""
+        from mcp_vault.vault.wrapping import WrapRegistry
+
+        registre = _registre([], echec_a_partir_de=1)
+        deja = dict(self._entree_active(), status="revoked")
+        muees, persistee = WrapRegistry.mark_entries_revoked(registre, [deja])
+
+        assert muees == 0, "une entrée déjà révoquée ne mue pas"
+        assert persistee is True, (
+            "l'absence d'écriture est rapportée comme un échec d'écriture — "
+            "l'appelant recevrait un avertissement sans objet")
+
+    @pytest.mark.parametrize("statut", ["active", "pending"])
+    def test_la_revocation_couvre_active_ET_pending(self, statut):
+        """Les DEUX états mutent — trou trouvé par mutation, pas par relecture.
+
+        Restreindre la sélection au seul `active` laissait une entrée `pending`
+        porteuse d'un accessor **non révoquée au registre** alors qu'OpenBao,
+        lui, avait bien révoqué : la divergence exacte que ce lot existe pour
+        rendre visible, mais silencieuse cette fois.
+        """
+        from mcp_vault.vault.wrapping import WrapRegistry
+
+        registre = _registre()
+        entree = dict(self._entree_active(), status=statut)
+        muees, persistee = WrapRegistry.mark_entries_revoked(registre, [entree])
+
+        assert muees == 1, f"une entrée {statut!r} n'a pas mué"
+        assert entree["status"] == "revoked", entree
+        assert persistee is True
+
+    def test_le_signal_survit_au_verbe_de_COMPENSATION(self):
+        """⚠️ Le cas qui compte le plus — et celui qui était muet.
+
+        `secret_wrap_lookup` est le verbe que l'appelant emploie pour COMPENSER.
+        Il délègue la révocation au même helper, mais jetait son drapeau : une
+        révocation confirmée et non inscrite y ressortait en `ok/revoked`
+        silencieux. Le signal était donc absent précisément là où il sert.
+        """
+        from mcp_vault.vault import wrapping as w
+        registre = _registre([self._entree_active()], echec_a_partir_de=1)
+        client = MagicMock()
+        with patch.object(w, "get_wrap_registry", return_value=registre), \
+             patch.object(w, "_get_client", return_value=client):
+            r = run(w.lookup_and_revoke_by_operation_id(OP, MISSION))
+
+        client.auth.token.revoke_accessor.assert_called_once_with(accessor="ACC-1")
+        assert r["state"] == "revoked", r
+        assert r["count_revoked"] == 1, r
+        assert r.get("registry_persisted") is False, (
+            f"la compensation rend un succès MUET sur une révocation non "
+            f"inscrite : l'appelant clôt son registre dessus — {r!r}")
+        assert r.get("count_not_persisted") == 1, r
+        assert "redémarrage" in r.get("warning", ""), (
+            f"le signal doit avoir la MÊME forme sur les deux verbes — un "
+            f"`warning`, pas un message rallongé : {r!r}")
+
+    def test_la_compensation_NOMINALE_reste_muette(self):
+        """Anti-complaisance, en miroir du test précédent."""
+        from mcp_vault.vault import wrapping as w
+        registre = _registre([self._entree_active()])
+        client = MagicMock()
+        with patch.object(w, "get_wrap_registry", return_value=registre), \
+             patch.object(w, "_get_client", return_value=client):
+            r = run(w.lookup_and_revoke_by_operation_id(OP, MISSION))
+
+        assert r["state"] == "revoked" and r["count_revoked"] == 1, r
+        assert "registry_persisted" not in r, (
+            f"le drapeau apparaît sur un chemin nominal : il cesse d'être un "
+            f"signal — {r!r}")
+        assert "count_not_persisted" not in r, r
+
+    def test_le_compte_couvre_les_entrees_PARTAGEANT_l_accessor(self):
+        """⚠️ `count_not_persisted` doit compter ce qui a MUÉ, pas le groupe actif.
+
+        La sélection passée au registre couvre TOUTES les entrées visibles de
+        l'accessor — y compris un `pending` qui le partagerait. Compter
+        `len(group)`, c'est-à-dire les seules entrées `active`, sous-estimait :
+        nous annoncions « nombre exact » sur un compte faux.
+        """
+        from mcp_vault.vault import wrapping as w
+        base = {
+            "operation_id": OP, "mission_id": MISSION, "accessor": "ACC-1",
+            "vault_id": "mcp-mission", "secret_path": "missions/db",
+            "created_at": "", "expires_at": "2099-01-01T00:00:00+00:00",
+        }
+        registre = _registre([base | {"status": "active"},
+                              base | {"status": "pending"}],
+                             echec_a_partir_de=1)
+        client = MagicMock()
+        with patch.object(w, "get_wrap_registry", return_value=registre), \
+             patch.object(w, "_get_client", return_value=client):
+            r = run(w.lookup_and_revoke_by_operation_id(OP, MISSION))
+
+        assert r.get("registry_persisted") is False, r
+        assert r.get("count_not_persisted") == 2, (
+            f"deux entrées ont mué, {r.get('count_not_persisted')!r} annoncée(s) "
+            f"— le compte sous-estime ce qui n'est pas inscrit : {r!r}")
+
+    def test_le_signal_survit_a_une_sortie_NON_NOMINALE(self):
+        """Les sorties d'erreur publiées le portent aussi.
+
+        `consume_terminal` et `partial_revocation` sont des retours documentés
+        de la compensation. Une révocation non inscrite y disparaîtrait tout
+        aussi silencieusement que sur le succès — et l'appelant y est déjà en
+        train de gérer un incident.
+        """
+        from mcp_vault.vault import wrapping as w
+        base = {
+            "operation_id": OP, "mission_id": MISSION,
+            "vault_id": "mcp-mission", "secret_path": "missions/db",
+            "created_at": "", "expires_at": "2099-01-01T00:00:00+00:00",
+        }
+        registre = _registre([base | {"status": "active", "accessor": "ACC-1"},
+                              base | {"status": "unusable", "accessor": "ACC-2"}],
+                             echec_a_partir_de=1)
+        client = MagicMock()
+        with patch.object(w, "get_wrap_registry", return_value=registre), \
+             patch.object(w, "_get_client", return_value=client):
+            r = run(w.lookup_and_revoke_by_operation_id(OP, MISSION))
+
+        assert r["error_type"] == "consume_terminal", r
+        assert r.get("registry_persisted") is False, (
+            f"une sortie d'erreur perd le signal : l'appelant gère déjà un "
+            f"incident et n'apprend pas que la révocation n'est pas inscrite "
+            f"— {r!r}")
+        assert "warning" in r, r

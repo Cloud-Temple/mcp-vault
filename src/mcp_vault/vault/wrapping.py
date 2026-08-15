@@ -409,10 +409,10 @@ class WrapRegistry:
             self._save()
         return found
 
-    def mark_entries_revoked(self, entries: list) -> bool:
+    def mark_entries_revoked(self, entries: list) -> tuple[int, bool]:
         """
         Marque comme "revoked" UNIQUEMENT les entrées passées (références vivantes
-        de _wraps) puis persiste. Retourne True si au moins une entrée a mué.
+        de _wraps) puis persiste.
 
         SÉCURITÉ #115 : contrairement à mark_revoked(accessor) qui mute TOUTES
         les entrées d'un accessor (y compris une entrée hors du périmètre de
@@ -422,24 +422,39 @@ class WrapRegistry:
         les références passées — la mutation serait perdue silencieusement. Le
         refresh a lieu UNE fois en tête de primitive, avant la sélection.
 
-        ⚠️ RÉSIDU CONNU — l'échec de persistance n'est PAS remonté. La révocation
-        OpenBao a réussi, mais si `_save()` échoue la mémoire porte `revoked`
-        alors que S3 porte encore `active`/`pending` : au redémarrage l'entrée
-        ressuscite dans un état que nous avons déjà annoncé révoqué à l'appelant.
-        Même famille que la révocation d'urgence de `wrap_secret` — un effet
-        externe CONFIRMÉ que nous ne savons pas rendre durable quand S3 est
-        indisponible. Non réparable avec S3 pour seul support (il y faudrait un
-        journal survivant au redémarrage) : voir le critère d'acceptation porté
-        à #123, pas un chantier distinct.
+        Rend le couple **(muees, persistee)** :
+        - `muees`     — NOMBRE d'entrées passées à `revoked`. Un compte et non
+          un booléen : l'appelant doit pouvoir dire combien d'entrées ne sont
+          pas inscrites, et une sélection peut en contenir plus que le groupe
+          actif qui l'a déclenchée (un `pending` partageant l'accessor) ;
+        - `persistee` — l'écriture du registre a réussi. `True` quand il n'y
+          avait rien à écrire : l'absence de mutation n'est pas un échec.
+
+        ⚠️ LIMITE STRUCTURELLE, remontée mais NON réparée (#140). La révocation
+        OpenBao a réussi ; si `_save()` échoue, la mémoire porte `revoked` alors
+        que le registre persistant porte encore `active`/`pending` — **au
+        redémarrage l'entrée ressuscite dans un état déjà annoncé révoqué à
+        l'appelant**.
+
+        Nous ne restaurons PAS l'état mémoire, contrairement à `mark_active` :
+        ici la mémoire dit la VÉRITÉ (OpenBao a bien révoqué), c'est le support
+        durable qui est en retard. La revenir à `active` remplacerait un fait
+        exact par une prudence inexacte.
+
+        ⇒ Ce que ce lot corrige : l'appelant **apprend** que le fait n'est pas
+        durable, au lieu de recevoir un succès muet. Ce qu'il ne corrige pas :
+        rendre le fait durable, ce qui exige un support disponible au moment
+        précis où le support habituel ne l'est pas. Critère d'acceptation porté
+        à #123.
         """
-        found = False
+        muees = 0
         for entry in entries:
             if isinstance(entry, dict) and entry.get("status") in ("active", "pending"):
                 entry["status"] = "revoked"
-                found = True
-        if found:
-            self._save()
-        return found
+                muees += 1
+        if not muees:
+            return 0, True
+        return muees, self._save()
 
     def has_accessor(self, accessor: str) -> bool:
         """Vérifie que l'accessor appartient à un wrap géré par ce registry."""
@@ -1004,21 +1019,40 @@ async def _revoke_accessor_selected(registry, accessor: str, selection: list) ->
         return {"status": "error", "error_type": "backend_unavailable",
                 "message": "OpenBao non disponible"}
 
+    def _rendre(etat: str) -> dict:
+        """Réponse de révocation, augmentée du sort de la PERSISTANCE (#140).
+
+        La révocation OpenBao est acquise quand on arrive ici. Si le registre
+        n'a pas pu l'inscrire, l'appelant doit le savoir : au redémarrage
+        l'entrée ressuscitera dans un état que nous venons de lui annoncer
+        révoqué. Le champ n'apparaît QUE dans ce cas — une réponse nominale
+        reste identique à celle des versions antérieures.
+        """
+        muees, persistee = registry.mark_entries_revoked(selection)
+        r = {"status": "ok", "state": etat, "accessor": accessor[:12] + "..."}
+        if not persistee:
+            r["count_not_persisted"] = muees
+            logger.error(
+                "revoke : révocation OpenBao confirmée mais registre NON persisté "
+                "(accessor=%r) — l'entrée ressuscitera au redémarrage", accessor[:12])
+            r["registry_persisted"] = False
+            r["warning"] = ("Révocation effectuée côté coffre, mais NON inscrite au "
+                            "registre : au redémarrage l'entrée réapparaîtra comme "
+                            "non révoquée. Rejouer la compensation plus tard")
+        return r
+
     try:
         client.auth.token.revoke_accessor(accessor=accessor)
-        registry.mark_entries_revoked(selection)
-        return {"status": "ok", "state": "revoked", "accessor": accessor[:12] + "..."}
+        return _rendre("revoked")
     except Exception as e:
         err_str = str(e).lower()
         # OpenBao : "bad accessor" ou token déjà révoqué/expiré → idempotent
         if any(k in err_str for k in ("bad accessor", "not found", "invalid accessor")):
             # Marquer comme révoqué dans le registry (est expiré ou déjà révoqué côté Vault)
-            registry.mark_entries_revoked(selection)
-            return {"status": "ok", "state": "already_revoked", "accessor": accessor[:12] + "..."}
+            return _rendre("already_revoked")
         # Distinguer HTTP 4xx (client error, idem already_revoked) vs 5xx/réseau
         if any(k in err_str for k in ("404", "400")):
-            registry.mark_entries_revoked(selection)
-            return {"status": "ok", "state": "already_revoked", "accessor": accessor[:12] + "..."}
+            return _rendre("already_revoked")
         # 5xx / réseau → erreur réelle (broker doit retenter)
         logger.warning("revoke_wrap backend_error: %s", type(e).__name__)
         return {"status": "error", "error_type": "backend_error",
@@ -1142,6 +1176,7 @@ async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) 
     # compteur n'avance que sur résultat ok, de la taille du groupe — en cas
     # d'échec OpenBao, AUCUNE entrée du groupe n'est comptée révoquée.
     count_revoked = 0
+    non_persistees = 0
     errors = []
     groups: dict = {}
     for entry in active_entries:
@@ -1155,8 +1190,32 @@ async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) 
         result = await _revoke_accessor_selected(registry, accessor, selection)
         if result["status"] == "ok":
             count_revoked += len(group)
+            # #140 : le helper signale une révocation CONFIRMÉE mais non
+            # inscrite. La jeter ici la rendrait muette sur le verbe même que
+            # l'appelant emploie pour compenser — c'est-à-dire là où elle
+            # compte le plus.
+            if result.get("registry_persisted") is False:
+                # Le compte vient du registre, PAS de `len(group)` : la
+                # sélection couvre toutes les entrées visibles de l'accessor,
+                # y compris un `pending` qui le partagerait — le groupe actif
+                # en compterait une de moins.
+                non_persistees += result.get("count_not_persisted", len(group))
         else:
             errors.append(result.get("error_type", "backend_error"))
+
+
+    def _avec_persistance(r: dict) -> dict:
+        """Ajoute l'avertissement #140 si une révocation confirmée n'a pas été
+        inscrite. Champ ABSENT sinon — sans quoi il cesserait d'être un signal.
+        """
+        if non_persistees:
+            r["registry_persisted"] = False
+            r["count_not_persisted"] = non_persistees
+            r["warning"] = (
+                f"{non_persistees} révocation(s) effectuée(s) côté coffre mais NON "
+                "inscrite(s) au registre : au redémarrage ces entrées "
+                "réapparaîtront non révoquées. Rejouer la compensation plus tard")
+        return r
 
     if errors:
         # #78 : ce chemin porte AUSSI les compteurs. Sans eux, un appelant
@@ -1169,13 +1228,13 @@ async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) 
             message += (f" ; {len(terminaux_partiels)} entrée(s) figée(s) sur un "
                         "état terminal de consommation, qu'un nouvel essai ne "
                         "résoudra pas")
-        return {
+        return _avec_persistance({
             "status": "error", "error_type": "partial_revocation",
             "operation_id": operation_id, "count_revoked": count_revoked,
             "entries_found": len(entries), "count_already_revoked": count_already,
             "count_consume_terminal": len(terminaux_partiels),
             "message": message,
-        }
+        })
 
     # #78, revue de diff : le mélange TERMINAL + ACTIF ne doit pas non plus
     # sortir en succès. On vient de révoquer les entrées actives, mais une
@@ -1186,7 +1245,7 @@ async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) 
     terminaux_restants = [e for e in entries
                           if e.get("status") in _CONSUME_TERMINAL_STATUSES]
     if terminaux_restants:
-        return {
+        return _avec_persistance({
             "status": "error", "error_type": "consume_terminal",
             "operation_id": operation_id, "count_revoked": count_revoked,
             "entries_found": len(entries), "count_already_revoked": count_already,
@@ -1195,7 +1254,7 @@ async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) 
                        "figée sur un état terminal de consommation : elle n'est "
                        "ni révoquée ni attestée. Ne pas conclure que la "
                        "ressource est entièrement neutralisée",
-        }
+        })
 
     total_entries = len(entries)
     if total_entries > 1:
@@ -1205,11 +1264,11 @@ async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) 
     else:
         state = "revoked"
 
-    return {
+    return _avec_persistance({
         "status": "ok", "state": state,
         "operation_id": operation_id, "count_revoked": count_revoked,
         "entries_found": total_entries,
-    }
+    })
 
 
 # États d'entrée reconnus du registre (transitions register_pending → mark_active
