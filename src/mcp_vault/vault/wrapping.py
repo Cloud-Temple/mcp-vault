@@ -409,10 +409,10 @@ class WrapRegistry:
             self._save()
         return found
 
-    def mark_entries_revoked(self, entries: list) -> tuple[bool, bool]:
+    def mark_entries_revoked(self, entries: list) -> tuple[int, bool]:
         """
         Marque comme "revoked" UNIQUEMENT les entrées passées (références vivantes
-        de _wraps) puis persiste. Retourne True si au moins une entrée a mué.
+        de _wraps) puis persiste.
 
         SÉCURITÉ #115 : contrairement à mark_revoked(accessor) qui mute TOUTES
         les entrées d'un accessor (y compris une entrée hors du périmètre de
@@ -422,8 +422,11 @@ class WrapRegistry:
         les références passées — la mutation serait perdue silencieusement. Le
         refresh a lieu UNE fois en tête de primitive, avant la sélection.
 
-        Rend le couple **(mue, persistee)** :
-        - `mue`      — au moins une entrée est passée à `revoked` ;
+        Rend le couple **(muees, persistee)** :
+        - `muees`     — NOMBRE d'entrées passées à `revoked`. Un compte et non
+          un booléen : l'appelant doit pouvoir dire combien d'entrées ne sont
+          pas inscrites, et une sélection peut en contenir plus que le groupe
+          actif qui l'a déclenchée (un `pending` partageant l'accessor) ;
         - `persistee` — l'écriture du registre a réussi. `True` quand il n'y
           avait rien à écrire : l'absence de mutation n'est pas un échec.
 
@@ -444,14 +447,14 @@ class WrapRegistry:
         précis où le support habituel ne l'est pas. Critère d'acceptation porté
         à #123.
         """
-        found = False
+        muees = 0
         for entry in entries:
             if isinstance(entry, dict) and entry.get("status") in ("active", "pending"):
                 entry["status"] = "revoked"
-                found = True
-        if not found:
-            return False, True
-        return True, self._save()
+                muees += 1
+        if not muees:
+            return 0, True
+        return muees, self._save()
 
     def has_accessor(self, accessor: str) -> bool:
         """Vérifie que l'accessor appartient à un wrap géré par ce registry."""
@@ -1025,9 +1028,10 @@ async def _revoke_accessor_selected(registry, accessor: str, selection: list) ->
         révoqué. Le champ n'apparaît QUE dans ce cas — une réponse nominale
         reste identique à celle des versions antérieures.
         """
-        _, persistee = registry.mark_entries_revoked(selection)
+        muees, persistee = registry.mark_entries_revoked(selection)
         r = {"status": "ok", "state": etat, "accessor": accessor[:12] + "..."}
         if not persistee:
+            r["count_not_persisted"] = muees
             logger.error(
                 "revoke : révocation OpenBao confirmée mais registre NON persisté "
                 "(accessor=%r) — l'entrée ressuscitera au redémarrage", accessor[:12])
@@ -1191,7 +1195,11 @@ async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) 
             # l'appelant emploie pour compenser — c'est-à-dire là où elle
             # compte le plus.
             if result.get("registry_persisted") is False:
-                non_persistees += len(group)
+                # Le compte vient du registre, PAS de `len(group)` : la
+                # sélection couvre toutes les entrées visibles de l'accessor,
+                # y compris un `pending` qui le partagerait — le groupe actif
+                # en compterait une de moins.
+                non_persistees += result.get("count_not_persisted", len(group))
         else:
             errors.append(result.get("error_type", "backend_error"))
 
@@ -1203,11 +1211,10 @@ async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) 
         if non_persistees:
             r["registry_persisted"] = False
             r["count_not_persisted"] = non_persistees
-            r["message"] = (r.get("message", "") +
-                            f" ⚠️ {non_persistees} révocation(s) effectuée(s) côté "
-                            "coffre mais NON inscrite(s) au registre : au "
-                            "redémarrage ces entrées réapparaîtront non révoquées. "
-                            "Rejouer la compensation plus tard").strip()
+            r["warning"] = (
+                f"{non_persistees} révocation(s) effectuée(s) côté coffre mais NON "
+                "inscrite(s) au registre : au redémarrage ces entrées "
+                "réapparaîtront non révoquées. Rejouer la compensation plus tard")
         return r
 
     if errors:

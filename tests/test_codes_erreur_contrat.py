@@ -612,9 +612,9 @@ class TestRevocationConfirmeeMaisNonPersistee:
 
         registre = _registre([], echec_a_partir_de=1)
         deja = dict(self._entree_active(), status="revoked")
-        mue, persistee = WrapRegistry.mark_entries_revoked(registre, [deja])
+        muees, persistee = WrapRegistry.mark_entries_revoked(registre, [deja])
 
-        assert mue is False, "une entrée déjà révoquée ne mue pas"
+        assert muees == 0, "une entrée déjà révoquée ne mue pas"
         assert persistee is True, (
             "l'absence d'écriture est rapportée comme un échec d'écriture — "
             "l'appelant recevrait un avertissement sans objet")
@@ -632,9 +632,9 @@ class TestRevocationConfirmeeMaisNonPersistee:
 
         registre = _registre()
         entree = dict(self._entree_active(), status=statut)
-        mue, persistee = WrapRegistry.mark_entries_revoked(registre, [entree])
+        muees, persistee = WrapRegistry.mark_entries_revoked(registre, [entree])
 
-        assert mue is True, f"une entrée {statut!r} n'a pas mué"
+        assert muees == 1, f"une entrée {statut!r} n'a pas mué"
         assert entree["status"] == "revoked", entree
         assert persistee is True
 
@@ -660,7 +660,9 @@ class TestRevocationConfirmeeMaisNonPersistee:
             f"la compensation rend un succès MUET sur une révocation non "
             f"inscrite : l'appelant clôt son registre dessus — {r!r}")
         assert r.get("count_not_persisted") == 1, r
-        assert "redémarrage" in r["message"], r
+        assert "redémarrage" in r.get("warning", ""), (
+            f"le signal doit avoir la MÊME forme sur les deux verbes — un "
+            f"`warning`, pas un message rallongé : {r!r}")
 
     def test_la_compensation_NOMINALE_reste_muette(self):
         """Anti-complaisance, en miroir du test précédent."""
@@ -676,3 +678,59 @@ class TestRevocationConfirmeeMaisNonPersistee:
             f"le drapeau apparaît sur un chemin nominal : il cesse d'être un "
             f"signal — {r!r}")
         assert "count_not_persisted" not in r, r
+
+    def test_le_compte_couvre_les_entrees_PARTAGEANT_l_accessor(self):
+        """⚠️ `count_not_persisted` doit compter ce qui a MUÉ, pas le groupe actif.
+
+        La sélection passée au registre couvre TOUTES les entrées visibles de
+        l'accessor — y compris un `pending` qui le partagerait. Compter
+        `len(group)`, c'est-à-dire les seules entrées `active`, sous-estimait :
+        nous annoncions « nombre exact » sur un compte faux.
+        """
+        from mcp_vault.vault import wrapping as w
+        base = {
+            "operation_id": OP, "mission_id": MISSION, "accessor": "ACC-1",
+            "vault_id": "mcp-mission", "secret_path": "missions/db",
+            "created_at": "", "expires_at": "2099-01-01T00:00:00+00:00",
+        }
+        registre = _registre([base | {"status": "active"},
+                              base | {"status": "pending"}],
+                             echec_a_partir_de=1)
+        client = MagicMock()
+        with patch.object(w, "get_wrap_registry", return_value=registre), \
+             patch.object(w, "_get_client", return_value=client):
+            r = run(w.lookup_and_revoke_by_operation_id(OP, MISSION))
+
+        assert r.get("registry_persisted") is False, r
+        assert r.get("count_not_persisted") == 2, (
+            f"deux entrées ont mué, {r.get('count_not_persisted')!r} annoncée(s) "
+            f"— le compte sous-estime ce qui n'est pas inscrit : {r!r}")
+
+    def test_le_signal_survit_a_une_sortie_NON_NOMINALE(self):
+        """Les sorties d'erreur publiées le portent aussi.
+
+        `consume_terminal` et `partial_revocation` sont des retours documentés
+        de la compensation. Une révocation non inscrite y disparaîtrait tout
+        aussi silencieusement que sur le succès — et l'appelant y est déjà en
+        train de gérer un incident.
+        """
+        from mcp_vault.vault import wrapping as w
+        base = {
+            "operation_id": OP, "mission_id": MISSION,
+            "vault_id": "mcp-mission", "secret_path": "missions/db",
+            "created_at": "", "expires_at": "2099-01-01T00:00:00+00:00",
+        }
+        registre = _registre([base | {"status": "active", "accessor": "ACC-1"},
+                              base | {"status": "unusable", "accessor": "ACC-2"}],
+                             echec_a_partir_de=1)
+        client = MagicMock()
+        with patch.object(w, "get_wrap_registry", return_value=registre), \
+             patch.object(w, "_get_client", return_value=client):
+            r = run(w.lookup_and_revoke_by_operation_id(OP, MISSION))
+
+        assert r["error_type"] == "consume_terminal", r
+        assert r.get("registry_persisted") is False, (
+            f"une sortie d'erreur perd le signal : l'appelant gère déjà un "
+            f"incident et n'apprend pas que la révocation n'est pas inscrite "
+            f"— {r!r}")
+        assert "warning" in r, r
