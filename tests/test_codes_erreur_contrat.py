@@ -282,7 +282,7 @@ class TestReponseIncompleteApresAppel:
         ("consuming",               "operation_revocable", "ACC-1"),
         ("consume_outcome_unknown", "operation_revocable", "ACC-1"),
     ])
-    def test_tout_etat_SANS_MORT_PROUVEE_bloque_la_cle_avant_tout_appel(
+    def test_tout_etat_NON_TENU_POUR_MORT_bloque_la_cle_avant_tout_appel(
             self, status, code, accessor):
         """⚠️ `active` est le pire cas à laisser passer : la provision est VIVANTE
         et NOMMABLE, donc un rejeu produit deux enveloppes sous une même clé —
@@ -403,7 +403,7 @@ class TestReponseIncompleteApresAppel:
             f"non révocable est passée sous silence : {r['message']!r}")
 
     def test_la_liste_liberatoire_est_ECRITE_A_L_ENVERS(self):
-        """La règle est « bloquer sauf mort prouvée », pas « bloquer si connu ».
+        """La règle est « bloquer sauf jeton tenu pour mort », pas « bloquer si connu ».
 
         Un état ajouté demain doit BLOQUER par défaut, pas passer. Ce test
         exerce un état absent de la taxonomie : s'il ouvrait la clé, tout ajout
