@@ -344,12 +344,32 @@ class TestPointEntreeReel:
         assert _de(registre, A)["status"] == "active"
         assert _de(registre, B)["status"] == "pending"
 
-    def test_un_retry_apres_failed_reste_permis(self):
-        registre = _registre([_entree(A, "failed")])
-        r, _ = self._wrap(registre)
+    def test_un_retry_apres_failed_est_REFUSE(self):
+        """v0.13.0 : `failed` bloque la clé comme `pending`.
 
-        assert r["status"] == "ok", r
-        assert [e["status"] for e in registre._wraps].count("active") == 1
+        Avant, le retry était permis — et créait une SECONDE enveloppe alors que
+        la première pouvait vivre sans accessor, donc sans être révocable. Le
+        code rendu est DISTINCT de `operation_pending` : l'appel OpenBao a eu
+        lieu ici, il est seulement inconnu là-bas.
+        """
+        registre = _registre([_entree(A, "failed")])
+        r, client = self._wrap(registre)
+
+        assert r["error_type"] == "operation_failed", r
+        assert not client.read.called, "OpenBao appelé : un second wrap a été créé"
+        assert len(registre._wraps) == 1, (
+            f"une seconde intention a été écrite : {registre._wraps!r}")
+
+    def test_le_blocage_est_cloisonne_par_mission(self):
+        """Un `failed` de la mission A ne doit pas bloquer la mission B.
+
+        Le correctif porte sur le COUPLE. S'il bloquait sur l'`operation_id`
+        seul, une mission tierce partageant l'identifiant serait condamnée — le
+        défaut inter-missions que v0.12.0 a précisément fermé.
+        """
+        registre = _registre([_entree(A, "failed")])
+        assert registre.blocking_intent_status(OP, A) == "failed"
+        assert registre.blocking_intent_status(OP, B) is None
 
     def test_mark_active_impossible_fait_revoquer_l_accessor(self):
         """
@@ -358,7 +378,10 @@ class TestPointEntreeReel:
         le wrap existe côté OpenBao, il ne doit pas être remis à l'appelant.
         """
         # La 1re sauvegarde (register_pending) RÉUSSIT, la 2e (mark_active) échoue.
-        registre = _registre([_entree(A, "failed")], echec_a_partir_de=2)
+        # ⚠️ L'entrée préexistante porte la mission B : depuis v0.13.0 un `failed`
+        # de la mission A bloquerait la clé AVANT l'appel OpenBao, et ce test ne
+        # mesurerait plus le repli de `mark_active` mais le refus de la garde.
+        registre = _registre([_entree(B, "failed")], echec_a_partir_de=2)
         r, client = self._wrap(registre)
 
         assert r["status"] == "error", r
@@ -462,7 +485,7 @@ class TestCycleDeVieDuRefus:
         comparaison naïf/aware lève, et seul `ValueError` était intercepté.
         """
         registre = _registre([_entree(A) | {"expires_at": echeance}])
-        assert registre.has_pending(OP, A) is True, cas
+        assert registre.blocking_intent_status(OP, A) == "pending", cas
 
     def test_une_echeance_depassee_bloque_TOUJOURS(self):
         """
@@ -471,7 +494,7 @@ class TestCycleDeVieDuRefus:
         libération par échéance soit un choix explicite, jamais un glissement.
         """
         registre = _registre([_entree(A) | {"expires_at": self._echeance(-3600)}])
-        assert registre.has_pending(OP, A) is True
+        assert registre.blocking_intent_status(OP, A) == "pending"
 
     def test_le_message_prescrit_la_seule_reprise_qui_marche(self):
         from mcp_vault.vault import wrapping as w

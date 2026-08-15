@@ -505,6 +505,31 @@ async def secret_wrap(
 
     Returns:
         {status, wrap_token (SENSIBLE), secret_id, accessor, vault_url, expires_at, intended_use}
+
+    ⚠️ RUPTURE v0.13.0 — une clé `(operation_id, mission_id)` déjà engagée n'est
+    JAMAIS rejouable, et le refus porte deux codes distincts :
+
+        operation_pending — une intention est en cours ; on ignore si OpenBao a
+                            été appelé
+        operation_failed  — une tentative a échoué APRÈS un appel possible au
+                            coffre : une ressource peut subsister sans accessor,
+                            donc sans être révocable
+        operation_revocable — une provision antérieure subsiste et porte un
+                            accessor : la révoquer d'abord. Couvre `active`,
+                            `consuming` ET `consume_outcome_unknown` — il est
+                            nommé d'après la CONDUITE, pas d'après un état
+
+    Auparavant seul `pending` bloquait : un retry créait une SECONDE enveloppe
+    pendant que la première pouvait vivre. Désormais la clé n'est libérée que
+    sur les trois états où le registre TIENT LE JETON POUR MORT (`revoked`,
+    `consumed`, `unusable`) — c'est ce qui laisse fonctionner la reprise
+    « révoquer puis recréer ». Tout autre état bloque, y compris un état ajouté
+    ultérieurement. Reprise = nouvel `operation_id`.
+
+    ⚠️ « Tient pour mort » n'est pas « prouvé mort » : le registre ne stocke pas
+    le `wrap_token`, donc un jeton bidon présenté à `secret_consume` marque
+    l'entrée `unusable` alors que son wrap réel vit encore. Ce lot RÉDUIT le
+    trou sans le fermer (résidu antérieur, #140).
     """
     from .auth.context import (check_wrap_permission, check_access,
                                check_path_policy, check_wrap_path_policy,

@@ -18,6 +18,13 @@ Architecture :
 - Pattern write-ahead : le registry est écrit en "pending" AVANT l'appel OpenBao,
   puis mis à jour en "active" avec l'accessor après succès. Si crash entre les deux,
   lookup_and_revoke_by_operation_id retourne "found_unattached" (TTL fera expirer le wrap côté Vault).
+- ⚠️ v0.13.0 : une clé (operation_id, mission_id) déjà engagée n'est JAMAIS rejouable.
+  Règle écrite à l'envers — on bloque SAUF si rien ne peut survivre : seuls
+  "revoked", "consumed" et "unusable" libèrent la clé (jeton TENU POUR mort par
+  le registre — croyance, pas preuve : cf. _ETATS_SANS_SURVIVANT). Tout
+  le reste bloque, y compris un état ajouté plus tard, sous trois codes distincts
+  (operation_pending / operation_failed / operation_revocable).
+  Le blocage est DÉFINITIF — rien d'autre ne libère une clé.
 
 Invariants de sécurité :
 - Le wrap_token (secret) n'est jamais loggué, stocké, ni inclus dans les erreurs.
@@ -100,6 +107,29 @@ def init_wrap_registry():
         print(f"🔐 Wrap Registry initialisé ({_wrap_registry.count()} entrées)", file=sys.stderr)
     else:
         print("🔐 Wrap Registry non configuré (S3 requis)", file=sys.stderr)
+
+
+# Les SEULS états qui libèrent une clé `(operation_id, mission_id)` : ceux où le
+# registre TIENT LE JETON POUR MORT. La liste est volontairement écrite en
+# libératoire et non en bloquante — un état oublié ou ajouté plus tard BLOQUE par
+# défaut, donc échoue du côté prudent au lieu d'ouvrir un trou en silence.
+#
+# ⚠️ `consume_outcome_unknown` n'y figure PAS, bien qu'il soit rangé parmi les
+# états terminaux de consommation : OpenBao a pu consommer le jeton avant que la
+# réponse ne se perde, donc le jeton PEUT ENCORE VIVRE.
+#
+# ⚠️ RÉSIDU ASSUMÉ, ANTÉRIEUR À CE LOT — ces trois états sont une CROYANCE du
+# registre, pas une preuve :
+#   - le registre ne stocke jamais le `wrap_token`, seulement l'accessor.
+#     `secret_consume` sélectionne l'entrée par (operation_id, mission_id) puis
+#     déballe le jeton PRÉSENTÉ : un jeton bidon marque l'entrée `unusable`
+#     alors que le wrap réel de cette entrée est intact et vivant ;
+#   - `revoked` est posé dès qu'une exception OpenBao porte 400/404 — de
+#     l'idempotence, pas une attestation.
+# Libérer la clé sur ces états peut donc laisser un wrap vivant. Le lot v0.13.0
+# RÉDUIT le trou (avant, tout sauf `pending` libérait) sans le fermer : le fermer
+# exige de lier le jeton présenté à l'entrée ciblée, hors périmètre ici. Voir #140.
+_ETATS_SANS_SURVIVANT = frozenset({"revoked", "consumed", "unusable"})
 
 
 class WrapRegistry:
@@ -284,42 +314,90 @@ class WrapRegistry:
         )
         return None
 
-    def has_pending(self, operation_id: str, mission_id: str) -> bool:
+    def blocking_intent_status(self, operation_id: str, mission_id: str):
         """
-        Une provision est-elle DÉJÀ en cours pour ce couple ?
+        L'état qui INTERDIT de (re)jouer ce couple, ou None si la clé est libre.
 
-        Rejouer une clé `(operation_id, mission_id)` dont une entrée est encore
-        `pending` est refusé : après un plantage on ne sait pas si OpenBao a déjà
-        créé un wrap, et rattacher une nouvelle provision au même `pending`
-        rendrait la première orpheline ET non compensable. Un retry après
-        `failed` reste permis.
+        Rend l'état bloquant trouvé, ou None si la clé est libre. Quand plusieurs
+        coexistent, le FAIT LE PLUS FORT prime — une ressource possiblement
+        vivante avant un échec, un échec avant une simple intention.
 
-        ⚠️ DEUX RÉSIDUS ASSUMÉS :
+        ⚠️ La règle est écrite À L'ENVERS, et c'est délibéré : **on bloque SAUF
+        si rien ne peut survivre**. Seuls `revoked`, `consumed` et `unusable`
+        libèrent la clé — les trois états où le registre TIENT le jeton pour
+        mort. ⚠️ C'est une croyance, pas une preuve : voir le résidu documenté
+        sur `_ETATS_SANS_SURVIVANT`. Tout le reste bloque, y compris un état que
+        nous ajouterions demain : un oubli échoue alors du côté prudent au lieu
+        d'ouvrir un trou en silence.
 
-        1. **Le blocage est durable, et pas seulement après un plantage.** Si la
+        ⚠️ `consume_outcome_unknown` BLOQUE, contrairement à ce que son
+        classement parmi les « états terminaux de consommation » suggère : il
+        signifie qu'OpenBao **a pu** consommer le jeton avant que la réponse ne
+        se perde — donc que le jeton **peut encore vivre**. L'entrée conserve son
+        accessor, elle reste révocable, et un rejeu y créerait une seconde
+        enveloppe vivante.
+
+        C'est la reprise nominale de `mcp-mission` que la liste libératoire
+        préserve : révoquer la provision précédente (elle passe `revoked`), puis
+        en recréer une. Bloquer plus large échangerait une double provision
+        contre un déni de service.
+
+        ⚠️ `failed` bloque DEPUIS v0.13.0, et c'est le cœur du correctif. Il est
+        posé par `mark_failed` quand l'appel OpenBao a échoué — **y compris après
+        qu'OpenBao a pu créer le wrap** (délai dépassé, coupure réseau). L'entrée
+        n'a alors PAS d'accessor : la ressource éventuelle est innommable, donc
+        non révocable. Autoriser un retry sur cette clé, comme nous le faisions,
+        crée une SECONDE enveloppe pendant que la première peut vivre — ce que
+        `mcp-mission` interdit par contrat depuis le 15/08/2026, et que notre
+        code rendait pourtant possible.
+
+        Le blocage est DÉFINITIF : rien ne libère une clé chez nous. C'est
+        l'échange assumé — une clé morte contre une double provision. Il ne coûte
+        rien aux appelants connus, qui frappent un nouvel `operation_id` à chaque
+        tentative. La reprise se fait avec un NOUVEL `operation_id`.
+
+        ⚠️ TROIS RÉSIDUS ASSUMÉS :
+
+        1. **Le blocage sur `pending` ne suit pas toujours un plantage.** Si la
            sauvegarde de `mark_active`/`mark_failed` échoue, elles restaurent
            l'état mémoire et l'entrée redevient `pending` : l'appel de résolution
            a bien eu lieu, c'est sa PERSISTANCE qui manque. La restauration reste
            correcte — un `active` en mémoire alors que S3 porte `pending` serait
-           un mensonge d'état. La reprise se fait avec un NOUVEL `operation_id`.
+           un mensonge d'état.
 
            Libérer la clé sur l'échéance de l'entrée ne suffirait pas : la
            nouvelle intention créerait une SECONDE entrée `pending`, donc une
            ambiguïté. Et `expires_at` est calculé AVANT l'appel OpenBao, dont le
            TTL court depuis l'émission — il ne borne pas la durée de vie réelle
-           du wrap. Lot distinct.
+           du wrap.
 
-        2. **Pas de garantie d'unicité distribuée.** Sans CAS/ETag S3 (#51), deux
+        2. **Une révocation d'urgence confirmée reste invisible.** Quand la
+           persistance est tombée, nous ne pouvons rien inscrire — pas même
+           « révoqué ». La compensation répond donc `found_unattached` pour une
+           ressource que nous savons morte. Non réparable avec S3 pour seul
+           support durable : il y faudrait un journal survivant au redémarrage.
+           Déclaré tel quel aux appelants, pas planifié.
+
+        3. **Pas de garantie d'unicité distribuée.** Sans CAS/ETag S3 (#51), deux
            instances peuvent lire l'absence puis écrire toutes les deux.
         """
         self._maybe_refresh()
-        return any(
-            _entry_well_formed(e)
+        vus = {
+            e.get("status") for e in self._wraps
+            if _entry_well_formed(e)
             and e.get("operation_id") == operation_id
             and e.get("mission_id") == mission_id
-            and e.get("status") == "pending"
-            for e in self._wraps
-        )
+        }
+        bloquants = {e for e in vus if e not in _ETATS_SANS_SURVIVANT}
+        if not bloquants:
+            return None
+        # Du fait le plus fort au plus faible. Le `next` ne sert que de filet :
+        # un état inconnu de cette liste bloque quand même (fail-close).
+        for etat in ("active", "consuming", "consume_outcome_unknown",
+                     "failed", "pending"):
+            if etat in bloquants:
+                return etat
+        return next(iter(sorted(bloquants)))
 
     def mark_active(self, operation_id: str, mission_id: str, accessor: str) -> bool:
         """
@@ -389,6 +467,16 @@ class WrapRegistry:
         _maybe_refresh ici : un rechargement remplacerait _wraps et détacherait
         les références passées — la mutation serait perdue silencieusement. Le
         refresh a lieu UNE fois en tête de primitive, avant la sélection.
+
+        ⚠️ RÉSIDU CONNU — l'échec de persistance n'est PAS remonté. La révocation
+        OpenBao a réussi, mais si `_save()` échoue la mémoire porte `revoked`
+        alors que S3 porte encore `active`/`pending` : au redémarrage l'entrée
+        ressuscite dans un état que nous avons déjà annoncé révoqué à l'appelant.
+        Même famille que la révocation d'urgence de `wrap_secret` — un effet
+        externe CONFIRMÉ que nous ne savons pas rendre durable quand S3 est
+        indisponible. Non réparable avec S3 pour seul support (il y faudrait un
+        journal survivant au redémarrage) : voir le critère d'acceptation porté
+        à #123, pas un chantier distinct.
         """
         found = False
         for entry in entries:
@@ -609,8 +697,15 @@ async def wrap_secret(
     Le wrap_token retourné ne doit jamais être loggué côté broker.
 
     Codes d'erreur et effet externe — ce que l'appelant doit pouvoir en déduire :
-    - AVANT tout appel OpenBao, donc rien de créé : `invalid_input`,
-      `backend_unavailable`, `operation_pending`, `registry_unavailable`.
+    - AVANT tout appel OpenBao, et rien de créé par CET appel : `invalid_input`,
+      `backend_unavailable`, `registry_unavailable`.
+    - AVANT tout appel OpenBao, mais une ressource ANTÉRIEURE peut subsister —
+      la clé est déjà engagée et n'est plus jamais rejouable (v0.13.0) :
+        `operation_pending`   intention en cours, appel OpenBao inconnu
+        `operation_failed`    échec après un appel possible, SANS accessor donc
+                              non compensable
+        `operation_revocable` provision antérieure AVEC accessor, donc
+                              compensable — la révoquer, puis nouvelle clé
     - APRÈS l'appel, donc un wrap PEUT exister sans accessor exposé :
       `not_found`, `backend_error`.
     - APRÈS création certaine du wrap : `wrap_created_revoked` (révocation
@@ -639,17 +734,47 @@ async def wrap_secret(
     if registry is None:
         return {"status": "error", "error_type": "registry_unavailable",
                 "message": "Registre de compensation non configuré (S3 requis)"}
-    # Rejeu d'une clé dont une provision est encore `pending` : refusé AVANT toute
-    # écriture. Après un plantage, on ne sait pas si OpenBao a déjà créé un wrap ;
-    # en rattacher un second au même couple rendrait le premier orphelin ET non
-    # compensable. Un retry après `failed` reste permis.
-    if registry.has_pending(operation_id, mission_id):
+    # Rejeu d'une clé déjà engagée : refusé AVANT toute écriture. On ne sait pas si
+    # OpenBao a déjà créé un wrap ; en rattacher un second au même couple rendrait
+    # le premier orphelin ET non compensable. Les deux états bloquants portent des
+    # informations DIFFÉRENTES et méritent donc deux codes (cf. #78 : ne jamais
+    # fondre un fait et une ignorance sous un même nom).
+    bloquant = registry.blocking_intent_status(operation_id, mission_id)
+    if bloquant == "pending":
         logger.warning("wrap_secret : provision déjà en cours (op=%r, mission=%r) — refusé",
                        operation_id[:16], mission_id[:16])
         return {"status": "error", "error_type": "operation_pending",
                 "message": "Une provision est déjà en cours pour cette opération et "
                            "cette mission — ne pas rejouer la même clé : repartir "
                            "avec un nouvel operation_id"}
+    if bloquant == "failed":
+        logger.warning("wrap_secret : clé déjà engagée et échouée (op=%r, mission=%r) — refusé",
+                       operation_id[:16], mission_id[:16])
+        return {"status": "error", "error_type": "operation_failed",
+                "message": "Une tentative antérieure pour cette opération et cette "
+                           "mission a échoué APRÈS un appel possible au coffre : une "
+                           "ressource peut subsister sans accessor, donc sans être "
+                           "révocable. Cette clé n'est pas rejouable — repartir avec "
+                           "un nouvel operation_id"}
+    if bloquant is not None:  # "active" | "consuming" | "consume_outcome_unknown"
+        # Le cas le PIRE à laisser passer : une ressource possiblement vivante et
+        # NOMMABLE. Un rejeu créerait une seconde enveloppe sous la même clé, ce
+        # que l'appelant s'interdit par contrat. Ici, contrairement aux deux refus
+        # ci-dessus, il détient l'accessor : la sortie existe et elle est propre.
+        #
+        # ⚠️ Le code ne dit PAS « active » : il couvre aussi
+        # `consume_outcome_unknown`, où le jeton n'est que POSSIBLEMENT vivant. Le
+        # nommer d'après un état précis serait le même mensonge que ceux corrigés
+        # en v0.12.1 — il est nommé d'après ce que l'appelant PEUT FAIRE.
+        logger.warning("wrap_secret : provision %s déjà en place (op=%r, mission=%r) — refusé",
+                       bloquant, operation_id[:16], mission_id[:16])
+        return {"status": "error", "error_type": "operation_revocable",
+                "message": "Une provision antérieure subsiste pour cette opération "
+                           "et cette mission ; elle porte un accessor, donc elle "
+                           "reste RÉVOCABLE. ⚠️ D'autres entrées peuvent coexister "
+                           "sous cette clé, dont certaines non révocables. Ne pas "
+                           "rejouer cette clé : révoquer ce qui peut l'être, puis "
+                           "repartir avec un nouvel operation_id"}
     if not registry.register_pending(operation_id, mission_id, vault_id, secret_path, ttl_seconds,
                                      tenant_id=tenant_id, expected_aud=expected_aud):
         # S3 indisponible → compensation impossible → refuser le wrap
