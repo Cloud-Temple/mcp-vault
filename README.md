@@ -180,7 +180,7 @@ Contrat pour le `CredentialBrokerService` de mcp-mission : livraison de credenti
 | Outil | Perm | Description |
 | --- | --- | --- |
 | `secret_wrap(vault_id, secret_path, mission_id, operation_id, ttl_seconds?, tenant_id?, expected_aud?)` | wrap | Crée un wrap token single-use (write-ahead registry). ⚠️ **`tenant_id` OBLIGATOIRE si `ENFORCE_MISSION_TOKEN_VALIDATION=true`** — le serveur ne peut pas le déduire, et une provision au binding incomplet serait refusée à la consommation *(#78)*. `expected_aud` absente (ou blanche) est complétée depuis la configuration ; une audience désignant une **autre** instance est refusée (`binding_mismatch`) car le wrap serait inconsommable ; configuration durcie incohérente (JWKS vide, audience non résoluble) → `misconfigured` |
-| `secret_revoke_wrap(lease_id)` | wrap | Révocation idempotente (introuvable **dans un registre disponible** = succès), limitée au périmètre de l'appelant ; registre non initialisé → `error/registry_unavailable` *(#120)* |
+| `secret_revoke_wrap(lease_id)` | wrap | Révocation idempotente, limitée au périmètre de l'appelant ; registre non initialisé → `error/registry_unavailable` *(#120)*. ⚠️ Un accessor introuvable **dans un registre disponible** rend `ok/not_found` : c'est un **succès d'appel**, pas une révocation — aucun appel OpenBao n'a été tenté (voir la table de recréation plus bas) |
 | `secret_wrap_lookup(operation_id, mission_id)` | wrap | Retrouve & **révoque** les wraps du couple (compensation orphelins #74), limité au périmètre de l'appelant. ⚠️ `mission_id` REQUIS : un operation_id n'est pas unique entre missions, et sans lui la compensation d'un orphelin révoquait la provision vivante d'une AUTRE mission |
 | `secret_wrap_status(operation_id, mission_id)` | wrap | Consulte l'état d'un wrap **sans le révoquer** — lecture seule, instantané best-effort (#77), limité au périmètre de l'appelant. ⚠️ `mission_id` REQUIS : sans lui, l'état des provisions d'une autre mission était divulgué |
 | `secret_consume(wrap_token, operation_id, mission_token)` | admin | Valide JWT ES256/JWKS (contrat PEP complet depuis *(#86)* : exp/iat/iss/aud/mission_id/jti/scope/tenant_id + `component_id`), vérifie binding complet (mission_id, tenant_id, aud) — en mode durci les DEUX champs sont exigés *(#78)*, unwrap OpenBao (C18). Contrat d'erreurs non réessayables : `wrap_unusable`, `consume_outcome_unknown`, `empty_secret` *(#78)* |
@@ -191,7 +191,7 @@ Contrat pour le `CredentialBrokerService` de mcp-mission : livraison de credenti
 > ⚠️ *(#86)* Dès que `ENFORCE_MISSION_TOKEN_VALIDATION=true` (seul, ou via le PEP `/mcp` ci-dessous), `MISSION_JWKS_URL`, `MCP_INSTANCE_ID`/`MISSION_TOKEN_AUD` **et** `MISSION_STATUS_URL` deviennent obligatoires (fail-fast au boot) — sans quoi une mission abortée conserverait l'accès jusqu'à expiration du `mission_token`.
 > ⚠️ *(#86)* Le validateur applique désormais EXACTEMENT le même contrat que le PEP `/mcp` ci-dessous (mêmes claims requis, même vérification `component_id`) — un JWT authentique mais destiné à une autre instance vault est rejeté par les deux points d'application, pas seulement le premier.
 
-#### Matrice d'effet externe — ce qu'un code d'erreur permet de DÉDUIRE *(v0.12.1)*
+#### Matrice d'effet externe — ce qu'un code d'erreur permet de DÉDUIRE *(v0.13.0)*
 
 **Tous les codes métier arrivent en ENVELOPPE, `isError = false`.** Un appelant qui
 ne regarde que `isError` les prend pour des succès. **Lire `status`, puis
@@ -209,6 +209,8 @@ revient en enveloppe.
 | Code | Appel OpenBao | Ressource à compenser |
 | --- | --- | --- |
 | `invalid_input`, `backend_unavailable`, `operation_pending` | **absent** | non, pour cet appel |
+| `operation_failed` *(v0.13.0)* | **absent** pour cet appel | ⚠️ **possiblement, d'une tentative ANTÉRIEURE** — sans accessor, donc non compensable |
+| `operation_active` *(v0.13.0)* | **absent** pour cet appel | **oui, d'une provision ANTÉRIEURE** — elle porte un accessor, donc elle **est** compensable |
 | `registry_unavailable` | **absent** | non |
 | `wrap_created_revoked` | **wrap créé** | non — révocation confirmée |
 | `wrap_created_orphaned` | **wrap créé** | ⚠️ **possiblement** — active jusqu'au TTL, **non compensable** |
@@ -216,12 +218,14 @@ revient en enveloppe.
 
 ⚠️ `backend_error` peut suivre un appel qu'OpenBao a reçu (délai dépassé, coupure) ;
 `not_found` est déduit d'un motif cherché dans le texte de l'exception, donc non
-prouvé. Dans les deux cas l'intention passe `failed` **sans accessor** — et la clé
-redevient alors rejouable, ce qui créerait un second wrap. ⚠️ Si la persistance de
-ce marquage échoue à son tour, l'entrée revient `pending` et la clé est au
-contraire **bloquée** (`operation_pending`) : les deux issues existent et ne sont
-pas prévisibles côté appelant. **Repartir sur un nouvel `operation_id`**, jamais
-rejouer la même clé.
+prouvé. Dans les deux cas l'intention passe `failed` **sans accessor**.
+
+**Depuis v0.13.0, la clé est alors BLOQUÉE DÉFINITIVEMENT** — un rejeu rend
+`operation_failed`, sans aucun appel OpenBao. *(Jusqu'en v0.12.1 elle redevenait
+rejouable, et le rejeu créait un second wrap pendant que le premier pouvait
+vivre.)* Si la persistance du marquage échoue, l'entrée revient `pending` et la
+clé est bloquée sous `operation_pending` : le blocage est le même, seul le code
+diffère. **Reprise = nouvel `operation_id`, dans tous les cas.**
 
 > Une intention `failed` (ou `pending`) sans accessor rend `found_unattached` sur `secret_wrap_lookup` : aucune révocation n'est possible, seul le TTL borne la ressource éventuelle. ⚠️ Ce verdict ne dit **pas** qu'une ressource existe — il dit que nous ne pouvons pas l'exclure. *(v0.12.1 : ce cas répondait `already_revoked`, affirmant une révocation inexistante.)*
 
@@ -236,6 +240,38 @@ rejouer la même clé.
 | `secret_wrap_status` — `backend_unavailable` | **absent** : registre absent ou dernier rafraîchissement S3 échoué | rejeu toujours sûr |
 
 > `secret_wrap_status` ne mute ni OpenBao ni le registre (cache et journal d'audit, eux, bougent). Il ne distingue **pas** le transitoire du durable : instantané best-effort, et une panne S3 pendant la fenêtre de cache n'est même pas détectée.
+
+#### Ce que le registre PROUVE — et ce qu'il ne prouve pas
+
+🔴 **`secret_wrap_status` rend ce que le REGISTRE CROIT, pas un constat OpenBao.**
+Aucun client OpenBao n'est appelé. Chaque réponse est une **croyance datée** :
+
+- **`active` ne prouve pas qu'un wrap vit** — il a pu expirer, être consommé ou
+  révoqué chez OpenBao sans qu'aucune transition de registre ne soit écrite.
+- **`consuming` n'atteste pas qu'un déballage soit parti** : l'état est persisté
+  **avant** l'appel d'unwrap.
+- **`consumed`, `revoked`, `unusable` ne parlent que d'UNE entrée**, jamais du
+  couple : plusieurs entrées peuvent coexister pour un même
+  `(operation_id, mission_id)` — historiquement, parce que le verrou de clé ne
+  regardait que `pending` jusqu'en v0.12.1. ⚠️ Un état terminal sur l'une ne dit
+  **rien** des autres : une entrée `unusable` peut coexister avec une `active`.
+- **`revoked`** est aussi posé quand OpenBao répond 400/404 : c'est de
+  l'idempotence, pas une preuve du sort du jeton.
+
+⚠️ **`ambiguous` de `secret_wrap_status` et `ambiguous` de `secret_wrap_lookup` ne
+sont pas le même mot.** Le status est **pur** ; le lookup est **destructif** —
+face à plusieurs entrées il révoque les actives. **Ne jamais appeler
+`secret_wrap_lookup` pour comprendre un `ambiguous`** : il détruirait ce qu'on
+cherche à diagnostiquer. Aucun verbe ne détaille un `ambiguous` (ni cardinalité,
+ni état individuel) : c'est un refus terminal, sans investigation.
+
+**Quand peut-on recréer après `secret_revoke_wrap` ?**
+
+| Réponse | Recréer ? |
+| --- | --- |
+| `ok/revoked`, `ok/already_revoked` | ✅ révocation émise et acceptée, ou jeton déclaré invalide/absent par OpenBao |
+| `ok/not_found` | ❌ **aucun appel OpenBao tenté** — accessor inconnu du registre ou hors périmètre |
+| `backend_error`, `backend_unavailable`, `registry_unavailable` | ❌ rien d'attesté |
 
 **`secret_consume`** — « aucun appel émis » ne veut **pas** dire « jeton intact » :
 sur ces chemins nous ne regardons pas le jeton, qui peut avoir expiré ou avoir été
@@ -658,4 +694,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.12.1
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.13.0

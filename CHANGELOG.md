@@ -2,6 +2,75 @@
 
 ## [Non publié]
 
+## [0.13.0] — 2026-08-15
+
+### ⚠️ RUPTURE — une clé de provisionnement déjà engagée n'est plus jamais rejouable
+
+Quand un appel OpenBao échoue **après** avoir possiblement créé le wrap (délai
+dépassé, coupure réseau, réponse incomplète), l'intention passe `failed` **sans
+accessor** : la ressource éventuelle est innommable, donc non révocable.
+
+Jusqu'en v0.12.1 la garde ne bloquait que `pending` — la clé
+`(operation_id, mission_id)` **redevenait rejouable**. Un retry créait alors une
+**seconde enveloppe pendant que la première pouvait vivre**, ce qui viole
+l'invariant « au plus une enveloppe active par identifiant » sur lequel
+`mcp-mission` s'est engagé le 15/08/2026.
+
+`failed` bloque désormais la clé, avec un code **distinct** — les deux états
+portent des informations différentes, et les fondre reproduirait le défaut #78
+(un fait et une ignorance sous un même nom) :
+
+| Code | Ce qu'il atteste | Appel OpenBao |
+| --- | --- | --- |
+| `operation_pending` | une intention est en cours | **inconnu** |
+| `operation_failed` *(nouveau)* | une tentative a échoué après un appel possible ; une ressource peut subsister sans accessor | **a eu lieu** |
+| `operation_active` *(nouveau)* | une provision existe, vivante et **révocable** (elle porte un accessor) | **a réussi** |
+
+⚠️ **`active` était le pire cas laissé passer**, et il ne l'était pas moins avant :
+une provision VIVANTE et NOMMABLE. Un rejeu produisait deux enveloppes actives
+sous une même clé. Les états `active` et `consuming` bloquent donc eux aussi.
+
+✅ **Les états terminaux ne bloquent PAS** (`revoked`, `consumed`, `unusable`,
+`consume_outcome_unknown`) : plus rien ne vit sous cette clé de notre point de
+vue. C'est ce qui laisse fonctionner la reprise nominale « révoquer la provision
+précédente, puis en recréer une » — bloquer aussi large aurait échangé une double
+provision contre un déni de service. Un test épingle ce garde-fou inverse.
+
+⚠️ **Le blocage est DÉFINITIF** — rien ne libère une clé. C'est l'échange assumé :
+une clé morte contre une double provision. Il ne coûte rien aux appelants connus,
+qui frappent un nouvel `operation_id` à chaque tentative — `mcp-mission` l'a
+établi par lecture de son code, puis a rendu ce cas terminal dans son propre
+contrat. **Reprise = nouvel `operation_id`, dans tous les cas.**
+
+⚠️ **Version mineure et non correctif** : un appel aujourd'hui accepté devient
+refusé. Aucune signature ne change, aucun champ ne disparaît, mais la conduite
+d'un appelant qui rejouait change — d'où le bump.
+
+### Le registre publie enfin ce qu'il PROUVE, et ce qu'il ne prouve pas
+
+`secret_wrap_status` lit un instantané du registre : **aucun client OpenBao n'est
+appelé**. Le contrat publié ne le disait nulle part, et deux équipes clientes
+construisaient une procédure de décision sur ses réponses comme sur des constats.
+Le README (FR et EN) porte désormais trois précisions absentes :
+
+- **chaque réponse est une croyance datée** — `active` ne prouve pas qu'un wrap
+  vive, `consuming` est persisté **avant** l'appel d'unwrap, et `consumed` /
+  `revoked` / `unusable` ne parlent que d'**une** entrée : le verrou de clé ne
+  regardant que `pending`, plusieurs entrées peuvent coexister pour un même
+  couple, et un état terminal sur l'une ne dit rien des autres ;
+- **`ambiguous` de `secret_wrap_status` n'est pas celui de `secret_wrap_lookup`** :
+  le premier est pur, le second **révoque les entrées actives**. Appeler le lookup
+  pour « comprendre » un `ambiguous` détruit ce qu'on cherche à diagnostiquer ;
+- **une table « quand peut-on recréer »** après `secret_revoke_wrap`.
+
+⚠️ **Une formulation trompeuse corrigée** : le README annonçait pour
+`secret_revoke_wrap` qu'un accessor « introuvable dans un registre disponible =
+succès ». C'est un **succès d'appel**, pas une révocation — `ok/not_found`
+signifie qu'aucun appel OpenBao n'a été tenté. Un appelant pouvait y lire une
+neutralisation et recréer par-dessus une ressource encore vivante.
+
+Documentation seule : aucun changement de code, de signature ni de comportement.
+
 ## [0.12.1] — 2026-08-14
 
 ### Un code d'erreur qui annonçait « rien n'a été créé » alors qu'un wrap existait

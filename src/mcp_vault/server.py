@@ -505,6 +505,23 @@ async def secret_wrap(
 
     Returns:
         {status, wrap_token (SENSIBLE), secret_id, accessor, vault_url, expires_at, intended_use}
+
+    ⚠️ RUPTURE v0.13.0 — une clé `(operation_id, mission_id)` déjà engagée n'est
+    JAMAIS rejouable, et le refus porte deux codes distincts :
+
+        operation_pending — une intention est en cours ; on ignore si OpenBao a
+                            été appelé
+        operation_failed  — une tentative a échoué APRÈS un appel possible au
+                            coffre : une ressource peut subsister sans accessor,
+                            donc sans être révocable
+        operation_active  — une provision existe, VIVANTE et révocable (elle
+                            porte un accessor) ; la révoquer d'abord
+
+    Auparavant seul `pending` bloquait : un retry créait une SECONDE enveloppe
+    pendant que la première pouvait vivre. Les états TERMINAUX (`revoked`,
+    `consumed`, `unusable`, `consume_outcome_unknown`) ne bloquent pas — c'est ce
+    qui laisse fonctionner la reprise « révoquer puis recréer ».
+    Reprise = nouvel `operation_id`.
     """
     from .auth.context import (check_wrap_permission, check_access,
                                check_path_policy, check_wrap_path_policy,

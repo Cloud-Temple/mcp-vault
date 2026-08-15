@@ -178,23 +178,25 @@ class TestLesOriginesHonnetesGardentRegistryUnavailable:
 
 
 # =============================================================================
-# 2 bis) LE DÉFAUT QUI RESTE OUVERT — épinglé, pas corrigé
+# 2 bis) LE DÉFAUT DE REJEU — FERMÉ en v0.13.0
 # =============================================================================
 
 class TestReponseIncompleteApresAppel:
-    """Une réponse OpenBao sans `wrap_info` exploitable rend `backend_error`, et
-    l'intention passe `failed` — donc la clé REDEVIENT REJOUABLE alors qu'un wrap
-    a pu être créé sans que nous en ayons l'accessor.
+    """Une réponse OpenBao sans `wrap_info` exploitable rend `backend_error` et
+    marque l'intention `failed`. Jusqu'en v0.12.1 la clé REDEVENAIT REJOUABLE
+    alors qu'un wrap avait pu être créé sans que nous en ayons l'accessor : un
+    rejeu créait une SECONDE enveloppe pendant que la première pouvait vivre.
 
-    ⚠️ Ce test ÉPINGLE le comportement actuel, il ne l'approuve pas. Le défaut est
-    signalé aux deux équipes clientes avec la seule protection disponible : ne pas
-    rejouer la même clé. Le fermer exige une transition persistée — sans elle, une
-    clé bloquée l'est DÉFINITIVEMENT (rien ne libère une clé), ce qui échangerait
-    un incident rare contre un incident fréquent. Lot distinct, arbitrage
-    propriétaire.
+    ⚠️ v0.13.0 bloque la clé sur `failed` comme sur `pending`, avec un code
+    DISTINCT (`operation_failed`) — les deux états portent des informations
+    différentes et les fondre reproduirait le défaut #78.
 
-    Sans cet épinglage, une « correction » silencieuse de ce chemin passerait
-    inaperçue alors qu'elle changerait le contrat annoncé.
+    L'arbitrage qui nous retenait est tombé le 15/08/2026 : `mcp-mission` a prouvé
+    par lecture de code qu'aucun chemin métier ne rejoue une clé, puis a rendu ce
+    cas TERMINAL dans son propre contrat. Bloquer ne leur coûte donc rien, là où
+    le rejeu leur violait leur invariant « au plus une enveloppe active ».
+
+    Le blocage est DÉFINITIF (rien ne libère une clé) : c'est l'échange assumé.
     """
 
     def _wrap_reponse(self, reponse):
@@ -218,20 +220,17 @@ class TestReponseIncompleteApresAppel:
 
         assert r["error_type"] == "backend_error", (f"{cas} : {r!r}")
         assert "wrap_token" not in r, f"{cas} : jeton remis sur un chemin d'erreur"
-        # L'intention est `failed`, donc `has_pending` ne bloque plus : c'est
-        # PRÉCISÉMENT le défaut documenté. Si cette assertion tombe, le contrat
-        # annoncé aux clients a changé — il faut les prévenir, pas ajuster le test.
         assert registre._wraps[0]["status"] == "failed", (
-            f"{cas} : état {registre._wraps[0]['status']!r} — le défaut de rejeu "
-            f"documenté aux équipes clientes a changé de forme")
+            f"{cas} : état {registre._wraps[0]['status']!r} — l'intention doit "
+            f"rester `failed`, c'est elle qui bloque désormais la clé")
 
-    def test_le_rejeu_de_la_cle_est_EFFECTIVEMENT_possible_apres_failed(self):
-        """Le défaut n'est pas déduit d'un état de registre : il est EXERCÉ.
+    def test_le_rejeu_de_la_cle_est_REFUSE_apres_failed(self):
+        """La fermeture n'est pas déduite d'un état de registre : elle est EXERCÉE.
 
         Épingler `status == "failed"` prouve l'état, pas la conséquence. Ici un
-        second `wrap_secret` sur la MÊME clé aboutit et appelle OpenBao une
-        seconde fois — c'est la création du second wrap, le premier restant
-        orphelin.
+        second `wrap_secret` sur la MÊME clé doit être refusé **et n'appeler
+        OpenBao qu'une seule fois** — c'est l'absence du second wrap qui est la
+        propriété de sécurité, pas le code rendu.
         """
         from mcp_vault.vault import wrapping as w
         registre = _registre()
@@ -242,17 +241,81 @@ class TestReponseIncompleteApresAppel:
              patch.object(w, "_get_config", return_value=cfg):
             client.read.return_value = {}                      # réponse incomplète
             r1 = run(w.wrap_secret("mcp-mission", "missions/db", MISSION, OP, 300))
-            client.read.return_value = {                        # 2e essai : OpenBao répond
+            client.read.return_value = {                        # 2e essai : OpenBao répondrait
                 "wrap_info": {"token": "s.SECOND", "accessor": "ACC-2"}}
             r2 = run(w.wrap_secret("mcp-mission", "missions/db", MISSION, OP, 300))
 
         assert r1["error_type"] == "backend_error", r1
-        assert r2["status"] == "ok", (
-            f"le rejeu est refusé : le défaut documenté aux équipes clientes "
-            f"n'existe plus sous cette forme — {r2!r}")
-        assert client.read.call_count == 2, (
-            "un second wrap n'a pas été créé : l'assertion ci-dessus passerait "
-            "sur un chemin qui n'appelle pas OpenBao")
+        assert r2["error_type"] == "operation_failed", (
+            f"le rejeu a été accepté : le second wrap est créé alors que le "
+            f"premier peut vivre sans accessor — {r2!r}")
+        assert "wrap_token" not in r2, f"jeton remis sur un rejeu refusé : {r2!r}"
+        assert client.read.call_count == 1, (
+            f"OpenBao a été appelé {client.read.call_count} fois : le refus doit "
+            f"précéder tout appel, sinon un second wrap existe malgré l'erreur")
+        assert len(registre._wraps) == 1, (
+            f"une seconde intention a été écrite : {registre._wraps!r}")
+
+    @staticmethod
+    def _wrap_sur_etat(status, accessor=None):
+        """Tente un `wrap_secret` sur une clé portant DÉJÀ une entrée `status`."""
+        from mcp_vault.vault import wrapping as w
+        registre = _registre([{
+            "operation_id": OP, "mission_id": MISSION, "accessor": accessor,
+            "vault_id": "mcp-mission", "secret_path": "missions/db",
+            "created_at": "", "expires_at": "2099-01-01T00:00:00+00:00",
+            "status": status,
+        }])
+        client = MagicMock()
+        client.read.return_value = {"wrap_info": {"token": "s.NEW", "accessor": "ACC-NEW"}}
+        cfg = SimpleNamespace(openbao_addr="http://127.0.0.1:8200")
+        with patch.object(w, "get_wrap_registry", return_value=registre), \
+             patch.object(w, "_get_client", return_value=client), \
+             patch.object(w, "_get_config", return_value=cfg):
+            r = run(w.wrap_secret("mcp-mission", "missions/db", MISSION, OP, 300))
+        return r, client, registre
+
+    @pytest.mark.parametrize("status, code, accessor", [
+        ("pending",   "operation_pending", None),
+        ("failed",    "operation_failed",  None),
+        ("active",    "operation_active",  "ACC-1"),
+        ("consuming", "operation_active",  "ACC-1"),
+    ])
+    def test_tout_etat_NON_TERMINAL_bloque_la_cle_avant_tout_appel(
+            self, status, code, accessor):
+        """⚠️ `active` est le pire cas à laisser passer : la provision est VIVANTE
+        et NOMMABLE, donc un rejeu produit deux enveloppes actives sous une même
+        clé — l'invariant que l'appelant s'interdit.
+
+        Les codes distinguent trois informations différentes (#78 : ne jamais
+        fondre un fait et une ignorance) : `pending` on ignore si OpenBao a été
+        appelé ; `failed` l'appel a eu lieu et une ressource peut exister sans
+        accessor ; `active`/`consuming` une provision existe ET reste révocable.
+        """
+        r, client, registre = self._wrap_sur_etat(status, accessor)
+
+        assert r["error_type"] == code, f"état {status!r} : {r!r}"
+        assert not client.read.called, (
+            f"OpenBao appelé malgré une entrée {status!r} : un second wrap existe")
+        assert "wrap_token" not in r, f"jeton remis sur un refus : {r!r}"
+        assert len(registre._wraps) == 1, (
+            f"une seconde intention a été écrite pour {status!r} : {registre._wraps!r}")
+
+    @pytest.mark.parametrize("status", [
+        "revoked", "consumed", "unusable", "consume_outcome_unknown"])
+    def test_un_etat_TERMINAL_ne_bloque_PAS(self, status):
+        """Garde-fou inverse — bloquer trop casserait la reprise nominale.
+
+        `mcp-mission` révoque la provision précédente PUIS en recrée une. Si un
+        état terminal bloquait, cette séquence — qu'ils viennent d'arrêter par
+        contrat — deviendrait impossible et nous aurions échangé une double
+        provision contre un déni de service. Sans ce test, resserrer la garde
+        « par prudence » passerait inaperçu.
+        """
+        r, client, _ = self._wrap_sur_etat(status, accessor="ACC-1")
+
+        assert r["status"] == "ok", f"état terminal {status!r} bloqué à tort : {r!r}"
+        assert client.read.called, "aucun nouveau wrap créé alors que la clé est libre"
 
     def test_apres_failed_la_compensation_n_affirme_PAS_une_revocation(self):
         """Le piège opérationnel : c'est `secret_wrap_lookup` que l'appelant
