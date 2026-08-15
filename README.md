@@ -210,7 +210,7 @@ revient en enveloppe.
 | --- | --- | --- |
 | `invalid_input`, `backend_unavailable`, `operation_pending` | **absent** | non, pour cet appel |
 | `operation_failed` *(v0.13.0)* | **absent** pour cet appel | ⚠️ **possiblement, d'une tentative ANTÉRIEURE** — sans accessor, donc non compensable |
-| `operation_active` *(v0.13.0)* | **absent** pour cet appel | **oui, d'une provision ANTÉRIEURE** — elle porte un accessor, donc elle **est** compensable |
+| `operation_revocable` *(v0.13.0)* | **absent** pour cet appel | ⚠️ **possiblement, d'une provision ANTÉRIEURE** — mais elle porte un accessor, donc elle **est** compensable |
 | `registry_unavailable` | **absent** | non |
 | `wrap_created_revoked` | **wrap créé** | non — révocation confirmée |
 | `wrap_created_orphaned` | **wrap créé** | ⚠️ **possiblement** — active jusqu'au TTL, **non compensable** |

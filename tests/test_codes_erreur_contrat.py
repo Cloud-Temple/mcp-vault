@@ -276,21 +276,29 @@ class TestReponseIncompleteApresAppel:
         return r, client, registre
 
     @pytest.mark.parametrize("status, code, accessor", [
-        ("pending",   "operation_pending", None),
-        ("failed",    "operation_failed",  None),
-        ("active",    "operation_active",  "ACC-1"),
-        ("consuming", "operation_active",  "ACC-1"),
+        ("pending",                 "operation_pending",   None),
+        ("failed",                  "operation_failed",    None),
+        ("active",                  "operation_revocable", "ACC-1"),
+        ("consuming",               "operation_revocable", "ACC-1"),
+        ("consume_outcome_unknown", "operation_revocable", "ACC-1"),
     ])
-    def test_tout_etat_NON_TERMINAL_bloque_la_cle_avant_tout_appel(
+    def test_tout_etat_SANS_MORT_PROUVEE_bloque_la_cle_avant_tout_appel(
             self, status, code, accessor):
         """⚠️ `active` est le pire cas à laisser passer : la provision est VIVANTE
-        et NOMMABLE, donc un rejeu produit deux enveloppes actives sous une même
-        clé — l'invariant que l'appelant s'interdit.
+        et NOMMABLE, donc un rejeu produit deux enveloppes sous une même clé —
+        l'invariant que l'appelant s'interdit.
 
-        Les codes distinguent trois informations différentes (#78 : ne jamais
-        fondre un fait et une ignorance) : `pending` on ignore si OpenBao a été
-        appelé ; `failed` l'appel a eu lieu et une ressource peut exister sans
-        accessor ; `active`/`consuming` une provision existe ET reste révocable.
+        ⚠️ `consume_outcome_unknown` doit bloquer AUSSI, bien qu'il soit rangé
+        parmi les états terminaux de consommation : OpenBao a pu consommer le
+        jeton avant que la réponse ne se perde, donc le jeton PEUT ENCORE VIVRE.
+        Une première version de ce lot le laissait passer.
+
+        Les codes distinguent trois informations (#78 : ne jamais fondre un fait
+        et une ignorance) : `pending` on ignore si OpenBao a été appelé ;
+        `failed` l'appel a eu lieu, ressource possible mais SANS accessor ;
+        `operation_revocable` une ressource peut vivre ET porte un accessor. Ce
+        dernier est nommé d'après ce que l'appelant PEUT FAIRE, pas d'après un
+        état de registre — sinon il mentirait sur `consume_outcome_unknown`.
         """
         r, client, registre = self._wrap_sur_etat(status, accessor)
 
@@ -301,21 +309,44 @@ class TestReponseIncompleteApresAppel:
         assert len(registre._wraps) == 1, (
             f"une seconde intention a été écrite pour {status!r} : {registre._wraps!r}")
 
-    @pytest.mark.parametrize("status", [
-        "revoked", "consumed", "unusable", "consume_outcome_unknown"])
-    def test_un_etat_TERMINAL_ne_bloque_PAS(self, status):
+    @pytest.mark.parametrize("status", ["revoked", "consumed", "unusable"])
+    def test_seule_une_MORT_PROUVEE_libere_la_cle(self, status):
         """Garde-fou inverse — bloquer trop casserait la reprise nominale.
 
-        `mcp-mission` révoque la provision précédente PUIS en recrée une. Si un
-        état terminal bloquait, cette séquence — qu'ils viennent d'arrêter par
-        contrat — deviendrait impossible et nous aurions échangé une double
-        provision contre un déni de service. Sans ce test, resserrer la garde
-        « par prudence » passerait inaperçu.
+        `mcp-mission` révoque la provision précédente PUIS en recrée une : si
+        `revoked` bloquait, cette séquence — qu'ils viennent d'arrêter par
+        contrat — deviendrait impossible, et nous aurions échangé une double
+        provision contre un déni de service.
+
+        ⚠️ Ces TROIS états seulement, parce que le jeton y est prouvé mort.
+        `consume_outcome_unknown` n'en fait PAS partie et est couvert par le test
+        de blocage ci-dessus : une version antérieure de ce lot l'avait rangé
+        ici, et ce test verrouillait alors la régression qu'il prétendait
+        interdire. Un test de garde-fou peut protéger un défaut.
         """
         r, client, _ = self._wrap_sur_etat(status, accessor="ACC-1")
 
-        assert r["status"] == "ok", f"état terminal {status!r} bloqué à tort : {r!r}"
+        assert r["status"] == "ok", f"mort prouvée {status!r} bloquée à tort : {r!r}"
         assert client.read.called, "aucun nouveau wrap créé alors que la clé est libre"
+
+    def test_la_liste_liberatoire_est_ECRITE_A_L_ENVERS(self):
+        """La règle est « bloquer sauf mort prouvée », pas « bloquer si connu ».
+
+        Un état ajouté demain doit BLOQUER par défaut, pas passer. Ce test
+        exerce un état absent de la taxonomie : s'il ouvrait la clé, tout ajout
+        futur creuserait un trou silencieux — et notre engagement de prévenir
+        les équipes clientes deviendrait le seul filet.
+        """
+        from mcp_vault.vault.wrapping import _ETATS_SANS_SURVIVANT
+
+        assert _ETATS_SANS_SURVIVANT == {"revoked", "consumed", "unusable"}, (
+            f"la liste libératoire a changé : {_ETATS_SANS_SURVIVANT!r} — tout "
+            f"ajout ouvre la clé à un rejeu, prévenir les équipes clientes")
+
+        r, client, _ = self._wrap_sur_etat("etat_futur_inconnu", accessor="ACC-1")
+        assert r["status"] == "error", (
+            f"un état inconnu a LIBÉRÉ la clé au lieu de la bloquer : {r!r}")
+        assert not client.read.called, "OpenBao appelé sur un état inconnu"
 
     def test_apres_failed_la_compensation_n_affirme_PAS_une_revocation(self):
         """Le piège opérationnel : c'est `secret_wrap_lookup` que l'appelant

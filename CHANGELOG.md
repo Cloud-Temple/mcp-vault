@@ -24,17 +24,30 @@ portent des informations différentes, et les fondre reproduirait le défaut #78
 | --- | --- | --- |
 | `operation_pending` | une intention est en cours | **inconnu** |
 | `operation_failed` *(nouveau)* | une tentative a échoué après un appel possible ; une ressource peut subsister sans accessor | **a eu lieu** |
-| `operation_active` *(nouveau)* | une provision existe, vivante et **révocable** (elle porte un accessor) | **a réussi** |
+| `operation_revocable` *(nouveau)* | une provision antérieure subsiste et porte un accessor : elle **est** révocable | **a réussi** |
 
-⚠️ **`active` était le pire cas laissé passer**, et il ne l'était pas moins avant :
-une provision VIVANTE et NOMMABLE. Un rejeu produisait deux enveloppes actives
-sous une même clé. Les états `active` et `consuming` bloquent donc eux aussi.
+⚠️ **`active` était le pire cas laissé passer** : une provision VIVANTE et
+NOMMABLE, dont le rejeu produisait deux enveloppes sous une même clé.
 
-✅ **Les états terminaux ne bloquent PAS** (`revoked`, `consumed`, `unusable`,
-`consume_outcome_unknown`) : plus rien ne vit sous cette clé de notre point de
-vue. C'est ce qui laisse fonctionner la reprise nominale « révoquer la provision
-précédente, puis en recréer une » — bloquer aussi large aurait échangé une double
-provision contre un déni de service. Un test épingle ce garde-fou inverse.
+**La règle est écrite à l'envers, et c'est délibéré : on bloque SAUF si rien ne
+peut survivre.** Seuls `revoked`, `consumed` et `unusable` libèrent la clé — les
+trois états où le jeton est **prouvé mort**. Tout le reste bloque, y compris un
+état que nous ajouterions plus tard : un oubli échoue alors du côté prudent au
+lieu d'ouvrir un trou en silence.
+
+⚠️ **`consume_outcome_unknown` BLOQUE**, malgré son rangement parmi les états
+terminaux de consommation : OpenBao a pu consommer le jeton avant que la réponse
+ne se perde, donc le jeton **peut encore vivre**. L'entrée conserve son accessor.
+
+✅ **La reprise nominale reste possible** — révoquer la provision précédente
+(elle passe `revoked`), puis en recréer une. Bloquer plus large aurait échangé
+une double provision contre un déni de service : un test épingle ce garde-fou
+inverse, et un autre vérifie que la liste libératoire n'accueille pas d'état
+supplémentaire.
+
+`operation_revocable` est nommé d'après **la conduite attendue**, pas d'après un
+état de registre : le nommer `operation_active` aurait menti sur
+`consume_outcome_unknown`, où la ressource n'est que *possiblement* vivante.
 
 ⚠️ **Le blocage est DÉFINITIF** — rien ne libère une clé. C'est l'échange assumé :
 une clé morte contre une double provision. Il ne coûte rien aux appelants connus,

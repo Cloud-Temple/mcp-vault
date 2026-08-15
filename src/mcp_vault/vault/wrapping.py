@@ -19,8 +19,11 @@ Architecture :
   puis mis à jour en "active" avec l'accessor après succès. Si crash entre les deux,
   lookup_and_revoke_by_operation_id retourne "found_unattached" (TTL fera expirer le wrap côté Vault).
 - ⚠️ v0.13.0 : une clé (operation_id, mission_id) déjà engagée n'est JAMAIS rejouable.
-  "pending" ET "failed" la bloquent, sous deux codes distincts (operation_pending /
-  operation_failed). Le blocage est DÉFINITIF — rien ne libère une clé.
+  Règle écrite à l'envers — on bloque SAUF si rien ne peut survivre : seuls
+  "revoked", "consumed" et "unusable" libèrent la clé (jeton prouvé mort). Tout
+  le reste bloque, y compris un état ajouté plus tard, sous trois codes distincts
+  (operation_pending / operation_failed / operation_revocable).
+  Le blocage est DÉFINITIF — rien d'autre ne libère une clé.
 
 Invariants de sécurité :
 - Le wrap_token (secret) n'est jamais loggué, stocké, ni inclus dans les erreurs.
@@ -103,6 +106,18 @@ def init_wrap_registry():
         print(f"🔐 Wrap Registry initialisé ({_wrap_registry.count()} entrées)", file=sys.stderr)
     else:
         print("🔐 Wrap Registry non configuré (S3 requis)", file=sys.stderr)
+
+
+# Les SEULS états qui libèrent une clé `(operation_id, mission_id)` : ceux où
+# plus rien ne peut survivre. La liste est volontairement écrite en libératoire
+# et non en bloquante — un état oublié ou ajouté plus tard BLOQUE par défaut,
+# donc échoue du côté prudent au lieu d'ouvrir un trou en silence.
+#
+# ⚠️ `consume_outcome_unknown` n'y figure PAS, bien qu'il soit rangé parmi les
+# états terminaux de consommation : OpenBao a pu consommer le jeton avant que la
+# réponse ne se perde, donc le jeton PEUT ENCORE VIVRE. `unusable`, lui, y figure
+# — là OpenBao affirme le wrap mort.
+_ETATS_SANS_SURVIVANT = frozenset({"revoked", "consumed", "unusable"})
 
 
 class WrapRegistry:
@@ -291,14 +306,27 @@ class WrapRegistry:
         """
         L'état qui INTERDIT de (re)jouer ce couple, ou None si la clé est libre.
 
-        Rend l'état bloquant trouvé (`"active"`, `"consuming"`, `"pending"` ou
-        `"failed"`) ou None si la clé est libre. Quand plusieurs coexistent, le
-        FAIT LE PLUS FORT prime — une provision vivante avant une intention.
+        Rend l'état bloquant trouvé, ou None si la clé est libre. Quand plusieurs
+        coexistent, le FAIT LE PLUS FORT prime — une ressource possiblement
+        vivante avant un échec, un échec avant une simple intention.
 
-        Ne bloquent PAS les états terminaux (`revoked`, `consumed`, `unusable`,
-        `consume_outcome_unknown`) : plus rien ne vit sous cette clé de notre
-        point de vue. C'est ce qui laisse fonctionner la reprise nominale de
-        `mcp-mission` — révoquer la provision précédente, puis en recréer une.
+        ⚠️ La règle est écrite À L'ENVERS, et c'est délibéré : **on bloque SAUF
+        si rien ne peut survivre**. Seuls `revoked`, `consumed` et `unusable`
+        libèrent la clé — les trois états où le jeton est prouvé mort. Tout le
+        reste bloque, y compris un état que nous ajouterions demain : un
+        oubli échoue alors du côté prudent au lieu d'ouvrir un trou en silence.
+
+        ⚠️ `consume_outcome_unknown` BLOQUE, contrairement à ce que son
+        classement parmi les « états terminaux de consommation » suggère : il
+        signifie qu'OpenBao **a pu** consommer le jeton avant que la réponse ne
+        se perde — donc que le jeton **peut encore vivre**. L'entrée conserve son
+        accessor, elle reste révocable, et un rejeu y créerait une seconde
+        enveloppe vivante.
+
+        C'est la reprise nominale de `mcp-mission` que la liste libératoire
+        préserve : révoquer la provision précédente (elle passe `revoked`), puis
+        en recréer une. Bloquer plus large échangerait une double provision
+        contre un déni de service.
 
         ⚠️ `failed` bloque DEPUIS v0.13.0, et c'est le cœur du correctif. Il est
         posé par `mark_failed` quand l'appel OpenBao a échoué — **y compris après
@@ -346,15 +374,16 @@ class WrapRegistry:
             and e.get("operation_id") == operation_id
             and e.get("mission_id") == mission_id
         }
-        # Ordre = du fait le plus fort au plus faible. Les états ABSENTS d'ici
-        # sont les états terminaux (`revoked`, `consumed`, `unusable`,
-        # `consume_outcome_unknown`) : plus rien ne vit sous cette clé de notre
-        # point de vue, un nouveau provisionnement y est donc légitime — c'est ce
-        # qui laisse fonctionner la reprise nominale « révoquer puis recréer ».
-        for etat in ("active", "consuming", "pending", "failed"):
-            if etat in vus:
+        bloquants = {e for e in vus if e not in _ETATS_SANS_SURVIVANT}
+        if not bloquants:
+            return None
+        # Du fait le plus fort au plus faible. Le `next` ne sert que de filet :
+        # un état inconnu de cette liste bloque quand même (fail-close).
+        for etat in ("active", "consuming", "consume_outcome_unknown",
+                     "failed", "pending"):
+            if etat in bloquants:
                 return etat
-        return None
+        return next(iter(sorted(bloquants)))
 
     def mark_active(self, operation_id: str, mission_id: str, accessor: str) -> bool:
         """
@@ -654,8 +683,15 @@ async def wrap_secret(
     Le wrap_token retourné ne doit jamais être loggué côté broker.
 
     Codes d'erreur et effet externe — ce que l'appelant doit pouvoir en déduire :
-    - AVANT tout appel OpenBao, donc rien de créé : `invalid_input`,
-      `backend_unavailable`, `operation_pending`, `registry_unavailable`.
+    - AVANT tout appel OpenBao, et rien de créé par CET appel : `invalid_input`,
+      `backend_unavailable`, `registry_unavailable`.
+    - AVANT tout appel OpenBao, mais une ressource ANTÉRIEURE peut subsister —
+      la clé est déjà engagée et n'est plus jamais rejouable (v0.13.0) :
+        `operation_pending`   intention en cours, appel OpenBao inconnu
+        `operation_failed`    échec après un appel possible, SANS accessor donc
+                              non compensable
+        `operation_revocable` provision antérieure AVEC accessor, donc
+                              compensable — la révoquer, puis nouvelle clé
     - APRÈS l'appel, donc un wrap PEUT exister sans accessor exposé :
       `not_found`, `backend_error`.
     - APRÈS création certaine du wrap : `wrap_created_revoked` (révocation
@@ -706,17 +742,22 @@ async def wrap_secret(
                            "ressource peut subsister sans accessor, donc sans être "
                            "révocable. Cette clé n'est pas rejouable — repartir avec "
                            "un nouvel operation_id"}
-    if bloquant is not None:  # "active" | "consuming"
-        # Le cas le PIRE à laisser passer : une provision vivante et NOMMABLE.
-        # Un rejeu créerait une seconde enveloppe active sous la même clé, ce que
-        # l'appelant s'interdit par contrat. Ici, contrairement aux deux refus
+    if bloquant is not None:  # "active" | "consuming" | "consume_outcome_unknown"
+        # Le cas le PIRE à laisser passer : une ressource possiblement vivante et
+        # NOMMABLE. Un rejeu créerait une seconde enveloppe sous la même clé, ce
+        # que l'appelant s'interdit par contrat. Ici, contrairement aux deux refus
         # ci-dessus, il détient l'accessor : la sortie existe et elle est propre.
+        #
+        # ⚠️ Le code ne dit PAS « active » : il couvre aussi
+        # `consume_outcome_unknown`, où le jeton n'est que POSSIBLEMENT vivant. Le
+        # nommer d'après un état précis serait le même mensonge que ceux corrigés
+        # en v0.12.1 — il est nommé d'après ce que l'appelant PEUT FAIRE.
         logger.warning("wrap_secret : provision %s déjà en place (op=%r, mission=%r) — refusé",
                        bloquant, operation_id[:16], mission_id[:16])
-        return {"status": "error", "error_type": "operation_active",
-                "message": "Une provision est déjà en place pour cette opération et "
-                           "cette mission — elle porte un accessor et reste "
-                           "révocable. Ne pas rejouer cette clé : révoquer la "
+        return {"status": "error", "error_type": "operation_revocable",
+                "message": "Une provision antérieure subsiste pour cette opération "
+                           "et cette mission ; elle porte un accessor, donc elle "
+                           "reste RÉVOCABLE. Ne pas rejouer cette clé : révoquer la "
                            "provision existante, puis repartir avec un nouvel "
                            "operation_id"}
     if not registry.register_pending(operation_id, mission_id, vault_id, secret_path, ttl_seconds,

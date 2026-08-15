@@ -514,14 +514,16 @@ async def secret_wrap(
         operation_failed  — une tentative a échoué APRÈS un appel possible au
                             coffre : une ressource peut subsister sans accessor,
                             donc sans être révocable
-        operation_active  — une provision existe, VIVANTE et révocable (elle
-                            porte un accessor) ; la révoquer d'abord
+        operation_revocable — une provision antérieure subsiste et porte un
+                            accessor : la révoquer d'abord. Couvre `active`,
+                            `consuming` ET `consume_outcome_unknown` — il est
+                            nommé d'après la CONDUITE, pas d'après un état
 
     Auparavant seul `pending` bloquait : un retry créait une SECONDE enveloppe
-    pendant que la première pouvait vivre. Les états TERMINAUX (`revoked`,
-    `consumed`, `unusable`, `consume_outcome_unknown`) ne bloquent pas — c'est ce
-    qui laisse fonctionner la reprise « révoquer puis recréer ».
-    Reprise = nouvel `operation_id`.
+    pendant que la première pouvait vivre. Seule une MORT PROUVÉE libère la clé
+    (`revoked`, `consumed`, `unusable`) — c'est ce qui laisse fonctionner la
+    reprise « révoquer puis recréer ». Tout autre état bloque, y compris un état
+    ajouté ultérieurement. Reprise = nouvel `operation_id`.
     """
     from .auth.context import (check_wrap_permission, check_access,
                                check_path_policy, check_wrap_path_policy,

@@ -208,7 +208,7 @@ schema-valid but **semantically refused** comes back as an envelope.
 | --- | --- | --- |
 | `invalid_input`, `backend_unavailable`, `operation_pending` | **none** | no, for this call |
 | `operation_failed` *(v0.13.0)* | **none** for this call | ⚠️ **possibly, from an EARLIER attempt** — without an accessor, hence not compensable |
-| `operation_active` *(v0.13.0)* | **none** for this call | **yes, from an EARLIER provision** — it carries an accessor, so it **is** compensable |
+| `operation_revocable` *(v0.13.0)* | **none** for this call | ⚠️ **possibly, from an EARLIER provision** — but it carries an accessor, so it **is** compensable |
 | `registry_unavailable` | **none** | no |
 | `wrap_created_revoked` | **wrap created** | no — revocation confirmed |
 | `wrap_created_orphaned` | **wrap created** | ⚠️ **possibly** — may live until TTL, **not compensable** |
