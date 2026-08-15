@@ -191,7 +191,7 @@ Contrat pour le `CredentialBrokerService` de mcp-mission : livraison de credenti
 > ⚠️ *(#86)* Dès que `ENFORCE_MISSION_TOKEN_VALIDATION=true` (seul, ou via le PEP `/mcp` ci-dessous), `MISSION_JWKS_URL`, `MCP_INSTANCE_ID`/`MISSION_TOKEN_AUD` **et** `MISSION_STATUS_URL` deviennent obligatoires (fail-fast au boot) — sans quoi une mission abortée conserverait l'accès jusqu'à expiration du `mission_token`.
 > ⚠️ *(#86)* Le validateur applique désormais EXACTEMENT le même contrat que le PEP `/mcp` ci-dessous (mêmes claims requis, même vérification `component_id`) — un JWT authentique mais destiné à une autre instance vault est rejeté par les deux points d'application, pas seulement le premier.
 
-#### Matrice d'effet externe — ce qu'un code d'erreur permet de DÉDUIRE *(v0.13.0)*
+#### Matrice d'effet externe — ce qu'un code d'erreur permet de DÉDUIRE *(v0.14.0)*
 
 **Tous les codes métier arrivent en ENVELOPPE, `isError = false`.** Un appelant qui
 ne regarde que `isError` les prend pour des succès. **Lire `status`, puis
@@ -211,6 +211,8 @@ revient en enveloppe.
 | `invalid_input`, `backend_unavailable`, `operation_pending` | **absent** | non, pour cet appel |
 | `operation_failed` *(v0.13.0)* | **absent** pour cet appel | ⚠️ **possiblement, d'une tentative ANTÉRIEURE** — sans accessor, donc non compensable |
 | `operation_revocable` *(v0.13.0)* | **absent** pour cet appel | ⚠️ **possiblement, d'une provision ANTÉRIEURE** — mais elle porte un accessor, donc elle **est** compensable |
+| `operation_terminated` *(v0.14.0)* | **absent** pour cet appel | non — provision antérieure tenue pour terminée, rien à compenser |
+| `registry_inconsistent` *(v0.14.0)* | **absent** pour cet appel | ⚠️ **inconnu** — entrée illisible, rien ne peut en être déduit |
 | `registry_unavailable` | **absent** | non |
 | `wrap_created_revoked` | **wrap créé** | non — révocation confirmée |
 | `wrap_created_orphaned` | **wrap créé** | ⚠️ **possiblement** — active jusqu'au TTL, **non compensable** |
@@ -220,25 +222,35 @@ revient en enveloppe.
 `not_found` est déduit d'un motif cherché dans le texte de l'exception, donc non
 prouvé. Dans les deux cas l'intention passe `failed` **sans accessor**.
 
-**Depuis v0.13.0, la clé est alors BLOQUÉE DÉFINITIVEMENT** — un rejeu rend
-`operation_failed`, sans aucun appel OpenBao. *(Jusqu'en v0.12.1 elle redevenait
-rejouable, et le rejeu créait un second wrap pendant que le premier pouvait
-vivre.)* Si la persistance du marquage échoue, l'entrée revient `pending` et la
-clé est bloquée sous `operation_pending` : le blocage est le même, seul le code
-diffère. **Reprise = nouvel `operation_id`, dans tous les cas.**
+**La clé est alors BLOQUÉE DÉFINITIVEMENT** — un rejeu rend `operation_failed`,
+sans aucun appel OpenBao. *(Jusqu'en v0.12.1 elle redevenait rejouable, et le
+rejeu créait un second wrap pendant que le premier pouvait vivre.)* Si la
+persistance du marquage échoue, l'entrée revient `pending` et la clé est bloquée
+sous `operation_pending` : le blocage est le même, seul le code diffère.
+**Reprise = nouvel `operation_id`, dans tous les cas.**
 
-> **La règle est écrite à l'envers** — on bloque **sauf** si rien ne peut
-> survivre. Seuls `revoked`, `consumed` et `unusable` libèrent la clé ; tout
-> autre état bloque, **y compris un état que nous ajouterions plus tard**. C'est
-> la liste libératoire qui préserve la reprise nominale « révoquer la provision
-> précédente, puis en recréer une ».
+> ⚠️ **v0.14.0 — UNE CLÉ EST À USAGE UNIQUE, SANS CONDITION.** La moindre entrée
+> pour le couple `(operation_id, mission_id)` bloque `secret_wrap`, quel que soit
+> son état, **entrée corrompue comprise** : une entrée illisible est une raison de
+> refuser, jamais d'autoriser. **Plus rien ne libère une clé.**
 >
-> ⚠️ **Ces trois états sont une croyance du registre, pas une preuve.** Nous ne
-> stockons jamais le `wrap_token` : `secret_consume` sélectionne l'entrée par
-> `(operation_id, mission_id)` puis déballe le jeton **présenté**, donc un jeton
-> bidon marque l'entrée `unusable` alors que son wrap réel est intact. Et
-> `revoked` est posé dès qu'une exception OpenBao porte un 400/404. **v0.13.0
-> réduit ce trou sans le fermer.**
+> En v0.13.0, `revoked`, `consumed` et `unusable` la rouvraient — pour préserver
+> la reprise « révoquer puis recréer » du broker. Celle-ci a été retirée de sa
+> conception, et le recensement des porteurs de jeton `wrap` en production n'en a
+> trouvé qu'un seul. Cette libération était aussi le dernier chemin par lequel un
+> jeton **étranger** présenté à `secret_consume` pouvait marquer une entrée
+> `unusable` — et libérer une clé dont le wrap réel vivait encore.
+>
+> ⚠️ **La garde ne porte QUE sur la création.** `secret_revoke_wrap`,
+> `secret_wrap_status` et `secret_wrap_lookup` restent ouverts sur une clé
+> engagée : sans cela l'appelant serait enfermé avec des ressources qu'il ne
+> pourrait plus ni voir ni couper. Un test compte les appelants de la garde et
+> échoue s'il en apparaît un second.
+>
+> ⚠️ **Deux contournements ne sont PAS fermés** : la perte du fichier de registre
+> (registre vide = toutes les clés redeviennent vierges) et la course entre deux
+> instances, faute de CAS/ETag *(#51)*. Ce ne sont pas des libérations métier,
+> mais l'unicité n'est pas absolue pour autant.
 
 > Une intention `failed` (ou `pending`) sans accessor rend `found_unattached` sur `secret_wrap_lookup` : aucune révocation n'est possible, seul le TTL borne la ressource éventuelle. ⚠️ Ce verdict ne dit **pas** qu'une ressource existe — il dit que nous ne pouvons pas l'exclure. *(v0.12.1 : ce cas répondait `already_revoked`, affirmant une révocation inexistante.)*
 
@@ -707,4 +719,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.13.0
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.14.0

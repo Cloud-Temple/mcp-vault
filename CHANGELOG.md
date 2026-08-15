@@ -2,6 +2,70 @@
 
 ## [Non publié]
 
+## [0.14.0] — 2026-08-15
+
+### ⚠️ RUPTURE — une clé de provisionnement est désormais à USAGE UNIQUE, sans condition
+
+v0.13.0 bloquait le rejeu d'une clé `(operation_id, mission_id)` **sauf** sur
+trois états — `revoked`, `consumed`, `unusable` — où le registre tient le jeton
+pour mort. Cette libération n'existait que pour préserver la reprise
+« révoquer la provision précédente, puis en recréer une » du broker `mcp-mission`.
+
+**Deux faits l'ont rendue inutile le 15/08/2026 :** `mcp-mission` a retiré cette
+reprise de sa conception (identifiant neuf par tentative, jamais réutilisé) et
+l'a confirmé par lecture de son code ; la plateforme agentique a ensuite lu le
+registre de tokens de production et établi qu'**un seul composant** portait un
+jeton de permission `wrap`.
+
+⇒ **La moindre entrée pour le couple bloque désormais `secret_wrap`**, quel que
+soit son état. Plus rien ne libère une clé.
+
+| Code | Ce qu'il atteste |
+| --- | --- |
+| `operation_terminated` *(nouveau)* | provision antérieure tenue pour **terminée** par le registre — rien à compenser |
+| `registry_inconsistent` *(nouveau sur ce chemin)* | entrée **illisible** — rien ne peut en être déduit |
+
+⚠️ **Une entrée CORROMPUE bloque elle aussi.** La garde de v0.13.0 les écartait
+via `_entry_well_formed` : une entrée abîmée rouvrait donc la clé. La sélection
+n'exige plus que des `operation_id`/`mission_id` lisibles et égaux — au-delà, une
+entrée illisible est une raison de **refuser**, jamais d'autoriser.
+
+### Ce que ça ferme, et ce que ça ne ferme pas
+
+✅ **Le dernier chemin d'exploitation de #140.** Le registre ne stocke jamais le
+`wrap_token` : `secret_consume` sélectionne l'entrée par la clé puis déballe le
+jeton **présenté**, sans lien entre les deux. Un jeton **étranger** marquait donc
+une entrée `unusable` — ce qui **libérait une clé dont le wrap réel vivait
+encore**. Ce chemin est fermé. **Sa cause reste ouverte** et documentée à #140 :
+la fermer exige de lier le jeton présenté à l'entrée ciblée.
+
+⚠️ **Deux contournements ne sont PAS fermés**, et il ne faut pas les croire
+emportés par ce lot : la perte du fichier de registre (registre vide = toutes les
+clés redeviennent vierges) et la course entre deux instances, faute de CAS/ETag
+(**#51**). Ce ne sont pas des libérations métier, mais l'unicité n'est pas
+absolue pour autant.
+
+### La garde ne porte QUE sur la création — et c'est verrouillé
+
+`secret_revoke_wrap`, `secret_wrap_status` et `secret_wrap_lookup` restent
+ouverts sur une clé engagée. C'est la condition posée par `mcp-mission` : sans
+elle, ils seraient enfermés avec des ressources qu'ils ne pourraient plus ni voir
+ni couper.
+
+**Un test compte les appelants de la garde dans le code de production et échoue
+s'il en apparaît un second** — sans quoi un lot futur pourrait fermer un de ces
+trois verbes sans que personne ne s'en aperçoive avant l'incident.
+
+### ⚠️ Pour qui c'est une rupture
+
+Tout appelant qui **réutilisait un `operation_id` après une révocation** est
+désormais refusé. Au recensement du 15/08/2026, aucun composant ne le faisait.
+⚠️ La permission `admin` court-circuite la garde `wrap` : un porteur de jeton
+`admin` peut appeler `secret_wrap` sans figurer dans un recensement des porteurs
+`wrap`. L'impact est celui d'un opérateur humain — reprendre une clé neuve devant
+un refus — mais il est réel.
+
+
 ## [0.13.0] — 2026-08-15
 
 ### ⚠️ RUPTURE — une clé de provisionnement déjà engagée n'est plus jamais rejouable
