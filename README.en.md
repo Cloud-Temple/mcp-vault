@@ -225,6 +225,19 @@ still be alive.)* If persisting that marking fails, the entry reverts to
 `pending` and the key is blocked under `operation_pending`: same block, different
 code. **Recovery = a new `operation_id`, in every case.**
 
+> **The rule is written the other way round** — we block **unless** nothing can
+> survive. Only `revoked`, `consumed` and `unusable` release the key; any other
+> state blocks, **including a state we might add later**. That release list is
+> what preserves the nominal recovery "revoke the previous provision, then
+> create a new one".
+>
+> ⚠️ **Those three states are a registry belief, not a proof.** We never store
+> the `wrap_token`: `secret_consume` selects the entry by
+> `(operation_id, mission_id)` then unwraps the **presented** token, so a bogus
+> token marks the entry `unusable` while its real wrap is untouched. And
+> `revoked` is set as soon as an OpenBao exception carries a 400/404. **v0.13.0
+> narrows this hole without closing it.**
+
 > A `failed` (or `pending`) intent without an accessor returns `found_unattached` on `secret_wrap_lookup`: no revocation is possible, only the TTL bounds the possible resource. ⚠️ That verdict does **not** state that a resource exists — it states that we cannot rule it out. *(v0.12.1: this case used to answer `already_revoked`, asserting a revocation that never happened.)*
 
 **The other four tools**, on the unavailability codes:

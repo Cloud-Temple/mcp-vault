@@ -227,6 +227,19 @@ vivre.)* Si la persistance du marquage échoue, l'entrée revient `pending` et l
 clé est bloquée sous `operation_pending` : le blocage est le même, seul le code
 diffère. **Reprise = nouvel `operation_id`, dans tous les cas.**
 
+> **La règle est écrite à l'envers** — on bloque **sauf** si rien ne peut
+> survivre. Seuls `revoked`, `consumed` et `unusable` libèrent la clé ; tout
+> autre état bloque, **y compris un état que nous ajouterions plus tard**. C'est
+> la liste libératoire qui préserve la reprise nominale « révoquer la provision
+> précédente, puis en recréer une ».
+>
+> ⚠️ **Ces trois états sont une croyance du registre, pas une preuve.** Nous ne
+> stockons jamais le `wrap_token` : `secret_consume` sélectionne l'entrée par
+> `(operation_id, mission_id)` puis déballe le jeton **présenté**, donc un jeton
+> bidon marque l'entrée `unusable` alors que son wrap réel est intact. Et
+> `revoked` est posé dès qu'une exception OpenBao porte un 400/404. **v0.13.0
+> réduit ce trou sans le fermer.**
+
 > Une intention `failed` (ou `pending`) sans accessor rend `found_unattached` sur `secret_wrap_lookup` : aucune révocation n'est possible, seul le TTL borne la ressource éventuelle. ⚠️ Ce verdict ne dit **pas** qu'une ressource existe — il dit que nous ne pouvons pas l'exclure. *(v0.12.1 : ce cas répondait `already_revoked`, affirmant une révocation inexistante.)*
 
 **Les quatre autres outils**, sur les codes d'indisponibilité :

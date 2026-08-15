@@ -329,6 +329,38 @@ class TestReponseIncompleteApresAppel:
         assert r["status"] == "ok", f"mort prouvée {status!r} bloquée à tort : {r!r}"
         assert client.read.called, "aucun nouveau wrap créé alors que la clé est libre"
 
+    def test_deux_entrees_le_fait_le_plus_ACTIONNABLE_prime(self):
+        """Une `active` et une `failed` sous la même clé : que rendre ?
+
+        Nous rendons `operation_revocable` — le seul des deux qui offre une
+        SORTIE à l'appelant. ⚠️ Mais l'orphelin non révocable disparaît alors du
+        diagnostic : le message doit donc avertir que d'autres entrées peuvent
+        coexister, sinon le code affirmerait implicitement une exclusivité qu'il
+        n'a pas. C'est ce que ce test épingle.
+        """
+        from mcp_vault.vault import wrapping as w
+        base = {
+            "operation_id": OP, "mission_id": MISSION,
+            "vault_id": "mcp-mission", "secret_path": "missions/db",
+            "created_at": "", "expires_at": "2099-01-01T00:00:00+00:00",
+        }
+        registre = _registre([
+            base | {"status": "failed", "accessor": None},
+            base | {"status": "active", "accessor": "ACC-1"},
+        ])
+        client = MagicMock()
+        cfg = SimpleNamespace(openbao_addr="http://127.0.0.1:8200")
+        with patch.object(w, "get_wrap_registry", return_value=registre), \
+             patch.object(w, "_get_client", return_value=client), \
+             patch.object(w, "_get_config", return_value=cfg):
+            r = run(w.wrap_secret("mcp-mission", "missions/db", MISSION, OP, 300))
+
+        assert r["error_type"] == "operation_revocable", r
+        assert not client.read.called, "OpenBao appelé malgré deux entrées bloquantes"
+        assert "coexister" in r["message"], (
+            f"le message affirme une exclusivité qu'il n'a pas — l'entrée `failed` "
+            f"non révocable est passée sous silence : {r['message']!r}")
+
     def test_la_liste_liberatoire_est_ECRITE_A_L_ENVERS(self):
         """La règle est « bloquer sauf mort prouvée », pas « bloquer si connu ».
 

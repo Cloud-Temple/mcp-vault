@@ -31,9 +31,19 @@ NOMMABLE, dont le rejeu produisait deux enveloppes sous une même clé.
 
 **La règle est écrite à l'envers, et c'est délibéré : on bloque SAUF si rien ne
 peut survivre.** Seuls `revoked`, `consumed` et `unusable` libèrent la clé — les
-trois états où le jeton est **prouvé mort**. Tout le reste bloque, y compris un
-état que nous ajouterions plus tard : un oubli échoue alors du côté prudent au
-lieu d'ouvrir un trou en silence.
+trois états où le registre **tient le jeton pour mort**. Tout le reste bloque, y
+compris un état que nous ajouterions plus tard : un oubli échoue alors du côté
+prudent au lieu d'ouvrir un trou en silence.
+
+⚠️ **« Tient pour mort » n'est pas « prouvé mort », et le trou n'est pas
+entièrement fermé.** Le registre ne stocke jamais le `wrap_token`, seulement
+l'accessor : `secret_consume` sélectionne l'entrée par
+`(operation_id, mission_id)` puis déballe le jeton **présenté**. Un jeton bidon
+marque donc l'entrée `unusable` alors que son wrap réel est intact. Et `revoked`
+est posé dès qu'une exception OpenBao porte un 400/404 — de l'idempotence, pas
+une attestation. **Ce lot RÉDUIT le trou** — avant, tout sauf `pending` libérait
+la clé — **sans le fermer** : le fermer exige de lier le jeton présenté à
+l'entrée ciblée. Résidu antérieur à ce lot, versé à #140.
 
 ⚠️ **`consume_outcome_unknown` BLOQUE**, malgré son rangement parmi les états
 terminaux de consommation : OpenBao a pu consommer le jeton avant que la réponse

@@ -108,15 +108,26 @@ def init_wrap_registry():
         print("🔐 Wrap Registry non configuré (S3 requis)", file=sys.stderr)
 
 
-# Les SEULS états qui libèrent une clé `(operation_id, mission_id)` : ceux où
-# plus rien ne peut survivre. La liste est volontairement écrite en libératoire
-# et non en bloquante — un état oublié ou ajouté plus tard BLOQUE par défaut,
-# donc échoue du côté prudent au lieu d'ouvrir un trou en silence.
+# Les SEULS états qui libèrent une clé `(operation_id, mission_id)` : ceux où le
+# registre TIENT LE JETON POUR MORT. La liste est volontairement écrite en
+# libératoire et non en bloquante — un état oublié ou ajouté plus tard BLOQUE par
+# défaut, donc échoue du côté prudent au lieu d'ouvrir un trou en silence.
 #
 # ⚠️ `consume_outcome_unknown` n'y figure PAS, bien qu'il soit rangé parmi les
 # états terminaux de consommation : OpenBao a pu consommer le jeton avant que la
-# réponse ne se perde, donc le jeton PEUT ENCORE VIVRE. `unusable`, lui, y figure
-# — là OpenBao affirme le wrap mort.
+# réponse ne se perde, donc le jeton PEUT ENCORE VIVRE.
+#
+# ⚠️ RÉSIDU ASSUMÉ, ANTÉRIEUR À CE LOT — ces trois états sont une CROYANCE du
+# registre, pas une preuve :
+#   - le registre ne stocke jamais le `wrap_token`, seulement l'accessor.
+#     `secret_consume` sélectionne l'entrée par (operation_id, mission_id) puis
+#     déballe le jeton PRÉSENTÉ : un jeton bidon marque l'entrée `unusable`
+#     alors que le wrap réel de cette entrée est intact et vivant ;
+#   - `revoked` est posé dès qu'une exception OpenBao porte 400/404 — de
+#     l'idempotence, pas une attestation.
+# Libérer la clé sur ces états peut donc laisser un wrap vivant. Le lot v0.13.0
+# RÉDUIT le trou (avant, tout sauf `pending` libérait) sans le fermer : le fermer
+# exige de lier le jeton présenté à l'entrée ciblée, hors périmètre ici. Voir #140.
 _ETATS_SANS_SURVIVANT = frozenset({"revoked", "consumed", "unusable"})
 
 
@@ -757,9 +768,10 @@ async def wrap_secret(
         return {"status": "error", "error_type": "operation_revocable",
                 "message": "Une provision antérieure subsiste pour cette opération "
                            "et cette mission ; elle porte un accessor, donc elle "
-                           "reste RÉVOCABLE. Ne pas rejouer cette clé : révoquer la "
-                           "provision existante, puis repartir avec un nouvel "
-                           "operation_id"}
+                           "reste RÉVOCABLE. ⚠️ D'autres entrées peuvent coexister "
+                           "sous cette clé, dont certaines non révocables. Ne pas "
+                           "rejouer cette clé : révoquer ce qui peut l'être, puis "
+                           "repartir avec un nouvel operation_id"}
     if not registry.register_pending(operation_id, mission_id, vault_id, secret_path, ttl_seconds,
                                      tenant_id=tenant_id, expected_aud=expected_aud):
         # S3 indisponible → compensation impossible → refuser le wrap

@@ -520,10 +520,16 @@ async def secret_wrap(
                             nommé d'après la CONDUITE, pas d'après un état
 
     Auparavant seul `pending` bloquait : un retry créait une SECONDE enveloppe
-    pendant que la première pouvait vivre. Seule une MORT PROUVÉE libère la clé
-    (`revoked`, `consumed`, `unusable`) — c'est ce qui laisse fonctionner la
-    reprise « révoquer puis recréer ». Tout autre état bloque, y compris un état
-    ajouté ultérieurement. Reprise = nouvel `operation_id`.
+    pendant que la première pouvait vivre. Désormais la clé n'est libérée que
+    sur les trois états où le registre TIENT LE JETON POUR MORT (`revoked`,
+    `consumed`, `unusable`) — c'est ce qui laisse fonctionner la reprise
+    « révoquer puis recréer ». Tout autre état bloque, y compris un état ajouté
+    ultérieurement. Reprise = nouvel `operation_id`.
+
+    ⚠️ « Tient pour mort » n'est pas « prouvé mort » : le registre ne stocke pas
+    le `wrap_token`, donc un jeton bidon présenté à `secret_consume` marque
+    l'entrée `unusable` alors que son wrap réel vit encore. Ce lot RÉDUIT le
+    trou sans le fermer (résidu antérieur, #140).
     """
     from .auth.context import (check_wrap_permission, check_access,
                                check_path_policy, check_wrap_path_policy,
