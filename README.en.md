@@ -190,7 +190,7 @@ Contract for the mcp-mission `CredentialBrokerService`: single-use credential de
 > ⚠️ *(#86)* As soon as `ENFORCE_MISSION_TOKEN_VALIDATION=true` (standalone, or via the `/mcp` PEP below), `MISSION_JWKS_URL`, `MCP_INSTANCE_ID`/`MISSION_TOKEN_AUD` **and** `MISSION_STATUS_URL` become mandatory (fail-fast at boot) — otherwise an aborted mission would keep access until the `mission_token` expires.
 > ⚠️ *(#86)* The validator now applies EXACTLY the same contract as the `/mcp` PEP below (same required claims, same `component_id` check) — a genuine JWT meant for another vault instance is now rejected by both enforcement points, not just the first one.
 
-#### External-effect matrix — what an error code lets you DEDUCE *(v0.13.0)*
+#### External-effect matrix — what an error code lets you DEDUCE *(v0.14.0)*
 
 **Every business error code arrives as an ENVELOPE, `isError = false`.** A caller
 that only looks at `isError` reads them all as successes. **Read `status`, then
@@ -209,6 +209,8 @@ schema-valid but **semantically refused** comes back as an envelope.
 | `invalid_input`, `backend_unavailable`, `operation_pending` | **none** | no, for this call |
 | `operation_failed` *(v0.13.0)* | **none** for this call | ⚠️ **possibly, from an EARLIER attempt** — without an accessor, hence not compensable |
 | `operation_revocable` *(v0.13.0)* | **none** for this call | ⚠️ **possibly, from an EARLIER provision** — but it carries an accessor, so it **is** compensable |
+| `operation_terminated` *(v0.14.0)* | **none** for this call | no — earlier provision held as finished, nothing to compensate |
+| `registry_inconsistent` *(v0.14.0)* | **none** for this call | ⚠️ **unknown** — unreadable entry, nothing can be inferred |
 | `registry_unavailable` | **none** | no |
 | `wrap_created_revoked` | **wrap created** | no — revocation confirmed |
 | `wrap_created_orphaned` | **wrap created** | ⚠️ **possibly** — may live until TTL, **not compensable** |
@@ -218,25 +220,34 @@ schema-valid but **semantically refused** comes back as an envelope.
 cut); `not_found` is derived from a pattern searched in the exception text, hence
 unproven. In both cases the intent is marked `failed` **without an accessor**.
 
-**Since v0.13.0 the key is then BLOCKED PERMANENTLY** — a replay returns
-`operation_failed`, with no OpenBao call at all. *(Up to v0.12.1 it became
-replayable again, and the replay created a second wrap while the first one could
-still be alive.)* If persisting that marking fails, the entry reverts to
-`pending` and the key is blocked under `operation_pending`: same block, different
-code. **Recovery = a new `operation_id`, in every case.**
+**The key is then BLOCKED PERMANENTLY** — a replay returns `operation_failed`,
+with no OpenBao call at all. *(Up to v0.12.1 it became replayable again, and the
+replay created a second wrap while the first one could still be alive.)* If
+persisting that marking fails, the entry reverts to `pending` and the key is
+blocked under `operation_pending`: same block, different code. **Recovery = a new
+`operation_id`, in every case.**
 
-> **The rule is written the other way round** — we block **unless** nothing can
-> survive. Only `revoked`, `consumed` and `unusable` release the key; any other
-> state blocks, **including a state we might add later**. That release list is
-> what preserves the nominal recovery "revoke the previous provision, then
-> create a new one".
+> ⚠️ **v0.14.0 — A KEY IS SINGLE-USE, UNCONDITIONALLY.** Any entry at all for the
+> `(operation_id, mission_id)` pair blocks `secret_wrap`, whatever its state,
+> **including a corrupted entry**: an unreadable entry is a reason to refuse,
+> never to allow. **Nothing releases a key any more.**
 >
-> ⚠️ **Those three states are a registry belief, not a proof.** We never store
-> the `wrap_token`: `secret_consume` selects the entry by
-> `(operation_id, mission_id)` then unwraps the **presented** token, so a bogus
-> token marks the entry `unusable` while its real wrap is untouched. And
-> `revoked` is set as soon as an OpenBao exception carries a 400/404. **v0.13.0
-> narrows this hole without closing it.**
+> In v0.13.0, `revoked`, `consumed` and `unusable` reopened it — to preserve the
+> broker's "revoke then re-create" recovery. That recovery was dropped from its
+> design, and the production census of `wrap` token holders found only one.
+> That release was also the last path by which a **foreign** token presented to
+> `secret_consume` could mark an entry `unusable` — and release a key whose real
+> wrap was still alive.
+>
+> ⚠️ **The guard covers CREATION only.** `secret_revoke_wrap`,
+> `secret_wrap_status` and `secret_wrap_lookup` stay open on an engaged key:
+> without that the caller would be locked in with resources it could neither see
+> nor cut. A test counts the guard's callers and fails if a second one appears.
+>
+> ⚠️ **Two bypasses are NOT closed**: loss of the registry file (empty registry =
+> every key becomes pristine again) and the race between two instances, absent
+> CAS/ETag *(#51)*. These are not business releases, but uniqueness is not
+> absolute either.
 
 > A `failed` (or `pending`) intent without an accessor returns `found_unattached` on `secret_wrap_lookup`: no revocation is possible, only the TTL bounds the possible resource. ⚠️ That verdict does **not** state that a resource exists — it states that we cannot rule it out. *(v0.12.1: this case used to answer `already_revoked`, asserting a revocation that never happened.)*
 
@@ -710,4 +721,4 @@ mcp-vault/
 
 ---
 
-**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.13.0
+**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.14.0

@@ -518,18 +518,27 @@ async def secret_wrap(
                             accessor : la révoquer d'abord. Couvre `active`,
                             `consuming` ET `consume_outcome_unknown` — il est
                             nommé d'après la CONDUITE, pas d'après un état
+        operation_terminated — provision déjà servie, tenue pour terminée par le
+                            registre : rien à compenser, prendre une clé neuve
+        registry_inconsistent — entrée illisible : rien ne peut en être déduit
 
-    Auparavant seul `pending` bloquait : un retry créait une SECONDE enveloppe
-    pendant que la première pouvait vivre. Désormais la clé n'est libérée que
-    sur les trois états où le registre TIENT LE JETON POUR MORT (`revoked`,
-    `consumed`, `unusable`) — c'est ce qui laisse fonctionner la reprise
-    « révoquer puis recréer ». Tout autre état bloque, y compris un état ajouté
-    ultérieurement. Reprise = nouvel `operation_id`.
+    ⚠️ v0.14.0 — **une clé est à USAGE UNIQUE, sans condition.** La moindre
+    entrée pour ce couple bloque, quel que soit son état, entrée corrompue
+    comprise. **PLUS RIEN ne libère une clé.** En v0.13.0, `revoked`, `consumed`
+    et `unusable` la rouvraient pour préserver la reprise « révoquer puis
+    recréer » de `mcp-mission` ; ils l'ont retirée de leur conception, et la
+    plateforme a établi qu'aucun autre composant ne portait de jeton `wrap`.
 
-    ⚠️ « Tient pour mort » n'est pas « prouvé mort » : le registre ne stocke pas
-    le `wrap_token`, donc un jeton bidon présenté à `secret_consume` marque
-    l'entrée `unusable` alors que son wrap réel vit encore. Ce lot RÉDUIT le
-    trou sans le fermer (résidu antérieur, #140).
+    Cette libération était aussi le dernier chemin d'exploitation de #140 : un
+    jeton étranger présenté à `secret_consume` marquait une entrée `unusable` et
+    libérait donc une clé dont le wrap réel vivait encore.
+
+    ⚠️ La garde ne porte QUE sur la création. `secret_revoke_wrap`,
+    `secret_wrap_status` et `secret_wrap_lookup` restent ouverts sur une clé
+    engagée : sans cela l'appelant serait enfermé avec des ressources qu'il ne
+    pourrait plus ni voir ni couper.
+
+    Reprise = nouvel `operation_id`, dans tous les cas.
     """
     from .auth.context import (check_wrap_permission, check_access,
                                check_path_policy, check_wrap_path_policy,
