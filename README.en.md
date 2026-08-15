@@ -273,7 +273,12 @@ blocked under `operation_pending`: same block, different code. **Recovery = a ne
 > then carries `registry_persisted: false` and a `warning`. The field is
 > **absent** on the nominal path.
 >
-> ⇒ **Conduct**: treat an `ok/revoked` carrying `registry_persisted: false` as a
+> ⚠️ **The signal is carried by BOTH revocation verbs** — `secret_revoke_wrap`
+> **and** `secret_wrap_lookup`, including on its `partial_revocation` and
+> `consume_terminal` exits. On the compensation verb it also carries
+> `count_not_persisted`, the exact number of entries affected.
+>
+> ⇒ **Conduct**: treat any answer carrying `registry_persisted: false` as a
 > revocation that is **real but unrecorded** — do not close your own registry on
 > it, and run the compensation again later. The same limit affects
 > `secret_wrap`'s emergency revocation, where the entry stays `pending` and

@@ -409,7 +409,7 @@ class WrapRegistry:
             self._save()
         return found
 
-    def mark_entries_revoked(self, entries: list) -> bool:
+    def mark_entries_revoked(self, entries: list) -> tuple[bool, bool]:
         """
         Marque comme "revoked" UNIQUEMENT les entrées passées (références vivantes
         de _wraps) puis persiste. Retourne True si au moins une entrée a mué.
@@ -1172,6 +1172,7 @@ async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) 
     # compteur n'avance que sur résultat ok, de la taille du groupe — en cas
     # d'échec OpenBao, AUCUNE entrée du groupe n'est comptée révoquée.
     count_revoked = 0
+    non_persistees = 0
     errors = []
     groups: dict = {}
     for entry in active_entries:
@@ -1185,8 +1186,29 @@ async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) 
         result = await _revoke_accessor_selected(registry, accessor, selection)
         if result["status"] == "ok":
             count_revoked += len(group)
+            # #140 : le helper signale une révocation CONFIRMÉE mais non
+            # inscrite. La jeter ici la rendrait muette sur le verbe même que
+            # l'appelant emploie pour compenser — c'est-à-dire là où elle
+            # compte le plus.
+            if result.get("registry_persisted") is False:
+                non_persistees += len(group)
         else:
             errors.append(result.get("error_type", "backend_error"))
+
+
+    def _avec_persistance(r: dict) -> dict:
+        """Ajoute l'avertissement #140 si une révocation confirmée n'a pas été
+        inscrite. Champ ABSENT sinon — sans quoi il cesserait d'être un signal.
+        """
+        if non_persistees:
+            r["registry_persisted"] = False
+            r["count_not_persisted"] = non_persistees
+            r["message"] = (r.get("message", "") +
+                            f" ⚠️ {non_persistees} révocation(s) effectuée(s) côté "
+                            "coffre mais NON inscrite(s) au registre : au "
+                            "redémarrage ces entrées réapparaîtront non révoquées. "
+                            "Rejouer la compensation plus tard").strip()
+        return r
 
     if errors:
         # #78 : ce chemin porte AUSSI les compteurs. Sans eux, un appelant
@@ -1199,13 +1221,13 @@ async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) 
             message += (f" ; {len(terminaux_partiels)} entrée(s) figée(s) sur un "
                         "état terminal de consommation, qu'un nouvel essai ne "
                         "résoudra pas")
-        return {
+        return _avec_persistance({
             "status": "error", "error_type": "partial_revocation",
             "operation_id": operation_id, "count_revoked": count_revoked,
             "entries_found": len(entries), "count_already_revoked": count_already,
             "count_consume_terminal": len(terminaux_partiels),
             "message": message,
-        }
+        })
 
     # #78, revue de diff : le mélange TERMINAL + ACTIF ne doit pas non plus
     # sortir en succès. On vient de révoquer les entrées actives, mais une
@@ -1216,7 +1238,7 @@ async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) 
     terminaux_restants = [e for e in entries
                           if e.get("status") in _CONSUME_TERMINAL_STATUSES]
     if terminaux_restants:
-        return {
+        return _avec_persistance({
             "status": "error", "error_type": "consume_terminal",
             "operation_id": operation_id, "count_revoked": count_revoked,
             "entries_found": len(entries), "count_already_revoked": count_already,
@@ -1225,7 +1247,7 @@ async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) 
                        "figée sur un état terminal de consommation : elle n'est "
                        "ni révoquée ni attestée. Ne pas conclure que la "
                        "ressource est entièrement neutralisée",
-        }
+        })
 
     total_entries = len(entries)
     if total_entries > 1:
@@ -1235,11 +1257,11 @@ async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) 
     else:
         state = "revoked"
 
-    return {
+    return _avec_persistance({
         "status": "ok", "state": state,
         "operation_id": operation_id, "count_revoked": count_revoked,
         "entries_found": total_entries,
-    }
+    })
 
 
 # États d'entrée reconnus du registre (transitions register_pending → mark_active

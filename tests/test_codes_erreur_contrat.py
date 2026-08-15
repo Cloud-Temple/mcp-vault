@@ -637,3 +637,42 @@ class TestRevocationConfirmeeMaisNonPersistee:
         assert mue is True, f"une entrée {statut!r} n'a pas mué"
         assert entree["status"] == "revoked", entree
         assert persistee is True
+
+    def test_le_signal_survit_au_verbe_de_COMPENSATION(self):
+        """⚠️ Le cas qui compte le plus — et celui qui était muet.
+
+        `secret_wrap_lookup` est le verbe que l'appelant emploie pour COMPENSER.
+        Il délègue la révocation au même helper, mais jetait son drapeau : une
+        révocation confirmée et non inscrite y ressortait en `ok/revoked`
+        silencieux. Le signal était donc absent précisément là où il sert.
+        """
+        from mcp_vault.vault import wrapping as w
+        registre = _registre([self._entree_active()], echec_a_partir_de=1)
+        client = MagicMock()
+        with patch.object(w, "get_wrap_registry", return_value=registre), \
+             patch.object(w, "_get_client", return_value=client):
+            r = run(w.lookup_and_revoke_by_operation_id(OP, MISSION))
+
+        client.auth.token.revoke_accessor.assert_called_once_with(accessor="ACC-1")
+        assert r["state"] == "revoked", r
+        assert r["count_revoked"] == 1, r
+        assert r.get("registry_persisted") is False, (
+            f"la compensation rend un succès MUET sur une révocation non "
+            f"inscrite : l'appelant clôt son registre dessus — {r!r}")
+        assert r.get("count_not_persisted") == 1, r
+        assert "redémarrage" in r["message"], r
+
+    def test_la_compensation_NOMINALE_reste_muette(self):
+        """Anti-complaisance, en miroir du test précédent."""
+        from mcp_vault.vault import wrapping as w
+        registre = _registre([self._entree_active()])
+        client = MagicMock()
+        with patch.object(w, "get_wrap_registry", return_value=registre), \
+             patch.object(w, "_get_client", return_value=client):
+            r = run(w.lookup_and_revoke_by_operation_id(OP, MISSION))
+
+        assert r["state"] == "revoked" and r["count_revoked"] == 1, r
+        assert "registry_persisted" not in r, (
+            f"le drapeau apparaît sur un chemin nominal : il cesse d'être un "
+            f"signal — {r!r}")
+        assert "count_not_persisted" not in r, r

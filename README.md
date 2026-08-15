@@ -277,8 +277,13 @@ sous `operation_pending` : le blocage est le même, seul le code diffère.
 > nous **le disons** : la réponse porte alors `registry_persisted: false` et un
 > `warning`. Le champ est **absent** sur le chemin nominal.
 >
-> ⇒ **Conduite** : traiter un `ok/revoked` portant `registry_persisted: false`
-> comme une révocation **réelle mais non consignée** — ne pas clore son propre
+> ⚠️ **Le signal est porté par les DEUX verbes de révocation** —
+> `secret_revoke_wrap` **et** `secret_wrap_lookup`, y compris sur ses sorties
+> `partial_revocation` et `consume_terminal`. Sur le verbe de compensation il
+> porte en plus `count_not_persisted`, le nombre exact d'entrées concernées.
+>
+> ⇒ **Conduite** : traiter un retour portant `registry_persisted: false` comme
+> une révocation **réelle mais non consignée** — ne pas clore son propre
 > registre dessus, et repasser la compensation plus tard. La même limite touche
 > la révocation d'urgence de `secret_wrap`, où l'entrée reste `pending` et où
 > `secret_wrap_lookup` répondra `found_unattached` pour une ressource que nous
