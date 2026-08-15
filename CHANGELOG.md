@@ -2,6 +2,36 @@
 
 ## [Non publié]
 
+## [0.14.1] — 2026-08-15
+
+### Une révocation confirmée mais non inscrite ne passe plus en silence
+
+Quand `secret_revoke_wrap` révoque un accessor, la révocation OpenBao est
+**acquise**. Si l'écriture du registre échoue ensuite, le retour de `_save()`
+était **jeté** : l'appelant recevait un succès muet, clôturait son propre
+registre — et au redémarrage l'entrée **ressuscitait non révoquée**, dans un état
+que nous venions de lui annoncer révoqué.
+
+La réponse porte désormais `registry_persisted: false` et un `warning`. ⚠️ Le
+champ est **absent** du chemin nominal : un champ toujours présent ne signalerait
+rien.
+
+**La mémoire n'est PAS restaurée** — contrairement à `mark_active`. Ici elle dit
+la vérité (OpenBao a bien révoqué) ; c'est le support durable qui est en retard.
+La ramener à `active` remplacerait un fait exact par une prudence inexacte.
+
+⚠️ **Ce lot ne rend PAS le fait durable, et ne prétend pas fermer #140.**
+Inscrire un effet confirmé exige un support disponible au moment précis où le
+support habituel ne l'est pas. Avec un seul support durable, il n'y en a pas.
+Ce lot fait la seule chose possible sans second support : **le dire**. La limite
+est désormais au contrat publié (README FR et EN), comme la fiche l'exigeait.
+
+Le critère d'acceptation est porté à **#123** : soit un effet confirmé survit à
+une panne du support suivie d'un redémarrage, soit le lot déclare explicitement
+l'impossibilité. Sans ce critère, « on le traitera avec #123 » restait une
+histoire qu'on se raconte.
+
+
 ## [0.14.0] — 2026-08-15
 
 ### ⚠️ RUPTURE — une clé de provisionnement est désormais à USAGE UNIQUE, sans condition

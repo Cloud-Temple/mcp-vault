@@ -1,6 +1,6 @@
 # Catalogue des Tests E2E — MCP Vault
 
-> **Version** : v0.14.0 — Une clé de provisionnement déjà engagée n'est plus jamais rejouable : un échec postérieur à l'appel OpenBao bloque désormais la clé (`operation_failed`), là où le rejeu créait une seconde enveloppe pendant que la première pouvait vivre sans être révocable
+> **Version** : v0.14.1 — Une clé de provisionnement déjà engagée n'est plus jamais rejouable : un échec postérieur à l'appel OpenBao bloque désormais la clé (`operation_failed`), là où le rejeu créait une seconde enveloppe pendant que la première pouvait vivre sans être révocable
 > **Dernière exécution** : 349 assertions e2e sur 15 catégories (+ 18 tests crypto)
 > **Décompte reproductible** : comptage AST des appels `check` / `check_true` / `check_value` / `check_traversed` dans les fonctions `test_*` de `tests/test_e2e.py`, boucles littérales expansées
 > **Durée** : ~5 secondes (e2e) + <1s (crypto)

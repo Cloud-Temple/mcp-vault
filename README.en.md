@@ -255,11 +255,30 @@ blocked under `operation_pending`: same block, different code. **Recovery = a ne
 
 | Tool | External effect | Conduct |
 | --- | --- | --- |
+| `secret_revoke_wrap` — `ok` + `registry_persisted: false` *(v0.14.1)* | **revocation DONE**, but not recorded in the registry | replay the compensation later — see the box below |
 | `secret_revoke_wrap` — `registry_unavailable`, `backend_unavailable` | **none**, no revocation attempted | retry safe **and required** |
 | `secret_revoke_wrap` — `backend_error` | call **issued**, effect **unknown** | retry safe (revocation is idempotent) |
 | `secret_wrap_lookup` — `backend_unavailable` | **none**: both fail-close guards precede any revocation | wait then retry, safe |
 | `secret_wrap_lookup` — `partial_revocation` | **unknown** for uncounted entries (`count_revoked` states what landed) | retry safe, but it will not resolve frozen entries |
 | `secret_wrap_status` — `backend_unavailable` | **none**: registry absent or last S3 refresh failed | retry always safe |
+
+> ⚠️ **A CONFIRMED EFFECT MAY NOT SURVIVE A RESTART** *(structural limit, #140)*.
+> When a revocation succeeds at the vault but the registry write fails, the fact
+> is recorded **nowhere durable**: on restart the entry reappears **not revoked**,
+> in a state we have just reported as revoked to the caller.
+>
+> **This is not fixable with a single durable store** — recording the fact would
+> require a store available at the very moment the usual one is not. Since
+> **v0.14.1** we cannot make the fact durable, but we **say so**: the response
+> then carries `registry_persisted: false` and a `warning`. The field is
+> **absent** on the nominal path.
+>
+> ⇒ **Conduct**: treat an `ok/revoked` carrying `registry_persisted: false` as a
+> revocation that is **real but unrecorded** — do not close your own registry on
+> it, and run the compensation again later. The same limit affects
+> `secret_wrap`'s emergency revocation, where the entry stays `pending` and
+> `secret_wrap_lookup` will answer `found_unattached` for a resource we know is
+> dead.
 
 > `secret_wrap_status` mutates neither OpenBao nor the registry (the memory cache and audit log do change). It does **not** distinguish transient from durable failure: best-effort snapshot, and an S3 outage during the cache window is not even detected.
 
@@ -721,4 +740,4 @@ mcp-vault/
 
 ---
 
-**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.14.0
+**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.14.1

@@ -258,11 +258,31 @@ sous `operation_pending` : le blocage est le même, seul le code diffère.
 
 | Outil | Effet externe | Conduite |
 | --- | --- | --- |
+| `secret_revoke_wrap` — `ok` + `registry_persisted: false` *(v0.14.1)* | **révocation FAITE**, mais non inscrite au registre | rejouer la compensation plus tard — voir l'encadré ci-dessous |
 | `secret_revoke_wrap` — `registry_unavailable`, `backend_unavailable` | **absent**, aucune révocation tentée | rejeu sûr **et nécessaire** |
 | `secret_revoke_wrap` — `backend_error` | appel **émis**, effet **inconnu** | rejeu sûr (révocation idempotente) |
 | `secret_wrap_lookup` — `backend_unavailable` | **absent** : les deux gardes fail-close précèdent toute révocation | attente puis rejeu, sûr |
 | `secret_wrap_lookup` — `partial_revocation` | **inconnu** sur les entrées non comptées (`count_revoked` dit ce qui a abouti) | rejeu sûr, mais il ne résoudra pas les entrées figées |
 | `secret_wrap_status` — `backend_unavailable` | **absent** : registre absent ou dernier rafraîchissement S3 échoué | rejeu toujours sûr |
+
+> ⚠️ **UN EFFET CONFIRMÉ PEUT NE PAS SURVIVRE À UN REDÉMARRAGE** *(limite
+> structurelle, #140)*. Quand une révocation réussit côté coffre mais que
+> l'écriture du registre échoue, le fait n'est inscrit **nulle part de durable** :
+> au redémarrage, l'entrée réapparaît **non révoquée**, dans un état que nous
+> venons d'annoncer révoqué à l'appelant.
+>
+> **Ce n'est pas réparable avec un seul support durable** — inscrire le fait
+> exigerait un support disponible au moment précis où le support habituel ne
+> l'est pas. Depuis **v0.14.1**, nous ne pouvons pas rendre le fait durable, mais
+> nous **le disons** : la réponse porte alors `registry_persisted: false` et un
+> `warning`. Le champ est **absent** sur le chemin nominal.
+>
+> ⇒ **Conduite** : traiter un `ok/revoked` portant `registry_persisted: false`
+> comme une révocation **réelle mais non consignée** — ne pas clore son propre
+> registre dessus, et repasser la compensation plus tard. La même limite touche
+> la révocation d'urgence de `secret_wrap`, où l'entrée reste `pending` et où
+> `secret_wrap_lookup` répondra `found_unattached` pour une ressource que nous
+> savons morte.
 
 > `secret_wrap_status` ne mute ni OpenBao ni le registre (cache et journal d'audit, eux, bougent). Il ne distingue **pas** le transitoire du durable : instantané best-effort, et une panne S3 pendant la fenêtre de cache n'est même pas détectée.
 
@@ -719,4 +739,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.14.0
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.14.1

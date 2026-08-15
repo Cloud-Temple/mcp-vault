@@ -422,24 +422,36 @@ class WrapRegistry:
         les références passées — la mutation serait perdue silencieusement. Le
         refresh a lieu UNE fois en tête de primitive, avant la sélection.
 
-        ⚠️ RÉSIDU CONNU — l'échec de persistance n'est PAS remonté. La révocation
-        OpenBao a réussi, mais si `_save()` échoue la mémoire porte `revoked`
-        alors que S3 porte encore `active`/`pending` : au redémarrage l'entrée
-        ressuscite dans un état que nous avons déjà annoncé révoqué à l'appelant.
-        Même famille que la révocation d'urgence de `wrap_secret` — un effet
-        externe CONFIRMÉ que nous ne savons pas rendre durable quand S3 est
-        indisponible. Non réparable avec S3 pour seul support (il y faudrait un
-        journal survivant au redémarrage) : voir le critère d'acceptation porté
-        à #123, pas un chantier distinct.
+        Rend le couple **(mue, persistee)** :
+        - `mue`      — au moins une entrée est passée à `revoked` ;
+        - `persistee` — l'écriture du registre a réussi. `True` quand il n'y
+          avait rien à écrire : l'absence de mutation n'est pas un échec.
+
+        ⚠️ LIMITE STRUCTURELLE, remontée mais NON réparée (#140). La révocation
+        OpenBao a réussi ; si `_save()` échoue, la mémoire porte `revoked` alors
+        que le registre persistant porte encore `active`/`pending` — **au
+        redémarrage l'entrée ressuscite dans un état déjà annoncé révoqué à
+        l'appelant**.
+
+        Nous ne restaurons PAS l'état mémoire, contrairement à `mark_active` :
+        ici la mémoire dit la VÉRITÉ (OpenBao a bien révoqué), c'est le support
+        durable qui est en retard. La revenir à `active` remplacerait un fait
+        exact par une prudence inexacte.
+
+        ⇒ Ce que ce lot corrige : l'appelant **apprend** que le fait n'est pas
+        durable, au lieu de recevoir un succès muet. Ce qu'il ne corrige pas :
+        rendre le fait durable, ce qui exige un support disponible au moment
+        précis où le support habituel ne l'est pas. Critère d'acceptation porté
+        à #123.
         """
         found = False
         for entry in entries:
             if isinstance(entry, dict) and entry.get("status") in ("active", "pending"):
                 entry["status"] = "revoked"
                 found = True
-        if found:
-            self._save()
-        return found
+        if not found:
+            return False, True
+        return True, self._save()
 
     def has_accessor(self, accessor: str) -> bool:
         """Vérifie que l'accessor appartient à un wrap géré par ce registry."""
@@ -1004,21 +1016,39 @@ async def _revoke_accessor_selected(registry, accessor: str, selection: list) ->
         return {"status": "error", "error_type": "backend_unavailable",
                 "message": "OpenBao non disponible"}
 
+    def _rendre(etat: str) -> dict:
+        """Réponse de révocation, augmentée du sort de la PERSISTANCE (#140).
+
+        La révocation OpenBao est acquise quand on arrive ici. Si le registre
+        n'a pas pu l'inscrire, l'appelant doit le savoir : au redémarrage
+        l'entrée ressuscitera dans un état que nous venons de lui annoncer
+        révoqué. Le champ n'apparaît QUE dans ce cas — une réponse nominale
+        reste identique à celle des versions antérieures.
+        """
+        _, persistee = registry.mark_entries_revoked(selection)
+        r = {"status": "ok", "state": etat, "accessor": accessor[:12] + "..."}
+        if not persistee:
+            logger.error(
+                "revoke : révocation OpenBao confirmée mais registre NON persisté "
+                "(accessor=%r) — l'entrée ressuscitera au redémarrage", accessor[:12])
+            r["registry_persisted"] = False
+            r["warning"] = ("Révocation effectuée côté coffre, mais NON inscrite au "
+                            "registre : au redémarrage l'entrée réapparaîtra comme "
+                            "non révoquée. Rejouer la compensation plus tard")
+        return r
+
     try:
         client.auth.token.revoke_accessor(accessor=accessor)
-        registry.mark_entries_revoked(selection)
-        return {"status": "ok", "state": "revoked", "accessor": accessor[:12] + "..."}
+        return _rendre("revoked")
     except Exception as e:
         err_str = str(e).lower()
         # OpenBao : "bad accessor" ou token déjà révoqué/expiré → idempotent
         if any(k in err_str for k in ("bad accessor", "not found", "invalid accessor")):
             # Marquer comme révoqué dans le registry (est expiré ou déjà révoqué côté Vault)
-            registry.mark_entries_revoked(selection)
-            return {"status": "ok", "state": "already_revoked", "accessor": accessor[:12] + "..."}
+            return _rendre("already_revoked")
         # Distinguer HTTP 4xx (client error, idem already_revoked) vs 5xx/réseau
         if any(k in err_str for k in ("404", "400")):
-            registry.mark_entries_revoked(selection)
-            return {"status": "ok", "state": "already_revoked", "accessor": accessor[:12] + "..."}
+            return _rendre("already_revoked")
         # 5xx / réseau → erreur réelle (broker doit retenter)
         logger.warning("revoke_wrap backend_error: %s", type(e).__name__)
         return {"status": "error", "error_type": "backend_error",

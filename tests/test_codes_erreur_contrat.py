@@ -540,3 +540,100 @@ class TestFormeDeTransport:
         assert code in charge, f"code absent de la charge utile : {charge!r}"
         assert "s.WRAPTOKEN" not in charge, (
             f"le jeton traverse le protocole sur un chemin d'erreur : {charge!r}")
+
+
+# =============================================================================
+# 5) #140 — UN EFFET CONFIRMÉ QUI N'A PAS PU ÊTRE INSCRIT SE DIT
+# =============================================================================
+
+class TestRevocationConfirmeeMaisNonPersistee:
+    """La révocation OpenBao a RÉUSSI, l'écriture du registre a ÉCHOUÉ.
+
+    Jusqu'ici le retour de `_save()` était jeté : l'appelant recevait un succès
+    muet. Au redémarrage l'entrée ressuscite `active` — dans un état que nous
+    venions de lui annoncer révoqué, et sur lequel il avait clos son propre
+    registre.
+
+    ⚠️ Ce lot ne rend PAS le fait durable — il faudrait un support disponible
+    au moment précis où le support habituel ne l'est pas (#140, critère porté à
+    #123). Il fait la seule chose possible sans second support : **le dire**.
+    """
+
+    def _entree_active(self):
+        return {
+            "operation_id": OP, "mission_id": MISSION, "accessor": "ACC-1",
+            "vault_id": "mcp-mission", "secret_path": "missions/db",
+            "created_at": "", "expires_at": "2099-01-01T00:00:00+00:00",
+            "status": "active",
+        }
+
+    def _revoquer(self, *, echec_persistance: bool):
+        from mcp_vault.vault import wrapping as w
+        registre = _registre([self._entree_active()],
+                             echec_a_partir_de=1 if echec_persistance else 0)
+        client = MagicMock()
+        with patch.object(w, "get_wrap_registry", return_value=registre), \
+             patch.object(w, "_get_client", return_value=client):
+            return run(w.revoke_wrap("ACC-1")), registre, client
+
+    def test_l_echec_de_persistance_est_ANNONCE_a_l_appelant(self):
+        r, registre, client = self._revoquer(echec_persistance=True)
+
+        client.auth.token.revoke_accessor.assert_called_once_with(accessor="ACC-1")
+        assert r["state"] == "revoked", (
+            f"la révocation OpenBao a eu lieu : l'annoncer autrement serait un "
+            f"second mensonge — {r!r}")
+        assert r.get("registry_persisted") is False, (
+            f"succès MUET sur une révocation non inscrite : l'appelant clôt son "
+            f"registre sur un fait qui ressuscitera au redémarrage — {r!r}")
+        assert "warning" in r and "redémarrage" in r["warning"], r
+        # La mémoire dit la vérité : OpenBao A révoqué. On ne la ramène pas à
+        # `active` pour « cohérence » — ce serait remplacer un fait exact par
+        # une prudence inexacte.
+        assert registre._wraps[0]["status"] == "revoked", registre._wraps
+
+    def test_une_revocation_NOMINALE_ne_porte_aucun_avertissement(self):
+        """Anti-complaisance : un champ toujours présent ne signalerait rien.
+
+        Si `registry_persisted` apparaissait aussi sur le chemin nominal, le
+        test ci-dessus resterait vert sans que le signal ait la moindre valeur.
+        """
+        r, _, _ = self._revoquer(echec_persistance=False)
+
+        assert r["state"] == "revoked", r
+        assert "registry_persisted" not in r, (
+            f"le champ apparaît sur un chemin nominal : il cesse d'être un "
+            f"signal — {r!r}")
+        assert "warning" not in r, r
+
+    def test_rien_a_muter_n_est_PAS_un_echec_de_persistance(self):
+        """Une sélection déjà `revoked` n'écrit rien : ne pas crier au loup."""
+        from mcp_vault.vault.wrapping import WrapRegistry
+
+        registre = _registre([], echec_a_partir_de=1)
+        deja = dict(self._entree_active(), status="revoked")
+        mue, persistee = WrapRegistry.mark_entries_revoked(registre, [deja])
+
+        assert mue is False, "une entrée déjà révoquée ne mue pas"
+        assert persistee is True, (
+            "l'absence d'écriture est rapportée comme un échec d'écriture — "
+            "l'appelant recevrait un avertissement sans objet")
+
+    @pytest.mark.parametrize("statut", ["active", "pending"])
+    def test_la_revocation_couvre_active_ET_pending(self, statut):
+        """Les DEUX états mutent — trou trouvé par mutation, pas par relecture.
+
+        Restreindre la sélection au seul `active` laissait une entrée `pending`
+        porteuse d'un accessor **non révoquée au registre** alors qu'OpenBao,
+        lui, avait bien révoqué : la divergence exacte que ce lot existe pour
+        rendre visible, mais silencieuse cette fois.
+        """
+        from mcp_vault.vault.wrapping import WrapRegistry
+
+        registre = _registre()
+        entree = dict(self._entree_active(), status=statut)
+        mue, persistee = WrapRegistry.mark_entries_revoked(registre, [entree])
+
+        assert mue is True, f"une entrée {statut!r} n'a pas mué"
+        assert entree["status"] == "revoked", entree
+        assert persistee is True
