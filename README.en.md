@@ -262,16 +262,32 @@ blocked under `operation_pending`: same block, different code. **Recovery = a ne
 | `secret_wrap_lookup` — `partial_revocation` | **unknown** for uncounted entries (`count_revoked` states what landed) | retry safe, but it will not resolve frozen entries |
 | `secret_wrap_status` — `backend_unavailable` | **none**: registry absent or last S3 refresh failed | retry always safe |
 
-> ⚠️ **A CONFIRMED EFFECT MAY NOT SURVIVE A RESTART** *(structural limit, #140)*.
-> When a revocation succeeds at the vault but the registry write fails, the fact
-> is recorded **nowhere durable**: on restart the entry reappears **not revoked**,
-> in a state we have just reported as revoked to the caller.
+> ⚠️ **A CONFIRMED EFFECT MAY NOT SURVIVE A RESTART** *(structural limit, #140 —
+> **settled**, see #123)*. When a revocation succeeds at the vault but the
+> registry write fails, the fact is recorded **nowhere durable**: on restart the
+> entry **may reappear not revoked**, in a state we have just reported as revoked
+> to the caller.
+>
+> *"May", not "will"*: an S3 exception does not prove the write did not land — a
+> timeout can follow an already-accepted write — and the registry is
+> **last-write-wins with no lock**, so another instance may have written in the
+> meantime. The caller therefore cannot infer the durable state from the failure;
+> it can only treat it as **undetermined**.
 >
 > **This is not fixable with a single durable store** — recording the fact would
-> require a store available at the very moment the usual one is not. Since
-> **v0.14.1** we cannot make the fact durable, but we **say so**: the response
-> then carries `registry_persisted: false` and a `warning`. The field is
-> **absent** on the nominal path.
+> require a store available at the very moment the usual one is not. Holding the
+> guarantee would take a **second store**: a local journal, replayed in
+> reconciliation **before** the registry is served again. The local volume
+> already exists in the deployment; the mechanism does not — and it would be
+> **instance-local**, invisible to another instance and lost with the host.
+>
+> ⚠️ **DECISION (#123): that second store will not be built.** The limit is
+> **accepted and published**, it is not pending a fix.
+> **Do not size your contract on the assumption that it will go away.**
+>
+> What we do instead, since **v0.14.1**: we do not make the fact durable, but we
+> **say so** — the response then carries `registry_persisted: false` and a
+> `warning`. The field is **absent** on the nominal path.
 >
 > ⚠️ **The signal has the SAME shape on BOTH revocation verbs** —
 > `secret_revoke_wrap` and `secret_wrap_lookup`: `registry_persisted: false`,
@@ -285,8 +301,9 @@ blocked under `operation_pending`: same block, different code. **Recovery = a ne
 > revocation that is **real but unrecorded** — do not close your own registry on
 > it, and run the compensation again later. The same limit affects
 > `secret_wrap`'s emergency revocation, where the entry stays `pending` and
-> `secret_wrap_lookup` will answer `found_unattached` for a resource we know is
-> dead.
+> `secret_wrap_lookup` will answer `found_unattached` for a resource we **treat
+> as** dead — the server takes an exception-free OpenBao return as a confirmed
+> revocation, it reads nothing back to attest it.
 
 > `secret_wrap_status` mutates neither OpenBao nor the registry (the memory cache and audit log do change). It does **not** distinguish transient from durable failure: best-effort snapshot, and an S3 outage during the cache window is not even detected.
 
