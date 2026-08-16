@@ -2,6 +2,45 @@
 
 ## [Non publié]
 
+### La limite de durabilité est ARBITRÉE — elle n'est plus en attente
+
+Le critère porté à #123 par #140 était binaire : soit un effet OpenBao confirmé
+survit à une panne du support suivie d'un redémarrage, soit le lot **déclare
+l'impossibilité et la publie**. La seconde branche est retenue.
+
+**Le second support ne sera pas construit.** Le tenir exigerait un journal local
+rejoué en réconciliation avant de resservir le registre — mécanisme inexistant,
+à greffer sur le lot qui réécrit les points d'application des autorisations, et
+qui resterait **local à l'instance**, perdu avec l'hôte. Le rapport risque /
+bénéfice ne le justifie pas : dans le sous-cas où l'effet est bien intervenu
+sans que le nouvel état soit publié, le registre **peut** rester plus prudent
+que l'état que le serveur tient pour acquis — il annonce vivante une enveloppe
+qu'il tient pour révoquée — et l'appelant reçoit alors le signal au moment même
+où cela se produit.
+
+⚠️ Le contrat publié ne dit plus « nous ne pouvons pas encore », il dit
+**« nous avons décidé de ne pas »**. Un appelant ne doit pas dimensionner son
+contrat en supposant que cette limite disparaîtra.
+
+**Aucun changement de comportement — documentation seule, pas de bump.**
+
+### Deux affirmations trop catégoriques corrigées au contrat publié
+
+Relevées en revue adversariale sur le texte même de la limite :
+
+- « au redémarrage l'entrée **réapparaît** non révoquée » → **peut réapparaître**.
+  Une exception S3 ne prouve pas que l'écriture n'a pas abouti (un délai d'attente
+  peut suivre une écriture acceptée), et le registre est en dernier-écrivain-gagne
+  sans verrou. L'appelant ne peut que tenir l'état durable pour **indéterminé** ;
+- « une ressource que nous **savons** morte » → **que nous tenons pour** morte.
+  Le serveur traite un retour OpenBao sans exception comme une révocation
+  confirmée ; il ne relit rien pour l'attester.
+
+⚠️ Les mêmes formulations catégoriques subsistent dans les `warning` renvoyés à
+l'exécution (`wrapping.py`). Elles ne changent aucune conduite attendue et ne
+justifient pas un tag à elles seules : portées en note à #123, à corriger avec le
+prochain lot de code.
+
 ## [0.14.1] — 2026-08-15
 
 ### Une révocation confirmée mais non inscrite ne passe plus en silence

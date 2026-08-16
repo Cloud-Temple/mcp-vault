@@ -266,16 +266,32 @@ sous `operation_pending` : le blocage est le même, seul le code diffère.
 | `secret_wrap_status` — `backend_unavailable` | **absent** : registre absent ou dernier rafraîchissement S3 échoué | rejeu toujours sûr |
 
 > ⚠️ **UN EFFET CONFIRMÉ PEUT NE PAS SURVIVRE À UN REDÉMARRAGE** *(limite
-> structurelle, #140)*. Quand une révocation réussit côté coffre mais que
-> l'écriture du registre échoue, le fait n'est inscrit **nulle part de durable** :
-> au redémarrage, l'entrée réapparaît **non révoquée**, dans un état que nous
-> venons d'annoncer révoqué à l'appelant.
+> structurelle, #140 — **arbitrée**, cf. #123)*. Quand une révocation réussit
+> côté coffre mais que l'écriture du registre échoue, le fait n'est inscrit
+> **nulle part de durable** : au redémarrage, l'entrée **peut réapparaître non
+> révoquée**, dans un état que nous venons d'annoncer révoqué à l'appelant.
+>
+> *« Peut » et non « va »* : une exception S3 ne prouve pas que l'écriture n'a
+> pas abouti — un délai d'attente peut suivre une écriture déjà acceptée — et le
+> registre est en **dernier-écrivain-gagne sans verrou**, une autre instance a pu
+> écrire entre-temps. L'appelant ne peut donc pas déduire l'état durable de
+> l'échec ; il ne peut que le tenir pour **indéterminé**.
 >
 > **Ce n'est pas réparable avec un seul support durable** — inscrire le fait
 > exigerait un support disponible au moment précis où le support habituel ne
-> l'est pas. Depuis **v0.14.1**, nous ne pouvons pas rendre le fait durable, mais
-> nous **le disons** : la réponse porte alors `registry_persisted: false` et un
-> `warning`. Le champ est **absent** sur le chemin nominal.
+> l'est pas. Le tenir supposerait un **second support** : un journal local,
+> rejoué en réconciliation **avant** de resservir le registre. Le volume local
+> existe déjà dans le déploiement ; le mécanisme, non — et il serait **local à
+> l'instance**, invisible d'une autre et perdu avec l'hôte.
+>
+> ⚠️ **DÉCISION (#123) : ce second support ne sera pas construit.** La limite est
+> **assumée et publiée**, elle n'est pas en attente d'un correctif.
+> **Ne dimensionnez pas votre contrat en supposant qu'elle disparaîtra.**
+>
+> Ce que nous faisons à la place, depuis **v0.14.1** : nous ne rendons pas le
+> fait durable, mais nous **le disons** — la réponse porte alors
+> `registry_persisted: false` et un `warning`. Le champ est **absent** sur le
+> chemin nominal.
 >
 > ⚠️ **Le signal a la MÊME forme sur les DEUX verbes de révocation** —
 > `secret_revoke_wrap` et `secret_wrap_lookup` : `registry_persisted: false`,
@@ -289,7 +305,8 @@ sous `operation_pending` : le blocage est le même, seul le code diffère.
 > registre dessus, et repasser la compensation plus tard. La même limite touche
 > la révocation d'urgence de `secret_wrap`, où l'entrée reste `pending` et où
 > `secret_wrap_lookup` répondra `found_unattached` pour une ressource que nous
-> savons morte.
+> **tenons pour** morte — le serveur traite un retour OpenBao sans exception
+> comme une révocation confirmée, il ne relit rien pour l'attester.
 
 > `secret_wrap_status` ne mute ni OpenBao ni le registre (cache et journal d'audit, eux, bougent). Il ne distingue **pas** le transitoire du durable : instantané best-effort, et une panne S3 pendant la fenêtre de cache n'est même pas détectée.
 
