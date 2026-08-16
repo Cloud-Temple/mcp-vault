@@ -23,6 +23,7 @@ import asyncio
 import os
 import sys
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -410,3 +411,97 @@ def test_vault_shutdown_is_idempotent():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# =============================================================================
+# Piste 4 de #110 — la sonde répond PENDANT qu'une requête S3 est bloquée
+# =============================================================================
+#
+# La fiche #110 demandait quatre choses. Trois sont livrées et vérifiées
+# ailleurs : bornes réseau (ci-dessus, lot 1), sortie des appels S3 de la boucle
+# (lots 2 et 3), et `/health` insensible à S3 — obtenu par construction, puisque
+# `availability_status()` n'appelle plus que la sonde OpenBao.
+#
+# ⚠️ PREMIÈRE VERSION DE CE TEST, RETIRÉE : elle installait un faux client S3 qui
+# dormait 3 s, appelait la sonde isolément, et vérifiait qu'elle répondait vite.
+# Elle était verte parce qu'AUCUN appel S3 n'avait lieu — le sommeil ne
+# s'exécutait jamais. Elle gardait donc contre « la sonde appelle S3 elle-même »,
+# ce qui est utile, mais PAS contre le mécanisme de l'incident : une AUTRE
+# requête monopolise la boucle, et la sonde fait la queue derrière elle. C'est
+# cette file globale qui a produit les 488 s, avec des dizaines de `/health`
+# débloqués à la même milliseconde.
+#
+# La version ci-dessous reproduit ce mécanisme, et elle ne mesure pas un temps :
+# elle prouve un ORDRE. Le témoin est échantillonné DEPUIS le thread S3 encore
+# bloqué — si la sonde n'a pas répondu à ce moment-là, la boucle était gelée.
+
+from tests.test_s3_offload_122 import Barriere, _assert_boucle_restee_vivante
+
+
+@pytest.mark.parametrize("chemin", ["/health", "/ready", "/healthz"])
+def test_la_sonde_repond_pendant_qu_une_requete_S3_est_bloquee(chemin, tmp_path,
+                                                               monkeypatch):
+    """#110 piste 4 — le test de non-régression que la fiche exigeait.
+
+    Un appel S3 réel (`check_s3_connectivity`) est bloqué dans son thread. La
+    sonde doit répondre AVANT qu'il soit libéré. Le temps ne sert qu'à éviter un
+    test pendu ; le critère de succès est l'ordre, pas la durée.
+
+    SABOTAGE (vérifié) : remplacer le `run_blocking` de `check_s3_connectivity`
+    par un appel synchrone gèle la boucle — le témoin ne progresse pas, et
+    `_assert_boucle_restee_vivante` rougit.
+    """
+    from mcp_vault import s3_sync
+    from mcp_vault.auth.middleware import HealthCheckMiddleware
+    from mcp_vault.openbao import manager
+
+    donnees = tmp_path / "openbao"
+    donnees.mkdir()
+    monkeypatch.setattr(s3_sync, "get_settings",
+                        lambda: SimpleNamespace(
+                            openbao_data_dir=str(donnees), s3_bucket_name="test-bucket",
+                            vault_s3_prefix="_storage", s3_endpoint_url="http://localhost:0",
+                            s3_region_name="fr1", s3_connect_timeout=5,
+                            s3_read_timeout=30, s3_max_attempts=2))
+
+    barriere = Barriere(retour=(True, "S3 OK (test-bucket)"))
+    monkeypatch.setattr(s3_sync, "_head_bucket_blocking", barriere)
+
+    # Sonde OpenBao saine et immédiate : on isole la variable S3.
+    sonde_openbao = MagicMock(return_value=SimpleNamespace(
+        sys=SimpleNamespace(read_health_status=lambda method=None: {
+            "sealed": False, "initialized": True})))
+
+    async def aval(scope, receive, send):  # pragma: no cover — jamais atteint
+        raise AssertionError("la sonde ne doit pas traverser vers l'aval")
+
+    mw = HealthCheckMiddleware(aval)
+    evenements = []
+
+    async def _receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def _send(ev):
+        evenements.append(ev)
+
+    async def sonde_pendant_le_blocage():
+        """Témoin : ne peut répondre que si la boucle est restée vivante."""
+        while not barriere.entree.is_set():
+            await asyncio.sleep(0.001)
+        await mw({"type": "http", "path": chemin, "headers": []}, _receive, _send)
+        barriere.temoin_a_progresse = True     # échantillonné depuis le thread S3
+        barriere.liberation.set()
+
+    async def scenario():
+        with patch.object(manager.hvac, "Client", sonde_openbao):
+            return await asyncio.gather(s3_sync.check_s3_connectivity(),
+                                        sonde_pendant_le_blocage(),
+                                        return_exceptions=True)
+
+    asyncio.run(scenario())
+
+    statuts = [e["status"] for e in evenements if e["type"] == "http.response.start"]
+    assert statuts, f"{chemin} n'a rendu aucune réponse"
+    _assert_boucle_restee_vivante(
+        barriere,
+        f"{chemin} pendant un appel S3 bloqué")
