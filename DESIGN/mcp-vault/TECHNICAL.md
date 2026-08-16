@@ -1,6 +1,6 @@
 # Documentation Technique — MCP Vault
 
-> **Version** : 0.14.1 | **Date** : 2026-08-15 | **Auteur** : Cloud Temple
+> **Version** : 0.15.0 | **Date** : 2026-08-16 | **Auteur** : Cloud Temple
 > **Licence** : Apache 2.0 | **Statut** : ✅ Production-ready (audit V2.1 complété + PKI interne v0.5.1)
 
 ---
@@ -15,7 +15,11 @@ MCP Vault est un serveur MCP (Model Context Protocol) qui fournit une gestion s�
 2. **File backend + S3 sync** — Les données sont stockées localement (file backend) et synchronisées périodiquement avec S3 (source de vérité froide)
 3. **Types de secrets style 1Password** — 14 types prédéfinis avec validation des champs
 4. **Même pattern que Live Memory** — Bearer tokens, `vault_ids`, `check_access()`, starter-kit Cloud Temple
-5. **Zéro mocking** — Tous les tests sont réels (S3 Dell ECS, Docker, OpenBao)
+5. **Les tests e2e sont réels** — S3 Dell ECS, Docker, OpenBao, sans double.
+   ⚠️ La suite UNITAIRE, elle, mocke délibérément S3, `hvac` et les magasins
+   (`tests/conftest.py`, `tests/doubles_magasins.py`) : elle ne doit dépendre
+   ni d'un binaire OpenBao ni d'un réseau. Annoncer « zéro mocking » pour
+   l'ensemble était faux.
 
 ---
 
@@ -699,7 +703,9 @@ ui = false
 
 ### 3.14 `audit.py` — Audit Store MCP
 
-Journal d'audit de toutes les opérations MCP, avec double persistance :
+Journal d'audit de toutes les opérations MCP. **Un seul support persistant** —
+le fichier JSONL local ; le ring buffer mémoire n'est qu'un cache de lecture
+(5 000 dernières entrées), perdu à chaque redémarrage :
 
 **Architecture** :
 
@@ -713,7 +719,7 @@ Journal d'audit de toutes les opérations MCP, avec double persistance :
 │  │ • Accès rapide + filtrage    │  │   audit-mcp.jsonl      │  │
 │  │ • Perdu au restart           │  │ • Persistant (volume)  │  │
 │  │ • Chargé depuis JSONL        │  │ • Append-only          │  │
-│  │   au startup                 │  │ • Synced S3 via volume │  │
+│  │   au startup                 │  │ • Local, PAS sur S3    │  │
 │  └──────────────────────────────┘  └────────────────────────┘  │
 └────────────────────────────────────────────────────────────────┘
 ```
@@ -807,7 +813,7 @@ services:
 
 volumes:
   openbao-data:  # Persistance locale (crash recovery)
-  openbao-logs:  # Logs OpenBao (optionnel)
+  openbao-logs:  # Logs OpenBao ET journal d'audit applicatif — PAS optionnel
 ```
 
 **IPC_LOCK** : `cap_add: IPC_LOCK` dans docker-compose pour le mlock OpenBao.

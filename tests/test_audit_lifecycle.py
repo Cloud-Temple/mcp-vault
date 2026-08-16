@@ -24,6 +24,8 @@ import sys
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from tests.doubles_magasins import DoubleMagasin
+
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -69,7 +71,7 @@ class _Ctx:
 
 async def test_revoke_token_audite_succes():
     send = AsyncMock()
-    store = MagicMock()
+    store = DoubleMagasin()
     store.revoke.return_value = {"status": "ok", "message": "révoqué"}
     with _Ctx(), patch.object(api, "get_token_store", return_value=store), \
             patch.object(api, "log_audit") as mock_audit:
@@ -83,7 +85,7 @@ async def test_revoke_token_non_persistee_auditee_en_error():
     """Événement critique : S3 down -> révocation perdue -> token reste valide.
     Doit être tracé en 'error', pas silencieux."""
     send = AsyncMock()
-    store = MagicMock()
+    store = DoubleMagasin()
     store.revoke.return_value = {"status": "storage_unavailable", "message": "S3 down"}
     with _Ctx(), patch.object(api, "get_token_store", return_value=store), \
             patch.object(api, "log_audit") as mock_audit:
@@ -96,7 +98,7 @@ async def test_revoke_token_non_persistee_auditee_en_error():
 async def test_revoke_token_not_found_pas_d_audit_de_succes():
     """Un not_found n'est pas une mutation : on ne loggue pas un faux succès."""
     send = AsyncMock()
-    store = MagicMock()
+    store = DoubleMagasin()
     store.revoke.return_value = {"status": "not_found", "message": "absent"}
     with _Ctx(), patch.object(api, "get_token_store", return_value=store), \
             patch.object(api, "log_audit") as mock_audit:
@@ -110,7 +112,7 @@ async def test_revoke_token_not_found_pas_d_audit_de_succes():
 
 async def test_create_token_audite_sans_exposer_le_token_brut():
     send = AsyncMock()
-    store = MagicMock()
+    store = DoubleMagasin()
     store.create.return_value = {
         "raw_token": "sk-vault-SECRET-XYZ", "hash": "h" * 64,
         "client_name": "agent", "permissions": ["read"], "allowed_resources": ["v1"],
@@ -129,7 +131,7 @@ async def test_create_token_audite_sans_exposer_le_token_brut():
 
 async def test_update_token_audite():
     send = AsyncMock()
-    store = MagicMock()
+    store = DoubleMagasin()
     store.update.return_value = {"status": "updated", "updated_fields": ["permissions"],
                                  "client_name": "agent"}
     body = json.dumps({"permissions": ["read", "write"]})
@@ -145,7 +147,7 @@ async def test_update_token_audite():
 
 async def test_create_policy_audite():
     send = AsyncMock()
-    pstore = MagicMock()
+    pstore = DoubleMagasin()
     pstore.create.return_value = {"status": "created", "policy_id": "p1"}
     body = json.dumps({"policy_id": "p1", "description": "x"})
     with _Ctx(), patch("mcp_vault.auth.policies.get_policy_store", return_value=pstore), \
@@ -159,7 +161,7 @@ async def test_create_policy_audite():
 
 async def test_delete_policy_audite():
     send = AsyncMock()
-    pstore = MagicMock()
+    pstore = DoubleMagasin()
     pstore.delete.return_value = True
     with _Ctx(), patch("mcp_vault.auth.policies.get_policy_store", return_value=pstore), \
             patch.object(api, "log_audit") as mock_audit:
@@ -175,7 +177,7 @@ async def test_mcp_policy_create_preserve_resultat_et_audite():
     """policy_create (MCP) doit retourner le résultat du store INCHANGÉ et auditer."""
     store_result = {"status": "created", "policy_id": "p1"}
     expected = dict(store_result)  # snapshot indépendant (détecte une mutation en place)
-    pstore = MagicMock()
+    pstore = DoubleMagasin()
     pstore.create.return_value = store_result
     with _Ctx(), patch("mcp_vault.auth.policies.get_policy_store", return_value=pstore), \
             patch("mcp_vault.audit.log_audit") as mock_audit:
@@ -190,7 +192,7 @@ async def test_mcp_token_update_preserve_resultat_et_audite():
     """token_update (MCP) doit retourner le résultat du store INCHANGÉ et auditer."""
     store_result = {"status": "updated", "updated_fields": ["permissions"]}
     expected = dict(store_result)  # snapshot indépendant (détecte une mutation en place)
-    tstore = MagicMock()
+    tstore = DoubleMagasin()
     tstore.update.return_value = store_result
     with _Ctx(), patch("mcp_vault.auth.token_store.get_token_store", return_value=tstore), \
             patch("mcp_vault.audit.log_audit") as mock_audit:
@@ -203,7 +205,7 @@ async def test_mcp_token_update_preserve_resultat_et_audite():
 async def test_mcp_policy_delete_storage_error_audite():
     """Régression du fix MOYEN : une suppression de policy NON persistée (S3 down)
     via MCP doit être auditée en 'error', pas silencieuse."""
-    pstore = MagicMock()
+    pstore = DoubleMagasin()
     pstore.delete.return_value = "storage_error"
     with _Ctx(), patch("mcp_vault.auth.policies.get_policy_store", return_value=pstore), \
             patch("mcp_vault.audit.log_audit") as mock_audit:

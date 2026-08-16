@@ -17,6 +17,8 @@ import os
 import sys
 from unittest.mock import patch
 
+from tests.doubles_magasins import DoubleMagasin
+
 import pytest
 
 # S'assurer que le module est importable
@@ -402,7 +404,7 @@ class TestAdminApiCodeStructure:
         """
         from unittest.mock import MagicMock, patch
 
-        mock_store = MagicMock()
+        mock_store = DoubleMagasin()
         mock_store.create.return_value = {"status": "created", "policy_id": "test-pol"}
 
         token_info = {"client_name": "agent-creator", "permissions": ["admin"], "allowed_resources": []}

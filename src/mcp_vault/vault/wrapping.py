@@ -39,6 +39,8 @@ Limites V1 (documentées) :
   distribué (S3 conditional write, Redis, etc.) pour multi-instance.
 """
 
+import asyncio
+import functools
 import json
 import logging
 import re
@@ -47,6 +49,8 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
+from ..async_offload import run_blocking
+from ..store_refresh import Freshness
 from ..vault_ids import is_valid_vault_id
 
 logger = logging.getLogger("mcp-vault.wrapping")
@@ -175,7 +179,11 @@ class WrapRegistry:
     def __init__(self, settings):
         self.settings = settings
         self._wraps: list[dict] = []
-        self._cache_time: float = 0
+        self.freshness = Freshness()
+        # Verrou du magasin (#123). Tenu par le rafraîchisseur de fond ET par les
+        # cinq points d'entrée wrap, qui exécutent tout leur corps hors boucle :
+        # une opération wrap est donc atomique vis-à-vis d'un rechargement.
+        self.refresh_lock = asyncio.Lock()
         # #77 : True tant que le dernier load() a abouti (succès ou 404 = vide connu) ;
         # False si un load() a échoué sur une panne S3 effective. Sert à la
         # consultation d'état (status_by_operation_id) pour ne pas présenter un
@@ -192,18 +200,19 @@ class WrapRegistry:
             resp = s3.get_object(Bucket=self.settings.s3_bucket_name, Key=self.S3_KEY)
             data = json.loads(resp["Body"].read().decode())
             self._wraps = data.get("wraps", [])
-            self._cache_time = time.time()
+            self.freshness.mark_success()
             self._last_load_ok = True
         except Exception as e:
             if "NoSuchKey" in str(e) or "404" in str(e):
                 self._wraps = []
-                self._cache_time = time.time()
+                self.freshness.mark_success()
                 self._last_load_ok = True  # absence de fichier = registre vide connu
             else:
                 # #77 : panne S3 effective — le cache n'est PAS rafraîchi. On le
                 # signale pour que la consultation d'état (status) ne masque pas
                 # l'indisponibilité en renvoyant un not_found/active trompeur.
                 self._last_load_ok = False
+                self.freshness.mark_failure(f"S3 GET: {type(e).__name__}")
                 logger.warning("WrapRegistry S3 load: %s", type(e).__name__)
 
     def _save(self) -> bool:
@@ -224,7 +233,7 @@ class WrapRegistry:
                 Body=data.encode(),
                 ContentType="application/json",
             )
-            self._cache_time = time.time()  # invalide le cache après write
+            self.freshness.mark_success()  # un PUT réussi prouve S3 joignable
             # #77 : un save réussi prouve que S3 est joignable et que le cache mémoire
             # est persisté — on lève un éventuel _last_load_ok=False laissé par une
             # panne S3 antérieure (sinon la consultation d'état resterait bloquée en
@@ -236,8 +245,36 @@ class WrapRegistry:
             return False
 
     def _maybe_refresh(self):
-        if time.time() - self._cache_time > self.CACHE_TTL:
-            self.load()
+        """
+        Constate la fraîcheur de l'instantané. **MÉMOIRE PURE** — aucun appel
+        réseau (#123, voir `store_refresh`).
+
+        Avant ce lot, cette méthode faisait un GET S3 SYNCHRONE depuis la boucle,
+        sur les quatre outils wrap et `secret_consume`. Le chargement appartient
+        désormais au rafraîchisseur de fond.
+
+        ⚠️ **Pas de copy-on-write ici, et c'est délibéré** (condition n°3 portée
+        au commentaire d'arbitrage de #123). Les trois magasins d'autorisation
+        publient leur candidat seulement après confirmation du PUT, parce que des
+        gardes SYNCHRONES les lisent sans verrou. Le registre n'a aucun lecteur de
+        ce type : ses cinq points d'entrée sont tous `async` et s'exécutent sous
+        le verrou du magasin. Y appliquer la publication-après-PUT détruirait au
+        contraire un acquis de v0.14.1 — `mark_entries_revoked` conserve
+        VOLONTAIREMENT en mémoire une révocation confirmée mais non inscrite,
+        parce que la mémoire y dit la vérité et que c'est le support durable qui
+        est en retard.
+
+        La péremption est signalée par `_last_load_ok`, que la consultation d'état
+        traduit en `backend_unavailable` — même conduite que sur une panne de
+        chargement, puisque c'en est une : personne n'a rechargé.
+        """
+        if self._last_load_ok and self.freshness.is_stale(self.CACHE_TTL):
+            self._last_load_ok = False
+            logger.warning(
+                "WrapRegistry PÉRIMÉ : aucun rechargement réussi depuis plus de "
+                "%.0fs — l'état consulté n'est pas présenté comme fiable",
+                self.CACHE_TTL,
+            )
 
     # ── Write-ahead methods ──────────────────────────────────────────
 
@@ -644,7 +681,62 @@ def _validate_inputs(vault_id: str, secret_path: str,
 # Fonctions core wrap / revoke / lookup
 # =============================================================================
 
-async def wrap_secret(
+async def _offload_registre(fn, mutation, *args, **kwargs):
+    """
+    Exécute `fn` hors de la boucle, sous le verrou du magasin (#123).
+
+    Les cinq points d'entrée wrap sont `async` mais leur corps est ENTIÈREMENT
+    synchrone : appels S3 du registre *et* appels OpenBao (hvac). Exécutés dans
+    la boucle, ils la monopolisent — c'est l'incident #110, 488 s mesurées, et le
+    chemin le plus lourd puisqu'une seule création de wrap fait deux PUT S3 et un
+    aller-retour OpenBao.
+
+    Le verrou rend chaque opération wrap ATOMIQUE vis-à-vis du rafraîchisseur de
+    fond : aucun `load()` ne peut publier un instantané antérieur entre la
+    décision et son écriture. Il n'est jamais relâché sur une écriture en vol —
+    `run_blocking` ne rend la main qu'à la fin réelle du thread (lot 2, #122).
+
+    ⚠️ Les opérations wrap deviennent donc sérialisées ENTRE ELLES sur une
+    instance. C'est assumé, et c'est un gain : le registre est en
+    dernier-écrivain-gagne sans CAS (#51), et deux opérations concurrentes s'y
+    écrasaient déjà. La boucle, elle, reste libre — la sonde de santé répond
+    pendant qu'un thread attend S3.
+
+    Sans registre (S3 non configuré), il n'y a pas de verrou à prendre : on
+    offloade quand même, parce que l'appel OpenBao reste bloquant.
+
+    `mutation` dit si l'opération ÉCRIT (registre et/ou OpenBao). Les écritures
+    sont refusées une fois le magasin fermé par l'arrêt : sans ce test, prendre
+    le verrou après le drainage suffirait à écrire APRÈS l'attestation « aucune
+    écriture en vol ». La consultation d'état, elle, reste ouverte — elle ne mute
+    rien, et la refuser dégraderait le diagnostic pendant l'arrêt.
+    """
+    registry = get_wrap_registry()
+    if mutation and registry is not None:
+        from ..store_refresh import magasin_ferme
+        if magasin_ferme(registry):
+            return {"status": "error", "error_type": "backend_unavailable",
+                    "message": "Arrêt en cours — aucune opération de registre "
+                               "acceptée (réessayer après redémarrage)"}
+    appel = functools.partial(fn, *args, **kwargs)
+    verrou = getattr(registry, "refresh_lock", None)
+    if verrou is None:
+        # Deux cas, tous deux sans rien à sérialiser : pas de registre du tout
+        # (S3 non configuré), ou un double de banc qui n'est pas un
+        # `WrapRegistry`. Dans les deux cas il n'y a ni rafraîchisseur de fond ni
+        # écriture S3 concurrente. On offloade quand même : l'appel OpenBao, lui,
+        # reste bloquant, et c'est le corps entier qui doit sortir de la boucle.
+        #
+        # ⚠️ Ce chemin ne doit JAMAIS être celui de la production. C'est verrouillé
+        # par `test_le_vrai_registre_porte_TOUJOURS_un_verrou` : si `WrapRegistry`
+        # cessait d'exposer `refresh_lock`, les opérations wrap cesseraient
+        # silencieusement d'être sérialisées contre le rafraîchisseur.
+        return await run_blocking(appel)
+    async with verrou:
+        return await run_blocking(appel)
+
+
+def _wrap_secret_blocking(
     vault_id: str,
     secret_path: str,
     mission_id: str,
@@ -707,6 +799,30 @@ async def wrap_secret(
     if registry is None:
         return {"status": "error", "error_type": "registry_unavailable",
                 "message": "Registre de compensation non configuré (S3 requis)"}
+    # FAIL-CLOSE sur instantané ambigu (#123). La garde d'usage unique ci-dessous
+    # ne vaut que ce que vaut l'instantané qu'elle interroge : sur un registre non
+    # rafraîchi, une entrée bloquante EXISTANTE peut être invisible, la clé passer
+    # pour vierge, et `register_pending` écraser cette entrée en
+    # dernier-écrivain-gagne avant de créer un SECOND wrap sur la même clé.
+    #
+    # ⚠️ Cette garde manquait déjà avant ce lot : `_maybe_refresh` tentait alors un
+    # GET, mais un GET en échec laissait `wrap_secret` décider sur la mémoire
+    # périmée. #123 élargit la fenêtre — l'instantané peut être périmé alors que S3
+    # est joignable — donc la garde devient indispensable ici, comme elle l'est
+    # déjà sur `revoke_wrap`, `secret_wrap_lookup` et `secret_wrap_status`.
+    # `_maybe_refresh` est le CONSTAT de péremption (mémoire pure depuis #123) :
+    # sans cet appel explicite, le drapeau ne serait posé que plus loin, par le
+    # premier accès au registre — c'est-à-dire après la décision qu'il doit garder.
+    registry._maybe_refresh()
+    if getattr(registry, "_last_load_ok", True) is False:
+        registry_status = "instantané périmé ou dernier rafraîchissement en échec"
+        logger.warning("wrap_secret : registre non rafraîchi (%s) — création refusée",
+                       registry_status)
+        return {"status": "error", "error_type": "backend_unavailable",
+                "message": "Registre non rafraîchi (S3 injoignable ou instantané "
+                           "périmé) — création refusée, aucune écriture tentée "
+                           "(réessayer)"}
+
     # Rejeu d'une clé déjà engagée : refusé AVANT toute écriture. On ne sait pas si
     # OpenBao a déjà créé un wrap ; en rattacher un second au même couple rendrait
     # le premier orphelin ET non compensable. Les deux états bloquants portent des
@@ -856,6 +972,27 @@ async def wrap_secret(
     }
 
 
+async def wrap_secret(
+    vault_id: str,
+    secret_path: str,
+    mission_id: str,
+    operation_id: str,
+    ttl_seconds: int = 300,
+    tenant_id: str = "",
+    expected_aud: str = "",
+) -> dict:
+    """Point d'entrée public — `_wrap_secret_blocking` hors boucle (#123).
+
+    Voir `_offload_registre` : le corps est inchangé, seul son lieu d'exécution
+    change. Aucune logique ici, sans quoi il existerait deux comportements dont
+    un seul serait couvert par les bancs.
+    """
+    return await _offload_registre(
+        _wrap_secret_blocking, True, vault_id, secret_path, mission_id, operation_id,
+        ttl_seconds=ttl_seconds, tenant_id=tenant_id, expected_aud=expected_aud,
+    )
+
+
 # ── Sélection défensive & visibilité du registre (issue #115) ────────────────
 # Les trois primitives revoke/lookup/status travaillent sur une sélection
 # UNIQUE, défensive (une entrée malformée n'est jamais lue par clé sans garde)
@@ -944,7 +1081,7 @@ def _visible_entries(entries: list) -> list:
     return visible
 
 
-async def revoke_wrap(lease_id: str) -> dict:
+def _revoke_wrap_blocking(lease_id: str) -> dict:
     """
     Révoque un wrap token de façon IDEMPOTENTE.
 
@@ -1002,10 +1139,15 @@ async def revoke_wrap(lease_id: str) -> dict:
     if all(e["status"] == "revoked" for e in visible):
         return {"status": "ok", "state": "already_revoked", "accessor": lease_id[:12] + "..."}
 
-    return await _revoke_accessor_selected(registry, lease_id, visible)
+    return _revoke_accessor_selected(registry, lease_id, visible)
 
 
-async def _revoke_accessor_selected(registry, accessor: str, selection: list) -> dict:
+async def revoke_wrap(lease_id: str) -> dict:
+    """Point d'entrée public — `_revoke_wrap_blocking` hors boucle (#123)."""
+    return await _offload_registre(_revoke_wrap_blocking, True, lease_id)
+
+
+def _revoke_accessor_selected(registry, accessor: str, selection: list) -> dict:
     """
     Révoque un accessor côté OpenBao et marque UNIQUEMENT la sélection passée.
 
@@ -1022,11 +1164,12 @@ async def _revoke_accessor_selected(registry, accessor: str, selection: list) ->
     def _rendre(etat: str) -> dict:
         """Réponse de révocation, augmentée du sort de la PERSISTANCE (#140).
 
-        La révocation OpenBao est acquise quand on arrive ici. Si le registre
-        n'a pas pu l'inscrire, l'appelant doit le savoir : au redémarrage
-        l'entrée ressuscitera dans un état que nous venons de lui annoncer
-        révoqué. Le champ n'apparaît QUE dans ce cas — une réponse nominale
-        reste identique à celle des versions antérieures.
+        La révocation OpenBao est tenue pour acquise quand on arrive ici. Si le
+        registre n'a pas pu l'inscrire, l'appelant doit le savoir : l'état
+        durable devient INDÉTERMINÉ, et l'entrée peut réapparaître au
+        redémarrage dans un état que nous venons de lui annoncer révoqué.
+        Le champ n'apparaît QUE dans ce cas — une réponse nominale reste
+        identique à celle des versions antérieures.
         """
         muees, persistee = registry.mark_entries_revoked(selection)
         r = {"status": "ok", "state": etat, "accessor": accessor[:12] + "..."}
@@ -1034,11 +1177,17 @@ async def _revoke_accessor_selected(registry, accessor: str, selection: list) ->
             r["count_not_persisted"] = muees
             logger.error(
                 "revoke : révocation OpenBao confirmée mais registre NON persisté "
-                "(accessor=%r) — l'entrée ressuscitera au redémarrage", accessor[:12])
+                "(accessor=%r) — état durable INDÉTERMINÉ, l'entrée peut "
+                "ressusciter au redémarrage", accessor[:12])
             r["registry_persisted"] = False
-            r["warning"] = ("Révocation effectuée côté coffre, mais NON inscrite au "
-                            "registre : au redémarrage l'entrée réapparaîtra comme "
-                            "non révoquée. Rejouer la compensation plus tard")
+            # ⚠️ Condition n°4 de l'arbitrage de #123 : ne JAMAIS promettre l'état
+            # durable. Un échec d'écriture ne prouve pas que rien n'a été écrit —
+            # un délai d'attente peut suivre un PUT accepté — et le registre est
+            # en dernier-écrivain-gagne. Le seul fait certain est l'incertitude.
+            r["warning"] = ("Révocation effectuée côté coffre, mais son inscription "
+                            "au registre a échoué : l'état durable est INDÉTERMINÉ "
+                            "et l'entrée peut réapparaître non révoquée au "
+                            "redémarrage. Rejouer la compensation plus tard")
         return r
 
     try:
@@ -1059,7 +1208,7 @@ async def _revoke_accessor_selected(registry, accessor: str, selection: list) ->
                 "message": "Erreur de révocation (réessayer)"}
 
 
-async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) -> dict:
+def _lookup_and_revoke_blocking(operation_id: str, mission_id: str) -> dict:
     """
     Retrouve et révoque les wraps du couple `(operation_id, mission_id)`.
 
@@ -1187,7 +1336,7 @@ async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) 
         # partagerait) — même sémantique que l'historique mark_revoked par
         # accessor, mais bornée à la visibilité de l'appelant.
         selection = [e for e in entries if e.get("accessor") == accessor]
-        result = await _revoke_accessor_selected(registry, accessor, selection)
+        result = _revoke_accessor_selected(registry, accessor, selection)
         if result["status"] == "ok":
             count_revoked += len(group)
             # #140 : le helper signale une révocation CONFIRMÉE mais non
@@ -1211,10 +1360,13 @@ async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) 
         if non_persistees:
             r["registry_persisted"] = False
             r["count_not_persisted"] = non_persistees
+            # ⚠️ Même règle que ci-dessus (condition n°4 de #123) : incertitude,
+            # jamais certitude.
             r["warning"] = (
-                f"{non_persistees} révocation(s) effectuée(s) côté coffre mais NON "
-                "inscrite(s) au registre : au redémarrage ces entrées "
-                "réapparaîtront non révoquées. Rejouer la compensation plus tard")
+                f"{non_persistees} révocation(s) effectuée(s) côté coffre mais dont "
+                "l'inscription au registre a échoué : l'état durable est INDÉTERMINÉ "
+                "et ces entrées peuvent réapparaître non révoquées au redémarrage. "
+                "Rejouer la compensation plus tard")
         return r
 
     if errors:
@@ -1269,6 +1421,11 @@ async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) 
         "operation_id": operation_id, "count_revoked": count_revoked,
         "entries_found": total_entries,
     })
+
+
+async def lookup_and_revoke_by_operation_id(operation_id: str, mission_id: str) -> dict:
+    """Point d'entrée public — `_lookup_and_revoke_blocking` hors boucle (#123)."""
+    return await _offload_registre(_lookup_and_revoke_blocking, True, operation_id, mission_id)
 
 
 # États d'entrée reconnus du registre (transitions register_pending → mark_active
@@ -1377,7 +1534,7 @@ def _usable_kv2_secret(unwrap_response) -> Optional[dict]:
     return envelope
 
 
-async def status_by_operation_id(operation_id: str, mission_id: str) -> dict:
+def _status_by_operation_id_blocking(operation_id: str, mission_id: str) -> dict:
     """
     ⚠️ `mission_id` est REQUIS : sans lui, cette lecture divulguait l'état des
     provisions d'une AUTRE mission.
@@ -1393,9 +1550,13 @@ async def status_by_operation_id(operation_id: str, mission_id: str) -> dict:
       et une consommation concurrente peut invalider l'instantané) ;
     - la lecture appelle `registry._maybe_refresh()` directement, mais n'écrit
       jamais sur S3 et ne révoque jamais ;
-    - `backend_unavailable` signale que le DERNIER rafraîchissement S3 a échoué ;
-      une panne S3 survenant PENDANT la fenêtre de cache (`CACHE_TTL`) n'est pas
-      détectée — l'état renvoyé peut alors être périmé (best-effort assumé).
+    - `backend_unavailable` signale que le DERNIER rafraîchissement S3 a échoué,
+      OU que l'instantané a dépassé son TTL sans rechargement réussi (#123).
+      ⚠️ La détection n'est pas INSTANTANÉE : une panne survenant juste après un
+      rafraîchissement réussi reste invisible jusqu'à la tentative suivante du
+      rafraîchisseur de fond (mi-TTL, puis toutes les 10 s après un échec).
+      L'état renvoyé peut donc être périmé d'au plus cette fenêtre — best-effort
+      assumé, mais plus « jamais détecté » comme avant #123.
 
     États : `not_found | pending | active | consuming | consumed | revoked |
     failed | unusable | consume_outcome_unknown | ambiguous |
@@ -1465,6 +1626,12 @@ async def status_by_operation_id(operation_id: str, mission_id: str) -> dict:
     return result
 
 
+async def status_by_operation_id(operation_id: str, mission_id: str) -> dict:
+    """Point d'entrée public — `_status_by_operation_id_blocking` hors boucle (#123)."""
+    # `mutation=False` : la consultation ne mute ni le registre ni OpenBao.
+    return await _offload_registre(_status_by_operation_id_blocking, False, operation_id, mission_id)
+
+
 def _infer_intended_use(secret_path: str) -> str:
     """Déduit l'intended_use depuis le chemin du secret (heuristique)."""
     path_lower = secret_path.lower()
@@ -1481,7 +1648,7 @@ def _infer_intended_use(secret_path: str) -> str:
 # Consommation médiée (issue #26 — anti-confused-deputy C18)
 # =============================================================================
 
-async def consume_wrap_secret(
+def _consume_wrap_secret_blocking(
     wrap_token: str,
     operation_id: str,
     mission_id: str,
@@ -1526,6 +1693,20 @@ async def consume_wrap_secret(
                 "message": "OpenBao non disponible"}
 
     settings = _get_config()
+
+    # FAIL-CLOSE sur instantané ambigu (#123), même raison que `wrap_secret`.
+    # La sélection par clé composite, le binding lu et les transitions persistées
+    # (`consuming` → `consumed`/`unusable`) reposent toutes sur cet instantané. Sur
+    # un registre non rafraîchi, on choisirait l'entrée sur un état incertain PUIS
+    # on écraserait S3 en dernier-écrivain-gagne. L'usage unique d'OpenBao borne le
+    # double déballage, pas la corruption du registre.
+    registry._maybe_refresh()   # constat de péremption AVANT toute sélection
+    if getattr(registry, "_last_load_ok", True) is False:
+        logger.warning("consume : registre non rafraîchi — consommation refusée")
+        return {"status": "error", "error_type": "backend_unavailable",
+                "message": "Registre non rafraîchi (S3 injoignable ou instantané "
+                           "périmé) — consommation refusée, aucun déballage tenté "
+                           "(réessayer)"}
 
     # ── 1. Lookup par clé composite ─────────────────────────────────
     entry = registry.get_by_composite_key(operation_id, mission_id)
@@ -1691,3 +1872,18 @@ async def consume_wrap_secret(
         "vault_id": entry.get("vault_id", ""),
         "secret_path": entry.get("secret_path", ""),
     }
+
+
+async def consume_wrap_secret(
+    wrap_token: str,
+    operation_id: str,
+    mission_id: str,
+    tenant_id: str = "",
+    expected_aud: str = "",
+    enforce: bool = False,
+) -> dict:
+    """Point d'entrée public — `_consume_wrap_secret_blocking` hors boucle (#123)."""
+    return await _offload_registre(
+        _consume_wrap_secret_blocking, True, wrap_token, operation_id, mission_id,
+        tenant_id=tenant_id, expected_aud=expected_aud, enforce=enforce,
+    )

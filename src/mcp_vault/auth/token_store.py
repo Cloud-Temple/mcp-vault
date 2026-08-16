@@ -29,23 +29,28 @@ Durcissement validation (issue #86, extension Lot 3) :
     pendant une panne S3), qui reste hors scope ici.
 """
 
+import asyncio
+import functools
 import logging
 import re
 import sys
-import time
 import json
 import hashlib
 from typing import Optional
 
 logger = logging.getLogger("mcp-vault.token-store")
 
+from ..async_offload import run_blocking
 from ..config import get_settings
+from ..store_refresh import RETRY_AFTER_ERROR_SECONDS, Freshness, magasin_ferme
 
 # Intervalle minimal de re-tentative de chargement après un échec (store
 # diagnostiqué invalide). N'affecte QUE la vitesse de récupération d'un état
 # `available` observable — ne bloque aucune décision dans ce lot (cf. limite
 # ci-dessus).
-_RETRY_AFTER_ERROR_SECONDS = 10.0
+# Conservé sous son nom historique (des bancs l'importent) ; la valeur vit
+# désormais dans `store_refresh`, partagée par les quatre magasins (#123).
+_RETRY_AFTER_ERROR_SECONDS = RETRY_AFTER_ERROR_SECONDS
 
 # =============================================================================
 # Token Store singleton
@@ -233,8 +238,14 @@ class TokenStore:
 
     def __init__(self, settings):
         self.settings = settings
+        # ⚠️ INSTANTANÉ PUBLIÉ (#123) : jamais muté en place, ni le dictionnaire
+        # extérieur ni les entrées. Une mutation construit un candidat, le
+        # persiste, et ne réassigne cet attribut qu'après confirmation du PUT.
+        # `get_by_hash` lit cette référence sans verrou, à chaque requête
+        # authentifiée.
         self._tokens: dict = {}  # hash → token_info
-        self._cache_time: float = 0.0
+        self.freshness = Freshness()
+        self.refresh_lock = asyncio.Lock()
         self._s3_client = None
         self._available: bool = True
         self._last_error: str = ""
@@ -284,7 +295,9 @@ class TokenStore:
         """
         self._available = False
         self._last_error = msg
-        self._cache_time = time.time()  # throttle la re-tentative (_maybe_refresh)
+        # Seule `last_attempt` avance : brider la re-tentative ne doit pas
+        # rajeunir un instantané qui n'a pas été rechargé (#123).
+        self.freshness.mark_failure(msg)
         logger.error(
             "Token Store INVALIDE : %s — cache bearer conservé tel quel "
             "(diagnostique seulement dans ce lot, voir docstring module)", msg,
@@ -310,8 +323,10 @@ class TokenStore:
             raw = resp["Body"].read().decode()
         except Exception as e:
             if self._is_missing_key_error(e):
+                # Absence nominale (1er boot) : chargement RÉUSSI d'un magasin
+                # vide, la fraîcheur doit avancer (#123).
                 self._tokens = {}
-                self._cache_time = time.time()
+                self.freshness.mark_success()
                 self._available = True
                 self._last_error = ""
                 return
@@ -350,7 +365,7 @@ class TokenStore:
             validated[norm["hash"]] = norm
 
         self._tokens = validated
-        self._cache_time = time.time()
+        self.freshness.mark_success()
         self._available = True
         self._last_error = ""
 
@@ -359,18 +374,23 @@ class TokenStore:
         # La forme en mémoire est déjà propre (normalisée par le validateur) ;
         # on re-persiste pour que le fichier S3 lui-même soit nettoyé.
         if dirty:
-            if self._save():
+            if self._save(self._tokens):
                 print("ℹ️  Token Store : migration policy_id '_remove' → '' effectuée.", file=sys.stderr)
             else:
                 logger.error("Token Store : migration '_remove' non persistée — S3 indisponible")
 
-    def _save(self) -> bool:
+    def _save(self, snapshot: dict) -> bool:
         """
-        Sauvegarde les tokens sur S3 (PUT = SigV2).
+        Persiste le SNAPSHOT CANDIDAT sur S3 (PUT = SigV2). Ne publie rien.
+
+        ⚠️ Prend le candidat en argument et ne lit JAMAIS `self._tokens` (#123) :
+        la publication appartient à l'appelant, et seulement après un True.
+        `get_by_hash` lit l'instantané publié à chaque requête authentifiée, sans
+        verrou — sans copy-on-write, il pourrait authentifier avec un token créé
+        mais non persisté, ou refuser sur une révocation que l'échec du PUT
+        annule.
 
         Retourne True si succès, False si S3 indisponible.
-        Les appelants doivent rollback l'état mémoire si False est retourné
-        (révocation perdue = faille sécurité critique).
 
         LIMITATION V1 — last-write-wins (issue #13) :
         En déploiement multi-instance, deux instances concurrent peuvent s'écraser
@@ -381,7 +401,7 @@ class TokenStore:
         try:
             s3 = self._get_s3_data()
             data = json.dumps(
-                {"tokens": list(self._tokens.values())},
+                {"tokens": list(snapshot.values())},
                 indent=2, default=str,
             )
             s3.put_object(
@@ -397,14 +417,36 @@ class TokenStore:
             return False
 
     def _maybe_refresh(self):
-        """Rafraîchit le cache si le TTL est dépassé (ou plus vite si état invalide)."""
-        elapsed = time.time() - self._cache_time
-        if self._available:
-            if elapsed > self.CACHE_TTL:
-                self.load()
-        else:
-            if elapsed > _RETRY_AFTER_ERROR_SECONDS:
-                self.load()
+        """
+        Constate la fraîcheur de l'instantané publié. **MÉMOIRE PURE** — aucun
+        appel réseau (#123, voir `store_refresh`).
+
+        Avant ce lot, cette méthode faisait un GET S3 SYNCHRONE depuis la boucle,
+        à CHAQUE requête authentifiée dont le TTL était dépassé : c'était le
+        chemin le plus fréquent du gel de #110. Le chargement appartient
+        désormais au rafraîchisseur de fond.
+
+        ⚠️ La POSTURE de ce magasin est INCHANGÉE et reste celle documentée en
+        tête de module : `available`/`last_error` sont DIAGNOSTIQUES SEULEMENT.
+        `get_by_hash` ne les consulte pas, et un instantané périmé continue donc
+        d'authentifier — exactement comme avant. Fermer ce résidu (deny-all
+        bearer pendant une panne S3) reste un chantier séparé : ce lot déplace le
+        chargement hors de la boucle, il ne change aucune décision.
+
+        La récupération, elle, est équivalente : là où chaque requête retentait
+        un GET après le TTL, le rafraîchisseur retente toutes les 10 s après une
+        panne — plus souvent, et sans geler personne.
+        """
+        if self._available and self.freshness.is_stale(self.CACHE_TTL):
+            self._available = False
+            self._last_error = (
+                "instantané périmé : aucun rechargement réussi depuis plus de "
+                f"{self.CACHE_TTL:.0f}s"
+            )
+            logger.error(
+                "Token Store PÉRIMÉ (%s) — cache bearer servi tel quel "
+                "(diagnostique seulement, cf. docstring module)", self._last_error,
+            )
 
     def get_by_hash(self, token_hash: str) -> Optional[dict]:
         """Cherche un token par son hash SHA-256. Vérifie l'expiration."""
@@ -470,11 +512,13 @@ class TokenStore:
             "revoked": False,
         }
 
-        self._tokens[token_hash] = token_info
-        if not self._save():
-            del self._tokens[token_hash]  # rollback mémoire
+        # Copy-on-write (#123) : publication après PUT confirmé seulement.
+        candidate = dict(self._tokens)
+        candidate[token_hash] = token_info
+        if not self._save(candidate):
             return {"status": "error", "error_type": "storage_unavailable",
                     "message": "Impossible de créer le token (S3 indisponible)"}
+        self._tokens = candidate
 
         return {"raw_token": raw_token, **token_info}
 
@@ -597,34 +641,37 @@ class TokenStore:
         if token.get("revoked"):
             return {"status": "error", "message": f"Token {hash_prefix}... est révoqué"}
 
-        # ── Snapshot AVANT mutation pour rollback si _save échoue ────────
-        import copy
-        snapshot = copy.deepcopy(dict(token))
-
-        # ── Mutations uniquement après validation et snapshot ─────────────
+        # ── Copy-on-write (#123) ─────────────────────────────────────────
+        # L'ENTRÉE est copiée, pas seulement le dictionnaire extérieur : la
+        # mutation portait ici sur le dict interne, donc une copie superficielle
+        # du seul niveau supérieur laisserait l'instantané servi voir la
+        # modification avant sa persistance. Le rollback disparaît avec le
+        # snapshot profond qu'il exigeait.
+        modifie = dict(token)
         if policy_id is not None:
-            token["policy_id"] = validated_policy_id
+            modifie["policy_id"] = validated_policy_id
 
         if permissions is not None:
-            token["permissions"] = validated_permissions
+            modifie["permissions"] = validated_permissions
 
         if allowed_resources is not None:
-            token["allowed_resources"] = validated_allowed_resources
+            modifie["allowed_resources"] = validated_allowed_resources
 
-        if not self._save():
-            self._tokens[target_hash].clear()
-            self._tokens[target_hash].update(snapshot)  # rollback vers l'état pré-mutation
+        candidate = dict(self._tokens)
+        candidate[target_hash] = modifie
+        if not self._save(candidate):
             return {"status": "error", "error_type": "storage_unavailable",
                     "message": "Modification non persistée (S3 indisponible)"}
+        self._tokens = candidate
 
         return {
             "status": "updated",
             "hash_prefix": hash_prefix,
-            "client_name": token["client_name"],
+            "client_name": modifie["client_name"],
             "updated_fields": updated_fields,
-            "policy_id": token.get("policy_id", ""),
-            "permissions": token["permissions"],
-            "allowed_resources": token.get("allowed_resources", []),
+            "policy_id": modifie.get("policy_id", ""),
+            "permissions": modifie["permissions"],
+            "allowed_resources": modifie.get("allowed_resources", []),
         }
 
     def revoke(self, hash_prefix: str) -> dict:
@@ -646,21 +693,21 @@ class TokenStore:
             return {"status": "ambiguous", "message": str(e)}
         if not target_hash:
             return {"status": "not_found", "message": f"Token {hash_prefix}... non trouvé"}
-        t = self._tokens[target_hash]
-        old_revoked = t.get("revoked", False)
-        old_revoked_at = t.get("revoked_at")
-        t["revoked"] = True
-        t["revoked_at"] = datetime.now(timezone.utc).isoformat()
-        if not self._save():
-            # Rollback : une révocation non persistée est CRITIQUE
-            t["revoked"] = old_revoked
-            if old_revoked_at:
-                t["revoked_at"] = old_revoked_at
-            else:
-                t.pop("revoked_at", None)
+        # Copy-on-write (#123) : une révocation non persistée ne doit RIEN
+        # changer à ce qui est servi. L'ancien code la publiait puis la
+        # défaisait ; entre les deux, `get_by_hash` — qui ne prend aucun verrou —
+        # refusait un token toujours valide. Le rollback d'une révocation était
+        # aussi le chemin le plus critique à ne pas rater : il n'existe plus.
+        revoque = dict(self._tokens[target_hash])
+        revoque["revoked"] = True
+        revoque["revoked_at"] = datetime.now(timezone.utc).isoformat()
+        candidate = dict(self._tokens)
+        candidate[target_hash] = revoque
+        if not self._save(candidate):
             logger.error("Révocation du token %s... non persistée — S3 indisponible", hash_prefix[:12])
             return {"status": "storage_unavailable",
                     "message": f"Révocation non persistée — S3 indisponible (token {hash_prefix[:12]}...)"}
+        self._tokens = candidate
         return {"status": "ok", "message": f"Token {hash_prefix[:12]}... révoqué"}
 
     def purge_revoked(self, older_than_days: int = 30, dry_run: bool = False) -> dict:
@@ -712,22 +759,62 @@ class TokenStore:
                     "older_than_days": older_than_days, "purged": [],
                     "message": "Aucun token révoqué à purger (rétention respectée)"}
 
-        # Snapshot pour rollback si _save échoue (cohérent avec revoke())
-        import copy
-        removed = {h: copy.deepcopy(self._tokens[h]) for h, _ in candidates}
-        for h in removed:
-            del self._tokens[h]
+        # Copy-on-write (#123) : cf. revoke(). La copie profonde servait à
+        # restaurer les entrées supprimées ; il n'y a plus de rollback.
+        candidate = dict(self._tokens)
+        for h, _ in candidates:
+            del candidate[h]
 
-        if not self._save():
-            self._tokens.update(removed)  # rollback : restaurer les tokens supprimés
-            logger.error("Purge de %d token(s) révoqué(s) non persistée — S3 indisponible", len(removed))
+        if not self._save(candidate):
+            logger.error("Purge de %d token(s) révoqué(s) non persistée — S3 indisponible", len(candidates))
             return {"status": "storage_unavailable", "dry_run": False, "count": 0,
                     "older_than_days": older_than_days,
                     "message": "Purge non persistée — S3 indisponible"}
+        self._tokens = candidate
 
         return {"status": "ok", "dry_run": False, "count": len(summary),
                 "older_than_days": older_than_days, "purged": summary,
                 "message": f"{len(summary)} token(s) révoqué(s) purgé(s)"}
+
+    # ── Façades async (issue #123) ───────────────────────────────────
+    #
+    # Les mutations font un PUT S3 SYNCHRONE ; appelées depuis l'API admin ou un
+    # outil MCP (tous `async`), elles gèlent la boucle. Ces façades les exécutent
+    # hors boucle, sous le verrou du magasin. Aucune logique n'y est dupliquée :
+    # la méthode synchrone reste la seule implémentation, donc la seule à
+    # couvrir.
+
+    async def acreate(self, *args, **kwargs) -> dict:
+        """`create()` hors boucle, sérialisé par le verrou du magasin."""
+        if magasin_ferme(self):
+            return {"status": "error", "error_type": "storage_unavailable",
+                    "message": "Arrêt en cours — aucune mutation acceptée"}
+        async with self.refresh_lock:
+            return await run_blocking(functools.partial(self.create, *args, **kwargs))
+
+    async def aupdate(self, *args, **kwargs) -> dict:
+        """`update()` hors boucle, sérialisé par le verrou du magasin."""
+        if magasin_ferme(self):
+            return {"status": "error", "error_type": "storage_unavailable",
+                    "message": "Arrêt en cours — aucune mutation acceptée"}
+        async with self.refresh_lock:
+            return await run_blocking(functools.partial(self.update, *args, **kwargs))
+
+    async def arevoke(self, hash_prefix: str) -> dict:
+        """`revoke()` hors boucle, sérialisé par le verrou du magasin."""
+        if magasin_ferme(self):
+            return {"status": "storage_unavailable",
+                    "message": "Arrêt en cours — révocation non tentée"}
+        async with self.refresh_lock:
+            return await run_blocking(functools.partial(self.revoke, hash_prefix))
+
+    async def apurge_revoked(self, *args, **kwargs) -> dict:
+        """`purge_revoked()` hors boucle, sérialisé par le verrou du magasin."""
+        if magasin_ferme(self):
+            return {"status": "storage_unavailable", "dry_run": False, "count": 0,
+                    "message": "Arrêt en cours — aucune mutation acceptée"}
+        async with self.refresh_lock:
+            return await run_blocking(functools.partial(self.purge_revoked, *args, **kwargs))
 
     @staticmethod
     def _is_expired(token: dict) -> bool:

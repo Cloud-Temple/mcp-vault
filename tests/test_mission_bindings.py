@@ -26,6 +26,8 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from tests.doubles_magasins import DoubleMagasin
+
 import pytest
 
 
@@ -517,16 +519,38 @@ class TestLoadState:
         assert store.available is False
         assert "acme" in store._bindings  # anti-écrasement destructeur
 
-    def test_retry_faster_than_ttl_after_error(self):
-        """Après une panne, _maybe_refresh retente à _RETRY_AFTER_ERROR_SECONDS, pas au TTL."""
-        import time as _t
+    def test_le_point_de_decision_ne_recharge_JAMAIS(self):
+        """#123 : `_maybe_refresh` constate, il ne charge plus.
+
+        ⚠️ Ce test REMPLACE `test_retry_faster_than_ttl_after_error`. La cadence
+        de re-tentative (10 s après une panne, pas 300 s) n'a pas disparu : elle
+        appartient au rafraîchisseur de fond et est prouvée dans
+        `tests/test_store_refresh_123.py`. La re-tester ici laisserait croire que
+        le point de décision recharge encore — c'est précisément ce que ce lot
+        supprime, parce qu'un GET S3 synchrone y gelait tout le service (#110).
+        """
         store = _make_store(offline=False)
         store._available = False
-        store._cache_time = _t.time() - (_RETRY_AFTER_ERROR_SECONDS + 1)
-        load_calls = {"n": 0}
-        store.load = MagicMock(side_effect=lambda: load_calls.__setitem__("n", load_calls["n"] + 1))
+        store.load = MagicMock(side_effect=AssertionError(
+            "le point de décision ne doit JAMAIS charger depuis la boucle"))
         store._maybe_refresh()
-        assert load_calls["n"] == 1  # a retenté bien avant 300s
+        assert store.available is False
+
+    def test_un_instantane_PERIME_refuse_meme_si_le_store_se_croit_disponible(self):
+        """Le rafraîchisseur est mort : la garde doit s'en apercevoir seule.
+
+        Sans ce constat, un instantané serait servi indéfiniment — un fail-open
+        silencieux exactement là où #69/#86 avaient fermé.
+        """
+        store = _make_store(offline=False)
+        store._bindings = {"acme": _rec()}
+        store.freshness.mark_success()
+        store._maybe_refresh()
+        assert store.available is True  # frais : servi
+        store.freshness._last_success -= store.CACHE_TTL + 1
+        store._maybe_refresh()
+        assert store.available is False
+        assert "périmé" in store.last_error
 
 
 class TestLoadValidation:
@@ -715,7 +739,7 @@ def _call_admin(path, method, body=b"", token_info="admin", store="unset"):
 
 def _fake_admin_store():
     """Store MagicMock disponible pour les tests API (réponses configurables par test)."""
-    store = MagicMock()
+    store = DoubleMagasin()
     store.list_all.return_value = []
     store.create.return_value = {"status": "created", "tenant_id": "acme",
                                  "allowed_resources": ["prod"], "permissions": ["read"],

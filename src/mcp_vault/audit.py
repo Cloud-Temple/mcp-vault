@@ -4,7 +4,10 @@ Audit Store — Journal d'audit MCP Vault.
 
 Enregistre toutes les opérations MCP dans :
 - Ring buffer mémoire (5000 entrées, accès rapide)
-- Fichier JSONL persistant (/openbao/logs/audit-mcp.jsonl, synced S3)
+- Fichier JSONL persistant (/openbao/logs/audit-mcp.jsonl)
+  ⚠️ LOCAL AU VOLUME `openbao-logs`, PAS synchronisé sur S3 : l'archive S3
+  ne couvre que `openbao_data_dir` (/openbao/file). La trace survit à un
+  redémarrage du conteneur, pas à la perte de l'hôte.
 
 Chaque entrée contient :
 - timestamp, client_name, tool_name, vault_id, status, detail, duration_ms
@@ -112,7 +115,9 @@ class AuditStore:
     Journal d'audit MCP avec ring buffer mémoire + fichier JSONL persistant.
 
     - Ring buffer : 5000 entrées en mémoire (accès rapide, filtrage)
-    - Fichier JSONL : persistant sur disque (synced S3 avec le volume OpenBao)
+    - Fichier JSONL : persistant sur le volume local `openbao-logs`.
+      ⚠️ NON synchronisé sur S3 — l'archive ne couvre que le file backend
+      OpenBao (`openbao_data_dir`), qui est un volume DISTINCT.
     - Chargement au startup : lit les dernières entrées du fichier
     """
 

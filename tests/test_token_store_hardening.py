@@ -395,18 +395,78 @@ class TestUpdateHardening:
 # Retry accéléré (diagnostique)
 # =============================================================================
 
+class TestCopyOnWrite:
+    """#123 : une mutation non persistée ne doit RIEN changer à ce qui est servi.
+
+    ⚠️ Trou de couverture trouvé PAR MUTATION, pas par relecture : publier le
+    candidat avant la confirmation du PUT ne faisait rougir aucun test. C'est
+    pourtant le chemin le plus critique du magasin — l'ancien code portait un
+    rollback explicite commenté « une révocation non persistée est CRITIQUE ».
+    """
+
+    def test_une_revocation_NON_PERSISTEE_ne_revoque_rien_en_memoire(self):
+        store = TokenStore(SimpleNamespace(s3_bucket_name="b"))
+        jeton = _token()
+        publie_avant = {jeton["hash"]: jeton}
+        store._tokens = publie_avant
+        store.freshness.mark_success()
+        store._get_s3_data = MagicMock(return_value=_fake_s3(put_ok=False))
+
+        res = store.revoke(jeton["hash"][:12])
+
+        assert res["status"] == "storage_unavailable", res
+        assert store._tokens[jeton["hash"]]["revoked"] is False, (
+            "le jeton apparaît révoqué alors que l'écriture a échoué : au "
+            "redémarrage il redeviendrait valide, et l'exploitant aurait cru la "
+            "révocation faite")
+        # La référence publiée est INCHANGÉE : aucun état intermédiaire n'a été
+        # publié, pas seulement « le contenu final est bon ».
+        assert store._tokens is publie_avant
+
+    def test_une_creation_NON_PERSISTEE_n_authentifie_pas(self):
+        """Le symétrique, dans le sens qui ouvre l'accès : un token créé mais non
+        écrit ne doit jamais authentifier — il disparaîtrait au redémarrage."""
+        store = TokenStore(SimpleNamespace(s3_bucket_name="b"))
+        store.freshness.mark_success()
+        store._get_s3_data = MagicMock(return_value=_fake_s3(put_ok=False))
+
+        res = store.create(client_name="agent", permissions=["read"])
+
+        assert res.get("error_type") == "storage_unavailable", res
+        assert store._tokens == {}, "un token non persisté est servi en mémoire"
+
+
 class TestRetryTiming:
-    def test_no_retry_before_accelerated_delay(self):
+    """⚠️ #123 : la cadence de re-tentative a changé de PROPRIÉTAIRE.
+
+    Elle n'est plus portée par `_maybe_refresh` — qui ne charge plus rien — mais
+    par le rafraîchisseur de fond, et elle est prouvée dans
+    `tests/test_store_refresh_123.py`. Ce qui est vérifié ici, c'est ce qui reste
+    vrai du magasin : le point de décision ne touche jamais le réseau, quel que
+    soit son état.
+    """
+
+    def test_le_point_de_decision_n_appelle_JAMAIS_S3(self):
         store = TokenStore(SimpleNamespace(s3_bucket_name="b"))
         store._mark_invalid("panne")
-        store._get_s3_data = MagicMock(side_effect=AssertionError("ne doit PAS être appelé avant le délai"))
+        store._get_s3_data = MagicMock(side_effect=AssertionError(
+            "S3 appelé depuis le point de décision — c'est le gel de #110"))
         store._maybe_refresh()
         assert store.available is False
+        # Le chemin réellement emprunté à chaque requête authentifiée.
+        assert store.get_by_hash("inexistant") is None
 
-    def test_recovers_after_accelerated_delay(self):
+    def test_un_instantane_PERIME_est_signale_sans_bloquer_le_bearer(self):
+        """La POSTURE de ce magasin est inchangée par #123 : `available` reste
+        DIAGNOSTIQUE. Un instantané périmé doit être visible — pour la sonde et
+        l'exploitant — sans se mettre à refuser l'authentification, ce qui serait
+        un changement de comportement bien plus large (deny-all bearer pendant
+        une panne S3) et reste hors périmètre, cf. docstring du module."""
         store = TokenStore(SimpleNamespace(s3_bucket_name="b"))
-        store._mark_invalid("panne")
-        store._cache_time = time.time() - (_RETRY_AFTER_ERROR_SECONDS + 1)
-        store._get_s3_data = MagicMock(return_value=_fake_s3(get_return=_file_bytes([_token()])))
+        jeton = _token()
+        store._tokens = {jeton["hash"]: jeton}
+        store.freshness.mark_success()
+        store.freshness._last_success -= store.CACHE_TTL + 1
         store._maybe_refresh()
-        assert store.available is True
+        assert store.available is False              # signalé
+        assert store.get_by_hash(jeton["hash"]) is not None  # mais toujours servi

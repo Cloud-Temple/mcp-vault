@@ -497,7 +497,12 @@ def _mem_registry(entries):
     class InMemoryRegistry(WrapRegistry):
         def __init__(self):
             self._wraps = list(entries)
-            self._cache_time = float("inf")
+            import asyncio
+            from mcp_vault.store_refresh import Freshness
+            self.freshness = Freshness()
+            self.freshness.mark_success()  # instantané frais (#123)
+            self._last_load_ok = getattr(self, '_last_load_ok', True)
+            self.refresh_lock = asyncio.Lock()
             self._last_load_ok = True
             self.saved = 0
 
@@ -624,23 +629,31 @@ def test_registry_admin_sees_everything():
     client.auth.token.revoke_accessor.assert_called_once()
 
 
-def test_registry_refresh_called_and_s3_outage_detected():
-    """R3-F2 : le refresh du cache reste câblé, et status conserve la
-    détection de panne S3 (_last_load_ok=False → backend_unavailable)."""
+def test_registry_perime_detecte_et_s3_outage_detected():
+    """R3-F2, réécrit pour #123 : la consultation ne présente jamais un
+    instantané douteux comme fiable.
+
+    ⚠️ La version d'origine exigeait que `_maybe_refresh` RECHARGE quand le cache
+    était expiré. Ce chargement était un GET S3 SYNCHRONE dans la boucle — le gel
+    de #110 — et il a été déplacé dans le rafraîchisseur de fond (prouvé dans
+    `tests/test_store_refresh_123.py`). Ce qui doit rester vrai ici, et qui est
+    la raison d'être de R3-F2, c'est la CONSÉQUENCE : un instantané qu'on n'a pas
+    pu rafraîchir ne doit pas être servi comme un état sûr.
+
+    Deux chemins y mènent désormais, tous deux vérifiés : la péremption constatée
+    en mémoire, et l'échec de chargement déjà enregistré.
+    """
     from mcp_vault.vault import wrapping as w
     reg = _mem_registry([_entry("op-1", "ACC1", "active")])
-    reg._cache_time = 0  # cache expiré → _maybe_refresh DOIT recharger
-    refreshed = {"n": 0}
-    original_load = reg.load
-
-    def counting_load():
-        refreshed["n"] += 1
-        original_load()
-    reg.load = counting_load
+    reg.load = MagicMock(side_effect=AssertionError(
+        "la consultation ne doit JAMAIS charger depuis la boucle (#123)"))
+    reg.freshness._last_success -= reg.CACHE_TTL + 1  # personne n'a rechargé
     stack, _ = _patch_wrapping(reg)
     with stack, admin_auth_context():
-        _run(w.status_by_operation_id("op-1", "m"))
-    assert refreshed["n"] >= 1, "le refresh du registre a été perdu (R3-F2)"
+        res_perime = _run(w.status_by_operation_id("op-1", "m"))
+    assert reg._last_load_ok is False, "la péremption n'a pas été constatée"
+    assert (res_perime["status"] == "error"
+            and res_perime.get("error_type") == "backend_unavailable"), res_perime
 
     reg2 = _mem_registry([_entry("op-1", "ACC1", "active")])
     reg2._last_load_ok = False

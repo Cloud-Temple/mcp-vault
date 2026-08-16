@@ -25,6 +25,8 @@ from datetime import datetime, timezone, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from tests.doubles_magasins import DoubleMagasin
+
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -168,7 +170,7 @@ def test_purge_frontiere_retention():
 
 async def test_api_purge_dry_run_200_sans_audit():
     send = AsyncMock()
-    store = MagicMock()
+    store = DoubleMagasin()
     store.purge_revoked.return_value = {"status": "ok", "dry_run": True, "count": 2,
                                         "older_than_days": 30, "candidates": []}
     with patch.object(api, "get_token_store", return_value=store), \
@@ -181,7 +183,7 @@ async def test_api_purge_dry_run_200_sans_audit():
 
 async def test_api_purge_effectif_audite_chaque_token_et_recap():
     send = AsyncMock()
-    store = MagicMock()
+    store = DoubleMagasin()
     store.purge_revoked.return_value = {
         "status": "ok", "dry_run": False, "count": 2, "older_than_days": 30,
         "purged": [
@@ -202,7 +204,7 @@ async def test_api_purge_effectif_audite_chaque_token_et_recap():
 @pytest.mark.parametrize("bad", [True, False, -1, "30", 1.5, 99999999])  # 99999999 > borne sup
 async def test_api_purge_older_than_invalide_400(bad):
     send = AsyncMock()
-    store = MagicMock()
+    store = DoubleMagasin()
     with patch.object(api, "get_token_store", return_value=store), \
             patch.object(api, "log_audit"):
         await api._api_purge_revoked_tokens(send, json.dumps({"older_than_days": bad}))
@@ -221,7 +223,7 @@ async def test_api_purge_dry_run_non_bool_400_sans_purge(bad):
     en purge réelle. Couvre en particulier les falsy ([], 0, "", None) qui étaient le
     vecteur exact du fail-open (bool([]) == bool(0) == False)."""
     send = AsyncMock()
-    store = MagicMock()
+    store = DoubleMagasin()
     with patch.object(api, "get_token_store", return_value=store), \
             patch.object(api, "log_audit") as audit:
         await api._api_purge_revoked_tokens(send, json.dumps({"dry_run": bad}))
@@ -233,7 +235,7 @@ async def test_api_purge_dry_run_non_bool_400_sans_purge(bad):
 async def test_api_purge_dry_run_true_reste_simulation():
     """Régression inverse : un vrai True continue de SIMULER (purge_revoked dry_run=True)."""
     send = AsyncMock()
-    store = MagicMock()
+    store = DoubleMagasin()
     store.purge_revoked.return_value = {"status": "ok", "dry_run": True, "count": 0,
                                         "older_than_days": 30, "candidates": []}
     with patch.object(api, "get_token_store", return_value=store), \
@@ -245,7 +247,7 @@ async def test_api_purge_dry_run_true_reste_simulation():
 async def test_api_purge_dry_run_false_execute_la_purge():
     """Un vrai False (comportement destructif volontaire) déclenche bien la purge effective."""
     send = AsyncMock()
-    store = MagicMock()
+    store = DoubleMagasin()
     store.purge_revoked.return_value = {"status": "ok", "dry_run": False, "count": 0,
                                         "older_than_days": 30, "purged": []}
     with patch.object(api, "get_token_store", return_value=store), \
@@ -256,7 +258,7 @@ async def test_api_purge_dry_run_false_execute_la_purge():
 
 async def test_api_purge_storage_unavailable_503_et_audit_error():
     send = AsyncMock()
-    store = MagicMock()
+    store = DoubleMagasin()
     store.purge_revoked.return_value = {"status": "storage_unavailable", "count": 0,
                                         "older_than_days": 30, "message": "S3 down"}
     with patch.object(api, "get_token_store", return_value=store), \
@@ -269,7 +271,7 @@ async def test_api_purge_storage_unavailable_503_et_audit_error():
 async def test_api_purge_effectif_count_zero_audit_recap_uniquement():
     """Rien à purger : exactement 1 récap ('ok', count=0), aucune ligne 'deleted'."""
     send = AsyncMock()
-    store = MagicMock()
+    store = DoubleMagasin()
     store.purge_revoked.return_value = {"status": "ok", "dry_run": False, "count": 0,
                                         "older_than_days": 30, "purged": [], "message": "rien"}
     with patch.object(api, "get_token_store", return_value=store), \
@@ -286,7 +288,7 @@ async def test_route_purge_refuse_non_admin_403():
     AVANT d'atteindre le handler (garde testée au niveau du routage réel)."""
     send = AsyncMock()
     receive = AsyncMock()
-    store = MagicMock()
+    store = DoubleMagasin()
     scope = {"type": "http", "method": "POST", "path": "/admin/api/tokens/purge", "headers": []}
     token_info = {"client_name": "w", "permissions": ["write"], "allowed_resources": []}
     with patch.object(api, "get_token_store", return_value=store):
@@ -299,7 +301,7 @@ async def test_route_purge_admin_atteint_le_handler():
     """Symétrique : un token admin franchit la garde et atteint le handler de purge."""
     send = AsyncMock()
     receive = AsyncMock(return_value={"type": "http.request", "body": b'{"dry_run": true}', "more_body": False})
-    store = MagicMock()
+    store = DoubleMagasin()
     store.purge_revoked.return_value = {"status": "ok", "dry_run": True, "count": 0,
                                         "older_than_days": 30, "candidates": [], "message": "ok"}
     scope = {"type": "http", "method": "POST", "path": "/admin/api/tokens/purge", "headers": []}

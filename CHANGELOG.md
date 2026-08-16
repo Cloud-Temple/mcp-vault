@@ -2,6 +2,118 @@
 
 ## [Non publié]
 
+## [0.15.0] — 2026-08-16
+
+### Un stockage lent ne gèle plus le service — dernier lot de #110
+
+Un appel S3 bloquant ne gelait pas une requête, il gelait **tout le service**,
+sonde de santé comprise : 488 s mesurées en production. Le lot 1 (v0.10.1) a
+borné ces appels, le lot 2 (#122) en a sorti cinq de la boucle. Restaient les
+**magasins d'autorisation** — les plus fréquents, interrogés à chaque requête
+authentifiée, et jusqu'ici appelés depuis des gardes **synchrones**.
+
+**Le point de décision lit désormais la mémoire, jamais le réseau.** Les gardes
+lisent un instantané publié ; quatre tâches de fond le renouvellent hors boucle,
+à la moitié du TTL, et toutes les 10 s après une panne.
+
+⚠️ **Le fail-close de #86/#69 est conservé À L'IDENTIQUE, avec son périmètre
+d'origine** : sur le **Policy Store**, le **Mission Binding Store** et les
+décisions du **registre wrap**, un instantané périmé au-delà de son TTL ne sert
+plus aucune décision. Seul le mécanisme change — on le **constate** au lieu de le
+découvrir en tentant un GET, si bien que le refus ne dépend plus de la
+joignabilité de S3.
+
+⚠️ **Le Token Store fait exception, et c'est inchangé** : `available` y reste
+DIAGNOSTIQUE, `get_by_hash` ne le consulte pas, et un instantané périmé continue
+donc d'authentifier. Fermer ce résidu (deny-all bearer pendant une panne S3) est
+un chantier séparé, hors périmètre ici comme il l'était en #86.
+
+### Deux horloges là où il n'y en avait qu'une
+
+`_cache_time` portait deux rôles : dater l'instantané servi, et brider les
+re-tentatives après une panne. Une panne les mettait en désaccord — repousser la
+date pour ne pas marteler S3 **rajeunissait aussi** un instantané jamais
+rechargé. Un magasin en panne restait donc « frais » indéfiniment.
+
+`Freshness` les sépare (`last_success` / `last_attempt`) et passe en temps
+**monotone** : un recul d'horloge murale ne peut plus rajeunir un état périmé.
+Les expirations **métier** (`expires_at`, rétention de purge) restent en UTC
+mural — ce sont des dates, pas des durées.
+
+### Copy-on-write sur les trois magasins d'autorisation
+
+Une mutation construit un candidat, le persiste, et ne publie qu'après
+confirmation du PUT. Une garde synchrone — qui ne prend aucun verrou — ne peut
+donc plus observer une policy créée mais non persistée, ni une suppression que
+l'échec du PUT annulera. Les rollbacks disparaissent, et avec eux le risque d'en
+oublier un : c'était le cas le plus critique du Token Store, dont le code portait
+le commentaire « une révocation non persistée est CRITIQUE ».
+
+⚠️ **Le registre wrap n'en a délibérément PAS** — condition n°3 de l'arbitrage
+de #123. Aucun lecteur synchrone ne l'interroge, et la publication-après-PUT y
+détruirait un acquis de v0.14.1 : `mark_entries_revoked` conserve volontairement
+en mémoire une révocation confirmée mais non inscrite. Ses cinq points d'entrée
+sont en revanche exécutés **en entier** hors boucle, sous le verrou du magasin —
+appels OpenBao compris.
+
+### Drainage à l'arrêt
+
+Les rafraîchisseurs sont arrêtés **puis** les verrous drainés, avant le
+scellement et l'upload final. L'ordre compte : drainer d'abord laisserait un
+rafraîchissement démarrer pendant le drainage, et son écriture atterrirait après
+l'archive.
+
+### Observabilité
+
+`system_health` porte la fraîcheur de chaque magasin (`stores`, et
+`stores_stale` s'il y a lieu), et passe en `degraded` si l'un est périmé. Sans
+cela, un rafraîchisseur mort ne se verrait qu'au premier refus.
+
+### Deux affirmations fausses corrigées au passage
+
+- **Le journal d'audit ne se synchronise PAS sur S3.** `audit.py` l'annonçait
+  (« synced S3 avec le volume OpenBao »), recopié dans la documentation
+  technique. L'archive ne couvre que `openbao_data_dir` (`/openbao/file`) ;
+  `openbao-logs` est un volume DISTINCT. La trace survit à un redémarrage du
+  conteneur, pas à la perte de l'hôte — et ce n'est pas la même promesse.
+- **`MissionBindingStore.force_reload` n'a aucun appelant** en production (le
+  `force_reload` de l'API admin porte sur le cache JWKS). Sa docstring laissait
+  croire l'inverse et masquait qu'elle reste un appel S3 synchrone.
+
+### ⚠️ Un appel réseau synchrone SUBSISTE, hors périmètre
+
+Le rafraîchissement du cache JWKS (`mission_jwt.py`) fait un `httpx.get`
+**synchrone**, déclenché depuis la validation d'un jeton mission, elle-même
+appelée sans `await` dans la coroutine du PEP. Même classe de défaut que #110,
+sur un chemin aussi chaud — mais **borné** par son délai d'attente (5 s) et son
+backoff, là où les appels S3 d'origine cumulaient plusieurs minutes. Relevé en
+préparant ce lot, déclaré au contrat publié, **non corrigé** : #123 ne porte que
+sur les magasins S3.
+
+### Ce que ce lot NE ferme pas
+
+La race d'écriture multi-instance (#13/#51). Le dernier écrivain gagne toujours,
+et un rafraîchissement de fond **élargit** la fenêtre pendant laquelle deux
+instances peuvent diverger sans le savoir. Ne pas présenter ce lot comme
+« magasins multi-instance sûrs ».
+
+### Vérification
+
+- **1508 tests collectés — 1475 passent, 33 ignorés** (ces derniers exigent un
+  OpenBao réel), dont 27 nouveaux sur le rafraîchissement, et aucune tâche
+  asyncio laissée vivante en fin de suite
+- **16 mutations injectées, 16 détectées** — dont le retrait de l'offload, le
+  retour à l'horloge murale, un échec qui rajeunit l'instantané, la publication
+  avant confirmation du PUT, le retrait des gardes fail-close de création et de
+  consommation, et le retrait de la barrière de fermeture d'arrêt
+- ⚠️ **Quatre trous fermés grâce aux mutations ou à la revue, invisibles à la
+  relecture** : un test « aucun appel S3 » qui levait une `AssertionError` — que
+  `load()` avalait dans son `except Exception`, si bien qu'il restait vert alors
+  que la garde rechargeait ; l'absence totale de couverture sur la fenêtre
+  copy-on-write d'une révocation de token ; la sortie `partial_revocation`
+  annoncée comme couverte sans l'être ; et la condition n°4 publiée que rien ne
+  verrouillait
+
 ### La limite de durabilité est ARBITRÉE — elle n'est plus en attente
 
 Le critère porté à #123 par #140 était binaire : soit un effet OpenBao confirmé
@@ -22,7 +134,9 @@ où cela se produit.
 **« nous avons décidé de ne pas »**. Un appelant ne doit pas dimensionner son
 contrat en supposant que cette limite disparaîtra.
 
-**Aucun changement de comportement — documentation seule, pas de bump.**
+**Cet arbitrage seul ne change aucun comportement** — c'est une décision écrite,
+livrée d'abord en documentation. Il est publié avec 0.15.0 parce qu'il n'avait pas
+encore été tagué, non parce qu'il exigerait une version.
 
 ### Deux affirmations trop catégoriques corrigées au contrat publié
 
@@ -36,10 +150,10 @@ Relevées en revue adversariale sur le texte même de la limite :
   Le serveur traite un retour OpenBao sans exception comme une révocation
   confirmée ; il ne relit rien pour l'attester.
 
-⚠️ Les mêmes formulations catégoriques subsistent dans les `warning` renvoyés à
-l'exécution (`wrapping.py`). Elles ne changent aucune conduite attendue et ne
-justifient pas un tag à elles seules : portées en note à #123, à corriger avec le
-prochain lot de code.
+✅ **Les mêmes formulations catégoriques sont corrigées dans les `warning`
+renvoyés à l'exécution** (`wrapping.py`). Portées en note à #123 lors de
+l'arbitrage, elles sont fermées par ce lot — la condition n°4 de cet arbitrage
+est désormais verrouillée par deux tests qui interdisent tout futur affirmé.
 
 ## [0.14.1] — 2026-08-15
 
@@ -3536,7 +3650,7 @@ La console web `/admin` atteint la **parité fonctionnelle totale** avec le CLI.
 - OpenBao embedded (localhost:8200, file backend, XChaCha20-Poly1305)
 - Token Store S3 avec cache TTL 5 min
 - Policy Store S3 avec cache TTL 5 min
-- Audit Store double persistance (mémoire + JSONL)
+- Audit Store : cache mémoire (ring buffer, volatile) + JSONL, **seul support persistant**
 
 ### Documentation
 - ARCHITECTURE.md v0.2.2-draft : spécification complète
