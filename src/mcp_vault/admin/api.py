@@ -593,7 +593,7 @@ async def _api_create_token(send, body):
         if not policy_found:
             return await _json_response(send, 400, {"status": "error", "message": f"Policy '{policy_id}' non trouvée"})
 
-    result = store.create(client_name, permissions, allowed_resources,
+    result = await store.acreate(client_name, permissions, allowed_resources,
                           expires_in_days=expires_in_days, email=email,
                           policy_id=policy_id)
     if result.get("status") == "error":
@@ -647,7 +647,7 @@ async def _api_update_token(send, hash_prefix, body):
         if not policy_found:
             return await _json_response(send, 400, {"status": "error", "message": f"Policy '{policy_id}' non trouvée"})
 
-    result = store.update(
+    result = await store.aupdate(
         hash_prefix=hash_prefix,
         policy_id=policy_id,
         permissions=permissions,
@@ -668,7 +668,7 @@ async def _api_revoke_token(send, hash_prefix):
     if not store:
         return await _json_response(send, 400, {"status": "error", "message": "S3 non configuré"})
 
-    result = store.revoke(hash_prefix)
+    result = await store.arevoke(hash_prefix)
     revoke_status = result.get("status")
     # Normalise le corps de réponse : status="error" dans tous les cas d'échec
     # (le status interne dict est distinct du status JSON retourné au client)
@@ -718,7 +718,7 @@ async def _api_purge_revoked_tokens(send, body):
         return await _json_response(send, 400, {"status": "error",
                 "message": "dry_run doit être un booléen (true/false)"})
 
-    result = store.purge_revoked(older_than_days, dry_run=dry_run)
+    result = await store.apurge_revoked(older_than_days, dry_run=dry_run)
 
     if not dry_run and result.get("status") == "ok":
         # Audit basé sur ce qui a RÉELLEMENT été purgé (pas sur un dry-run préalable
@@ -1055,7 +1055,7 @@ async def _api_create_policy(send, body):
     if not policy_id:
         return await _json_response(send, 400, {"status": "error", "message": "policy_id requis"})
 
-    result = store.create(
+    result = await store.acreate(
         policy_id=policy_id,
         description=data.get("description", ""),
         allowed_tools=data.get("allowed_tools", []),
@@ -1098,7 +1098,7 @@ async def _api_delete_policy(send, policy_id):
     if not store:
         return await _json_response(send, 400, {"status": "error", "message": "S3 non configuré"})
 
-    result = store.delete(policy_id)
+    result = await store.adelete(policy_id)
     if result is True:
         log_audit("policy_delete", "deleted", detail=f"policy={policy_id}")
         await _json_response(send, 200, {"status": "deleted", "policy_id": policy_id})
@@ -1163,7 +1163,7 @@ async def _api_create_mission_binding(send, body):
     # l'ancien `data.get("policy_id", "") or ""` blanchissait silencieusement
     # toute valeur falsy (ex. `false`) en "" — un binding SANS policy était créé
     # alors qu'une référence (même malformée) avait été fournie.
-    result = store.create(
+    result = await store.acreate(
         tenant_id=data.get("tenant_id", ""),
         allowed_resources=data.get("allowed_resources", []),
         permissions=data.get("permissions", []),
@@ -1217,7 +1217,7 @@ async def _api_delete_mission_binding(send, tenant_id):
     if not store:
         return await _json_response(send, 400, {"status": "error",
                 "message": "Mission Binding Store non configuré"})
-    result = store.delete(tenant_id)
+    result = await store.adelete(tenant_id)
     if result is True:
         did = _binding_decision_id()
         log_audit("mission_binding_delete", "deleted",
@@ -1262,7 +1262,7 @@ async def _api_purge_mission_bindings(send, body):
         return await _json_response(send, 400, {"status": "error",
                 "message": "dry_run doit être un booléen (true/false)"})
 
-    result = store.purge(older_than_days, dry_run=dry_run)
+    result = await store.apurge(older_than_days, dry_run=dry_run)
 
     if not dry_run and result.get("status") == "ok":
         did = _binding_decision_id()

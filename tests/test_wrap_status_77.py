@@ -158,7 +158,7 @@ def test_status_survives_malformed_entry_via_real_registry():
     from mcp_vault.vault import wrapping as w
     reg = w.WrapRegistry(MagicMock())
     reg._wraps = [{}]          # entrée corrompue (pas de clé operation_id)
-    reg._cache_time = 9e18     # cache "frais" → pas de refresh S3
+    reg.freshness.mark_success()  # instantané frais (#123)
     reg._last_load_ok = True
     with patch.object(w, "get_wrap_registry", return_value=reg):
         res = _run(w.status_by_operation_id("op-1", "m1"))

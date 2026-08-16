@@ -72,7 +72,8 @@ services:
     volumes:
       # Persistance locale du file backend OpenBao (cache crash recovery)
       - openbao-data:/openbao/file
-      # Logs OpenBao (optionnel)
+      # Logs OpenBao ET `audit-mcp.jsonl` — seul support persistant du journal
+      # d'audit applicatif, non couvert par l'archive S3. PAS optionnel.
       - openbao-logs:/openbao/logs
     cap_add:
       - IPC_LOCK  # Permet à OpenBao de verrouiller la mémoire (mlock)
@@ -106,6 +107,9 @@ services:
 volumes:
   openbao-data:
     driver: local
+  # ⚠️ Porte aussi `audit-mcp.jsonl`, le SEUL support persistant du journal
+  # d'audit applicatif, et il n'est pas couvert par l'archive S3 (qui ne
+  # compresse que `openbao-data`). Le supprimer détruit la trace d'audit.
   openbao-logs:
     driver: local
 

@@ -308,7 +308,7 @@ sous `operation_pending` : le blocage est le même, seul le code diffère.
 > **tenons pour** morte — le serveur traite un retour OpenBao sans exception
 > comme une révocation confirmée, il ne relit rien pour l'attester.
 
-> `secret_wrap_status` ne mute ni OpenBao ni le registre (cache et journal d'audit, eux, bougent). Il ne distingue **pas** le transitoire du durable : instantané best-effort, et une panne S3 pendant la fenêtre de cache n'est même pas détectée.
+> `secret_wrap_status` ne mute ni OpenBao ni le registre (cache et journal d'audit, eux, bougent). Il ne distingue **pas** le transitoire du durable : instantané best-effort. ⚠️ *Corrigé en v0.15.0* — une panne S3 survenant pendant la fenêtre de cache n'était alors **pas détectée du tout** ; le rafraîchisseur de fond la constate désormais à sa prochaine tentative (mi-TTL, puis toutes les 10 s), et `status` bascule en `backend_unavailable`. La détection n'est donc pas instantanée, mais elle a lieu.
 
 #### Ce que le registre PROUVE — et ce qu'il ne prouve pas
 
@@ -601,6 +601,73 @@ PkiMiddleware → AdminMiddleware → HealthCheckMiddleware → AuthMiddleware �
 
 `PkiMiddleware` (v0.5.0) est la couche la plus externe — intercepte `/acme/*` et `/pki/ca/*.pem` avant l'auth (endpoints publics par design PKI/ACME).
 
+### Le point de décision lit la mémoire, jamais le réseau *(v0.15.0, #123)*
+
+Un appel S3 bloquant ne gelait pas une requête : il gelait **le service entier**,
+sonde de santé comprise — 488 s mesurées en production (#110). La cause est
+toujours la même : boto3 est synchrone, et un appel synchrone dans la boucle
+asyncio monopolise l'unique thread qui sert toutes les requêtes.
+
+Le lot 1 (v0.10.1) a borné la durée de ces appels, le lot 2 (#122) en a sorti
+cinq de la boucle. Ce lot ferme les derniers, et ce sont les plus fréquents : les
+**magasins d'autorisation**, interrogés à chaque requête authentifiée.
+
+> **Plus aucun appel S3 ne part d'un point de décision.** Les gardes
+> (`check_policy`, `check_path_policy`, `check_wrap_*`, `get_by_hash`,
+> `resolve`) lisent un **instantané publié en mémoire**. Des tâches de fond — une
+> par magasin — le renouvellent **hors boucle**, à la moitié du TTL, et toutes
+> les 10 s après une panne.
+
+⚠️ **Un appel réseau synchrone SUBSISTE sur le chemin d'authentification, et ce
+lot ne le ferme pas.** Le rafraîchissement du cache JWKS (`mission_jwt.py`,
+`httpx.get` synchrone, délai d'attente 5 s par défaut) est déclenché depuis la
+validation d'un jeton mission, elle-même appelée sans `await` dans la coroutine
+du PEP. Même classe de défaut que #110, sur un chemin aussi chaud — mais **borné**
+par son délai d'attente et son backoff, là où les appels S3 d'origine cumulaient
+plusieurs minutes. Hors périmètre de #123, qui ne porte que sur les magasins S3 :
+à traiter séparément.
+
+| Ce qui change | Ce qui ne change pas |
+| --- | --- |
+| Le chargement quitte la boucle | Le **fail-close** de #86/#69 : sur le Policy Store, le Mission Binding Store et le registre wrap, un instantané périmé au-delà de son TTL ne sert plus aucune décision |
+| Les mutations aussi (`acreate`, `adelete`, `arevoke`, …) | La **forme**, les **codes d'erreur** et les **signatures** des outils existants. Deux évolutions bornées : `system_health` gagne `stores` / `stores_stale`, et le **texte** du `warning` de révocation énonce désormais l'incertitude au lieu d'un futur certain |
+| Une opération wrap est atomique vis-à-vis d'un rechargement | La posture du Token Store : `available` y reste **diagnostique**, un instantané périmé continue d'authentifier |
+
+**Deux horloges, pas une.** Le code historique n'en portait qu'une, qui servait à
+la fois à dater l'instantané et à brider les re-tentatives. Une panne les mettait
+en désaccord : repousser la date pour ne pas marteler S3 rajeunissait aussi,
+mécaniquement, un instantané jamais rechargé — un magasin en panne restait donc
+« frais » indéfiniment. Elles sont désormais séparées, et en temps **monotone** :
+un recul d'horloge murale ne peut plus rajeunir un état périmé.
+
+**Copy-on-write** sur les trois magasins d'autorisation : une mutation construit
+un candidat, le persiste, et ne le publie qu'après confirmation du PUT. Une garde
+synchrone ne peut donc plus observer une policy créée mais non persistée, ni une
+suppression que l'échec du PUT annulera. Les rollbacks disparaissent — donc aussi
+le risque d'en oublier un.
+
+> ⚠️ **Le registre wrap n'a délibérément PAS de copy-on-write.** Aucun lecteur
+> synchrone ne l'interroge, et la publication-après-PUT y détruirait un acquis de
+> v0.14.1 : `mark_entries_revoked` conserve **volontairement** en mémoire une
+> révocation confirmée mais non inscrite, parce que la mémoire y dit la vérité et
+> que c'est le support durable qui est en retard.
+
+**Observabilité.** `system_health` porte désormais la fraîcheur de chaque magasin
+(`stores`, et `stores_stale` s'il y a lieu). Sans cela, un rafraîchisseur mort ne
+se verrait qu'au premier refus : le service répondrait normalement, puis
+refuserait tout d'un coup.
+
+> ⚠️ **Les sondes HTTP `/health` et `/healthz` sont volontairement INCHANGÉES.**
+> Un magasin périmé n'y bascule pas le conteneur en `unhealthy` : redémarrer ne
+> réparerait pas un stockage injoignable, et le `HEALTHCHECK` déclencherait une
+> boucle de redémarrage pendant l'incident. La péremption est une information
+> d'exploitation — elle vit sur `system_health`, pas sur la sonde d'orchestration.
+
+⚠️ **Limite inchangée** : rien ici ne ferme la race d'écriture multi-instance
+(#13/#51). Le dernier écrivain gagne toujours, et un rafraîchissement de fond
+élargit même la fenêtre pendant laquelle deux instances peuvent diverger sans le
+savoir.
+
 ### Sondes de santé *(v0.11.0, #103)*
 
 Deux questions distinctes, deux contrats :
@@ -649,7 +716,7 @@ Les clés unseal d'OpenBao sont protégées par **séparation physique à 3 fact
 
 ---
 
-## 📋 Tests (~600 tests, zéro mocking)
+## 📋 Tests (~1500 unitaires mockés + 349 e2e réels)
 
 > 📖 Voir [tests/README.md](tests/README.md) pour le guide complet d'exécution.
 
@@ -706,8 +773,8 @@ mcp-vault/
 ├── requirements.lock         # Dépendances pinnées (versions exactes)
 ├── VERSION                   # version courante du service
 ├── DESIGN/mcp-vault/
-│   ├── ARCHITECTURE.md       # Spécification détaillée (v0.12.0)
-│   ├── TECHNICAL.md          # Documentation technique (v0.12.0)
+│   ├── ARCHITECTURE.md       # Spécification détaillée (v0.15.0)
+│   ├── TECHNICAL.md          # Documentation technique (v0.15.0)
 │   └── SECURITY_AUDIT.md     # Rapport d'audit consolidé (60 findings V2.1)
 ├── scripts/
 │   ├── mcp_cli.py            # CLI entry point
@@ -763,4 +830,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.14.1
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.15.0

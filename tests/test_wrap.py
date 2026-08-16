@@ -53,7 +53,12 @@ def _make_registry(save_ok=True):
     class InMemoryRegistry(WrapRegistry):
         def __init__(self):
             self._wraps = []
-            self._cache_time = float("inf")
+            import asyncio
+            from mcp_vault.store_refresh import Freshness
+            self.freshness = Freshness()
+            self.freshness.mark_success()  # instantané frais (#123)
+            self._last_load_ok = getattr(self, '_last_load_ok', True)
+            self.refresh_lock = asyncio.Lock()
             self._save_result = save_ok
 
         def load(self):
@@ -453,7 +458,12 @@ def test_mark_active_s3_failure_revokes():
     class PartialFailRegistry(_make_registry().__class__):
         def __init__(self):
             self._wraps = []
-            self._cache_time = float("inf")
+            import asyncio
+            from mcp_vault.store_refresh import Freshness
+            self.freshness = Freshness()
+            self.freshness.mark_success()  # instantané frais (#123)
+            self._last_load_ok = getattr(self, '_last_load_ok', True)
+            self.refresh_lock = asyncio.Lock()
             self._call_count = 0
 
         def _save(self) -> bool:

@@ -367,7 +367,12 @@ class TestConsumeLogNoInjection:
                     "created_at": "", "expires_at": "", "status": "active",
                     "tenant_id": "", "expected_aud": "",
                 }]
-                self._cache_time = float("inf")
+                import asyncio
+                from mcp_vault.store_refresh import Freshness
+                self.freshness = Freshness()
+                self.freshness.mark_success()  # instantané frais (#123)
+                self._last_load_ok = getattr(self, '_last_load_ok', True)
+                self.refresh_lock = asyncio.Lock()
 
             def load(self):
                 pass
@@ -409,7 +414,12 @@ class TestRegistryAmbiguityLogNoInjection:
         class _Reg(WrapRegistry):
             def __init__(self, wraps):
                 self._wraps = wraps
-                self._cache_time = float("inf")
+                import asyncio
+                from mcp_vault.store_refresh import Freshness
+                self.freshness = Freshness()
+                self.freshness.mark_success()  # instantané frais (#123)
+                self._last_load_ok = getattr(self, '_last_load_ok', True)
+                self.refresh_lock = asyncio.Lock()
 
             def load(self):
                 pass

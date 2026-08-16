@@ -63,7 +63,12 @@ def _registre(entrees=(), *, echec_a_partir_de=0):
     class EnMemoire(WrapRegistry):
         def __init__(self):
             self._wraps = [dict(e) for e in entrees]
-            self._cache_time = float("inf")
+            import asyncio
+            from mcp_vault.store_refresh import Freshness
+            self.freshness = Freshness()
+            self.freshness.mark_success()  # instantané frais (#123)
+            self._last_load_ok = getattr(self, '_last_load_ok', True)
+            self.refresh_lock = asyncio.Lock()
             self._last_load_ok = True
             self.sauvegardes = 0
 
@@ -348,9 +353,20 @@ class TestReponseIncompleteApresAppel:
             f"{appels} occurrences de `blocking_intent_status(` (1 définition + "
             f"1 appel attendus). Un appel supplémentaire fermerait un verbe que "
             f"`mcp-mission` doit garder ouvert sur une clé engagée.")
-        assert "registry.blocking_intent_status(" in src.split("async def wrap_secret")[1], (
-            "l'unique appel n'est plus dans `wrap_secret` : la garde a changé de "
-            "périmètre")
+        # ⚠️ #123 : le corps de `wrap_secret` a été renommé
+        # `_wrap_secret_blocking` pour s'exécuter hors de la boucle ; `wrap_secret`
+        # n'est plus qu'une façade qui l'appelle. La garde vit donc dans le corps.
+        # La propriété vérifiée est INCHANGÉE : l'unique appel est sur le chemin de
+        # CRÉATION, et nulle part ailleurs.
+        corps_creation = src.split("def _wrap_secret_blocking")[1]
+        assert "registry.blocking_intent_status(" in corps_creation, (
+            "l'unique appel n'est plus sur le chemin de création : la garde a "
+            "changé de périmètre")
+        # Et il est bien AVANT la façade publique, donc dans le corps lui-même —
+        # sans quoi le `split` ci-dessus attraperait tout le reste du module.
+        assert (corps_creation.index("registry.blocking_intent_status(")
+                < corps_creation.index("async def wrap_secret")), (
+            "l'appel est hors du corps de création")
 
     def test_une_entree_CORROMPUE_bloque_au_lieu_de_liberer(self):
         """Une entrée illisible est une raison de REFUSER, jamais d'autoriser.
@@ -559,6 +575,43 @@ class TestRevocationConfirmeeMaisNonPersistee:
     #123). Il fait la seule chose possible sans second support : **le dire**.
     """
 
+    # Mots qui affirment un futur que le code ne peut pas connaître. Un échec
+    # d'écriture ne prouve pas que rien n'a été écrit (un délai d'attente peut
+    # suivre un PUT accepté), et le registre est en dernier-écrivain-gagne.
+    _CERTITUDES_INTERDITES = ("réapparaîtra", "réapparaîtront",
+                              "ressuscitera", "ressusciteront")
+
+    def test_le_warning_dit_l_INCERTITUDE_jamais_une_certitude(self):
+        """CONDITION N°4 de l'arbitrage publié de #123, rendue exécutable.
+
+        Nous avons publié aux trois équipes : « ne jamais promettre l'état
+        durable ». Le code disait pourtant « au redémarrage l'entrée réapparaîtra
+        comme non révoquée » — une certitude que rien ne fonde.
+
+        ⚠️ Ce test porte sur la PROPRIÉTÉ (pas de futur affirmé, incertitude
+        énoncée), pas sur la prose : reformuler le message reste libre, affirmer
+        un état durable ne l'est pas. Trouvé par mutation — aucun test ne
+        verrouillait cette condition, alors qu'elle est publiée.
+        """
+        r, _ = self._revoquer_sans_persistance()
+        warning = r["warning"]
+        for mot in self._CERTITUDES_INTERDITES:
+            assert mot not in warning, (
+                f"le warning affirme un futur ({mot!r}) : condition n°4 violée — "
+                f"{warning!r}")
+        assert "INDÉTERMINÉ" in warning, (
+            f"le warning n'énonce pas l'incertitude de l'état durable : {warning!r}")
+
+    def test_le_warning_de_la_COMPENSATION_dit_aussi_l_incertitude(self):
+        """Même règle sur `secret_wrap_lookup` : c'est le verbe où l'appelant
+        gère déjà un incident, donc le pire endroit où lui promettre un futur."""
+        r = self._compenser_sans_persistance()
+        warning = r["warning"]
+        for mot in self._CERTITUDES_INTERDITES:
+            assert mot not in warning, (
+                f"le warning de compensation affirme un futur ({mot!r}) — {warning!r}")
+        assert "INDÉTERMINÉ" in warning, warning
+
     def _entree_active(self):
         return {
             "operation_id": OP, "mission_id": MISSION, "accessor": "ACC-1",
@@ -566,6 +619,20 @@ class TestRevocationConfirmeeMaisNonPersistee:
             "created_at": "", "expires_at": "2099-01-01T00:00:00+00:00",
             "status": "active",
         }
+
+    def _revoquer_sans_persistance(self):
+        """Révocation OpenBao confirmée, écriture du registre en échec."""
+        r, _, client = self._revoquer(echec_persistance=True)
+        return r, client
+
+    def _compenser_sans_persistance(self):
+        """Idem, par le verbe de compensation."""
+        from mcp_vault.vault import wrapping as w
+        registre = _registre([self._entree_active()], echec_a_partir_de=1)
+        client = MagicMock()
+        with patch.object(w, "get_wrap_registry", return_value=registre), \
+             patch.object(w, "_get_client", return_value=client):
+            return run(w.lookup_and_revoke_by_operation_id(OP, MISSION))
 
     def _revoquer(self, *, echec_persistance: bool):
         from mcp_vault.vault import wrapping as w
@@ -663,6 +730,38 @@ class TestRevocationConfirmeeMaisNonPersistee:
         assert "redémarrage" in r.get("warning", ""), (
             f"le signal doit avoir la MÊME forme sur les deux verbes — un "
             f"`warning`, pas un message rallongé : {r!r}")
+
+    def test_le_signal_survit_a_la_sortie_PARTIAL_REVOCATION(self):
+        """⚠️ Trou relevé en revue : la sortie `partial_revocation` était annoncée
+        comme couverte, elle ne l'était pas.
+
+        Deux accessors distincts : le premier est révoqué mais son inscription
+        échoue, le second échoue côté OpenBao. La compensation sort donc en
+        `partial_revocation` — et c'est le pire moment pour taire une révocation
+        non inscrite, puisque l'appelant y gère déjà un incident partiel.
+        """
+        from mcp_vault.vault import wrapping as w
+
+        premiere = self._entree_active()
+        seconde = dict(self._entree_active(), accessor="ACC-2")
+        # 1re sauvegarde (celle du 1er accessor révoqué) en échec.
+        registre = _registre([premiere, seconde], echec_a_partir_de=1)
+        client = MagicMock()
+        client.auth.token.revoke_accessor.side_effect = [
+            None,                                   # ACC-1 : révoqué côté coffre
+            RuntimeError("OpenBao injoignable"),    # ACC-2 : échec réel
+        ]
+        with patch.object(w, "get_wrap_registry", return_value=registre), \
+             patch.object(w, "_get_client", return_value=client):
+            r = run(w.lookup_and_revoke_by_operation_id(OP, MISSION))
+
+        assert r.get("error_type") == "partial_revocation", r
+        assert r.get("registry_persisted") is False, (
+            f"la sortie partial_revocation TAIT une révocation non inscrite — "
+            f"c'est précisément le cas où l'appelant en a le plus besoin : {r!r}")
+        assert r.get("count_not_persisted", 0) >= 1, r
+        for mot in self._CERTITUDES_INTERDITES:
+            assert mot not in r.get("warning", ""), r
 
     def test_la_compensation_NOMINALE_reste_muette(self):
         """Anti-complaisance, en miroir du test précédent."""

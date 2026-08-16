@@ -157,12 +157,24 @@ async def system_health() -> dict:
     s3_ok, s3_detail = await check_s3_connectivity()
 
     all_ok = openbao_ok and s3_ok
+    # Fraîcheur des magasins (issue #123). Depuis que les décisions lisent un
+    # instantané publié, un rafraîchisseur de fond mort ne se voit plus : le
+    # service répond normalement jusqu'à la péremption, puis refuse tout d'un
+    # coup. Ce champ rend l'écart visible AVANT le fail-close.
+    from .store_refresh import freshness_report
+    magasins = freshness_report()
+    perimes = [nom for nom, vue in magasins.items() if vue.get("stale")]
+    if perimes:
+        all_ok = False
+
     return {
         "status": "ok" if all_ok else "degraded",
         "services": {
             "openbao": {"status": "ok" if openbao_ok else "error", "detail": openbao_detail},
             "s3": {"status": "ok" if s3_ok else "error", "detail": s3_detail},
         },
+        "stores": magasins,
+        **({"stores_stale": perimes} if perimes else {}),
     }
 
 
@@ -1087,7 +1099,7 @@ async def policy_create(policy_id: str, description: str = "",
     # `is None` STRICT (round 1 diff review #86 Lot 3) — jamais `x or []` : une
     # valeur falsy invalide (ex. False au lieu d'une liste) doit REMONTER jusqu'au
     # validateur du store (qui la rejette), pas être blanchie en [] avant.
-    result = store.create(
+    result = await store.acreate(
         policy_id=policy_id,
         description=description,
         allowed_tools=[] if allowed_tools is None else allowed_tools,
@@ -1186,7 +1198,7 @@ async def policy_delete(policy_id: str, confirm: bool = False) -> dict:
     if not store:
         return {"status": "error", "message": "Policy Store non configuré (S3 requis)"}
 
-    result = store.delete(policy_id)
+    result = await store.adelete(policy_id)
     if result is True:
         return _r("policy_delete", {"status": "deleted", "policy_id": policy_id},
                   detail=f"policy={policy_id}")
@@ -1626,7 +1638,7 @@ async def token_update(hash_prefix: str, policy_id: str = "",
         else:
             new_resources = [v.strip() for v in vaults.split(",") if v.strip()]
 
-    result = store.update(
+    result = await store.aupdate(
         hash_prefix=hash_prefix,
         policy_id=new_policy,
         permissions=new_perms,

@@ -26,19 +26,21 @@ Topologie multi-instance (reco Codex #69) :
 Pattern calqué sur PolicyStore/TokenStore (singleton + cache TTL + rollback sur _save).
 """
 
-import copy
+import asyncio
+import functools
 import hashlib
 import json
 import logging
 import re
 import sys
-import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 logger = logging.getLogger("mcp-vault.mission-binding-store")
 
+from ..async_offload import run_blocking
 from ..config import get_settings
+from ..store_refresh import RETRY_AFTER_ERROR_SECONDS, Freshness, magasin_ferme
 from ..vault_ids import is_valid_vault_id
 
 # Format défensif d'un tenant_id utilisé comme identité REST/CLI et clé de binding.
@@ -55,7 +57,10 @@ _MAX_ALLOWED_RESOURCES = 100
 
 # Intervalle minimal de re-tentative de chargement après un échec (store indisponible).
 # Évite de marteler S3 à chaque requête tout en récupérant vite dès qu'il revient.
-_RETRY_AFTER_ERROR_SECONDS = 10.0
+# Conservé sous son nom historique : plusieurs bancs l'importent pour vérifier la
+# cadence de re-tentative. La valeur vit désormais dans `store_refresh`, partagée
+# par les quatre magasins (issue #123).
+_RETRY_AFTER_ERROR_SECONDS = RETRY_AFTER_ERROR_SECONDS
 
 
 class MissionBindingStoreUnavailable(Exception):
@@ -268,8 +273,12 @@ class MissionBindingStore:
         # Identité canonique de l'instance = source unique d'audience (#47).
         self.instance_id = settings.resolved_mission_aud
         self.s3_key = f"{self.S3_KEY_PREFIX}{_encode_instance_id(self.instance_id)}.json"
+        # ⚠️ INSTANTANÉ PUBLIÉ (#123) : jamais muté en place. Une mutation
+        # construit un candidat, le persiste, et ne réassigne cet attribut
+        # qu'après confirmation du PUT (copy-on-write).
         self._bindings: dict = {}  # tenant_id → binding
-        self._cache_time: float = 0.0
+        self.freshness = Freshness()
+        self.refresh_lock = asyncio.Lock()
         self._available: bool = True
         self._last_error: str = ""
 
@@ -312,7 +321,9 @@ class MissionBindingStore:
         """Passe le store en état INDISPONIBLE observable (sans écraser le cache mémoire)."""
         self._available = False
         self._last_error = msg
-        self._cache_time = time.time()  # throttle la re-tentative (_maybe_refresh)
+        # Seule `last_attempt` avance : brider la re-tentative ne doit pas
+        # rajeunir un instantané qui n'a pas été rechargé (#123).
+        self.freshness.mark_failure(msg)
         logger.error(
             "Mission Binding Store INVALIDE key=%s : %s — runtime 503 + mutations refusées "
             "jusqu'à rétablissement", self.s3_key, msg,
@@ -334,8 +345,10 @@ class MissionBindingStore:
             raw = resp["Body"].read().decode()
         except Exception as e:
             if self._is_missing_key_error(e):
+                # Absence nominale (1er démarrage) : chargement RÉUSSI d'un
+                # magasin vide, la fraîcheur doit avancer (#123).
                 self._bindings = {}
-                self._cache_time = time.time()
+                self.freshness.mark_success()
                 self._available = True
                 self._last_error = ""
                 return
@@ -372,19 +385,31 @@ class MissionBindingStore:
             validated[tid] = b
 
         self._bindings = validated
-        self._cache_time = time.time()
+        self.freshness.mark_success()
         self._available = True
         self._last_error = ""
 
     def force_reload(self):
-        """Force un rechargement immédiat (ignore le TTL). Utile après mutation / reload admin."""
-        self._cache_time = 0.0
+        """Force un rechargement immédiat (ignore le TTL).
+
+        ⚠️ **Aucun appelant en production aujourd'hui** (vérifié : le
+        `force_reload()` de l'API admin porte sur le cache JWKS, pas sur ce
+        magasin). Conservée pour un usage d'exploitation ponctuel.
+
+        ⚠️ Appel S3 **SYNCHRONE**. L'appeler depuis la boucle réintroduirait
+        exactement le gel de #110 que #123 vient de fermer : le rechargement
+        appartient au rafraîchisseur de fond, et tout appel ici doit rester hors
+        boucle (démarrage, script d'exploitation) ou passer par `run_blocking`.
+        """
         self.load()
 
-    def _save(self) -> bool:
-        """Sauvegarde les bindings sur S3 (PUT = SigV2). Retourne True/False.
+    def _save(self, snapshot: dict) -> bool:
+        """Persiste le SNAPSHOT CANDIDAT sur S3 (PUT = SigV2). Ne publie rien.
 
-        Les appelants DOIVENT rollback l'état mémoire si False.
+        ⚠️ Prend le candidat en argument et ne lit JAMAIS `self._bindings`
+        (#123) : la publication appartient à l'appelant, et seulement après un
+        True. `resolve()` ne prend aucun verrou — sans cela il pourrait servir
+        un binding créé mais non persisté.
         LIMITATION V1 — last-write-wins intra-instance (issue #13/#51) : pas d'ETag/CAS.
         Le fichier par instance élimine le clobbering cross-instance ; deux writers sur la
         MÊME instance restent en last-write-wins (rare, single-process en pratique).
@@ -392,7 +417,7 @@ class MissionBindingStore:
         try:
             s3 = self._get_s3_data()
             data = json.dumps(
-                {"instance_id": self.instance_id, "bindings": list(self._bindings.values())},
+                {"instance_id": self.instance_id, "bindings": list(snapshot.values())},
                 indent=2, default=str,
             )
             s3.put_object(
@@ -413,18 +438,30 @@ class MissionBindingStore:
             )
             self._available = False
             self._last_error = f"S3 PUT: {type(e).__name__}"
-            self._cache_time = time.time()
+            self.freshness.mark_failure(self._last_error)
             return False
 
     def _maybe_refresh(self):
-        """Rafraîchit le cache si le TTL est dépassé (ou plus vite si état invalide)."""
-        elapsed = time.time() - self._cache_time
-        if self._available:
-            if elapsed > self.CACHE_TTL:
-                self.load()
-        else:
-            if elapsed > _RETRY_AFTER_ERROR_SECONDS:
-                self.load()
+        """
+        Constate la fraîcheur de l'instantané publié. **MÉMOIRE PURE** — aucun
+        appel réseau (#123, voir `store_refresh`).
+
+        Le fail-close de #69/#86 est conservé à l'identique : un instantané
+        périmé au-delà du TTL ne sert plus aucune décision. Seul le mécanisme
+        change — on le constate au lieu de le découvrir en tentant un GET
+        SYNCHRONE depuis la boucle.
+        """
+        if self._available and self.freshness.is_stale(self.CACHE_TTL):
+            self._available = False
+            self._last_error = (
+                "instantané périmé : aucun rechargement réussi depuis plus de "
+                f"{self.CACHE_TTL:.0f}s"
+            )
+            logger.error(
+                "Mission Binding Store PÉRIMÉ key=%s (%s) — runtime 503 jusqu'à "
+                "un rechargement réussi du rafraîchisseur de fond",
+                self.s3_key, self._last_error,
+            )
 
     def _ensure_available(self):
         """Rafraîchit puis lève si le store est indisponible (pour resolve/mutations)."""
@@ -534,11 +571,15 @@ class MissionBindingStore:
             "created_by": created_by,
         }
 
-        self._bindings[tenant_id] = binding
-        if not self._save():
-            del self._bindings[tenant_id]  # rollback mémoire
+        # Copy-on-write (#123) : publication seulement après PUT confirmé. Plus
+        # de rollback à écrire — donc plus de rollback à oublier — et `resolve()`,
+        # qui ne prend aucun verrou, ne peut pas servir un binding non persisté.
+        candidate = dict(self._bindings)
+        candidate[tenant_id] = binding
+        if not self._save(candidate):
             return {"status": "error", "error_type": "storage_unavailable",
                     "message": "Impossible de créer le binding (S3 indisponible)"}
+        self._bindings = candidate
 
         return {"status": "created", **binding}
 
@@ -588,11 +629,15 @@ class MissionBindingStore:
             return "storage_unavailable"
         if tenant_id not in self._bindings:
             return False
-        backup = self._bindings.pop(tenant_id)
-        if not self._save():
-            self._bindings[tenant_id] = backup  # rollback
+        # Copy-on-write (#123) : le binding reste servi tant que sa suppression
+        # n'est pas persistée. Une disparition transitoire ferait refuser un
+        # accès légitime pendant tout l'aller-retour S3.
+        candidate = dict(self._bindings)
+        del candidate[tenant_id]
+        if not self._save(candidate):
             logger.error("Suppression binding '%s' non persistée — S3 indisponible", tenant_id)
             return "storage_error"
+        self._bindings = candidate
         return True
 
     def purge(self, older_than_days: int = 30, dry_run: bool = False) -> dict:
@@ -639,20 +684,57 @@ class MissionBindingStore:
                     "older_than_days": older_than_days, "purged": [],
                     "message": "Aucun binding expiré à purger (rétention respectée)"}
 
-        removed = {tid: copy.deepcopy(self._bindings[tid]) for tid, _ in candidates}
-        for tid in removed:
-            del self._bindings[tid]
+        # Copy-on-write (#123) : cf. delete(). La copie profonde d'avant servait
+        # à restaurer les entrées supprimées ; il n'y a plus de rollback. Le
+        # candidat doit en revanche être une copie DISTINCTE, sans quoi la
+        # suppression toucherait l'instantané en cours d'utilisation.
+        candidate = dict(self._bindings)
+        for tid, _ in candidates:
+            del candidate[tid]
 
-        if not self._save():
-            self._bindings.update(removed)  # rollback
-            logger.error("Purge de %d binding(s) expiré(s) non persistée — S3 indisponible", len(removed))
+        if not self._save(candidate):
+            logger.error("Purge de %d binding(s) expiré(s) non persistée — S3 indisponible", len(candidates))
             return {"status": "error", "error_type": "storage_unavailable", "dry_run": False,
                     "count": 0, "older_than_days": older_than_days,
                     "message": "Purge non persistée — S3 indisponible"}
 
+        self._bindings = candidate
+
         return {"status": "ok", "dry_run": False, "count": len(summary),
                 "older_than_days": older_than_days, "purged": summary,
                 "message": f"{len(summary)} binding(s) expiré(s) purgé(s)"}
+
+    # ── Façades async (issue #123) ───────────────────────────────────
+    #
+    # Les mutations font un PUT S3 SYNCHRONE ; appelées depuis un outil MCP ou
+    # l'API admin (tous `async`), elles gèlent la boucle. Ces façades les
+    # exécutent hors boucle, sous le verrou du magasin. Elles n'ajoutent AUCUNE
+    # logique : l'implémentation reste la méthode synchrone, seule couverte par
+    # les bancs.
+
+    async def acreate(self, *args, **kwargs) -> dict:
+        """`create()` hors boucle, sérialisé par le verrou du magasin."""
+        if magasin_ferme(self):
+            return {"status": "error", "error_type": "storage_unavailable",
+                    "message": "Arrêt en cours — aucune mutation acceptée"}
+        async with self.refresh_lock:
+            return await run_blocking(functools.partial(self.create, *args, **kwargs))
+
+    async def adelete(self, tenant_id: str):
+        """`delete()` hors boucle, sérialisé par le verrou du magasin."""
+        if magasin_ferme(self):
+            return "storage_unavailable"
+        async with self.refresh_lock:
+            return await run_blocking(functools.partial(self.delete, tenant_id))
+
+    async def apurge(self, *args, **kwargs) -> dict:
+        """`purge()` hors boucle, sérialisé par le verrou du magasin."""
+        if magasin_ferme(self):
+            return {"status": "error", "error_type": "storage_unavailable",
+                    "dry_run": False, "count": 0,
+                    "message": "Arrêt en cours — aucune mutation acceptée"}
+        async with self.refresh_lock:
+            return await run_blocking(functools.partial(self.purge, *args, **kwargs))
 
     def count(self) -> int:
         """Nombre de bindings actifs (activés et non expirés) de cette instance."""

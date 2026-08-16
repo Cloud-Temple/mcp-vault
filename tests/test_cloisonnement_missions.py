@@ -63,7 +63,12 @@ Registre en mémoire qui COMPTE ses sauvegardes.
     class EnMemoire(WrapRegistry):
         def __init__(self):
             self._wraps = [dict(e) for e in entrees]
-            self._cache_time = float("inf")
+            import asyncio
+            from mcp_vault.store_refresh import Freshness
+            self.freshness = Freshness()
+            self.freshness.mark_success()  # instantané frais (#123)
+            self._last_load_ok = getattr(self, '_last_load_ok', True)
+            self.refresh_lock = asyncio.Lock()
             self._last_load_ok = True
             self.sauvegardes = 0
 

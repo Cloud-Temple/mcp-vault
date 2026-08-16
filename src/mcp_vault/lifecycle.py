@@ -319,6 +319,22 @@ async def vault_startup() -> bool:
     except Exception as e:
         logger.error(f"❌ Wrap Registry : {e}")
 
+    # ── 1d-bis. Rafraîchisseurs de fond des magasins (issue #123) ──
+    # À partir d'ici, plus AUCUN chargement S3 ne part de la boucle : les points
+    # de décision lisent un instantané publié, ces tâches le renouvellent hors
+    # boucle. Le premier chargement, lui, vient d'être fait ci-dessus — synchrone,
+    # avant tout trafic.
+    try:
+        from .store_refresh import start_store_refreshers
+        demarres = start_store_refreshers()
+        logger.info("♻️  Rafraîchissement de fond des magasins : %s",
+                    ", ".join(demarres) if demarres else "aucun magasin configuré")
+    except Exception as e:
+        # Un magasin sans rafraîchisseur se périmera puis refusera (fail-close) :
+        # bruyant et sûr, mais il faut que la cause soit lisible.
+        logger.error("❌ Rafraîchissement de fond NON démarré (%s) — les magasins "
+                     "se périmeront au bout de leur TTL", type(e).__name__)
+
     # ── 1e. Mission Token Validator (C18, singleton process-wide) ──────────────
     logger.info("🔐 Initialisation du Mission Token Validator...")
     try:
@@ -511,6 +527,36 @@ async def _vault_shutdown_sequence(skip_upload: bool = False):
         # Fail-close : sans preuve de drainage, on ne prend pas le risque
         # d'écraser une sauvegarde distante potentiellement plus récente.
         drained = False
+
+    # ── 1b. Arrêter les rafraîchisseurs, puis drainer les magasins (#123) ──
+    # AVANT le scellement et l'upload final : une écriture de magasin encore en
+    # vol se terminerait sinon après l'archive, qui ne la contiendrait pas.
+    # `stop_store_refreshers` arrête d'abord, draine ensuite — l'inverse
+    # laisserait un rafraîchissement démarrer pendant le drainage.
+    try:
+        from .store_refresh import stop_store_refreshers
+        magasins_draines = await stop_store_refreshers()
+        if magasins_draines:
+            logger.info("♻️  Magasins fermés et drainés (aucune écriture en vol)")
+        else:
+            logger.error(
+                "🚨 Magasins NON drainés — une écriture de magasin (tokens, "
+                "policies, bindings, registre wrap) peut être encore en vol et "
+                "atterrir après cet arrêt. Ces objets S3 sont distincts de "
+                "l'archive du coffre, qui reste donc publiée."
+            )
+    except Exception as e:
+        logger.warning("⚠️ Drainage des magasins : %s", type(e).__name__)
+
+    # ⚠️ Le drainage des magasins ne conditionne PAS l'upload final, et c'est
+    # délibéré. La revue le demandait, par analogie avec le drainage de la sync
+    # périodique (#122) ; l'analogie ne tient pas. L'archive finale compresse le
+    # **file backend d'OpenBao** ; les magasins écrivent des objets S3 DISTINCTS
+    # (`_system/tokens.json`, `_system/policies.json`,
+    # `_system/wrap_registry.json`, `_system/mission_bindings/*`). Une écriture de
+    # magasin arrivée tard ne peut donc pas figer un état antérieur dans
+    # l'archive : les deux ne se recouvrent pas. Y renoncer coûterait une
+    # sauvegarde réelle du coffre pour couvrir un risque inexistant.
 
     # ── 2. Sceller OpenBao + effacer les clés mémoire ────────────
     try:

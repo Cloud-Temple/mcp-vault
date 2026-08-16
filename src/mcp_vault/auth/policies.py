@@ -27,23 +27,25 @@ Usage :
     get_policy_store()     → Getter singleton
 """
 
+import asyncio
 import fnmatch
+import functools
 import json
 import logging
 import sys
-import time
 
 logger = logging.getLogger("mcp-vault.policy-store")
 from datetime import datetime, timezone
 from typing import Optional
 
+from ..async_offload import run_blocking
 from ..config import get_settings
+from ..store_refresh import RETRY_AFTER_ERROR_SECONDS, Freshness, magasin_ferme
 
-# Intervalle minimal de re-tentative de chargement après un échec (store indisponible).
-# Évite de marteler S3 à chaque requête tout en récupérant vite dès qu'il revient.
-# Borné PAR PROCESSUS SEULEMENT (pas de garantie multi-worker/réplica) — même
-# compromis assumé que MissionBindingStore.
-_RETRY_AFTER_ERROR_SECONDS = 10.0
+# Conservé sous son nom historique : plusieurs bancs l'importent pour vérifier la
+# cadence de re-tentative. La valeur vit désormais dans `store_refresh`, partagée
+# par les quatre magasins (issue #123).
+_RETRY_AFTER_ERROR_SECONDS = RETRY_AFTER_ERROR_SECONDS
 
 # Permissions valides pour une path_rule (contrat fermé).
 _VALID_PERMISSIONS = frozenset({"read", "write", "admin"})
@@ -198,8 +200,19 @@ class PolicyStore:
 
     def __init__(self, settings):
         self.settings = settings
+        # ⚠️ INSTANTANÉ PUBLIÉ (issue #123). Les gardes synchrones lisent CETTE
+        # référence sans verrou. Elle n'est JAMAIS mutée en place : une mutation
+        # construit un dictionnaire candidat, le persiste, et ne réassigne cet
+        # attribut qu'après confirmation du PUT (copy-on-write). Sans cela, une
+        # garde — qui ne prend aucun verrou — pourrait observer une policy créée
+        # mais non persistée, ou une suppression finalement annulée.
         self._policies: dict = {}  # policy_id → policy_info
-        self._cache_time: float = 0.0
+        self.freshness = Freshness()
+        # Verrou partagé par les mutations et le rafraîchisseur de fond. Tenu
+        # pendant tout l'appel S3 (`run_blocking` ne rend la main qu'à la fin
+        # réelle du thread) : un `load()` tardif ne peut pas écraser une mutation
+        # déjà confirmée.
+        self.refresh_lock = asyncio.Lock()
         self._available: bool = True
         self._last_error: str = ""
 
@@ -237,10 +250,15 @@ class PolicyStore:
         return resp.get("Error", {}).get("Code", "") == "NoSuchKey"
 
     def _mark_invalid(self, msg: str):
-        """Passe le store en état INDISPONIBLE observable (sans écraser le cache mémoire)."""
+        """Passe le store en état INDISPONIBLE observable (sans écraser le cache mémoire).
+
+        ⚠️ Seule `last_attempt` avance (`mark_failure`) : brider la re-tentative
+        ne doit pas rajeunir un instantané qui n'a pas été rechargé. C'est la
+        confusion que `_cache_time` entretenait avant #123.
+        """
         self._available = False
         self._last_error = msg
-        self._cache_time = time.time()  # throttle la re-tentative (_maybe_refresh)
+        self.freshness.mark_failure(msg)
         logger.error(
             "Policy Store INVALIDE : %s — décisions de policy refusées jusqu'à "
             "rétablissement (aucune policy périmée servie)", msg,
@@ -266,8 +284,12 @@ class PolicyStore:
             raw = resp["Body"].read().decode()
         except Exception as e:
             if self._is_missing_key_error(e):
+                # Absence nominale (1er démarrage) : c'est un chargement RÉUSSI
+                # d'un magasin vide, pas une panne — la fraîcheur doit avancer,
+                # sinon le magasin se périmerait au bout du TTL sur un déploiement
+                # neuf et refuserait toute décision.
                 self._policies = {}
-                self._cache_time = time.time()
+                self.freshness.mark_success()
                 self._available = True
                 self._last_error = ""
                 return
@@ -303,15 +325,21 @@ class PolicyStore:
             validated[norm["policy_id"]] = norm
 
         self._policies = validated
-        self._cache_time = time.time()
+        self.freshness.mark_success()
         self._available = True
         self._last_error = ""
 
-    def _save(self) -> bool:
+    def _save(self, snapshot: dict) -> bool:
         """
-        Sauvegarde les policies sur S3 (PUT = SigV2).
-        Retourne True si succès, False si échec (les appelants DOIVENT rollback
-        l'état mémoire si False).
+        Persiste le SNAPSHOT CANDIDAT sur S3 (PUT = SigV2). Ne publie rien.
+
+        ⚠️ Prend le candidat en argument et ne lit JAMAIS `self._policies`
+        (issue #123) : la publication est faite par l'appelant, et seulement
+        après un True. Une garde synchrone ne peut donc pas observer un état
+        intermédiaire — ni une policy créée mais non persistée, ni une
+        suppression que l'échec du PUT annulerait.
+
+        Retourne True si succès, False si échec.
 
         Distingue la sérialisation locale (bug de code — ne marque PAS le store
         invalide) d'un échec RÉEL du PUT S3 (preuve d'indisponibilité — marque le
@@ -324,7 +352,7 @@ class PolicyStore:
         """
         try:
             data = json.dumps(
-                {"policies": list(self._policies.values())},
+                {"policies": list(snapshot.values())},
                 indent=2, default=str,
             )
         except (TypeError, ValueError) as e:
@@ -348,14 +376,34 @@ class PolicyStore:
             return False
 
     def _maybe_refresh(self):
-        """Rafraîchit le cache si le TTL est dépassé (ou plus vite si état invalide)."""
-        elapsed = time.time() - self._cache_time
-        if self._available:
-            if elapsed > self.CACHE_TTL:
-                self.load()
-        else:
-            if elapsed > _RETRY_AFTER_ERROR_SECONDS:
-                self.load()
+        """
+        Constate la fraîcheur de l'instantané publié. **MÉMOIRE PURE** — aucun
+        appel réseau (issue #123).
+
+        Avant ce lot, cette méthode appelait `load()` depuis le point de décision,
+        c'est-à-dire un GET S3 SYNCHRONE dans la boucle asyncio : un stockage lent
+        y gelait tout le service, sonde de santé comprise (#110, 488 s mesurées).
+        Le chargement appartient désormais au rafraîchisseur de fond
+        (`StoreRefresher`), qui l'exécute hors boucle.
+
+        La propriété de sécurité de #86 est **conservée à l'identique** : un
+        instantané périmé au-delà du TTL ne sert plus aucune décision. Seule la
+        façon d'en arriver là change — on le constate au lieu de le découvrir en
+        tentant un GET.
+
+        ⚠️ Un magasin qui n'a JAMAIS chargé est périmé, donc indisponible. C'est
+        voulu : venir d'être construit n'autorise rien.
+        """
+        if self._available and self.freshness.is_stale(self.CACHE_TTL):
+            self._available = False
+            self._last_error = (
+                "instantané périmé : aucun rechargement réussi depuis plus de "
+                f"{self.CACHE_TTL:.0f}s"
+            )
+            logger.error(
+                "Policy Store PÉRIMÉ (%s) — décisions refusées jusqu'à un "
+                "rechargement réussi du rafraîchisseur de fond", self._last_error,
+            )
 
     def _ensure_available(self):
         """Rafraîchit puis lève si le store est indisponible (lectures/décisions).
@@ -426,11 +474,16 @@ class PolicyStore:
         except ValueError as e:
             return {"status": "error", "message": str(e)}
 
-        self._policies[policy_id] = policy
-        if not self._save():
-            del self._policies[policy_id]  # rollback mémoire
+        # Copy-on-write (#123) : on construit le candidat, on persiste, et on ne
+        # publie qu'après confirmation. Il n'y a plus de rollback à écrire — donc
+        # plus de rollback à oublier — et aucune garde synchrone ne peut observer
+        # une policy qui n'existe pas encore sur S3.
+        candidate = dict(self._policies)
+        candidate[policy_id] = policy
+        if not self._save(candidate):
             return {"status": "error", "error_type": "policy_store_unavailable",
                     "message": "Impossible de créer la policy (S3 indisponible)"}
+        self._policies = candidate
 
         return {"status": "created", **policy}
 
@@ -488,16 +541,48 @@ class PolicyStore:
         # (round 3 diff review).
         if not isinstance(policy_id, str) or policy_id not in self._policies:
             return False
-        policy_backup = self._policies.pop(policy_id)
-        if not self._save():
-            self._policies[policy_id] = policy_backup  # rollback
+        # Copy-on-write (#123) : la policy reste servie tant que sa suppression
+        # n'est pas persistée. Une suppression transitoire — visible puis annulée
+        # par l'échec du PUT — laisserait une garde synchrone refuser un accès
+        # légitime pendant l'aller-retour S3.
+        candidate = dict(self._policies)
+        del candidate[policy_id]
+        if not self._save(candidate):
             logger.error("Suppression policy '%s' non persistée — S3 indisponible", policy_id)
             return "storage_error"
+        self._policies = candidate
         return True
 
     def count(self) -> int:
         """Nombre de policies."""
         return len(self._policies)
+
+    # ── Façades async (issue #123) ───────────────────────────────────
+    #
+    # Les mutations font un PUT S3 SYNCHRONE. Appelées telles quelles depuis un
+    # outil MCP — ils sont tous `async` — elles gèlent la boucle pour la durée de
+    # l'aller-retour. Ces façades les exécutent hors boucle, sous le verrou du
+    # magasin.
+    #
+    # ⚠️ Elles n'ajoutent AUCUNE logique : la décision, la validation et le
+    # copy-on-write restent dans la méthode synchrone, qui est la seule
+    # implémentation. Dupliquer la logique ici créerait deux comportements dont
+    # un seul serait couvert par les bancs.
+
+    async def acreate(self, *args, **kwargs) -> dict:
+        """`create()` hors boucle, sérialisé par le verrou du magasin."""
+        if magasin_ferme(self):
+            return {"status": "error", "error_type": "policy_store_unavailable",
+                    "message": "Arrêt en cours — aucune mutation acceptée"}
+        async with self.refresh_lock:
+            return await run_blocking(functools.partial(self.create, *args, **kwargs))
+
+    async def adelete(self, policy_id: str):
+        """`delete()` hors boucle, sérialisé par le verrou du magasin."""
+        if magasin_ferme(self):
+            return "policy_store_unavailable"
+        async with self.refresh_lock:
+            return await run_blocking(functools.partial(self.delete, policy_id))
 
     # ── Matching (pour Phase 8b — enforcement) ───────────────────────
 

@@ -305,7 +305,7 @@ blocked under `operation_pending`: same block, different code. **Recovery = a ne
 > as** dead — the server takes an exception-free OpenBao return as a confirmed
 > revocation, it reads nothing back to attest it.
 
-> `secret_wrap_status` mutates neither OpenBao nor the registry (the memory cache and audit log do change). It does **not** distinguish transient from durable failure: best-effort snapshot, and an S3 outage during the cache window is not even detected.
+> `secret_wrap_status` mutates neither OpenBao nor the registry (the memory cache and audit log do change). It does **not** distinguish transient from durable failure: best-effort snapshot. ⚠️ *Fixed in v0.15.0* — an S3 outage during the cache window used to go **entirely undetected**; the background refresher now observes it on its next attempt (half-TTL, then every 10 s), and `status` flips to `backend_unavailable`. Detection is not instantaneous, but it happens.
 
 #### What the registry PROVES — and what it does not
 
@@ -601,6 +601,71 @@ PkiMiddleware → AdminMiddleware → HealthCheckMiddleware → AuthMiddleware �
 
 `PkiMiddleware` (v0.5.0) is the outermost layer — it intercepts `/acme/*` and `/pki/ca/*.pem` before auth (public endpoints by PKI/ACME design).
 
+### The decision point reads memory, never the network *(v0.15.0, #123)*
+
+A blocking S3 call did not freeze one request: it froze **the whole service**,
+health probe included — 488 s measured in production (#110). The cause is always
+the same: boto3 is synchronous, and a synchronous call inside the asyncio loop
+monopolises the single thread that serves every request.
+
+Batch 1 (v0.10.1) bounded these calls, batch 2 (#122) moved five of them off the
+loop. This batch closes the last ones, and they are the most frequent: the
+**authorization stores**, queried on every authenticated request.
+
+> **No S3 call leaves a decision point any more.** The guards
+> (`check_policy`, `check_path_policy`, `check_wrap_*`, `get_by_hash`,
+> `resolve`) read a **published in-memory snapshot**. Background tasks — one per
+> store — refresh it **off the loop**, at half the TTL, and every 10 s after a
+> failure.
+
+⚠️ **One synchronous network call REMAINS on the authentication path, and this
+batch does not close it.** The JWKS cache refresh (`mission_jwt.py`, synchronous
+`httpx.get`, 5 s default timeout) is triggered from mission token validation,
+itself called without `await` inside the PEP coroutine. Same defect class as
+#110, on a path just as hot — but **bounded** by its timeout and backoff, where
+the original S3 calls accumulated several minutes. Out of scope for #123, which
+covers the S3 stores only: to be handled separately.
+
+| What changes | What does not |
+| --- | --- |
+| Loading leaves the loop | The **fail-close** of #86/#69: on the Policy Store, the Mission Binding Store and the wrap registry, a snapshot stale beyond its TTL serves no decision |
+| Mutations too (`acreate`, `adelete`, `arevoke`, …) | The **shape**, **error codes** and **signatures** of existing tools. Two bounded changes: `system_health` gains `stores` / `stores_stale`, and the revocation `warning` **text** now states uncertainty instead of a certain future |
+| A wrap operation is atomic with respect to a reload | The Token Store's posture: `available` stays **diagnostic** there, a stale snapshot keeps authenticating |
+
+**Two clocks, not one.** The historical code carried a single one, used both to
+date the snapshot and to throttle retries. A failure put the two at odds: pushing
+the date forward to avoid hammering S3 also, mechanically, rejuvenated a snapshot
+that had never been reloaded — a failing store therefore stayed "fresh"
+indefinitely. They are now separate, and on a **monotonic** clock: a wall-clock
+step backwards can no longer rejuvenate a stale state.
+
+**Copy-on-write** on the three authorization stores: a mutation builds a
+candidate, persists it, and publishes it only after the PUT is confirmed. A
+synchronous guard can therefore no longer observe a policy created but not
+persisted, nor a deletion that a failed PUT will undo. Rollbacks disappear — and
+with them the risk of forgetting one.
+
+> ⚠️ **The wrap registry deliberately has NO copy-on-write.** No synchronous
+> reader queries it, and publish-after-PUT would destroy something v0.14.1 gained:
+> `mark_entries_revoked` **deliberately** keeps a confirmed-but-unrecorded
+> revocation in memory, because memory tells the truth there and it is the durable
+> store that is behind.
+
+**Observability.** `system_health` now carries each store's freshness (`stores`,
+plus `stores_stale` when relevant). Without it, a dead refresher would only show
+at the first refusal: the service would answer normally, then refuse everything at
+once.
+
+> ⚠️ **The HTTP probes `/health` and `/healthz` are deliberately UNCHANGED.** A
+> stale store does not flip the container to `unhealthy`: restarting would not fix
+> an unreachable store, and the `HEALTHCHECK` would trigger a restart loop during
+> the incident. Staleness is operational information — it lives on
+> `system_health`, not on the orchestration probe.
+
+⚠️ **Unchanged limit**: none of this closes the multi-instance write race
+(#13/#51). Last write still wins, and a background refresh even widens the window
+during which two instances can diverge without knowing it.
+
 ### Health probes *(v0.11.0, #103)*
 
 Two distinct questions, two contracts:
@@ -649,7 +714,7 @@ OpenBao's unseal keys are protected by **3-factor physical separation**:
 
 ---
 
-## 📋 Tests (~600 tests, zero mocking)
+## 📋 Tests (~1500 mocked unit tests + 349 real e2e)
 
 > 📖 See [tests/README.md](tests/README.md) for the full execution guide.
 
@@ -706,8 +771,8 @@ mcp-vault/
 ├── requirements.lock         # Pinned dependencies (exact versions)
 ├── VERSION                   # current service version
 ├── DESIGN/mcp-vault/
-│   ├── ARCHITECTURE.md       # Detailed specification (v0.12.0)
-│   ├── TECHNICAL.md          # Technical documentation (v0.12.0)
+│   ├── ARCHITECTURE.md       # Detailed specification (v0.15.0)
+│   ├── TECHNICAL.md          # Technical documentation (v0.15.0)
 │   └── SECURITY_AUDIT.md     # Consolidated audit report (60 V2.1 findings)
 ├── scripts/
 │   ├── mcp_cli.py            # CLI entry point
@@ -765,4 +830,4 @@ mcp-vault/
 
 ---
 
-**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.14.1
+**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.15.0

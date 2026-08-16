@@ -61,8 +61,14 @@ def _in_memory_registry():
 
     class InMemoryRegistry(WrapRegistry):
         def __init__(self):
+            import asyncio
+
+            from mcp_vault.store_refresh import Freshness
             self._wraps = []
-            self._cache_time = 0
+            self.freshness = Freshness()
+            self.freshness.mark_success()  # instantané frais (#123)
+            self.refresh_lock = asyncio.Lock()
+            self._last_load_ok = True
         def load(self):
             pass
         def _save(self) -> bool:

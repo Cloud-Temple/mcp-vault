@@ -49,6 +49,8 @@ import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from tests.doubles_magasins import DoubleMagasin
+
 import pytest
 
 # Convention du projet : mcp_vault vit dans src/ (pas d'install du package)
@@ -64,6 +66,17 @@ from mcp_vault.auth.policies import (
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def _vieillir(store, secondes: float) -> None:
+    """Recule la date du dernier chargement RÉUSSI de `secondes` (issue #123).
+
+    La fraîcheur est en temps MONOTONE : on ne peut pas la simuler en bougeant
+    l'horloge murale — c'est précisément la propriété recherchée. On recule donc
+    la borne elle-même. Ne touche PAS `last_attempt` : vieillir un instantané et
+    brider une re-tentative sont deux choses distinctes depuis ce lot.
+    """
+    store.freshness._last_success -= secondes
 
 
 def _make_store(offline: bool = True) -> PolicyStore:
@@ -326,13 +339,22 @@ class TestLoad:
 
 class TestIsToolAllowedIsPathAllowed:
     def test_poc_outage_after_ttl_raises_never_serves_stale_policy(self):
-        """POC EXACT du finding #86/3 : policy permissive en cache, TTL dépassé,
-        S3 en panne → is_tool_allowed() DOIT lever, jamais retourner True sur
-        l'ancien cache."""
+        """POC EXACT du finding #86/3 : policy permissive en cache, TTL dépassé
+        → is_tool_allowed() DOIT lever, jamais retourner True sur l'ancien cache.
+
+        ⚠️ #123 a changé le MÉCANISME sans toucher la propriété. Avant, la garde
+        découvrait la panne en TENTANT un GET S3 depuis la boucle. Désormais elle
+        CONSTATE la péremption en mémoire — le refus ne dépend plus de la
+        joignabilité de S3, il est donc strictement plus fiable. Le montage S3 de
+        l'ancienne version est retiré : il ne serait plus appelé, et le laisser
+        ferait croire qu'il prouve encore quelque chose.
+        """
         store = _make_store(offline=False)
         store._policies = {"p": _policy(policy_id="p", allowed_tools=[])}  # tout permis
-        store._cache_time = time.time() - 301  # TTL (300s) dépassé
-        store._get_s3_data = MagicMock(return_value=_fake_s3(get_exc=Exception("S3 down")))
+        store.freshness.mark_success()
+        _vieillir(store, 301)  # TTL (300 s) dépassé
+        store._get_s3_data = MagicMock(
+            side_effect=AssertionError("le point de décision ne doit JAMAIS appeler S3"))
         with pytest.raises(PolicyStoreUnavailable):
             store.is_tool_allowed("p", "vault_delete")
 
@@ -340,7 +362,7 @@ class TestIsToolAllowedIsPathAllowed:
         """Non-régression : avant expiration du TTL, comportement inchangé."""
         store = _make_store()
         store._policies = {"p": _policy(policy_id="p", allowed_tools=[])}
-        store._cache_time = time.time()
+        store.freshness.mark_success()
         assert store.is_tool_allowed("p", "vault_delete") is True
 
     def test_is_path_allowed_defensive_default_is_read_only_not_admin(self):
@@ -358,7 +380,7 @@ class TestIsToolAllowedIsPathAllowed:
                 "path_rules": [{"vault_pattern": "prod-*", "allowed_paths": []}],  # PAS de "permissions"
             }
         }
-        store._cache_time = time.time()
+        store.freshness.mark_success()
         assert store.is_path_allowed("p", "prod-1", "x", "read") is True
         assert store.is_path_allowed("p", "prod-1", "x", "write") is False
         assert store.is_path_allowed("p", "prod-1", "x", "admin") is False
@@ -369,7 +391,7 @@ class TestIsToolAllowedIsPathAllowed:
         désynchronisé, réouvrant la fenêtre de fail-open)."""
         store = _make_store()
         store._policies = {"p": _policy(policy_id="p", allowed_tools=[])}
-        store._cache_time = time.time()
+        store.freshness.mark_success()
         with patch.object(PolicyStore, "get") as mock_get:
             store.is_tool_allowed("p", "vault_delete")
             mock_get.assert_not_called()
@@ -379,7 +401,7 @@ class TestIsToolAllowedIsPathAllowed:
 
     def test_deleted_policy_fail_close(self):
         store = _make_store()
-        store._cache_time = time.time()
+        store.freshness.mark_success()
         assert store.is_tool_allowed("gone", "vault_delete") is False
         assert store.is_path_allowed("gone", "v", "p", "read") is False
 
@@ -435,7 +457,7 @@ class TestCreateAndDelete:
     def test_create_rejects_duplicate_policy_id(self):
         store = _make_store()
         store._policies = {"p": _policy(policy_id="p")}
-        store._cache_time = time.time()
+        store.freshness.mark_success()
         result = store.create("p")
         assert result["status"] == "error"
         assert "existe déjà" in result["message"]
@@ -443,7 +465,7 @@ class TestCreateAndDelete:
     def test_save_put_failure_marks_store_invalid(self):
         store = PolicyStore(SimpleNamespace(s3_bucket_name="b"))
         store._get_s3_data = MagicMock(return_value=_fake_s3(put_ok=False))
-        ok = store._save()
+        ok = store._save({})
         assert ok is False
         assert store.available is False
 
@@ -456,14 +478,13 @@ class TestCreateAndDelete:
         store = PolicyStore(SimpleNamespace(s3_bucket_name="b"))
         circular = {}
         circular["self"] = circular
-        store._policies = {"p": circular}
-        ok = store._save()
+        ok = store._save({"p": circular})
         assert ok is False
         assert store.available is True  # PAS marqué invalide
 
     def test_create_put_failure_rolls_back_memory_and_marks_unavailable(self):
         store = PolicyStore(SimpleNamespace(s3_bucket_name="b"))
-        store._cache_time = time.time()  # fraîche : _maybe_refresh() ne relance pas load()
+        store.freshness.mark_success()  # instantané frais : _maybe_refresh() ne le périme pas
         store._get_s3_data = MagicMock(return_value=_fake_s3(put_ok=False))
         result = store.create("p")
         assert result["status"] == "error"
@@ -471,14 +492,26 @@ class TestCreateAndDelete:
         assert "p" not in store._policies  # rollback mémoire
         assert store.available is False  # marqué invalide par _save()
 
-    def test_delete_put_failure_rolls_back(self):
+    def test_delete_put_failure_laisse_la_policy_SERVIE(self):
+        """Une suppression non persistée ne doit RIEN retirer à ce qui est servi.
+
+        ⚠️ #123 a supprimé le rollback, pas la propriété : la policy n'est plus
+        retirée puis remise, elle n'est jamais retirée du tout (copy-on-write).
+        La différence compte pour une garde synchrone, qui ne prend aucun verrou :
+        avec l'ancien code elle pouvait observer la disparition transitoire — et
+        refuser un accès légitime — pendant tout l'aller-retour S3.
+        """
         store = PolicyStore(SimpleNamespace(s3_bucket_name="b"))
-        store._policies = {"p": _policy(policy_id="p")}
-        store._cache_time = time.time()
+        publie_avant = {"p": _policy(policy_id="p")}
+        store._policies = publie_avant
+        store.freshness.mark_success()
         store._get_s3_data = MagicMock(return_value=_fake_s3(put_ok=False))
         result = store.delete("p")
         assert result == "storage_error"
-        assert "p" in store._policies  # rollback
+        assert "p" in store._policies
+        # La référence publiée est INCHANGÉE : preuve qu'aucun état intermédiaire
+        # n'a été publié, pas seulement que le contenu final est le bon.
+        assert store._policies is publie_avant
 
 
 # =============================================================================
@@ -508,13 +541,13 @@ class TestGetListAll:
 
     def test_get_returns_none_for_missing_policy_when_available(self):
         store = _make_store()
-        store._cache_time = time.time()
+        store.freshness.mark_success()
         assert store.get("nope") is None
 
     def test_list_all_returns_summary_when_available(self):
         store = _make_store()
         store._policies = {"p": _policy(policy_id="p", description="d")}
-        store._cache_time = time.time()
+        store.freshness.mark_success()
         result = store.list_all()
         assert result == [{
             "policy_id": "p", "description": "d",
@@ -527,24 +560,79 @@ class TestGetListAll:
 # Retry accéléré / récupération
 # =============================================================================
 
-class TestRetryAndRecovery:
-    def test_no_retry_before_accelerated_delay(self):
-        store = PolicyStore(SimpleNamespace(s3_bucket_name="b"))
-        store._mark_invalid("panne")
-        store._get_s3_data = MagicMock(side_effect=AssertionError("ne doit PAS être appelé avant le délai"))
-        store._maybe_refresh()
-        assert store.available is False
+class TestLePointDeDecisionNeTouchePlusLeReseau:
+    """Le cœur de #123 : la garde lit la mémoire, jamais le réseau.
 
-    def test_recovers_after_accelerated_delay(self):
+    ⚠️ La cadence de re-tentative (10 s après une panne, pas 300 s) n'a PAS
+    disparu — elle a changé de propriétaire. Elle appartient désormais au
+    rafraîchisseur de fond, et elle est prouvée dans
+    `tests/test_store_refresh_123.py`. Ne pas la re-tester ici : ce serait
+    re-prouver l'ancien mécanisme et laisser croire que la garde recharge encore.
+    """
+
+    @pytest.mark.parametrize("etat", ["neuf", "charge", "en_panne", "perime"])
+    def test_AUCUN_appel_S3_depuis_la_garde_quel_que_soit_l_etat(self, etat):
+        """⚠️ On COMPTE les accès S3, on ne lève pas depuis le client.
+
+        Une première version de ce test levait une `AssertionError` depuis
+        `_get_s3_data`. Elle ne mordait pas : `load()` capture `Exception`, dont
+        `AssertionError` hérite — la garde rechargeait, l'échec était avalé et
+        transformé en `_mark_invalid`, et le test passait au vert. Trouvé par
+        mutation (réintroduire `self.load()` dans `_maybe_refresh`), jamais par
+        relecture.
+        """
         store = PolicyStore(SimpleNamespace(s3_bucket_name="b"))
-        store._mark_invalid("panne")
-        store._cache_time = time.time() - (_RETRY_AFTER_ERROR_SECONDS + 1)
-        store._get_s3_data = MagicMock(
-            return_value=_fake_s3(get_return=_file_bytes([_policy()])))
-        store._maybe_refresh()
-        assert store.available is True
-        assert store.last_error == ""
-        assert store.count() == 1
+        if etat == "charge":
+            store.freshness.mark_success()
+        elif etat == "en_panne":
+            store._mark_invalid("panne")
+        elif etat == "perime":
+            store.freshness.mark_success()
+            _vieillir(store, store.CACHE_TTL + 1)
+        acces = {"n": 0}
+
+        def _compter():
+            acces["n"] += 1
+            return _fake_s3(get_return=_file_bytes([_policy()]))
+
+        store._get_s3_data = _compter
+        try:
+            store.is_tool_allowed("p", "vault_delete")
+        except PolicyStoreUnavailable:
+            pass  # un refus est une décision, pas un appel réseau
+        assert acces["n"] == 0, (
+            f"la garde a touché S3 {acces['n']} fois (état={etat}) — c'est le gel "
+            "de #110 qui revient")
+
+    def test_un_instantane_PERIME_refuse_meme_si_le_store_se_croit_disponible(self):
+        """Le rafraîchisseur est mort : plus personne ne recharge, et la garde
+        doit s'en apercevoir SEULE. Sans ce constat, l'instantané serait servi
+        indéfiniment — un fail-open silencieux exactement là où #86 avait fermé."""
+        store = PolicyStore(SimpleNamespace(s3_bucket_name="b"))
+        store._policies = {"p": _policy(policy_id="p", allowed_tools=[])}
+        store.freshness.mark_success()
+        assert store.is_tool_allowed("p", "vault_delete") is True  # frais : servi
+        _vieillir(store, store.CACHE_TTL + 1)
+        with pytest.raises(PolicyStoreUnavailable):
+            store.is_tool_allowed("p", "vault_delete")
+
+    def test_un_rafraichissement_ECHOUE_ne_rajeunit_PAS_l_instantane(self):
+        """RÉGRESSION CENTRALE de #123 — la confusion que `_cache_time` portait.
+
+        L'ancien code repoussait la même horloge pour brider les re-tentatives.
+        Une panne répétée rajeunissait donc mécaniquement un instantané qui
+        n'avait jamais été rechargé : le magasin restait « frais » pour toujours
+        tant que S3 échouait. SABOTAGE : faire avancer `last_success` dans
+        `Freshness.mark_failure` fait passer ce test au vert à tort.
+        """
+        store = PolicyStore(SimpleNamespace(s3_bucket_name="b"))
+        store.freshness.mark_success()
+        _vieillir(store, store.CACHE_TTL - 1)  # encore frais, de justesse
+        for _ in range(10):
+            store.freshness.mark_failure("S3 GET: TimeoutError")
+        assert store.freshness.is_stale(store.CACHE_TTL) is False
+        _vieillir(store, 2)  # la fraîcheur RÉELLE finit par expirer
+        assert store.freshness.is_stale(store.CACHE_TTL) is True
 
 
 # =============================================================================
@@ -579,7 +667,7 @@ class TestContextIntegration:
 
     def test_check_policy_catches_unavailable(self):
         from mcp_vault.auth import context as ctx
-        store = MagicMock()
+        store = DoubleMagasin()
         store.is_tool_allowed.side_effect = PolicyStoreUnavailable("panne")
         tok = {"permissions": ["read"], "policy_id": "p", "client_name": "c"}
         h = ctx.current_token_info.set(tok)
@@ -595,7 +683,7 @@ class TestContextIntegration:
 
     def test_check_path_policy_catches_unavailable(self):
         from mcp_vault.auth import context as ctx
-        store = MagicMock()
+        store = DoubleMagasin()
         store.is_path_allowed.side_effect = PolicyStoreUnavailable("panne")
         tok = {"permissions": ["read"], "policy_id": "p", "client_name": "c"}
         h = ctx.current_token_info.set(tok)
@@ -613,7 +701,7 @@ class TestContextIntegration:
         """Silencieux (pas d'audit) — cohérent avec le comportement documenté de
         can_read_vault_content() (pas de faux 'denied')."""
         from mcp_vault.auth import context as ctx
-        store = MagicMock()
+        store = DoubleMagasin()
         store.is_tool_allowed.side_effect = PolicyStoreUnavailable("panne")
         tok = {"permissions": ["read"], "policy_id": "p", "client_name": "c"}
         h = ctx.current_token_info.set(tok)
@@ -641,7 +729,7 @@ class TestPolicyIdReferenceGuards:
         from mcp_vault.admin import api
         send = AsyncMock()
         body = json.dumps({"client_name": "c", "policy_id": "p"})
-        tstore = MagicMock()
+        tstore = DoubleMagasin()
         with patch.object(api, "get_token_store", return_value=tstore), \
              patch("mcp_vault.auth.policies.get_policy_store", return_value=None):
             _run(api._api_create_token(send, body))
@@ -652,8 +740,8 @@ class TestPolicyIdReferenceGuards:
         from mcp_vault.admin import api
         send = AsyncMock()
         body = json.dumps({"client_name": "c", "policy_id": "p"})
-        tstore = MagicMock()
-        pstore = MagicMock()
+        tstore = DoubleMagasin()
+        pstore = DoubleMagasin()
         pstore.get.side_effect = PolicyStoreUnavailable("panne")
         with patch.object(api, "get_token_store", return_value=tstore), \
              patch("mcp_vault.auth.policies.get_policy_store", return_value=pstore):
@@ -665,7 +753,7 @@ class TestPolicyIdReferenceGuards:
         from mcp_vault.admin import api
         send = AsyncMock()
         body = json.dumps({"policy_id": "p"})
-        tstore = MagicMock()
+        tstore = DoubleMagasin()
         with patch.object(api, "get_token_store", return_value=tstore), \
              patch("mcp_vault.auth.policies.get_policy_store", return_value=None):
             _run(api._api_update_token(send, "abc123def456", body))
@@ -674,7 +762,7 @@ class TestPolicyIdReferenceGuards:
 
     def test_mcp_token_update_rejects_when_policy_store_absent(self):
         import mcp_vault.server as server
-        tstore = MagicMock()
+        tstore = DoubleMagasin()
         with patch("mcp_vault.auth.token_store.get_token_store", return_value=tstore), \
              patch("mcp_vault.auth.context.check_admin_permission", return_value=None), \
              patch("mcp_vault.auth.policies.get_policy_store", return_value=None):
@@ -688,7 +776,7 @@ class TestPolicyIdReferenceGuards:
             s3_endpoint_url="http://x", s3_bucket_name="b", resolved_mission_aud="inst"))
         store._maybe_refresh = MagicMock()
         store._available = True
-        pstore = MagicMock()
+        pstore = DoubleMagasin()
         pstore.get.side_effect = PolicyStoreUnavailable("panne")
         with patch("mcp_vault.auth.policies.get_policy_store", return_value=pstore):
             result = store.create(tenant_id="acme", allowed_resources=["prod"],
@@ -713,7 +801,7 @@ class TestPolicyIdFalsyNonStringRejected:
         from mcp_vault.admin import api
         send = AsyncMock()
         body = json.dumps({"client_name": "c", "policy_id": False})
-        tstore = MagicMock()
+        tstore = DoubleMagasin()
         with patch.object(api, "get_token_store", return_value=tstore):
             _run(api._api_create_token(send, body))
         assert _asgi_statuses(send) == [400]
@@ -723,7 +811,7 @@ class TestPolicyIdFalsyNonStringRejected:
         from mcp_vault.admin import api
         send = AsyncMock()
         body = json.dumps({"policy_id": False})
-        tstore = MagicMock()
+        tstore = DoubleMagasin()
         with patch.object(api, "get_token_store", return_value=tstore):
             _run(api._api_update_token(send, "abc123def456", body))
         assert _asgi_statuses(send) == [400]
@@ -731,7 +819,7 @@ class TestPolicyIdFalsyNonStringRejected:
 
     def test_mcp_token_update_rejects_boolean_policy_id(self):
         import mcp_vault.server as server
-        tstore = MagicMock()
+        tstore = DoubleMagasin()
         with patch("mcp_vault.auth.token_store.get_token_store", return_value=tstore), \
              patch("mcp_vault.auth.context.check_admin_permission", return_value=None):
             result = _run(server.token_update("abc123def456", policy_id=False))
@@ -757,7 +845,7 @@ class TestPolicyIdFalsyNonStringRejected:
         send = AsyncMock()
         body = json.dumps({"tenant_id": "acme", "allowed_resources": ["prod"],
                             "permissions": ["read"], "policy_id": False})
-        bstore = MagicMock()
+        bstore = DoubleMagasin()
         with patch("mcp_vault.auth.mission_bindings.get_mission_binding_store", return_value=bstore):
             _run(api._api_create_mission_binding(send, body))
         bstore.create.assert_called_once()
@@ -777,17 +865,17 @@ class TestRawExceptionsOnMalformedInput:
 
     def test_get_non_string_policy_id_returns_none_not_crash(self):
         store = _make_store()
-        store._cache_time = time.time()
+        store.freshness.mark_success()
         assert store.get(["not", "hashable"]) is None
 
     def test_is_tool_allowed_non_string_policy_id_returns_false_not_crash(self):
         store = _make_store()
-        store._cache_time = time.time()
+        store.freshness.mark_success()
         assert store.is_tool_allowed(["not", "hashable"], "vault_delete") is False
 
     def test_is_path_allowed_non_string_policy_id_returns_false_not_crash(self):
         store = _make_store()
-        store._cache_time = time.time()
+        store.freshness.mark_success()
         assert store.is_path_allowed({"not": "hashable"}, "v", "p", "read") is False
 
     def test_store_create_non_string_policy_id_rejected_not_crash(self):
@@ -799,7 +887,7 @@ class TestRawExceptionsOnMalformedInput:
     def test_api_create_policy_invalid_json_returns_400_not_crash(self):
         from mcp_vault.admin import api
         send = AsyncMock()
-        pstore = MagicMock()
+        pstore = DoubleMagasin()
         with patch("mcp_vault.auth.policies.get_policy_store", return_value=pstore):
             _run(api._api_create_policy(send, b"not json"))
         assert _asgi_statuses(send) == [400]
@@ -808,7 +896,7 @@ class TestRawExceptionsOnMalformedInput:
     def test_api_create_policy_top_level_array_returns_400_not_crash(self):
         from mcp_vault.admin import api
         send = AsyncMock()
-        pstore = MagicMock()
+        pstore = DoubleMagasin()
         with patch("mcp_vault.auth.policies.get_policy_store", return_value=pstore):
             _run(api._api_create_policy(send, json.dumps([1, 2, 3]).encode()))
         assert _asgi_statuses(send) == [400]
@@ -817,7 +905,7 @@ class TestRawExceptionsOnMalformedInput:
     def test_api_create_policy_non_string_policy_id_returns_400_not_crash(self):
         from mcp_vault.admin import api
         send = AsyncMock()
-        pstore = MagicMock()
+        pstore = DoubleMagasin()
         body = json.dumps({"policy_id": 123})
         with patch("mcp_vault.auth.policies.get_policy_store", return_value=pstore):
             _run(api._api_create_policy(send, body))
@@ -827,7 +915,7 @@ class TestRawExceptionsOnMalformedInput:
     def test_api_create_token_top_level_array_returns_400_not_crash(self):
         from mcp_vault.admin import api
         send = AsyncMock()
-        tstore = MagicMock()
+        tstore = DoubleMagasin()
         with patch.object(api, "get_token_store", return_value=tstore):
             _run(api._api_create_token(send, json.dumps([1, 2, 3]).encode()))
         assert _asgi_statuses(send) == [400]
@@ -836,7 +924,7 @@ class TestRawExceptionsOnMalformedInput:
     def test_api_update_token_top_level_array_returns_400_not_crash(self):
         from mcp_vault.admin import api
         send = AsyncMock()
-        tstore = MagicMock()
+        tstore = DoubleMagasin()
         with patch.object(api, "get_token_store", return_value=tstore):
             _run(api._api_update_token(send, "abc123def456", json.dumps([1, 2, 3]).encode()))
         assert _asgi_statuses(send) == [400]
@@ -845,7 +933,7 @@ class TestRawExceptionsOnMalformedInput:
     def test_api_create_mission_binding_top_level_array_returns_400_not_crash(self):
         from mcp_vault.admin import api
         send = AsyncMock()
-        bstore = MagicMock()
+        bstore = DoubleMagasin()
         with patch("mcp_vault.auth.mission_bindings.get_mission_binding_store", return_value=bstore):
             _run(api._api_create_mission_binding(send, json.dumps([1, 2, 3]).encode()))
         assert _asgi_statuses(send) == [400]
@@ -853,7 +941,7 @@ class TestRawExceptionsOnMalformedInput:
 
     def test_policy_store_delete_non_string_policy_id_returns_false_not_crash(self):
         store = _make_store()
-        store._cache_time = time.time()
+        store.freshness.mark_success()
         assert store.delete(["not", "hashable"]) is False
         store._save.assert_not_called()
 
