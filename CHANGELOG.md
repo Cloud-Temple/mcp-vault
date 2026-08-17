@@ -2,6 +2,158 @@
 
 ## [Non publié]
 
+## [0.16.1] — 2026-08-17
+
+### Le dernier appel réseau synchrone du chemin d'authentification est fermé — #148
+
+Le rafraîchissement du cache JWKS était un `httpx.get` **synchrone**, atteint
+depuis une coroutine sans `await`. Pendant sa durée, l'unique thread qui sert
+**toutes** les requêtes était monopolisé — sonde de santé comprise. Même classe de
+défaut que #110, sur un autre transport.
+
+**Ce n'était pas une hypothèse.** Relevé en production le 17/08 par la plateforme,
+sur le conteneur actif : un `GET` vers l'endpoint JWKS interne de `mcp-mission`
+répond en **117,2 ms**. C'était donc 117 ms de gel du service entier par
+rafraîchissement, au plus une fois par TTL de 60 s.
+
+**Trois chemins y menaient, tous des coroutines**, et les trois sont désormais
+déportés hors boucle par `run_blocking` (la primitive du lot 2 de #110) :
+
+| Site | Ce qui l'active |
+| --- | --- |
+| PEP transport (`AuthMiddleware._validate_mission_jwt`) | `MCP_AUTH_MODE ∈ {jwt, dual-stack}` |
+| `secret_wrap` | `ENFORCE_MISSION_TOKEN_VALIDATION=true` |
+| **`secret_consume`** | ⚠️ la simple **présence** de `MISSION_JWKS_URL` |
+| `POST /admin/api/auth/jwks/reload` | appel opérateur — le plus lent, il force le fetch |
+
+⚠️ **Le troisième site est le plus important, et il a failli être manqué.** En
+production, `MCP_AUTH_MODE=bearer` et `ENFORCE_MISSION_TOKEN_VALIDATION=false` :
+**aucune des deux portes d'authentification n'est active**, et une lecture par ces
+deux réglages aurait conclu « défaut latent, rien à faire ». Or la validation de
+`secret_consume` se déclenche sur la **seule présence** de l'URL JWKS — et c'est le
+chemin qui déballe **chaque enveloppe de credentials**, `mcp-agent` y présentant un
+`mission_token` ES256 à chaque appel (confirmé par eux le 17/08).
+
+### ⚠️ Le déport seul aurait recréé #110 sur l'autre transport
+
+Relevé en revue adversariale, sur un **NO-GO** du premier correctif — et c'est la
+partie la plus importante de ce lot.
+
+Déporter sans borner consommait un thread de l'exécuteur **partagé avec les
+offloads S3** (#122/#123) par requête mission : chacune prenait un thread, *puis*
+attendait le verrou du cache. Sur un endpoint JWKS lent ou tombé, N requêtes
+mission y auraient attendu en thread et **les lectures S3 auraient fait la queue
+derrière**. On aurait réparé la famine sur un transport en la recréant sur l'autre.
+
+Les résolutions déportées sont donc sérialisées par un **verrou asyncio** porté par
+le cache : au plus **un** thread engagé, les autres attendent côté boucle — ce qui
+ne coûte aucun thread.
+
+⚠️ **La sérialisation est INCONDITIONNELLE, après DEUX tentatives ratées de
+l'éviter.** Les deux voulaient épargner le verrou sur cache frais en constatant
+d'abord la fraîcheur depuis la boucle. Les deux étaient fausses **pour la même
+raison** : `JWKSCache._lock` est **tenu pendant tout le fetch HTTP**. Donc *toute*
+interaction avec ce cache depuis la boucle — **même une lecture** — peut s'y
+bloquer, et recréait exactement le gel que ce lot ferme. Une requête rafraîchissait
+en thread pendant que la suivante gelait la boucle sur le verrou.
+
+⇒ **Il n'existe pas de « coup d'œil gratuit » sur ce cache.** La seule règle sûre
+est : on n'y touche jamais depuis la boucle. Un commentaire le grave à l'endroit où
+la tentation reviendra.
+
+Coût de cette inconditionnalité, mesuré et assumé : les validations mission se
+sérialisent entre elles. Sur cache frais, chaque tenue vaut une vérification de
+signature ES256 — quelques centaines de microsecondes. Pendant un rafraîchissement,
+les autres attendent le temps du fetch (117 ms) — mais **côté boucle**, sans occuper
+de thread, et sans empêcher `/health`, les outils non-mission ni les lectures S3
+d'être servis. C'est exactement l'objet de #148.
+
+⚠️ Troisième défaut, trouvé par le banc et non par la revue : le point d'entrée
+reçoit un cache **`None`** quand le validateur existe sans cache (lifecycle non
+passé, URL ajoutée à chaud). Le déréférencer transformait un refus explicite de
+l'appelé en `AttributeError`, avalée par son `except` générique — donc en
+**validation silencieusement sautée**. Traité : on déporte sans verrou, la décision
+reste chez l'appelé.
+
+### Ce qui n'a PAS changé, et c'était la condition
+
+⚠️ **`JWKSCache` n'est pas réécrit.** Il est déjà thread-safe (`threading.Lock`) :
+plusieurs threads d'exécuteur s'y sérialisent, **un seul** fait le fetch, les
+autres trouvent l'instantané frais. C'est ce qui borne à la fois l'usage du pool de
+threads et la charge sur l'endpoint de `mcp-mission`. Un test le verrouille avec
+huit validations concurrentes et exige **un seul** fetch.
+
+Trois protections distinctes sont intactes, et les déplacer aurait transformé un
+gel en martèlement de leur endpoint :
+
+- le **fail-close** — un cache périmé n'est JAMAIS servi ;
+- le **backoff** exponentiel avec jitter sur échec de fetch ;
+- le **throttle « kid inconnu »** — au plus un rafraîchissement par fenêtre de
+  10 s, quel que soit le volume de `kid` inconnus reçus.
+
+⚠️ **`MISSION_JWKS_CACHE_TTL` n'est pas un réglage de latence, et il n'est pas
+touché.** `mcp-mission` nous a appris le 17/08 qu'une clé **révoquée disparaît de
+leur JWKS** : ce TTL est donc la **fenêtre de propagation d'une révocation de clé
+de signature**. Il vaut 60 s, cinq fois plus strict que le `max-age=300` qu'ils
+publient. Rendre l'appel non bloquant donne envie de l'allonger pour espacer les
+appels — **ce serait allonger la fenêtre de révocation.** Ne pas le faire.
+
+### Ce que le lot ne ferme pas
+
+L'activation du PEP mission JWT (#47, #86) reste ouverte : en production, un jeton
+mission **invalide** sur `secret_consume` est journalisé puis **ignoré**. La
+médiation anti-confused-deputy est donc exercée mais **pas appliquée** — posture
+pré-activation, documentée, et divulguée à `mcp-agent` le 17/08 parce qu'ils
+comptaient dessus.
+
+⚠️ **Contrainte d'ordre établie par ce lot** : activer le PEP **avant** ce
+correctif aurait transformé un hoquet de 117 ms en dépendance dure — toute
+indisponibilité de l'endpoint **mono-instance** de `mcp-mission` refusant *chaque*
+déballage de secret. C'est fait dans le bon ordre.
+
+### Vérification
+
+11 tests dédiés. **Cinq mutations injectées, cinq détectées** : remettre l'appel
+synchrone à chacun des trois sites fait rougir les tests de ce site — et fait
+**pendre** le banc quand la boucle gèle, ce qui est la démonstration la plus
+directe du défaut. Les deux autres retirent la borne d'exécuteur et court-circuitent
+le constat de fraîcheur.
+
+⚠️ **Le test de la borne a été refait DEUX fois, chaque fois parce qu'il était vert
+sans rien prouver.** Version 1 : il affirmait la borne avec un fetch **instantané** —
+il ne mesurait ni les threads bloqués ni l'exécuteur. Version 2 : fetch bloquant,
+mais son témoin était un drapeau relu **après coup** ; une boucle gelée dix secondes
+puis débloquée par le délai de garde du faux fetch le posait quand même. Il durait
+10,16 s au lieu de 0,15 s et passait.
+
+Version retenue : le témoin est **échantillonné depuis le thread, à l'instant où il
+sort** — le patron `Barriere` de #122, que ce test n'appliquait pas. Il ne dit plus
+« le scénario a fini par tourner » mais « le scénario avait déjà libéré quand le
+fetch est sorti », ce qui exige une boucle vivante. La mutation qui consulte le
+cache depuis la boucle — le défaut relevé en revue — le fait désormais rougir ; elle
+échappait aux deux versions précédentes.
+
+⚠️ La durée du banc est elle-même un signal : **1,1 s** contre **11 s** avant
+correction du défaut. Un banc qui traîne dix secondes sur un stub à délai de garde
+dit qu'une boucle attendait.
+
+⚠️ Aucun test ne mesure une **durée**. Deux formes seulement : un **ORDRE** (le
+témoin est échantillonné depuis le thread encore bloqué, harnais `Barriere` de
+#122) et une **IDENTITÉ DE THREAD** (le fetch ne doit pas s'exécuter dans le thread
+de la boucle). Chaque cas vert exige que le fetch ait réellement eu lieu — sans
+appel, il n'y a pas d'identifiant à comparer et l'assertion tombe.
+
+⚠️ Première rédaction du banc corrigée : elle utilisait un jeton factice `"a.b.c"`,
+rejeté au parsing d'en-tête **avant** d'atteindre le cache. Le fetch n'avait donc
+jamais lieu et le témoin attendait indéfiniment. Les jetons sont désormais de
+**vrais JWT ES256** signés par une clé P-256 générée dans le test.
+
+### Compatibilité
+
+Aucun appelant conforme ne casse : aucun code d'erreur, aucune signature, aucun
+champ de réponse ne change. Le seul effet observable est qu'une lenteur du JWKS ne
+gèle plus que la requête concernée, au lieu du service entier.
+
 ## [0.16.0] — 2026-08-17
 
 ### Une erreur de stockage mal lue ne rend plus une clé rejouable — #149

@@ -632,13 +632,34 @@ loop. This batch closes the last ones, and they are the most frequent: the
 > store — refresh it **off the loop**, at half the TTL, and every 10 s after a
 > failure.
 
-⚠️ **One synchronous network call REMAINS on the authentication path, and this
-batch does not close it.** The JWKS cache refresh (`mission_jwt.py`, synchronous
-`httpx.get`, 5 s default timeout) is triggered from mission token validation,
-itself called without `await` inside the PEP coroutine. Same defect class as
-#110, on a path just as hot — but **bounded** by its timeout and backoff, where
-the original S3 calls accumulated several minutes. Out of scope for #123, which
-covers the S3 stores only: to be handled separately.
+✅ **The last synchronous network call on the authentication path is closed**
+*(v0.16.1, #148)*. The JWKS cache refresh (`mission_jwt.py`, synchronous
+`httpx.get`) was triggered from mission token validation, itself called **without
+`await`** inside a coroutine. Same defect class as #110, on a path just as hot. It
+was **declared here as a residue** from v0.15.0 onwards; it no longer is.
+
+Measured in production on 17/08 before the fix: **117.2 ms** of whole-service
+freeze per refresh, at most once per 60 s TTL. Three paths led there, **all
+coroutines**, and all three now go off-loop through `run_blocking`:
+
+| Site | What activates it |
+| --- | --- |
+| Transport PEP (`AuthMiddleware`) | `MCP_AUTH_MODE ∈ {jwt, dual-stack}` |
+| `secret_wrap` | `ENFORCE_MISSION_TOKEN_VALIDATION=true` |
+| **`secret_consume`** | ⚠️ the mere **presence** of `MISSION_JWKS_URL` — this is the path that unwraps every credentials envelope |
+| `POST /admin/api/auth/jwks/reload` | operator call — the slowest, it forces the fetch |
+
+> ⚠️ **`JWKSCache` is NOT rewritten.** It is already thread-safe
+> (`threading.Lock`): several executor threads serialize on it, **exactly one**
+> performs the fetch, the others find the snapshot fresh. Its **fail-close** (a
+> stale cache is never served), its **backoff** and its **unknown-`kid` throttle**
+> are unchanged — moving them would have turned a freeze into a hammering of
+> `mcp-mission`'s endpoint.
+
+> ⚠️ **`MISSION_JWKS_CACHE_TTL` is not a latency knob.** A revoked key disappears
+> from `mcp-mission`'s JWKS, so this TTL is the **propagation window of a signing
+> key revocation**. It is **60 s**, five times stricter than the `max-age=300`
+> they publish, and **it must not be lengthened** to space out calls.
 
 | What changes | What does not |
 | --- | --- |
@@ -854,4 +875,4 @@ mcp-vault/
 
 ---
 
-**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.16.0
+**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.16.1

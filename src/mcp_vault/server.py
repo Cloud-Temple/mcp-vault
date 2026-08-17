@@ -922,7 +922,17 @@ async def secret_consume(
             logger.warning("secret_consume : singleton JWT absent (ENFORCE=false) — JWT non validé")
         else:
             try:
-                jwt_claims = validator.validate(mission_token)
+                # #148 : hors boucle. `validate()` délègue la résolution de clé au
+                # cache JWKS partagé, qui peut faire un `httpx.get` BLOQUANT. Ce
+                # chemin est celui du déballage de chaque enveloppe de credentials
+                # (mcp-agent présente un mission_token ES256 à chaque appel) : le
+                # gel y aurait touché tout le service, pas seulement cette requête.
+                from .auth.mission_jwt import get_jwks_cache, valider_hors_boucle
+                import functools as _ft
+                jwt_claims = await valider_hors_boucle(
+                    get_jwks_cache(),
+                    _ft.partial(validator.validate, mission_token),
+                )
                 mission_id = jwt_claims.get("mission_id", "")
             except Exception as e:
                 reason = getattr(e, "reason", "jwt_validation_failed")
