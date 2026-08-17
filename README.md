@@ -632,14 +632,37 @@ cinq de la boucle. Ce lot ferme les derniers, et ce sont les plus fréquents : l
 > par magasin — le renouvellent **hors boucle**, à la moitié du TTL, et toutes
 > les 10 s après une panne.
 
-⚠️ **Un appel réseau synchrone SUBSISTE sur le chemin d'authentification, et ce
-lot ne le ferme pas.** Le rafraîchissement du cache JWKS (`mission_jwt.py`,
-`httpx.get` synchrone, délai d'attente 5 s par défaut) est déclenché depuis la
-validation d'un jeton mission, elle-même appelée sans `await` dans la coroutine
-du PEP. Même classe de défaut que #110, sur un chemin aussi chaud — mais **borné**
-par son délai d'attente et son backoff, là où les appels S3 d'origine cumulaient
-plusieurs minutes. Hors périmètre de #123, qui ne porte que sur les magasins S3 :
-à traiter séparément.
+✅ **Le dernier appel réseau synchrone du chemin d'authentification est fermé**
+*(v0.16.1, #148)*. Le rafraîchissement du cache JWKS (`mission_jwt.py`,
+`httpx.get` synchrone) était déclenché depuis la validation d'un jeton mission,
+appelée **sans `await`** dans une coroutine. Même classe de défaut que #110, sur
+un chemin aussi chaud. Il était **déclaré ici comme résidu** depuis v0.15.0 ;
+il ne l'est plus.
+
+Mesuré en production le 17/08 avant correction : **117,2 ms** de gel du service
+entier par rafraîchissement, au plus une fois par TTL de 60 s. Trois chemins y
+menaient, **tous des coroutines**, et les trois sont déportés hors boucle par
+`run_blocking` :
+
+| Site | Ce qui l'active |
+| --- | --- |
+| PEP transport (`AuthMiddleware`) | `MCP_AUTH_MODE ∈ {jwt, dual-stack}` |
+| `secret_wrap` | `ENFORCE_MISSION_TOKEN_VALIDATION=true` |
+| **`secret_consume`** | ⚠️ la simple **présence** de `MISSION_JWKS_URL` — c'est le chemin du déballage de chaque enveloppe de credentials |
+| `POST /admin/api/auth/jwks/reload` | appel opérateur — le plus lent, il force le fetch |
+
+> ⚠️ **`JWKSCache` n'est PAS réécrit.** Il est déjà thread-safe (`threading.Lock`) :
+> plusieurs threads d'exécuteur s'y sérialisent, **un seul** fait le fetch, les
+> autres trouvent l'instantané frais. Son **fail-close** (un cache périmé n'est
+> jamais servi), son **backoff** et son **throttle « kid inconnu »** sont
+> inchangés — les déplacer aurait transformé un gel en martèlement de l'endpoint
+> de `mcp-mission`.
+
+> ⚠️ **`MISSION_JWKS_CACHE_TTL` n'est pas un réglage de latence.** Une clé révoquée
+> disparaît du JWKS de `mcp-mission` : ce TTL est donc la **fenêtre de propagation
+> d'une révocation de clé de signature**. Il vaut **60 s**, cinq fois plus strict
+> que le `max-age=300` qu'ils publient, et **il ne doit pas être allongé** pour
+> espacer les appels.
 
 | Ce qui change | Ce qui ne change pas |
 | --- | --- |
@@ -855,4 +878,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.16.0
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.16.1

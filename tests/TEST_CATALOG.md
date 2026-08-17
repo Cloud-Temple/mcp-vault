@@ -1,6 +1,6 @@
 # Catalogue des Tests E2E — MCP Vault
 
-> **Version** : v0.16.0 — Une erreur de stockage mal lue ne rend plus une clé de provisionnement rejouable : le registre ne conclut plus « fichier absent » depuis le TEXTE d'une erreur ni depuis un document valide mais sans la clé `wraps`, il repartait sinon vide en se déclarant fiable
+> **Version** : v0.16.1 — Le dernier appel réseau synchrone du chemin d'authentification est fermé : le rafraîchissement du cache JWKS ne gèle plus la boucle d'événements, sur ses trois chemins (PEP transport, déballage de credentials, rechargement admin)
 > **Dernière exécution** : 349 assertions e2e sur 15 catégories (+ 18 tests crypto)
 > **Décompte reproductible** : comptage AST des appels `check` / `check_true` / `check_value` / `check_traversed` dans les fonctions `test_*` de `tests/test_e2e.py`, boucles littérales expansées
 > **Durée** : ~5 secondes (e2e) + <1s (crypto)

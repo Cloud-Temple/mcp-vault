@@ -6,6 +6,7 @@ Pile d'exécution (ordre) :
     AdminMiddleware → HealthCheckMiddleware → AuthMiddleware → LoggingMiddleware → FastMCP
 """
 
+import functools
 import hmac
 import json
 import logging
@@ -344,6 +345,7 @@ class AuthMiddleware:
             MissionTokenInvalid,
             check_mission_active,
             get_jwks_cache,
+            valider_hors_boucle,
             validate_mission_token,
         )
 
@@ -352,13 +354,28 @@ class AuthMiddleware:
             # Lifecycle non passé / JWKS non initialisé → fail-close.
             return None, (503, "jwks_not_initialized", {})
 
+        # #148 : la validation reste SYNCHRONE — elle n'est pas réécrite — mais elle
+        # s'exécute hors de la boucle d'événements. Son étape 2 résout la clé par
+        # `JWKSCache.get_key()`, qui peut déclencher un `httpx.get` BLOQUANT vers
+        # l'endpoint JWKS de mcp-mission (117 ms mesurés en production le 17/08,
+        # jusqu'à 5 s de délai d'attente). Exécuté dans la boucle, il monopolise
+        # l'unique thread qui sert TOUTES les requêtes — sonde de santé comprise.
+        # Même classe de défaut que #110, autre transport.
+        #
+        # ⚠️ `JWKSCache` est déjà thread-safe (`threading.Lock`) : plusieurs threads
+        # d'exécuteur s'y sérialisent correctement, un seul fait le fetch, les autres
+        # trouvent le cache frais. Rien à changer dans le cache.
         try:
-            claims = validate_mission_token(
-                token,
+            claims = await valider_hors_boucle(
                 jwks_cache,
-                instance_id=settings.resolved_mission_aud,
-                component_kind=settings.mcp_component_kind,
-                iat_leeway=settings.mission_token_leeway_seconds,
+                functools.partial(
+                    validate_mission_token,
+                    token,
+                    jwks_cache,
+                    instance_id=settings.resolved_mission_aud,
+                    component_kind=settings.mcp_component_kind,
+                    iat_leeway=settings.mission_token_leeway_seconds,
+                ),
             )
         except MissionTokenInvalid as e:
             return None, (401, e.reason, {})

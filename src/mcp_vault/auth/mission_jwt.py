@@ -24,6 +24,7 @@ Ce module NE DOIT PAS importer hvac (ni transitivement) : il doit rester importa
 les tests unitaires sans OpenBao. Import autorisés : jwt (PyJWT), httpx, stdlib.
 """
 
+import asyncio
 import json
 import logging
 import random
@@ -34,6 +35,8 @@ from typing import Callable, Optional
 import httpx
 import jwt as _pyjwt
 from jwt.algorithms import ECAlgorithm
+
+from ..async_offload import run_blocking
 
 logger = logging.getLogger("mcp-vault.mission-jwt")
 
@@ -137,6 +140,14 @@ class JWKSCache:
         self._timeout = timeout
         self._now = time_func
         self._lock = threading.Lock()
+        # #148 : sérialise les RÉSOLUTIONS déportées hors boucle, côté asyncio.
+        # Sans lui, N requêtes mission concurrentes prennent chacune un thread de
+        # l'exécuteur — PARTAGÉ avec les offloads S3 (#122/#123) — puis attendent
+        # `_lock`. Un endpoint JWKS lent ou tombé affamerait donc S3 : on aurait
+        # réparé #110 sur un transport en le recréant sur l'autre. Ici, un seul
+        # thread au plus est engagé ; les autres attendent ce verrou asyncio, ce
+        # qui ne coûte aucun thread.
+        self.verrou_resolution = asyncio.Lock()
 
         # État du cache.
         self._keys_by_kid: dict[str, dict] = {}
@@ -205,6 +216,13 @@ class JWKSCache:
         """Nombre de clés actuellement en cache (diagnostic)."""
         with self._lock:
             return len(self._keys_by_kid)
+
+    # ⚠️ #148 — AUCUNE méthode de ce cache ne doit être appelée depuis la boucle
+    # d'événements, pas même pour « juste regarder ». `_lock` est TENU pendant tout
+    # le fetch HTTP : un simple constat de fraîcheur pris depuis la boucle s'y
+    # bloquerait, et recréerait exactement le gel que #148 ferme. Une première
+    # version de ce lot exposait un tel constat « en mémoire pure » — relevé en
+    # revue adversariale. Tout passe par `valider_hors_boucle`.
 
     # -- Interne (sous _lock) ---------------------------------------------------
 
@@ -384,6 +402,50 @@ def looks_like_jwt(token: str) -> bool:
     except Exception:
         return False
     return isinstance(header, dict) and "alg" in header
+
+
+# ── Déport hors boucle des validations (#148) ───────────────────────────────────
+
+async def valider_hors_boucle(jwks_cache: "JWKSCache", appel):
+    """Exécute une validation SYNCHRONE hors de la boucle, sans affamer l'exécuteur.
+
+    `appel` est un callable sans argument (utiliser `functools.partial`). Il n'est
+    pas réécrit : c'est son lieu d'exécution qui change.
+
+    Deux propriétés, portées par deux mécanismes distincts :
+
+    1. **la boucle n'est jamais gelée** — garantie par `run_blocking` ;
+    2. **au plus UN thread d'exécuteur est engagé sur le cache** — garantie par le
+       verrou asyncio. L'exécuteur est partagé avec les offloads S3 (#122/#123) :
+       sans cette borne, un endpoint JWKS tombé y laisserait N requêtes mission
+       attendre en thread, et les lectures S3 feraient la queue derrière.
+
+    ⚠️ **La sérialisation est INCONDITIONNELLE, et ce n'est pas une prudence
+    excessive.** Deux versions antérieures de ce lot ont tenté de l'éviter sur
+    cache frais, en consultant d'abord la fraîcheur depuis la boucle. Les deux
+    étaient fausses pour la même raison : `JWKSCache._lock` est **tenu pendant tout
+    le fetch HTTP**, donc *toute* interaction avec le cache depuis la boucle — même
+    une lecture — peut s'y bloquer et recréer le gel de #148. Il n'existe pas de
+    « coup d'œil gratuit » sur ce cache. La seule règle sûre est : on n'y touche
+    jamais depuis la boucle.
+
+    Coût de cette inconditionnalité : les validations mission se sérialisent entre
+    elles. Sur cache frais, chaque tenue vaut une vérification de signature ES256 —
+    quelques centaines de microsecondes. Pendant un rafraîchissement, les autres
+    attendent le temps du fetch (117 ms mesurés) — mais **côté boucle**, sans
+    occuper de thread, et sans empêcher `/health`, les outils non-mission ni les
+    lectures S3 d'être servis. C'est précisément ce que #148 devait obtenir.
+    """
+    # ⚠️ `jwks_cache` peut être None : le validateur de `secret_consume` résout le
+    # cache lui-même et sait rendre une erreur propre quand il est absent
+    # (lifecycle non passé, URL ajoutée à chaud). Déréférencer ici transformerait
+    # ce refus explicite en `AttributeError` — avalée par le `except` générique de
+    # l'appelant, donc en validation SILENCIEUSEMENT SAUTÉE. On se contente alors
+    # de déporter : le fond de la décision reste chez l'appelé.
+    if jwks_cache is None:
+        return await run_blocking(appel)
+    async with jwks_cache.verrou_resolution:
+        return await run_blocking(appel)
 
 
 # ── Validation PEP du mission_token (contrat réel mcp-mission v0.5.0) ───────────

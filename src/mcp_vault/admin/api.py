@@ -961,7 +961,15 @@ async def _api_jwks_reload(send):
             "message": "JWKS non configuré (MISSION_JWKS_URL vide ou lifecycle non passé)",
         })
     try:
-        count = cache.force_reload()
+        # #148 : hors boucle. C'est le site le PLUS lent des trois — `force_reload`
+        # remet le backoff à zéro et force le fetch, sans jamais bénéficier d'un
+        # cache frais. Un opérateur qui propage une révocation urgente gelait donc
+        # tout le service pendant l'appel, au moment précis où il le sollicite.
+        # Toujours sous le verrou : `force_reload` fetch PAR DÉFINITION (il remet
+        # le backoff à zéro), donc l'instantané frais ne l'exonère jamais.
+        from ..async_offload import run_blocking
+        async with cache.verrou_resolution:
+            count = await run_blocking(cache.force_reload)
     except JWKSUnavailable as e:
         return await _json_response(send, 503, {
             "status": "error",
