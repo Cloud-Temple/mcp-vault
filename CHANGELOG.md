@@ -2,6 +2,82 @@
 
 ## [Non publié]
 
+## [0.16.2] — 2026-08-17
+
+### Une indisponibilité du service de clés n'est plus annoncée comme un jeton invalide — #152
+
+Quand `secret_consume` ne peut pas vérifier l'identité de mission **parce que le
+service de clés est hors d'atteinte**, il rendait `error_type: "jwt_invalid"`.
+
+C'est la discipline #78 violée : fondre **un FAIT** sur l'appelant (« le jeton est
+invalide ») et **une IGNORANCE** de notre côté (« nous n'avons pas pu le vérifier »)
+sous un même nom. Le refus précède tout effet OpenBao — il appartient donc
+exactement à la classe publiée **`backend_unavailable`** : aucun effet tenté,
+enveloppe intacte, re-tentable.
+
+⚠️ **L'enjeu vient de leur contrat, pas du nôtre.** `mcp-agent` a publié sa table de
+décision : tout `error_type` autre que `backend_unavailable` vaut **consommation
+incertaine** ⇒ secret condamné, et depuis leur lot #49 **arrêt terminal de mission
+avec alerte de sécurité**. Sous `jwt_invalid`, une simple indisponibilité de
+l'endpoint JWKS **mono-instance** de `mcp-mission` se lisait chez eux comme un
+**incident d'intégrité de credential**. C'est eux qui ont posé la question ; nous
+n'avions pas vu la conséquence.
+
+Couvre `JWKSUnavailable` (endpoint injoignable, gelé au-delà du délai, backoff, 304
+sans cache, document malformé) **et** `bad_jwk`, que le mapping traduit vers le même
+motif : dans les deux cas la clé publique est hors d'atteinte.
+
+⚠️ **`backend_unavailable` n'est PAS élargi au-delà de « aucun effet tenté ».** Sa
+valeur pour les trois équipes vient de son étroitesse. Neuf motifs de refus sont
+verrouillés par test dans leur classe d'origine, et la mutation qui en fait un
+fourre-tout fait rougir huit tests.
+
+⚠️ **Cas laissé ouvert délibérément** : `kid_unknown_or_revoked` reste `jwt_invalid`.
+Il recouvre deux situations que nous ne distinguons pas encore — un jeton forgé
+(FAIT) et une rotation récente que le throttle anti-DoS nous a empêché d'aller
+vérifier (IGNORANCE). Le second est détectable chez nous, mais l'arbitrage appartient
+aussi à l'appelant : avis demandé à `mcp-agent`, non reçu à ce jour. Un test
+verrouille l'état actuel pour qu'un déplacement futur soit un **choix** et non un
+effet de bord.
+
+### ⚠️ Correction d'un recensement FAUX publié le 17/08
+
+Nous avons publié — README FR et EN, CHANGELOG de v0.16.1, commentaires de #148 et
+corps de #152, et deux messages aux équipes — que **`secret_wrap` faisait partie des
+sites de validation du `mission_token`**.
+
+**C'est faux.** Mesuré : `secret_wrap` **n'a aucun paramètre `mission_token`** et
+**n'appelle aucun validateur**. Il ne touche jamais le cache JWKS. Les sites sont
+**trois**, pas quatre : le PEP transport, `secret_consume`, et l'endpoint admin de
+rechargement.
+
+Origine de l'erreur, écrite pour qu'elle ne se répète pas : un `grep` sur
+`ENFORCE_MISSION_TOKEN_VALIDATION` trouve un bloc dans `secret_wrap` dont le
+commentaire mentionne `secret_consume`. Nous en avons **inféré** un bloc de
+validation. C'en est un de **configuration** et de complétude de binding.
+
+⇒ C'est la deuxième fois dans la même journée que nous **inférons au lieu de
+mesurer** sur cette surface : la première nous avait fait annoncer à tort à
+`mcp-agent` que le lien mission↔secret n'était pas imposé. Deux tests verrouillent
+désormais le fait : `secret_wrap` ne prend pas de `mission_token`, et n'appelle
+aucun validateur. S'il en appelait un un jour, il deviendrait soumis au déport de
+#148 **et** au mapping de #152 — le banc le dira.
+
+### Ce que ce lot ne change pas
+
+Rien en production. Le défaut n'était atteignable qu'en mode
+`ENFORCE_MISSION_TOKEN_VALIDATION=true`, et la production tourne à `false` : l'échec
+de validation y est journalisé puis **ignoré**, le déballage continue. Trois tests
+verrouillent cette conduite inchangée — non pour l'approuver, mais parce que la
+changer serait un autre lot (#47/#86).
+
+### Compatibilité
+
+Aucun appelant conforme ne casse. Un refus qui portait `jwt_invalid` porte désormais
+`backend_unavailable` **dans le seul cas où nous n'avons pas pu vérifier** — c'est
+précisément la correction demandée par `mcp-agent`, dont la table traite déjà ce
+code. Aucune signature, aucun autre code, aucun champ ne change.
+
 ## [0.16.1] — 2026-08-17
 
 ### Le dernier appel réseau synchrone du chemin d'authentification est fermé — #148
@@ -22,7 +98,6 @@ déportés hors boucle par `run_blocking` (la primitive du lot 2 de #110) :
 | Site | Ce qui l'active |
 | --- | --- |
 | PEP transport (`AuthMiddleware._validate_mission_jwt`) | `MCP_AUTH_MODE ∈ {jwt, dual-stack}` |
-| `secret_wrap` | `ENFORCE_MISSION_TOKEN_VALIDATION=true` |
 | **`secret_consume`** | ⚠️ la simple **présence** de `MISSION_JWKS_URL` |
 | `POST /admin/api/auth/jwks/reload` | appel opérateur — le plus lent, il force le fetch |
 

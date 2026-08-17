@@ -946,9 +946,41 @@ async def secret_consume(
                                 "message": "Configuration mission_token incomplète "
                                            "(audience non résolue) — redémarrer le "
                                            "service après correction"}
+                    if reason == "jwks_unavailable":
+                        # #152 : « je n'ai pas pu vérifier » n'est PAS « le jeton est
+                        # invalide ». Discipline #78 : ne jamais fondre un FAIT sur
+                        # l'appelant et une IGNORANCE de notre côté sous un même nom.
+                        #
+                        # Ce refus précède tout effet OpenBao — il appartient donc
+                        # exactement à la classe publiée `backend_unavailable` :
+                        # aucun effet tenté, enveloppe intacte, re-tentable.
+                        #
+                        # ⚠️ L'enjeu n'est pas cosmétique. `mcp-agent` traite tout
+                        # `error_type` autre que `backend_unavailable` comme une
+                        # consommation INCERTAINE — donc secret condamné, et depuis
+                        # leur lot #49 arrêt terminal de mission avec alerte de
+                        # sécurité. Sous `jwt_invalid`, une indisponibilité de
+                        # l'endpoint JWKS mono-instance de `mcp-mission` se lisait
+                        # chez eux comme un incident d'intégrité de credential.
+                        #
+                        # Couvre `JWKSUnavailable` (endpoint injoignable, gelé au-delà
+                        # du délai, backoff, 304 sans cache, document malformé) ET
+                        # `bad_jwk`, que `_INVALID_REASON_MAP` traduit vers le même
+                        # motif : dans les deux cas la clé publique est hors d'atteinte.
+                        return {"status": "error", "error_type": "backend_unavailable",
+                                "message": "Vérification de l'identité de mission "
+                                           "impossible (service de clés indisponible) "
+                                           "— aucun déballage tenté, réessayer"}
                     # #78/D5 : message client GÉNÉRIQUE — le reason (potentiellement porteur
                     # d'une valeur non vérifiée) reste dans le log serveur ci-dessus, jamais
                     # renvoyé au client ni versé à l'audit humain.
+                    #
+                    # ⚠️ `kid_unknown_or_revoked` reste ICI, délibérément (#152). Il
+                    # recouvre deux situations que nous ne distinguons pas encore : un
+                    # jeton forgé (FAIT ⇒ correct ici) et une rotation récente que le
+                    # throttle anti-DoS nous a empêché d'aller vérifier (IGNORANCE ⇒ il
+                    # devrait rejoindre le cas ci-dessus). Arbitrage ouvert, avis
+                    # demandé à `mcp-agent` : ne pas le déplacer sans leur réponse.
                     return {"status": "error", "error_type": "jwt_invalid",
                             "message": "Mission token invalide"}
                 logger.warning(

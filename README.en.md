@@ -645,7 +645,6 @@ coroutines**, and all three now go off-loop through `run_blocking`:
 | Site | What activates it |
 | --- | --- |
 | Transport PEP (`AuthMiddleware`) | `MCP_AUTH_MODE ∈ {jwt, dual-stack}` |
-| `secret_wrap` | `ENFORCE_MISSION_TOKEN_VALIDATION=true` |
 | **`secret_consume`** | ⚠️ the mere **presence** of `MISSION_JWKS_URL` — this is the path that unwraps every credentials envelope |
 | `POST /admin/api/auth/jwks/reload` | operator call — the slowest, it forces the fetch |
 
@@ -875,4 +874,4 @@ mcp-vault/
 
 ---
 
-**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.16.1
+**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.16.2

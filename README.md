@@ -647,7 +647,6 @@ menaient, **tous des coroutines**, et les trois sont déportés hors boucle par
 | Site | Ce qui l'active |
 | --- | --- |
 | PEP transport (`AuthMiddleware`) | `MCP_AUTH_MODE ∈ {jwt, dual-stack}` |
-| `secret_wrap` | `ENFORCE_MISSION_TOKEN_VALIDATION=true` |
 | **`secret_consume`** | ⚠️ la simple **présence** de `MISSION_JWKS_URL` — c'est le chemin du déballage de chaque enveloppe de credentials |
 | `POST /admin/api/auth/jwks/reload` | appel opérateur — le plus lent, il force le fetch |
 
@@ -878,4 +877,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.16.1
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.16.2
