@@ -2,6 +2,123 @@
 
 ## [Non publié]
 
+## [0.16.0] — 2026-08-17
+
+### Une erreur de stockage mal lue ne rend plus une clé rejouable — #149
+
+Notre garantie publiée est qu'une clé de provisionnement est à **usage unique,
+sans condition** — c'est celle sur laquelle `mcp-mission` a bâti son guichet de
+credentials. Elle ne vaut que ce que vaut l'instantané que la garde interroge.
+
+Le registre concluait « le fichier n'existe pas encore » dès que le **texte** de
+l'erreur de lecture *contenait* « 404 » ou « NoSuchKey » : un identifiant de
+requête, un port, un 404 émis par un intermédiaire. Il repartait alors **vide en
+se déclarant fiable**. Le refus fail-close de v0.15.0 ne se déclenchait pas — il
+ne lit que ce drapeau — la clé déjà engagée paraissait vierge, et un second
+secret pouvait être créé dessus.
+
+Désormais, seule une absence **authentifiée par le champ d'erreur structuré**
+(`botocore.ClientError` avec `Error.Code == "NoSuchKey"`) vide le registre. Toute
+autre erreur est une panne : la création est refusée avec `backend_unavailable`,
+sans qu'aucune écriture ni aucun appel OpenBao soit tenté.
+
+**Le défaut avait une seconde porte**, fermée dans le même lot après un NO-GO de
+revue adversariale sur le premier correctif. `load()` faisait
+`data.get("wraps", [])` : un GET qui **réussit** en renvoyant un JSON valide sans
+la clé `wraps` — un `{}`, un corps tronqué, un corps de remplacement d'un
+intermédiaire — produisait exactement le même effet, **sans qu'aucune erreur ne
+soit levée**. Le document est désormais validé (`{"wraps": [...]}` à la racine)
+**avant toute mutation d'état** : un document abîmé ne touche jamais l'instantané
+mémoire, et la lecture est classée comme panne. C'est la seconde moitié de la
+règle #69, que `PolicyStore` énonce déjà mot pour mot. Un registre
+**légitimement** vide (`{"wraps": []}`, l'état du fichier après une première
+écriture sans entrée) se charge normalement.
+
+⚠️ **C'est une règle déjà tranchée, que ce magasin n'avait jamais reçue.** La
+revue #69 (BLOQUANT-2) l'a établie et les trois magasins d'autorisation
+l'appliquent depuis. Le registre wrap était le seul des quatre à en être resté au
+test par sous-chaîne.
+
+⚠️ **Observé avant d'être corrigé.** Le 16/08, le faux S3 du banc de qualification
+plateforme renvoyait un `404` générique au lieu de `NoSuchKey`. Les trois magasins
+stricts ont refusé — c'est ce qui a bloqué la qualification de v0.15.0 et permis
+de trouver la cause réelle. Le registre wrap, lui, est passé. Le contraste était
+la démonstration du défaut ; il a d'abord été lu comme un détail de banc.
+
+⚠️ **Le premier démarrage reste nominal**, et c'est le risque qu'il fallait ne pas
+prendre : rien ne crée le fichier de registre, il naît de la première écriture.
+Un `NoSuchKey` authentique vaut donc toujours « registre vide ». L'option d'un
+`HEAD` de confirmation a été écartée comme inutile — les trois magasins stricts
+fonctionnent en production, ce qui démontre que le stockage nomme correctement
+l'absence.
+
+⚠️ **Effet de bord assumé** : derrière un intermédiaire non conforme, le guichet
+refusera au lieu de passer silencieusement. C'est la conduite correcte, et c'est
+déjà celle des trois autres magasins.
+
+Le contrat publié est corrigé sur un point où il **sous-déclarait** le défaut : il
+annonçait « la perte du fichier de registre » comme contournement, alors qu'il
+suffisait d'une erreur mal lue, sans aucune perte de donnée.
+
+### La volumétrie du registre est mesurée — sans que la sonde en devienne une cause — #146
+
+Le registre n'a ni purge ni écriture incrémentale : il est réécrit
+**intégralement** à chaque transition, donc le coût d'une opération croît avec le
+nombre d'entrées. Nous n'avions aucun chiffre, et la montée en charge des missions
+à fan-out est devant nous — mesurer après serait découvrir le nombre une fois
+qu'il a grossi.
+
+`system_health` publie donc, pour le registre wrap : `entries` (nombre d'entrées)
+et `last_write_bytes` (poids du dernier corps écrit, `null` tant qu'aucune
+écriture n'a eu lieu depuis le démarrage).
+
+⚠️ **`last_write_bytes` est relevé à l'écriture, jamais calculé à la demande.**
+Sérialiser le registre à chaque appel de supervision ferait de la sonde une cause
+du problème qu'elle mesure. Un test verrouille cette propriété : la sonde ne doit
+appeler aucune sérialisation. `entries` est un simple décompte en mémoire.
+
+Aucun arbitrage de purge n'est engagé ici. Le critère d'entrée de #146 reste
+inchangé : la purge se dimensionne sur un **état** (mission terminée ET
+réconciliée), pas sur une durée, et rien ne sera codé avant que `mcp-agent#122`
+soit en production.
+
+### Compatibilité
+
+Aucun appelant conforme ne casse. `backend_unavailable` est déjà au contrat comme
+refus **sans effet et re-tentable**, et les deux champs de `system_health` sont
+additifs.
+
+### La règle ne vit plus qu'à un seul endroit — et un cinquième site corrigé
+
+Le premier jet de ce lot laissait le prédicat d'absence **recopié dans quatre
+magasins**, avec un test d'alignement pour surveiller la divergence. C'était le
+mauvais arbitrage, pour une raison simple : **#149 est né de cette duplication
+même**, et un test qui énumère les magasins connus ne protège pas du scénario qui
+a produit le défaut — un magasin de PLUS, écrit plus tard, sans la règle.
+
+La règle vit désormais dans `s3_client.objet_absent()`, appelée par les cinq
+sites. Deux tests portent sur une propriété de l'**arbre source**, pas sur une
+liste de classes, et couvrent donc le magasin qui n'existe pas encore :
+
+- aucun fichier de `src/` ne peut réintroduire `"NoSuchKey" in str(...)` ;
+- le prédicat n'a **qu'une seule définition**, et elle est dans `s3_client.py`.
+
+⚠️ **Ce balayage a révélé un cinquième site**, hors des magasins : le
+téléchargement des **clés d'unseal** d'OpenBao portait encore le test par
+sous-chaîne. Une panne de stockage y devenait « pas de clés sur S3 ».
+
+**Aucune destruction de données n'était possible** : la garde #121
+(`_openbao_data_exists`) refuse durement d'initialiser quand le coffre contient
+des données, et la restauration depuis S3 échoue déjà en fail-close en amont. Le
+dégât était un **diagnostic faux** — on annonçait à l'exploitant « clés
+introuvables, restaurez l'objet chiffré » alors que la cause réelle était une
+erreur de stockage passagère, ce qui l'envoyait réparer la mauvaise chose. Une
+panne remonte désormais telle quelle.
+
+Les mappings d'erreurs **OpenBao** (`"404"` sur `str(e)` dans les chemins de
+révocation et de consommation) sont **inchangés** : ils portent sur une autre
+surface d'erreur, et #78 les a déjà arbitrés.
+
 ## [0.15.0] — 2026-08-16
 
 ### Un stockage lent ne gèle plus le service — dernier lot de #110

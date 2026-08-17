@@ -29,6 +29,7 @@ from typing import Optional
 import hvac
 
 from ..async_offload import run_blocking
+from ..s3_client import objet_absent
 from ..config import get_settings
 from .crypto import encrypt_with_bootstrap_key, decrypt_with_bootstrap_key
 from .manager import get_hvac_client
@@ -142,7 +143,14 @@ def _download_encrypted_keys_from_s3() -> Optional[dict]:
         )
         encrypted_b64 = response["Body"].read().decode("ascii")
     except Exception as e:
-        if "NoSuchKey" in str(e) or "404" in str(e):
+        # #149 : `None` signifie ici « aucune clé n'a jamais été déposée », ce que
+        # l'appelant traduit en « coffre vierge, initialisation possible ». Le
+        # déduire du TEXTE de l'erreur faisait annoncer « clés introuvables,
+        # restaurez l'objet chiffré » sur une simple panne de stockage — un
+        # diagnostic faux, qui envoie l'exploitant réparer la mauvaise chose.
+        # La garde #121 (`_openbao_data_exists`) empêchait la destruction ; elle
+        # ne corrigeait pas le message. Une panne remonte désormais telle quelle.
+        if objet_absent(e):
             logger.debug(f"Pas de clés chiffrées sur S3 ({_S3_INIT_KEY})")
             return None
         raise

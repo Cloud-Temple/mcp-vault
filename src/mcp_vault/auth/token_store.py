@@ -41,6 +41,7 @@ from typing import Optional
 logger = logging.getLogger("mcp-vault.token-store")
 
 from ..async_offload import run_blocking
+from ..s3_client import objet_absent
 from ..config import get_settings
 from ..store_refresh import RETRY_AFTER_ERROR_SECONDS, Freshness, magasin_ferme
 
@@ -269,23 +270,6 @@ class TokenStore:
         from ..s3_client import get_s3_meta_client
         return get_s3_meta_client()
 
-    @staticmethod
-    def _is_missing_key_error(e: Exception) -> bool:
-        """True UNIQUEMENT pour l'absence nominale de l'objet tokens.json (NoSuchKey).
-
-        Même logique robuste que PolicyStore/MissionBindingStore : ne se fie JAMAIS
-        à une sous-chaîne "404"/"NoSuchKey" dans str(e) — seul botocore
-        ClientError.response["Error"]["Code"] == "NoSuchKey" est nominal.
-        """
-        try:
-            from botocore.exceptions import ClientError
-        except ImportError:
-            return False  # sans botocore, toute erreur = indisponible (fail-close)
-        if not isinstance(e, ClientError):
-            return False
-        resp = getattr(e, "response", {}) or {}
-        return resp.get("Error", {}).get("Code", "") == "NoSuchKey"
-
     def _mark_invalid(self, msg: str):
         """Passe le store en état INDISPONIBLE observable (diagnostique seulement).
 
@@ -322,7 +306,7 @@ class TokenStore:
             resp = s3.get_object(Bucket=self.settings.s3_bucket_name, Key=self.S3_KEY)
             raw = resp["Body"].read().decode()
         except Exception as e:
-            if self._is_missing_key_error(e):
+            if objet_absent(e):
                 # Absence nominale (1er boot) : chargement RÉUSSI d'un magasin
                 # vide, la fraîcheur doit avancer (#123).
                 self._tokens = {}

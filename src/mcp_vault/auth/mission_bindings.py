@@ -39,6 +39,7 @@ from typing import Optional
 logger = logging.getLogger("mcp-vault.mission-binding-store")
 
 from ..async_offload import run_blocking
+from ..s3_client import objet_absent
 from ..config import get_settings
 from ..store_refresh import RETRY_AFTER_ERROR_SECONDS, Freshness, magasin_ferme
 from ..vault_ids import is_valid_vault_id
@@ -296,27 +297,6 @@ class MissionBindingStore:
         from ..s3_client import get_s3_data_client
         return get_s3_data_client()
 
-    @staticmethod
-    def _is_missing_key_error(e: Exception) -> bool:
-        """True UNIQUEMENT pour l'absence nominale de l'OBJET binding (`NoSuchKey`), via botocore.
-
-        Revue Codex #69 (BLOQUANT-2) : (1) ne PAS se fier à une sous-chaîne "404"/"NoSuchKey" dans
-        str(e) — un port 4040 ou un request-id contenant '404' ferait passer une panne pour un
-        fichier absent. (2) Ne PAS accepter `NoSuchBucket` ni un `404` générique : un bucket
-        supprimé/inaccessible ou un endpoint cassé est une VRAIE panne, pas l'absence du fichier
-        binding — le traiter en absence viderait le cache et masquerait la panne (deny silencieux).
-        Seul `Error.Code == "NoSuchKey"` = premier démarrage légitime (0 binding). Tout le reste →
-        indisponibilité (fail-close).
-        """
-        try:
-            from botocore.exceptions import ClientError
-        except ImportError:
-            return False  # sans botocore, toute erreur = indisponible (fail-close)
-        if not isinstance(e, ClientError):
-            return False
-        resp = getattr(e, "response", {}) or {}
-        return resp.get("Error", {}).get("Code", "") == "NoSuchKey"
-
     def _mark_invalid(self, msg: str):
         """Passe le store en état INDISPONIBLE observable (sans écraser le cache mémoire)."""
         self._available = False
@@ -344,7 +324,7 @@ class MissionBindingStore:
             resp = s3.get_object(Bucket=self.settings.s3_bucket_name, Key=self.s3_key)
             raw = resp["Body"].read().decode()
         except Exception as e:
-            if self._is_missing_key_error(e):
+            if objet_absent(e):
                 # Absence nominale (1er démarrage) : chargement RÉUSSI d'un
                 # magasin vide, la fraîcheur doit avancer (#123).
                 self._bindings = {}

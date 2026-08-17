@@ -353,6 +353,12 @@ def freshness_report() -> dict:
         vue = fraicheur.observability()
         ttl = getattr(magasin, "CACHE_TTL", None)
         vue["stale"] = fraicheur.is_stale(ttl) if ttl else None
+        # Métriques propres au magasin, s'il en expose (#146 : volumétrie du
+        # registre wrap). Optionnel par construction : un magasin qui n'a rien à
+        # dire n'a rien à implémenter.
+        metriques = getattr(magasin, "volumetrie", None)
+        if callable(metriques):
+            vue.update(metriques())
         rapport[nom] = vue
     return rapport
 

@@ -248,6 +248,20 @@ blocked under `operation_pending`: same block, different code. **Recovery = a ne
 > every key becomes pristine again) and the race between two instances, absent
 > CAS/ETag *(#51)*. These are not business releases, but uniqueness is not
 > absolute either.
+>
+> ⚠️ **That first bypass was wider than this sentence admitted, up to and
+> including v0.15.0** *(#149, fixed in v0.16.0)*. Losing the file was not
+> required: **a misread storage error was enough.** The registry concluded "object
+> absent" as soon as the error text *contained* "404" — a request id, a port, a
+> 404 emitted by an intermediary — then started empty **while declaring itself
+> trustworthy**, so the fail-close refusal never fired and the probe reported
+> nothing. **A second door reached the same effect with no error at all**: a read
+> that succeeded while returning valid JSON without the `wraps` key (a `{}`, a
+> truncated body) was taken for an empty registry. From now on, only an absence
+> authenticated by the structured error field (`NoSuchKey`) empties the registry,
+> and the document is validated before any state mutation; everything else
+> refuses creation. This is the rule the three authorization stores have applied
+> since #69.
 
 > A `failed` (or `pending`) intent without an accessor returns `found_unattached` on `secret_wrap_lookup`: no revocation is possible, only the TTL bounds the possible resource. ⚠️ That verdict does **not** state that a resource exists — it states that we cannot rule it out. *(v0.12.1: this case used to answer `already_revoked`, asserting a revocation that never happened.)*
 
@@ -656,6 +670,16 @@ plus `stores_stale` when relevant). Without it, a dead refresher would only show
 at the first refusal: the service would answer normally, then refuse everything at
 once.
 
+The wrap registry adds its **volumetry** *(v0.16.0, #146)*: `entries`, the number
+of entries, and `last_write_bytes`, the size of the last body written — `null`
+until a write has happened since startup. The registry has neither purge nor
+incremental write: it is rewritten **in full** on every transition, and we had no
+figure to size that cost.
+
+> ⚠️ **`last_write_bytes` is recorded at write time, never computed by the probe.**
+> Serializing the registry on every supervision call would make the probe a cause
+> of the very problem it measures. `entries` is a plain in-memory count.
+
 > ⚠️ **The HTTP probes `/health` and `/healthz` are deliberately UNCHANGED.** A
 > stale store does not flip the container to `unhealthy`: restarting would not fix
 > an unreachable store, and the `HEALTHCHECK` would trigger a restart loop during
@@ -830,4 +854,4 @@ mcp-vault/
 
 ---
 
-**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.15.0
+**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.16.0
