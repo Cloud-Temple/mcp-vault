@@ -50,6 +50,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from ..async_offload import run_blocking
+from ..s3_client import objet_absent
 from ..store_refresh import Freshness
 from ..vault_ids import is_valid_vault_id
 
@@ -189,21 +190,69 @@ class WrapRegistry:
         # consultation d'état (status_by_operation_id) pour ne pas présenter un
         # instantané périmé comme fiable. Additif — n'affecte pas le flux broker.
         self._last_load_ok: bool = True
+        # #146 : poids du dernier corps sérialisé, RELEVÉ À L'ÉCRITURE.
+        # Voir `volumetrie()` pour la raison de ne pas le calculer à la demande.
+        self._dernier_poids: Optional[int] = None
+
+    def volumetrie(self) -> dict:
+        """Cardinalité du registre et poids de sa dernière écriture (#146).
+
+        Le registre n'a ni purge ni écriture incrémentale : il est réécrit
+        INTÉGRALEMENT à chaque transition. Le coût d'une opération croît donc
+        avec le nombre d'entrées, et nous n'avons aucun chiffre. Ces deux valeurs
+        sont là pour que la mesure arrive seule, avant et après la montée en
+        charge, sans rien demander à personne.
+
+        ⚠️ **La taille n'est PAS calculée ici.** La sérialisation est précisément
+        le coût que #146 surveille : la recalculer à chaque appel de sonde ferait
+        de la sonde une cause du problème qu'elle mesure. Elle est donc relevée
+        dans `_save`, là où on sérialise de toute façon. `None` signifie « aucune
+        écriture depuis le démarrage », pas « vide ».
+
+        La cardinalité, elle, est gratuite : c'est un `len` sur l'instantané mémoire.
+        """
+        return {"entries": len(self._wraps), "last_write_bytes": self._dernier_poids}
 
     def _get_s3_data(self):
         from ..s3_client import get_s3_data_client
         return get_s3_data_client()
+
+    @staticmethod
+    def _wraps_depuis(data) -> list:
+        """Les entrées du document, ou une exception si sa forme est cassée.
+
+        Seconde moitié de la règle #69, elle aussi absente ici (#149) : un
+        document **valide mais structurellement faux** — `{}`, `{"wraps": null}`,
+        `{"wraps": {}}`, une liste à la racine — n'est PAS un registre vide.
+
+        Le tolérer produisait exactement l'effet du test par sous-chaîne : un
+        instantané vide déclaré fiable, donc toutes les clés de provisionnement
+        redevenues vierges — sans même qu'une erreur soit levée. `PolicyStore`
+        énonce la même règle : « un objet sans cette clé, ou `{}` tout court,
+        n'est PAS traité comme un store vide : seul NoSuchKey l'est ».
+
+        Levée depuis `load()`, l'exception retombe dans la branche de panne :
+        l'instantané mémoire est CONSERVÉ et la création est refusée. La
+        validation précède donc toute mutation d'état — un document abîmé ne
+        touche jamais le cache.
+        """
+        if not isinstance(data, dict) or not isinstance(data.get("wraps"), list):
+            raise ValueError(
+                'document de registre invalide : la racine doit être {"wraps": [...]}'
+            )
+        return data["wraps"]
 
     def load(self):
         try:
             s3 = self._get_s3_data()
             resp = s3.get_object(Bucket=self.settings.s3_bucket_name, Key=self.S3_KEY)
             data = json.loads(resp["Body"].read().decode())
-            self._wraps = data.get("wraps", [])
+            wraps = self._wraps_depuis(data)  # AVANT toute mutation d'état
+            self._wraps = wraps
             self.freshness.mark_success()
             self._last_load_ok = True
         except Exception as e:
-            if "NoSuchKey" in str(e) or "404" in str(e):
+            if objet_absent(e):
                 self._wraps = []
                 self.freshness.mark_success()
                 self._last_load_ok = True  # absence de fichier = registre vide connu
@@ -227,10 +276,14 @@ class WrapRegistry:
         try:
             s3 = self._get_s3_data()
             data = json.dumps({"wraps": self._wraps}, indent=2, default=str)
+            corps = data.encode()
+            # #146 : relevé ICI, où la sérialisation est déjà payée. Mesure le coût
+            # réel d'une transition, y compris si le PUT échoue ensuite.
+            self._dernier_poids = len(corps)
             s3.put_object(
                 Bucket=self.settings.s3_bucket_name,
                 Key=self.S3_KEY,
-                Body=data.encode(),
+                Body=corps,
                 ContentType="application/json",
             )
             self.freshness.mark_success()  # un PUT réussi prouve S3 joignable

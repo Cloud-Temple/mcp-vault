@@ -19,6 +19,43 @@ from .config import get_settings
 
 logger = logging.getLogger("mcp-vault.s3")
 
+
+# =============================================================================
+# Sémantique des erreurs S3 — SOURCE UNIQUE
+# =============================================================================
+
+def objet_absent(erreur: Exception) -> bool:
+    """Cette erreur signifie-t-elle « l'objet n'existe pas encore » ?
+
+    Elle ne répond QUE cela. Ce que chaque appelant fait de la réponse — repartir
+    sur un magasin vide, refuser de déverrouiller, initialiser — reste chez lui.
+
+    **Règle de la revue #69 (BLOQUANT-2)** : ne JAMAIS se fier à une sous-chaîne
+    "404"/"NoSuchKey" dans `str(erreur)`. Un request-id, un port ou un 404 émis
+    par un intermédiaire ferait passer une PANNE pour un fichier absent. Seul
+    `botocore.ClientError.response["Error"]["Code"] == "NoSuchKey"` est nominal
+    (premier démarrage) ; tout le reste (NoSuchBucket, 403, timeout, endpoint
+    cassé…) est une vraie panne, dont l'appelant décide en fail-close.
+
+    ⚠️ **Cette fonction est ici parce que la dupliquer a produit un défaut de
+    sécurité.** La règle vivait recopiée dans trois magasins d'autorisation, et
+    manquait au registre wrap : une erreur mal classée y rendait une clé de
+    provisionnement rejouable (#149). Un cinquième site — le téléchargement des
+    clés d'unseal — portait encore la version par sous-chaîne, où elle produisait
+    un diagnostic faux (« clés introuvables » au lieu de « stockage en panne »).
+    Toute nouvelle lecture d'un objet `_system/` passe par ici, sans exception :
+    un test interdit le retour du test par sous-chaîne dans tout `src/`.
+    """
+    try:
+        from botocore.exceptions import ClientError
+    except ImportError:
+        return False  # sans botocore, toute erreur = indisponible (fail-close)
+    if not isinstance(erreur, ClientError):
+        return False
+    reponse = getattr(erreur, "response", {}) or {}
+    return reponse.get("Error", {}).get("Code", "") == "NoSuchKey"
+
+
 # =============================================================================
 # Singleton clients
 # =============================================================================

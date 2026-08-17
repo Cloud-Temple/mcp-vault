@@ -251,6 +251,20 @@ sous `operation_pending` : le blocage est le même, seul le code diffère.
 > (registre vide = toutes les clés redeviennent vierges) et la course entre deux
 > instances, faute de CAS/ETag *(#51)*. Ce ne sont pas des libérations métier,
 > mais l'unicité n'est pas absolue pour autant.
+>
+> ⚠️ **Ce premier contournement était plus large que cette phrase ne le disait,
+> jusqu'à v0.15.0 incluse** *(#149, corrigé en v0.16.0)*. Il ne fallait pas perdre
+> le fichier : **il suffisait d'une erreur de stockage mal lue.** Le registre
+> concluait « objet absent » dès que le texte de l'erreur *contenait* « 404 » —
+> un identifiant de requête, un port, un 404 émis par un intermédiaire — puis
+> repartait vide **en se déclarant fiable**, si bien que le refus fail-close ne
+> se déclenchait pas et que la sonde ne signalait rien. **Une seconde porte
+> menait au même effet sans aucune erreur** : une lecture qui réussissait en
+> renvoyant un JSON valide mais sans la clé `wraps` (un `{}`, un corps tronqué)
+> était prise pour un registre vide. Désormais, seule une absence authentifiée par
+> le champ d'erreur structuré (`NoSuchKey`) vide le registre, et le document est
+> validé avant toute mutation d'état ; tout le reste refuse la création. C'est la
+> règle que les trois magasins d'autorisation appliquent depuis #69.
 
 > Une intention `failed` (ou `pending`) sans accessor rend `found_unattached` sur `secret_wrap_lookup` : aucune révocation n'est possible, seul le TTL borne la ressource éventuelle. ⚠️ Ce verdict ne dit **pas** qu'une ressource existe — il dit que nous ne pouvons pas l'exclure. *(v0.12.1 : ce cas répondait `already_revoked`, affirmant une révocation inexistante.)*
 
@@ -657,6 +671,17 @@ le risque d'en oublier un.
 se verrait qu'au premier refus : le service répondrait normalement, puis
 refuserait tout d'un coup.
 
+Le registre wrap y ajoute sa **volumétrie** *(v0.16.0, #146)* : `entries`, le
+nombre d'entrées, et `last_write_bytes`, le poids du dernier corps écrit — `null`
+tant qu'aucune écriture n'a eu lieu depuis le démarrage. Le registre n'a ni purge
+ni écriture incrémentale : il est réécrit **intégralement** à chaque transition,
+et nous n'avions aucun chiffre pour dimensionner ce coût.
+
+> ⚠️ **`last_write_bytes` est relevé à l'écriture, jamais calculé par la sonde.**
+> Sérialiser le registre à chaque appel de supervision ferait de la sonde une
+> cause du problème qu'elle mesure. `entries`, lui, est un simple décompte en
+> mémoire.
+
 > ⚠️ **Les sondes HTTP `/health` et `/healthz` sont volontairement INCHANGÉES.**
 > Un magasin périmé n'y bascule pas le conteneur en `unhealthy` : redémarrer ne
 > réparerait pas un stockage injoignable, et le `HEALTHCHECK` déclencherait une
@@ -830,4 +855,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.15.0
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.16.0

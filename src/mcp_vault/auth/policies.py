@@ -39,6 +39,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from ..async_offload import run_blocking
+from ..s3_client import objet_absent
 from ..config import get_settings
 from ..store_refresh import RETRY_AFTER_ERROR_SECONDS, Freshness, magasin_ferme
 
@@ -230,25 +231,6 @@ class PolicyStore:
         from ..s3_client import get_s3_data_client
         return get_s3_data_client()
 
-    @staticmethod
-    def _is_missing_key_error(e: Exception) -> bool:
-        """True UNIQUEMENT pour l'absence nominale de l'objet policies.json (NoSuchKey).
-
-        Ne se fie JAMAIS à une sous-chaîne "404"/"NoSuchKey" dans str(e) — un port ou
-        un request-id contenant ces motifs ferait passer une panne pour un fichier
-        absent. Seul botocore ClientError.response["Error"]["Code"] == "NoSuchKey" est
-        nominal (1er démarrage) ; tout le reste (NoSuchBucket, 403, timeout, endpoint
-        cassé...) est une VRAIE panne → fail-close (même logique que MissionBindingStore).
-        """
-        try:
-            from botocore.exceptions import ClientError
-        except ImportError:
-            return False  # sans botocore, toute erreur = indisponible (fail-close)
-        if not isinstance(e, ClientError):
-            return False
-        resp = getattr(e, "response", {}) or {}
-        return resp.get("Error", {}).get("Code", "") == "NoSuchKey"
-
     def _mark_invalid(self, msg: str):
         """Passe le store en état INDISPONIBLE observable (sans écraser le cache mémoire).
 
@@ -283,7 +265,7 @@ class PolicyStore:
             resp = s3.get_object(Bucket=self.settings.s3_bucket_name, Key=self.S3_KEY)
             raw = resp["Body"].read().decode()
         except Exception as e:
-            if self._is_missing_key_error(e):
+            if objet_absent(e):
                 # Absence nominale (1er démarrage) : c'est un chargement RÉUSSI
                 # d'un magasin vide, pas une panne — la fraîcheur doit avancer,
                 # sinon le magasin se périmerait au bout du TTL sur un déploiement
