@@ -17,10 +17,14 @@ comme un **incident d'intégrité de credential**.
 Le refus précède tout effet OpenBao : `backend_unavailable` est donc à la fois
 sémantiquement juste et conforme à la garantie que nous leur avons publiée.
 
-⚠️ Ce défaut n'est atteignable qu'en mode `ENFORCE_MISSION_TOKEN_VALIDATION=true`.
-En production (`false`), l'échec de validation est journalisé puis IGNORÉ et le
-déballage continue. Ces tests couvrent donc les DEUX postures : le mapping corrigé
-sous enforcement, et la conduite inchangée sans lui.
+⚠️ RECTIFICATION #154 — la rédaction d'origine de cette docstring affirmait que « ce
+défaut n'est atteignable qu'en `ENFORCE=true` ; en production l'échec est journalisé
+puis IGNORÉ et le déballage continue ». **C'était faux, et un test vert le
+verrouillait** : l'assertion de résultat portait sur un mock qui rendait toujours `ok`.
+Le déballage était bien TENTÉ, puis REFUSÉ en `not_found` — `mission_id` restant vide,
+la clé composite ne correspondait à rien. Le correctif de #152 ne couvrait donc que le
+chemin DORMANT. Voir `tests/test_indispo_hors_enforce_154.py`, qui mesure la chaîne
+réelle sans mock de consommation.
 """
 
 import asyncio
@@ -254,26 +258,46 @@ class TestUneIndisponibiliteDeCleNEstPasUnJetonInvalide:
 # ── 2. La posture de production reste inchangée ─────────────────────────────
 
 
-class TestSansEnforcementLaConduiteNeChangePas:
-    """En production, `ENFORCE_MISSION_TOKEN_VALIDATION=false` : l'échec de
-    validation est journalisé puis IGNORÉ, le déballage continue. Le défaut de
-    #152 n'y était donc pas atteignable, et le correctif ne doit rien y changer.
+class TestSansEnforcementUnFaitSurLAppelantNEstPasOppose:
+    """`ENFORCE=false` (posture de production jusqu'à #47) : un motif qui est un FAIT
+    sur l'appelant — jeton forgé, périmé, `kid` inconnu — n'est pas opposé ici, et la
+    consommation est TENTÉE.
 
-    ⚠️ Ce n'est pas une approbation de cette posture — c'est la posture
-    pré-activation documentée, suivie par #47/#86 et divulguée à `mcp-agent`.
+    ⚠️ Cette classe s'appelait `TestSansEnforcementLaConduiteNeChangePas` et affirmait
+    que « le déballage continue », avec `assert res["status"] == "ok"`. **Le `ok` venait
+    du mock `faux_consume`, pas du code.** En réalité `mission_id` reste vide, donc la
+    clé composite ne correspond à rien et le refus sort en `not_found` (#154). On ne
+    prouve donc ICI que l'absence de court-circuit — le résultat réel se mesure sans
+    mock dans `tests/test_indispo_hors_enforce_154.py`.
+
+    ⚠️ `jwks_unavailable` a QUITTÉ cette liste : depuis #154 il court-circuite dans les
+    DEUX postures, parce qu'il nomme notre incapacité et non un fait sur l'appelant.
     """
 
     @pytest.mark.parametrize("motif", [
-        "jwks_unavailable", "invalid_signature", "kid_unknown_or_revoked",
+        "invalid_signature", "kid_unknown_or_revoked", "token_expired",
     ])
-    def test_l_echec_est_ignore_et_le_deballage_continue(self, motif):
+    def test_l_echec_n_est_pas_oppose_et_la_consommation_est_TENTEE(self, motif):
         res, deballages = _consommer(motif, enforce=False)
 
         assert deballages == 1, (
-            "sans enforcement, l'échec de validation doit être ignoré et le "
-            f"déballage se poursuivre ; obtenu {res!r}"
+            "sans enforcement, un fait sur l'appelant ne doit pas court-circuiter la "
+            f"consommation ; obtenu {res!r}"
         )
-        assert res["status"] == "ok"
+
+    @pytest.mark.parametrize("motif", ["jwks_unavailable", "misconfigured_expected_aud"])
+    def test_notre_INCAPACITE_court_circuite_meme_sans_enforcement(self, motif):
+        """#154 : le hissage hors de la garde `enforce`. Le témoin est le compteur de
+        déballages : il doit rester à ZÉRO, sinon rien n'a été court-circuité."""
+        res, deballages = _consommer(motif, enforce=False)
+
+        assert deballages == 0, (
+            f"{motif} doit court-circuiter AVANT toute consommation ; obtenu {res!r}"
+        )
+        assert res["error_type"] != "not_found", (
+            "un refus faute d'avoir pu vérifier ne doit jamais s'annoncer "
+            f"« opération inconnue » ; obtenu {res!r}"
+        )
 
 
 # ── 3. Le recensement publié était FAUX — verrouillé ici ───────────────────

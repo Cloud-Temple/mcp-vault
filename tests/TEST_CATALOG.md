@@ -1,6 +1,6 @@
 # Catalogue des Tests E2E — MCP Vault
 
-> **Version** : v0.16.2 — Une indisponibilité du service de clés n'est plus annoncée comme un jeton invalide : le refus porte `backend_unavailable` (aucun effet tenté, re-tentable) au lieu de `jwt_invalid`, qui faisait condamner le secret chez l'appelant
+> **Version** : v0.16.3 — En production (`ENFORCE=false`), une indisponibilité du service de clés s'annonçait « opération inconnue » : les motifs qui nomment notre propre incapacité sortent désormais de la garde `enforce`
 > **Dernière exécution** : 349 assertions e2e sur 15 catégories (+ 18 tests crypto)
 > **Décompte reproductible** : comptage AST des appels `check` / `check_true` / `check_value` / `check_traversed` dans les fonctions `test_*` de `tests/test_e2e.py`, boucles littérales expansées
 > **Durée** : ~5 secondes (e2e) + <1s (crypto)

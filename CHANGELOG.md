@@ -2,6 +2,101 @@
 
 ## [Non publié]
 
+## [0.16.3] — 2026-08-18
+
+### En production, une indisponibilité du service de clés s'annonçait « opération inconnue » — #154
+
+⚠️ **Le correctif de #152 ne couvrait que le chemin dormant.** Il vivait sous la garde
+`if enforce:`, alors que la production tourne `ENFORCE_MISSION_TOKEN_VALIDATION=false`
+jusqu'à l'activation du PEP (#47). Le chemin **vivant** n'était pas corrigé.
+
+**Mécanisme mesuré** (chaîne réelle, registre contenant une entrée `active`) : la
+validation du `mission_token` échoue, `mission_id` reste **vide**, la clé composite
+`(operation_id, "")` ne correspond à aucune entrée, et le refus sortait en
+**`not_found`** — *« Wrap introuvable (opération inconnue ou expirée) »*.
+
+| Motif | Avant (`ENFORCE=false`) | Après |
+| --- | --- | --- |
+| `jwks_unavailable` | ⚠️ `not_found` | **`backend_unavailable`** |
+| `misconfigured_expected_aud` | ⚠️ `not_found` | **`misconfigured`** |
+| `invalid_signature`, `token_expired`, … | `not_found` | `not_found` (inchangé — voir #47) |
+
+⚠️ **`not_found` était pire que le `jwt_invalid` corrigé par #152.** `jwt_invalid`
+nommait au moins le bon domaine ; `not_found` **affirme un fait positif et faux sur
+l'opération de l'appelant** et envoie chercher un défaut de provisionnement inexistant.
+`mcp-agent` lisant tout `error_type` autre que `backend_unavailable` en consommation
+incertaine (leur #135), une indisponibilité de l'endpoint JWKS **mono-instance** de
+`mcp-mission` produisait chez eux une **fausse alerte de sécurité et un arrêt terminal
+de mission** (leur #49).
+
+### La règle posée
+
+> « Je n'ai pas pu vérifier » est un fait sur **notre** capacité, pas une décision de
+> politique. `enforce` arbitre si un jeton **invalide** est fatal ; il n'arbitre pas si
+> nous disons la vérité sur le motif du refus.
+
+Les motifs qui nomment notre propre incapacité — `jwks_unavailable` et
+`misconfigured_expected_aud` — sortent donc de la garde `enforce`. Les autres, qui sont
+des **faits sur l'appelant** (jeton forgé, périmé, audience fausse), restent en place :
+les transformer en refus explicite changerait la **posture** `ENFORCE=false`, ce qui
+relève de #47 et non d'un correctif de libellé.
+
+**Aucun appelant conforme ne perd un succès** : `secret_wrap` refuse un `mission_id`
+vide (`is_safe_id` exige 1 caractère, les espaces sont rejetés) et
+`get_by_composite_key` compare par égalité stricte sans joker — aucune entrée produite
+par le chemin de création ne peut donc être sélectionnée avec un `mission_id` vide. Le
+court-circuit retire un mensonge, pas un chemin. Deux tests verrouillent cette prémisse.
+
+> ⚠️ Nuance relevée en revue : `WrapRegistry.load()` ne valide pas les champs de chaque
+> entrée, donc une entrée **corrompue ou déposée à la main** avec un `mission_id` vide
+> resterait sélectionnable. Le court-circuit ne l'affaiblit pas — il **empêcherait** une
+> consommation anormale sur une telle entrée. La formulation « jamais » a été corrigée
+> ici en conséquence.
+
+### Deux chemins de plus, trouvés en revue adversariale
+
+Le hissage initial laissait derrière lui deux cas de **même nature**. Les deux sont
+corrigés dans ce lot :
+
+- **Le validateur non initialisé** (`validator is None` — lifecycle échoué, ou
+  `MISSION_JWKS_URL` ajoutée à chaud) journalisait puis continuait sous `ENFORCE=false`,
+  donc `not_found`. C'est la branche **sœur** de celle corrigée : la même erreur, commise
+  en la corrigeant — lire une branche sans lire ce qui l'entoure. Et le cas est **plus
+  probable** que la panne JWKS, puisqu'il découle d'un échec de démarrage, donc
+  persistant. Refus désormais dans les deux postures, en `misconfigured`.
+- **Un `kid` inconnu pendant une panne du JWKS.** `JWKSCache.get_key()` déclenche un
+  refresh forcé sur un `kid` absent, et **avalait l'échec** de ce refresh : le refus
+  sortait en `unknown_kid` — « jeton non authentique ». Un jeton **légitime** issu d'une
+  rotation pendant une panne était donc annoncé comme forgé. L'indisponibilité est
+  désormais propagée.
+  ⚠️ **Seulement quand le refresh a été TENTÉ.** S'il ne l'a pas été (throttle anti-DoS,
+  backoff, cache jamais peuplé), le refus reste `unknown_kid` **délibérément** : sinon un
+  appelant présentant des `kid` forgés obtiendrait une classe re-tentable au lieu d'un
+  refus — une protection retournée en invitation. Un test verrouille cette garde.
+  ⇒ Ce lot **réduit** ce que recouvre `kid_unknown_or_revoked` sans le déplacer :
+  l'arbitrage ouvert avec `mcp-agent` porte désormais sur le seul cas « non tenté ».
+
+### ⚠️ Pourquoi le défaut avait survécu — un test vert le verrouillait
+
+Le test qui « couvrait » la posture de production affirmait `res["status"] == "ok"`,
+mais `res` sortait d'un mock de `consume_wrap_secret` rendant **toujours** `ok`. Le vert
+venait du mock, et la docstring en déduisait que « le déballage continue » — d'où
+l'affirmation, publiée, que le défaut de #152 n'était pas atteignable en production.
+
+Réparé : `tests/test_indispo_hors_enforce_154.py` mesure la **chaîne réelle** sans mock
+de consommation, avec un **témoin** (un jeton vérifié doit consommer l'enveloppe et
+faire passer l'entrée `active` → `consumed`) sans lequel aucun refus ne prouverait autre
+chose qu'un harnais cassé.
+
+### Aussi
+
+- Le journal opérateur disait `« JWT invalide ignoré — reason=jwks_unavailable »` :
+  la même confusion, dans la trace. Il annonce désormais le refus attendu en aval.
+- L'étroitesse de `backend_unavailable` est vérifiée aussi **sans enforcement** —
+  vocabulaire des motifs énuméré depuis le code (dérivation AST), jamais recopié.
+
+**Tests** : 1551 verts, 33 ignorés. **8 mutations, toutes détectées.** Revue adversariale : NO-GO initial, 2 trouvailles majeures et 2 mineures retenues, 1 majeure écartée avec argument (voir #154).
+
 ## [0.16.2] — 2026-08-17
 
 ### Une indisponibilité du service de clés n'est plus annoncée comme un jeton invalide — #152
