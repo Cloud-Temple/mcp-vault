@@ -185,7 +185,23 @@ class JWKSCache:
                     try:
                         self._refetch_locked(force=True)
                     except JWKSUnavailable:
-                        pass
+                        # ⚠️ #154 : NE PAS avaler. Nous avons TENTÉ d'aller vérifier et
+                        # nous n'avons pas pu — c'est notre incapacité, pas un fait sur
+                        # le jeton. L'avaler faisait annoncer `unknown_kid` (« jeton non
+                        # authentique ») pour un jeton LÉGITIME issu d'une rotation
+                        # pendant une panne du JWKS : chez `mcp-agent`, secret condamné
+                        # et FAUSSE alerte de sécurité (leur #49).
+                        #
+                        # ⚠️ Ne PAS étendre ce raisonnement au cas où le refresh n'a pas
+                        # été TENTÉ (throttle anti-DoS, backoff, cache jamais peuplé) :
+                        # là le refus reste `unknown_kid` DÉLIBÉRÉMENT. Sinon un appelant
+                        # présentant des `kid` forgés obtiendrait une classe re-tentable
+                        # au lieu d'un refus — une protection retournée en invitation.
+                        #
+                        # Ce hissage RÉDUIT ce que recouvre `kid_unknown_or_revoked`
+                        # sans le déplacer : l'arbitrage ouvert avec `mcp-agent` porte
+                        # désormais sur le seul cas « non tenté ».
+                        raise
                     key = self._keys_by_kid.get(kid)
             if key is None:
                 # kid réellement inconnu → token non authentique (révoqué ou jamais

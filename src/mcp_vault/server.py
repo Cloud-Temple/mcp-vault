@@ -915,11 +915,20 @@ async def secret_consume(
         validator = get_mission_token_validator()
         if validator is None:
             # Singleton absent = lifecycle échoué ou JWKS_URL ajouté à chaud.
-            # Fail-close en mode enforced ; sinon log warning et continue.
-            if enforce:
-                return {"status": "error", "error_type": "misconfigured",
-                        "message": "Mission Token Validator non initialisé — redémarrer le service"}
-            logger.warning("secret_consume : singleton JWT absent (ENFORCE=false) — JWT non validé")
+            #
+            # ⚠️ #154 : refus dans les DEUX postures. C'est le même arbitrage que pour
+            # `jwks_unavailable` ci-dessous — un validateur non initialisé est NOTRE
+            # incapacité, pas un fait sur l'appelant. Laisser passer sous
+            # `ENFORCE=false` faisait continuer avec un `mission_id` VIDE, donc un refus
+            # en `not_found` (« opération inconnue ») pour une panne de démarrage de
+            # notre côté : chez `mcp-agent`, secret condamné et alerte de sécurité.
+            #
+            # `misconfigured` et NON `backend_unavailable` : la condition est
+            # PERSISTANTE (elle exige un redémarrage après correction), donc annoncer
+            # une classe que l'appelant re-tente serait un second mensonge — il
+            # bouclerait sur un état qui ne peut pas se résoudre seul.
+            return {"status": "error", "error_type": "misconfigured",
+                    "message": "Mission Token Validator non initialisé — redémarrer le service"}
         else:
             try:
                 # #148 : hors boucle. `validate()` délègue la résolution de clé au
@@ -937,40 +946,56 @@ async def secret_consume(
             except Exception as e:
                 reason = getattr(e, "reason", "jwt_validation_failed")
                 logger.warning("secret_consume JWT rejected: %s", reason)
+
+                # ── #154 : les motifs qui nomment NOTRE incapacité sortent AVANT la
+                # garde `enforce`, délibérément. « Je n'ai pas pu vérifier » est un
+                # fait sur notre capacité, pas une décision de politique : `enforce`
+                # arbitre si un jeton INVALIDE est fatal, il n'arbitre pas si nous
+                # disons la vérité sur le motif du refus.
+                #
+                # ⚠️ Sans ce hissage, #152 ne corrigeait que le chemin DORMANT. Sous
+                # `enforce=False` (posture de production jusqu'à #47) l'échec était
+                # journalisé puis « ignoré » — mais `mission_id` restait VIDE, donc la
+                # clé composite `(operation_id, "")` ne correspondait à rien et le
+                # refus sortait en `not_found` : « opération inconnue ou expirée », un
+                # fait POSITIF et FAUX sur l'appelant, qui envoie chercher un défaut de
+                # provisionnement inexistant. `mcp-agent` lisant tout code
+                # ≠ `backend_unavailable` en consommation incertaine (leur #135), une
+                # indisponibilité du JWKS mono-instance de `mcp-mission` produisait une
+                # FAUSSE alerte de sécurité et un arrêt terminal de mission (leur #49).
+                #
+                # Court-circuiter ne supprime AUCUN succès possible : `secret_wrap`
+                # refuse un `mission_id` vide (`is_safe_id` exige 1 caractère), donc
+                # aucune entrée du registre n'en porte, et `get_by_composite_key`
+                # compare par égalité stricte sans joker — la recherche ne pouvait pas
+                # aboutir. Le court-circuit retire un mensonge, pas un chemin.
+                if reason == "misconfigured_expected_aud":
+                    # Misconfiguration serveur (MISSION_TOKEN_AUD/MCP_INSTANCE_ID
+                    # non résolu), pas un JWT invalide — cohérent avec les autres
+                    # retours "misconfigured" de ce bloc et de secret_wrap (#86).
+                    return {"status": "error", "error_type": "misconfigured",
+                            "message": "Configuration mission_token incomplète "
+                                       "(audience non résolue) — redémarrer le "
+                                       "service après correction"}
+                if reason == "jwks_unavailable":
+                    # #152 : « je n'ai pas pu vérifier » n'est PAS « le jeton est
+                    # invalide ». Discipline #78 : ne jamais fondre un FAIT sur
+                    # l'appelant et une IGNORANCE de notre côté sous un même nom.
+                    #
+                    # Ce refus précède tout effet OpenBao — il appartient donc
+                    # exactement à la classe publiée `backend_unavailable` :
+                    # aucun effet tenté, enveloppe intacte, re-tentable.
+                    #
+                    # Couvre `JWKSUnavailable` (endpoint injoignable, gelé au-delà
+                    # du délai, backoff, 304 sans cache, document malformé) ET
+                    # `bad_jwk`, que `_INVALID_REASON_MAP` traduit vers le même
+                    # motif : dans les deux cas la clé publique est hors d'atteinte.
+                    return {"status": "error", "error_type": "backend_unavailable",
+                            "message": "Vérification de l'identité de mission "
+                                       "impossible (service de clés indisponible) "
+                                       "— aucun déballage tenté, réessayer"}
+
                 if enforce:
-                    if reason == "misconfigured_expected_aud":
-                        # Misconfiguration serveur (MISSION_TOKEN_AUD/MCP_INSTANCE_ID
-                        # non résolu), pas un JWT invalide — cohérent avec les autres
-                        # retours "misconfigured" de ce bloc et de secret_wrap (#86).
-                        return {"status": "error", "error_type": "misconfigured",
-                                "message": "Configuration mission_token incomplète "
-                                           "(audience non résolue) — redémarrer le "
-                                           "service après correction"}
-                    if reason == "jwks_unavailable":
-                        # #152 : « je n'ai pas pu vérifier » n'est PAS « le jeton est
-                        # invalide ». Discipline #78 : ne jamais fondre un FAIT sur
-                        # l'appelant et une IGNORANCE de notre côté sous un même nom.
-                        #
-                        # Ce refus précède tout effet OpenBao — il appartient donc
-                        # exactement à la classe publiée `backend_unavailable` :
-                        # aucun effet tenté, enveloppe intacte, re-tentable.
-                        #
-                        # ⚠️ L'enjeu n'est pas cosmétique. `mcp-agent` traite tout
-                        # `error_type` autre que `backend_unavailable` comme une
-                        # consommation INCERTAINE — donc secret condamné, et depuis
-                        # leur lot #49 arrêt terminal de mission avec alerte de
-                        # sécurité. Sous `jwt_invalid`, une indisponibilité de
-                        # l'endpoint JWKS mono-instance de `mcp-mission` se lisait
-                        # chez eux comme un incident d'intégrité de credential.
-                        #
-                        # Couvre `JWKSUnavailable` (endpoint injoignable, gelé au-delà
-                        # du délai, backoff, 304 sans cache, document malformé) ET
-                        # `bad_jwk`, que `_INVALID_REASON_MAP` traduit vers le même
-                        # motif : dans les deux cas la clé publique est hors d'atteinte.
-                        return {"status": "error", "error_type": "backend_unavailable",
-                                "message": "Vérification de l'identité de mission "
-                                           "impossible (service de clés indisponible) "
-                                           "— aucun déballage tenté, réessayer"}
                     # #78/D5 : message client GÉNÉRIQUE — le reason (potentiellement porteur
                     # d'une valeur non vérifiée) reste dans le log serveur ci-dessus, jamais
                     # renvoyé au client ni versé à l'audit humain.
@@ -983,8 +1008,19 @@ async def secret_consume(
                     # demandé à `mcp-agent` : ne pas le déplacer sans leur réponse.
                     return {"status": "error", "error_type": "jwt_invalid",
                             "message": "Mission token invalide"}
+
+                # ⚠️ #154 — « ignoré » ne veut PAS dire « sans conséquence ». Les motifs
+                # qui restent ici sont des faits sur l'appelant (jeton forgé, périmé,
+                # audience fausse) : ils ne sont pas opposés, mais `mission_id` reste
+                # VIDE, donc la clé composite ne correspondra à rien et le refus sortira
+                # en `not_found` au registre. Le journal le dit, pour que l'exploitant
+                # n'aille pas chercher un défaut de provisionnement.
+                # Ne PAS transformer ces motifs en refus explicite ici : ce serait
+                # changer la posture `ENFORCE=false`, ce qui relève de #47.
                 logger.warning(
-                    "secret_consume : JWT invalide ignoré (ENFORCE=false) — reason=%s", reason
+                    "secret_consume : validation échouée et NON opposée (ENFORCE=false) "
+                    "— reason=%s ; mission_id vide ⇒ refus attendu en not_found au "
+                    "registre (#154)", reason
                 )
 
     elif enforce:
