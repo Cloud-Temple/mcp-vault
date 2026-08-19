@@ -505,7 +505,18 @@ async def secret_wrap(
         secret_path: Chemin du secret dans le vault
         mission_id: Identifiant de la mission (scope)
         operation_id: Corrélation write-ahead pour compensation des orphelins (#74)
-        ttl_seconds: TTL du wrap token en secondes (défaut: 300s = 5 min)
+        ttl_seconds: TTL du wrap token en secondes (défaut: 300s = 5 min, borné
+            entre 60 et 3600).
+            ⚠️ Ce TTL borne la fenêtre pour OBTENIR le secret, PAS la durée de vie
+            du secret OBTENU (#156). L'enveloppe est à usage unique et meurt à son
+            TTL. MCP Vault n'impose AUCUNE expiration au secret KV ni au credential
+            qu'il contient : sa validité réelle dépend de son ÉMETTEUR, pas de nous.
+            Ni `secret_write` (qui ajoute une version — la précédente reste lisible
+            par son numéro) ni `secret_delete` (qui retire les versions du coffre,
+            pas le mot de passe de la machine) n'invalide un credential externe.
+            Seule une révocation ou rotation coordonnée chez l'émetteur le fait.
+            ⇒ Si la mission meurt après un déballage, la durée d'exposition n'est
+            bornée par personne, et le remède n'est pas dans cet outil.
         tenant_id: Locataire propriétaire (binding C18). Optionnel hors mode
             durci ; **REQUIS** si ENFORCE_MISSION_TOKEN_VALIDATION=true — aucune
             source serveur ne peut le suppléer, un locataire déduit attesterait
