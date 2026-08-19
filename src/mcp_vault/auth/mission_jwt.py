@@ -615,6 +615,50 @@ import asyncio as _asyncio_for_lock
 _mission_status_lock = _asyncio_for_lock.Lock()
 del _asyncio_for_lock
 
+# #86 finding 5 — single-flight PAR mission_id. Un appel en vol par mission ; les
+# suiveurs attendent SON résultat au lieu d'émettre le leur.
+#
+# ⚠️ POURQUOI PAS le verrou global ci-dessus tenu pendant l'appel HTTP : mesuré, ce
+# serait pire. Onze missions DIFFÉRENTES se résolvent en 0,30 s ; derrière un verrou
+# global elles se sérialiseraient à ~3,3 s, et un endpoint lent bloquerait TOUTES les
+# missions au lieu d'une. La sérialisation porte sur la CLÉ, pas sur le cache.
+#
+# ⚠️ POURQUOI DES FUTURES ET NON UN DICTIONNAIRE DE VERROUS : une entrée n'existe que
+# pendant l'appel et est retirée en `finally`. Un dictionnaire de verrous par
+# mission_id ne se vide jamais — il deviendrait la fuite mémoire que ce même lot
+# corrige juste en dessous.
+_mission_status_en_vol: dict[str, "asyncio.Future"] = {}
+
+# Borne du cache (#86 finding 5). Le dictionnaire n'avait ni taille maximale ni
+# éviction : mesuré à 5 000 entrées après 5 000 missions distinctes. Purge
+# OPPORTUNISTE des entrées périmées au franchissement du seuil — pas de LRU, pas de
+# tâche de fond : le coût reste proportionnel à ce qu'on nettoie.
+_MISSION_STATUS_CACHE_MAX = 1024
+
+
+def _purger_statuts_perimes_locked(maintenant: float, cache_ttl: int) -> None:
+    """Retire les entrées périmées si le cache dépasse sa borne. Appelé SOUS verrou.
+
+    Si la purge ne suffit pas (plus de `_MISSION_STATUS_CACHE_MAX` entrées encore
+    FRAÎCHES), on vide tout : mieux vaut re-interroger que croître sans fin. Le
+    single-flight borne le coût de cette reconstitution.
+    """
+    if len(_mission_status_cache) <= _MISSION_STATUS_CACHE_MAX:
+        return
+    perimees = [
+        mid for mid, (_, pose_a) in _mission_status_cache.items()
+        if maintenant - pose_a >= cache_ttl
+    ]
+    for mid in perimees:
+        del _mission_status_cache[mid]
+    if len(_mission_status_cache) > _MISSION_STATUS_CACHE_MAX:
+        logger.warning(
+            "check_mission_active : %d entrées de statut encore fraîches au-delà de la "
+            "borne (%d) — cache vidé",
+            len(_mission_status_cache), _MISSION_STATUS_CACHE_MAX,
+        )
+        _mission_status_cache.clear()
+
 # Allow-list des états dans lesquels mcp-mission continue d'émettre/re-signer des
 # tokens (contrat confirmé : _REFRESHABLE = {RUNNING, WAITING_HUMAN, PAUSED} — une
 # mission PAUSED reçoit des tokens re-signés). Tout autre état, état inconnu ou champ
