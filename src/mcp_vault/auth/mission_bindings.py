@@ -266,6 +266,25 @@ class MissionBindingStore:
     - CRUD : create / get / list_all / delete / purge (+ resolve pour le PEP)
     """
 
+    # #86 finding 7 — révocation différée : ARBITRAGE DE NE PAS RÉDUIRE, motivé.
+    #
+    # ⚠️ Ce TTL est une borne de FRAÎCHEUR et de fail-close, pas la cadence de polling
+    # (le rafraîchisseur de fond travaille à la moitié, cf. #123).
+    #
+    # Ce qu'il NE retarde PAS, vérifié : une révocation faite par NOTRE API est
+    # effective immédiatement — les mutations publient l'instantané en mémoire après un
+    # `_save()` confirmé (cf. `delete`, `create`, `purge`) ; et `expires_at` est évalué
+    # à CHAQUE `resolve()`, sans attendre un rechargement.
+    #
+    # Ce qu'il retarde : une mutation faite HORS de notre API — édition directe du
+    # fichier S3, ou une AUTRE réplique. Or nous sommes mono-instance (« single-process
+    # en pratique », cf. `_save`), et l'édition directe de S3 n'est pas une procédure
+    # de révocation supportée. L'exposition réelle est donc nulle aujourd'hui.
+    #
+    # Réduire le TTL coûterait des lectures S3 sur tous les magasins pour un gain nul.
+    # DÉCLENCHEURS qui rendent ce compromis réel, et qui appartiennent à #51 :
+    # passage multi-instance, apparition d'un second writer, ou reconnaissance de
+    # l'édition directe S3 comme procédure d'exploitation.
     CACHE_TTL = 300  # 5 minutes
     S3_KEY_PREFIX = "_system/mission_bindings/"
 

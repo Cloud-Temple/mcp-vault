@@ -1047,8 +1047,31 @@ async def secret_consume(
             cache_ttl=settings.mission_status_cache_ttl,
         )
         if not status_ok:
-            logger.warning("secret_consume : mission inactive — %s", status_reason)
+            logger.warning("secret_consume : mission non validée — %s", status_reason)
             if enforce:
+                # ⚠️ #86 finding 4 (revue de plan) — NE PAS fondre l'indisponibilité du
+                # service de missions dans « mission inactive ». C'est le défaut de #152
+                # et #154 sur un TROISIÈME chemin : une panne de notre vérification
+                # annoncée comme un fait sur la mission de l'appelant.
+                #
+                # `mcp-agent` lit tout code ≠ `backend_unavailable` en consommation
+                # incertaine (leur #135) ⇒ secret condamné et, depuis leur #49, arrêt
+                # terminal de mission AVEC alerte de sécurité. Sous `mission_inactive`,
+                # une indisponibilité du service de statut MONO-INSTANCE de
+                # `mcp-mission` se lisait donc chez eux comme une mission révoquée.
+                #
+                # Le PEP transport faisait déjà cette distinction (503 sur
+                # `service_unavailable`, 403 sinon) : c'est `secret_consume` qui était
+                # l'exception — exactement l'incohérence entre les deux points
+                # d'application que #86 finding 2 dénonçait.
+                #
+                # Ce refus précède tout effet OpenBao : aucun déballage tenté,
+                # enveloppe intacte, re-tentable.
+                if status_reason == "service_unavailable":
+                    return {"status": "error", "error_type": "backend_unavailable",
+                            "message": "Vérification de l'état de la mission "
+                                       "impossible (service de missions indisponible) "
+                                       "— aucun déballage tenté, réessayer"}
                 # #78/D5 : message client générique — status_reason loggué serveur, non reflété.
                 return {"status": "error", "error_type": "mission_inactive",
                         "message": "Mission non active"}

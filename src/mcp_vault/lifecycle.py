@@ -337,12 +337,22 @@ async def vault_startup() -> bool:
 
     # ── 1e. Mission Token Validator (C18, singleton process-wide) ──────────────
     logger.info("🔐 Initialisation du Mission Token Validator...")
+    # ⚠️ #86 finding 4 — dire à l'exploitant que son réglage ne fait rien. Un réglage
+    # offert et inerte laisse croire à une protection absente.
+    for inerte in settings.reglages_sans_effet():
+        logger.warning(
+            "⚠️  %s est posé mais SANS EFFET (#86) — il n'a jamais été appliqué. La "
+            "protection réelle du refresh JWKS est le throttle « kid inconnu » (10 s) "
+            "plus le backoff exponentiel. Retirer la variable ne change rien.", inerte,
+        )
     try:
         from .auth.jwt_validator import init_mission_token_validator
         _v = init_mission_token_validator(
             jwks_url=settings.mission_jwks_url,
             expected_aud=settings.resolved_mission_aud,  # source unique (#47)
             cache_ttl=settings.mission_jwks_cache_ttl,
+            # ⚠️ Transmis pour compatibilité de signature seulement — le validateur
+            # l'ignore (#86 finding 4). L'avertissement ci-dessous le dit à qui l'a posé.
             max_refresh_per_min=settings.mission_jwks_max_refresh_per_min,
             leeway_seconds=settings.mission_token_leeway_seconds,
             component_kind=settings.mcp_component_kind,  # aligné PEP, issue #86

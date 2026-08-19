@@ -610,7 +610,10 @@ def validate_mission_token(
 # ── Vérification mission active (déplacée depuis server.py — issue #47) ─────────
 # Le middleware PEP et secret_consume partagent ce check et son cache.
 
-_mission_status_cache: dict[str, tuple[bool, float]] = {}
+# (actif, motif, échéance). Le MOTIF est stocké (#86 F5) : sans lui, une
+# indisponibilité mise en cache ressortait en « mission_inactive_cached » — donc en
+# fait sur la mission alors que c'est NOTRE incapacité. Le même mensonge que #152.
+_mission_status_cache: dict[str, tuple[bool, str, float]] = {}
 import asyncio as _asyncio_for_lock
 _mission_status_lock = _asyncio_for_lock.Lock()
 del _asyncio_for_lock
@@ -635,8 +638,13 @@ _mission_status_en_vol: dict[str, "asyncio.Future"] = {}
 # tâche de fond : le coût reste proportionnel à ce qu'on nettoie.
 _MISSION_STATUS_CACHE_MAX = 1024
 
+# Durée de cache d'une INDISPONIBILITÉ (#86 F5) — très courte : elle borne
+# l'amplification sous charge continue sans retarder la détection du retour à la
+# normale de plus d'une seconde.
+_MISSION_STATUS_ERROR_TTL = 1.0
 
-def _purger_statuts_perimes_locked(maintenant: float, cache_ttl: int) -> None:
+
+def _purger_statuts_perimes_locked(maintenant: float) -> None:
     """Retire les entrées périmées si le cache dépasse sa borne. Appelé SOUS verrou.
 
     Si la purge ne suffit pas (plus de `_MISSION_STATUS_CACHE_MAX` entrées encore
@@ -646,8 +654,8 @@ def _purger_statuts_perimes_locked(maintenant: float, cache_ttl: int) -> None:
     if len(_mission_status_cache) <= _MISSION_STATUS_CACHE_MAX:
         return
     perimees = [
-        mid for mid, (_, pose_a) in _mission_status_cache.items()
-        if maintenant - pose_a >= cache_ttl
+        mid for mid, (_, _, expire_a) in _mission_status_cache.items()
+        if maintenant >= expire_a
     ]
     for mid in perimees:
         del _mission_status_cache[mid]
@@ -684,52 +692,68 @@ async def check_mission_active(
     import time as _time
     now = _time.time()
     async with _mission_status_lock:
-        if mission_id in _mission_status_cache:
-            cached_ok, cached_at = _mission_status_cache[mission_id]
-            if now - cached_at < cache_ttl:
-                return cached_ok, "" if cached_ok else "mission_inactive_cached"
+        entree = _mission_status_cache.get(mission_id)
+        if entree is not None:
+            ok, motif, expire_a = entree
+            if now < expire_a:
+                return ok, motif
 
-        en_vol = _mission_status_en_vol.get(mission_id)
-        suiveur = en_vol is not None
-        if not suiveur:
-            en_vol = asyncio.get_running_loop().create_future()
-            _mission_status_en_vol[mission_id] = en_vol
+        tache = _mission_status_en_vol.get(mission_id)
+        if tache is None:
+            # ⚠️ Une TÂCHE, et non une future portée par le meneur. `mcp-agent` coupe
+            # ses appels d'outils sur une échéance qui vaut « le budget restant de
+            # l'agent » — parfois quelques millisecondes. Avec une future, l'annulation
+            # du meneur faisait échouer TOUS les suiveurs ; avec une tâche, elle
+            # poursuit et chacun reçoit le vrai verdict. Correction issue de la revue
+            # de plan.
+            tache = asyncio.get_running_loop().create_task(
+                _resoudre_statut_mission(mission_id, status_url_template, cache_ttl)
+            )
+            _mission_status_en_vol[mission_id] = tache
+            # Se retire elle-même : le registre est borné par les missions EN VOL, pas
+            # par tous les identifiants vus. Un dictionnaire de VERROUS par mission ne
+            # se viderait jamais — il deviendrait la fuite que ce lot corrige.
+            tache.add_done_callback(
+                lambda _t, _mid=mission_id: _mission_status_en_vol.pop(_mid, None)
+            )
 
-    if suiveur:
-        # ⚠️ `shield` OBLIGATOIRE : sans lui, l'annulation d'UN suiveur annulerait la
-        # future PARTAGÉE, donc casserait le meneur et tous les autres suiveurs. Le
-        # cas n'est pas théorique — `mcp-agent` coupe ses appels d'outils sur
-        # échéance, et cette échéance peut valoir quelques millisecondes.
-        return await asyncio.shield(en_vol)
-
-    verdict = (False, "service_unavailable")
-    try:
-        verdict = await _resoudre_statut_mission(
-            mission_id, status_url_template, now, cache_ttl
-        )
-        return verdict
-    finally:
-        # Publier AVANT de retirer l'entrée : un suiveur qui arrive entre les deux
-        # doit trouver une future déjà résolue, jamais une future orpheline.
-        # Sur annulation du meneur, les suiveurs reçoivent le fail-close ci-dessus —
-        # refuser est sûr, les laisser attendre indéfiniment ne l'est pas.
-        if not en_vol.done():
-            en_vol.set_result(verdict)
-        # Pas de verrou : `pop` ne contient aucun `await`, donc aucune préemption
-        # possible dans la boucle coopérative.
-        _mission_status_en_vol.pop(mission_id, None)
+    # ⚠️ `shield` OBLIGATOIRE : sans lui, l'annulation d'UN appelant annulerait la
+    # tâche PARTAGÉE et casserait tous les autres.
+    return await asyncio.shield(tache)
 
 
 async def _resoudre_statut_mission(
-    mission_id: str, status_url_template: str, now: float, cache_ttl: int
+    mission_id: str, status_url_template: str, cache_ttl: int
 ) -> tuple[bool, str]:
-    """L'interrogation réelle de mcp-mission. Un seul appelant à la fois par mission.
+    """L'interrogation réelle. UN seul appelant à la fois par mission (#86 F5).
 
-    ⚠️ Les ERREURS ne sont volontairement PAS mises en cache : le fail-close répond
-    déjà « inactive », et cacher l'échec retarderait la détection du retour à la
-    normale. Le single-flight suffit à borner l'amplification — sans lui, onze
-    ouvriers payaient onze fois le délai d'attente.
+    ⚠️ TAXONOMIE — un seul cas est un FAIT sur la mission : une réponse 200 dont
+    l'état est hors allow-list. Tout le reste (non-200 quelconque, exception réseau)
+    dit seulement que NOUS n'avons pas pu vérifier, et sort en `service_unavailable`,
+    que `secret_consume` traduit en `backend_unavailable` (re-tentable, aucun
+    déballage tenté) et que le PEP transport rend déjà en 503.
+
+    ⚠️ Y COMPRIS LE 404, et c'est un choix argumenté CONTRE la revue de plan, qui
+    proposait de le lire « mission inconnue ⇒ inactive ». Nous ne pouvons pas
+    distinguer « la mission n'existe pas » de « notre URL est fausse » : un proxy mal
+    configuré rend précisément 404 — cas déjà rencontré en production sur le JWKS de
+    `mcp-mission`. Sous la lecture « inactive », une erreur de route de NOTRE côté
+    condamnerait les secrets de TOUTES les missions et lèverait une alerte de sécurité
+    chez `mcp-agent` : le défaut de #152 une quatrième fois. Sous
+    `service_unavailable`, un `mission_id` forgé obtient un refus re-tentable — le
+    fail-close tient, seule l'imputation change.
     """
+    import time as _time
+
+    async def _memoriser(ok: bool, motif: str, duree: float) -> None:
+        """Cache (actif, motif, échéance). `cache_ttl <= 0` = pas de cache, respecté."""
+        if cache_ttl <= 0:
+            return
+        async with _mission_status_lock:
+            maintenant = _time.time()
+            _mission_status_cache[mission_id] = (ok, motif, maintenant + duree)
+            _purger_statuts_perimes_locked(maintenant)
+
     try:
         url = status_url_template.format(mission_id=mission_id)
         async with httpx.AsyncClient(timeout=3.0) as http:
@@ -738,9 +762,8 @@ async def _resoudre_statut_mission(
             body = resp.json()
             state = str(body.get("status", body.get("state", "")))
             active = state.upper() in _ACTIVE_MISSION_STATES
-            async with _mission_status_lock:
-                _mission_status_cache[mission_id] = (active, now)
-                _purger_statuts_perimes_locked(now, cache_ttl)
+            motif = "" if active else "mission_inactive"
+            await _memoriser(active, motif, cache_ttl)
             if active:
                 return True, ""
             # #78/D5 : reason FERMÉ — l'état renvoyé par le service mission est une valeur
@@ -750,11 +773,15 @@ async def _resoudre_statut_mission(
             # repr échappe tout caractère de contrôle (anti-injection du log serveur).
             logger.info("check_mission_active: mission %r inactive (state=%r)",
                         mission_id[:16], state)
-            return False, "mission_inactive"
-        # 404 = mission inconnue → fail-close ; code HTTP non reflété dans le reason.
-        logger.info("check_mission_active: mission %r → HTTP %s",
-                    mission_id[:16], resp.status_code)
-        return False, "mission_status_error"
+            return False, motif
+        # Tout non-200 : nous n'avons pas pu vérifier. Code HTTP jamais reflété.
+        logger.warning("check_mission_active: mission %r → HTTP %s — indisponible",
+                       mission_id[:16], resp.status_code)
+        await _memoriser(False, "service_unavailable",
+                         min(cache_ttl, _MISSION_STATUS_ERROR_TTL))
+        return False, "service_unavailable"
     except Exception as e:
         logger.error("check_mission_active error: %s", type(e).__name__)
+        await _memoriser(False, "service_unavailable",
+                         min(cache_ttl, _MISSION_STATUS_ERROR_TTL))
         return False, "service_unavailable"
