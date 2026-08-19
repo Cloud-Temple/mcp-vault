@@ -2,6 +2,30 @@
 
 ## [Non publié]
 
+### Documentation — deux limites qui n'étaient écrites nulle part
+
+⚠️ **Aucun changement de comportement.** Documentation et description d'outil seulement,
+donc pas de version dédiée : ces textes partiront avec le prochain lot fonctionnel.
+
+**1. `ttl_seconds` ne borne pas la vie du secret livré — #156.** Ni le README ni le contrat
+ne le disaient, et la lecture naturelle allait dans le mauvais sens : `mcp-mission` a posé
+la question le 19/08, ce qui prouve que le malentendu était atteignable. L'enveloppe est à
+usage unique et meurt à son TTL (borné entre 60 s et 3600 s — `mcp-mission` se plafonne à
+300 s, ce qui est **son** choix et non notre plafond) ; le secret KV livré n'a **aucune
+expiration ni rotation**. Si une mission meurt après un déballage, la durée d'exposition
+n'est bornée par personne de notre côté.
+Écrit aux trois endroits qui compte : README FR/EN, et la **description de l'outil
+`secret_wrap`** — c'est elle que l'appelant lit réellement, pas notre README.
+
+**2. « log warning, continue » était trompeur depuis #154.** Les README FR/EN annonçaient
+qu'en `ENFORCE_MISSION_TOKEN_VALIDATION=false` un échec de validation était « journalisé,
+puis on continue ». C'est faux à deux titres : la consommation est ensuite **refusée** au
+registre (`mission_id` vide ⇒ clé composite sans correspondance), et depuis v0.16.3 ce qui
+exprime **notre propre incapacité** est refusé **dans les deux postures**.
+⇒ Nous avions corrigé le code sans corriger la phrase qui l'annonçait — la même faute que
+#154 réparait, une couche plus haut.
+
+
 ## [0.16.3] — 2026-08-18
 
 ### En production, une indisponibilité du service de clés s'annonçait « opération inconnue » — #154

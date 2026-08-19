@@ -505,7 +505,15 @@ async def secret_wrap(
         secret_path: Chemin du secret dans le vault
         mission_id: Identifiant de la mission (scope)
         operation_id: Corrélation write-ahead pour compensation des orphelins (#74)
-        ttl_seconds: TTL du wrap token en secondes (défaut: 300s = 5 min)
+        ttl_seconds: TTL du wrap token en secondes (défaut: 300s = 5 min, borné
+            entre 60 et 3600).
+            ⚠️ Ce TTL borne la fenêtre pour OBTENIR le secret, PAS la durée de vie
+            du secret OBTENU (#156). L'enveloppe est à usage unique et meurt à son
+            TTL ; le secret livré, lui, n'a AUCUNE expiration ni rotation côté
+            vault — il reste valide jusqu'à ce que son propriétaire le réécrive ou
+            le supprime. Si la mission meurt après un déballage, la durée
+            d'exposition n'est bornée par personne ici : le seul remède est de
+            faire tourner le secret, et rien ne le déclenche automatiquement.
         tenant_id: Locataire propriétaire (binding C18). Optionnel hors mode
             durci ; **REQUIS** si ENFORCE_MISSION_TOKEN_VALIDATION=true — aucune
             source serveur ne peut le suppléer, un locataire déduit attesterait
