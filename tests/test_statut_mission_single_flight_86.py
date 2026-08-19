@@ -544,8 +544,13 @@ class TestUnReglageSansEffetLeDitALExploitant:
             "démarrage (le modèle refuse les variables inconnues)"
         )
 
-    @pytest.mark.parametrize("valeur", [1, 2, 4, 99, 0])
+    @pytest.mark.parametrize("valeur", [1, 2, 3, 4, 99, 0])
     def test_une_valeur_posee_par_l_exploitant_est_signalee(self, valeur):
+        """⚠️ `3` EST dans la liste, et c'est le cas que la revue a trouvé manquant : un
+        déploiement qui écrit la variable à sa valeur par défaut l'a bel et bien posée,
+        garde la fausse assurance anti-DoS, et une comparaison au défaut resterait
+        muette. La première rédaction de ce test EXCLUAIT `3` — il verrouillait le
+        trou."""
         inertes = _reglages_mission(
             mission_jwks_max_refresh_per_min=valeur
         ).reglages_sans_effet()
@@ -561,11 +566,13 @@ class TestUnReglageSansEffetLeDitALExploitant:
             "signalement émis à la valeur par défaut"
         )
 
-    def test_le_demarrage_consulte_bien_cette_methode(self):
-        """⚠️ Behavioural, pas textuel : on remplace la méthode par un espion et on
-        vérifie que le démarrage l'appelle. Sans cela, la méthode pourrait être juste et
-        n'être branchée nulle part — le défaut de « un correctif se lit avec sa garde ».
+    def test_l_avertissement_atteint_REELLEMENT_le_journal(self, caplog):
+        """⚠️ La première rédaction n'espionnait que l'APPEL à `reglages_sans_effet()` :
+        elle passait même si le résultat était ensuite ignoré et qu'aucun avertissement
+        n'atteignait l'exploitant. Trouvaille de revue. On vérifie donc les DEUX : la
+        méthode est consultée, ET son contenu ressort au journal.
         """
+        import logging
         from unittest.mock import patch
 
         from mcp_vault import lifecycle
@@ -575,11 +582,12 @@ class TestUnReglageSansEffetLeDitALExploitant:
 
         def _espion(_self):
             appels.append(1)
-            return ["MISSION_JWKS_MAX_REFRESH_PER_MIN"]
+            return ["REGLAGE_TEMOIN_INERTE"]
 
         # Pydantic interdit d'attacher une méthode à une INSTANCE : on espionne la
         # classe, ce qui exerce le même point d'appel.
-        with patch.object(type(reglages), "reglages_sans_effet", _espion), \
+        with caplog.at_level(logging.WARNING), \
+             patch.object(type(reglages), "reglages_sans_effet", _espion), \
              patch.object(lifecycle, "get_settings", return_value=reglages):
             try:
                 asyncio.run(lifecycle.vault_startup())
@@ -589,6 +597,14 @@ class TestUnReglageSansEffetLeDitALExploitant:
         assert appels, (
             "le démarrage n'a pas consulté `reglages_sans_effet()` — le signalement "
             "n'atteindra jamais l'exploitant"
+        )
+        portant = [m for m in caplog.messages if "REGLAGE_TEMOIN_INERTE" in m]
+        assert portant, (
+            "la méthode est appelée mais son résultat ne ressort pas au journal — "
+            f"l'exploitant n'apprend rien. Messages vus : {caplog.messages!r}"
+        )
+        assert any("SANS EFFET" in m for m in portant), (
+            f"l'avertissement doit dire que le réglage ne fait rien : {portant!r}"
         )
 
 

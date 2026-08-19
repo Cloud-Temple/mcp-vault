@@ -115,10 +115,32 @@ d'exploitation.
 - Un client HTTP partagé pour le service de statut : le single-flight supprime déjà le
   coût dominant ; à mesurer avant d'ajouter un cycle de vie.
 
-**Tests** : 1592 verts, 33 ignorés. **12 mutations, toutes détectées** — dont une qui a
-d'abord **survécu** et révélé un garde-fou auto-référentiel : l'assertion de borne du cache
-se comparait à la constante qu'elle devait protéger, et ne pouvait donc pas échouer quand
-on relevait cette constante.
+#### ⚠️ Deux trouvailles de la revue du diff — le lot manquait son propre cas
+
+**Le réglage inerte restait muet quand l'exploitant le posait à sa valeur par défaut.** La
+première rédaction comparait la valeur au défaut (`3`) au lieu de vérifier qu'elle avait été
+**posée**. Un déploiement écrivant `MISSION_JWKS_MAX_REFRESH_PER_MIN=3` gardait donc la
+fausse assurance anti-DoS en silence — exactement le cas que ce lot prétend traiter. Et
+**notre propre test verrouillait le trou** : il excluait explicitement la valeur `3`.
+Corrigé par `model_fields_set`, qui distingue « fourni par une source » de « non fourni ».
+
+**Le test de branchement ne prouvait pas le signalement.** Il espionnait l'appel à
+`reglages_sans_effet()` et s'arrêtait là : il passait même si le résultat était ensuite
+ignoré et qu'aucun avertissement n'atteignait le journal. Il vérifie désormais les deux.
+
+**Contrôles négatifs de la revue, pour mémoire** : aucune course sur le single-flight (la
+création et l'insertion sont atomiques sous verrou), aucun auto-interblocage (la tâche
+enfant ne démarre qu'après la sortie du verrou), aucune fuite quand `cache_ttl <= 0`,
+`shield` démontré nécessaire par les tests d'annulation, borne du cache non
+auto-référentielle, et le 404 re-tentable reste fail-close sans oracle exploitable — un
+appelant ne peut pas atteindre ce contrôle sans un JWT ES256 valide.
+
+**Tests** : 1596 verts, 33 ignorés. **15 mutations, toutes détectées** — dont trois
+instructives : une a d'abord **survécu** et révélé un garde-fou **auto-référentiel**
+(l'assertion de borne du cache se comparait à la constante qu'elle devait protéger, donc ne
+pouvait pas échouer quand on relevait cette constante) ; les deux autres verrouillent
+désormais les trouvailles de la revue (retour au critère « différent du défaut », et un
+résultat consulté mais jamais journalisé).
 
 ## [Non publié]
 

@@ -201,7 +201,15 @@ class Settings(BaseSettings):
         # Documenté comme « rate-limit refresh JWKS (anti-DoS) », jamais appliqué : le
         # validateur l'accepte puis l'ignore. La protection réelle est le throttle des
         # refresh « kid inconnu » plus le backoff exponentiel.
-        if self.mission_jwks_max_refresh_per_min != 3:
+        #
+        # ⚠️ Le critère est « l'exploitant l'a POSÉ », PAS « la valeur diffère du
+        # défaut » — trouvaille de revue. Un déploiement qui écrit
+        # `MISSION_JWKS_MAX_REFRESH_PER_MIN=3` a posé la variable, garde la fausse
+        # assurance anti-DoS, et une comparaison au défaut resterait muette : le lot
+        # aurait manqué exactement le cas qu'il prétend traiter.
+        # `model_fields_set` porte les champs fournis par une source (env, .env,
+        # argument), même quand leur valeur coïncide avec le défaut.
+        if "mission_jwks_max_refresh_per_min" in self.model_fields_set:
             inertes.append("MISSION_JWKS_MAX_REFRESH_PER_MIN")
         return inertes
 
