@@ -7,6 +7,15 @@
 ⚠️ **Aucun changement de comportement.** Documentation et description d'outil seulement,
 donc pas de version dédiée : ces textes partiront avec le prochain lot fonctionnel.
 
+⚠️ **Et la première rédaction de ces textes portait elle-même une affirmation fausse**,
+trouvée en revue adversariale : « il reste valide jusqu'à ce que son propriétaire le
+réécrive ou le supprime » laissait croire que nos deux verbes suffisent à invalider un
+credential. **Ils ne suffisent pas** : `secret_write` **ajoute une version** (la précédente
+reste lisible par son numéro, `read_secret(..., version=N)`), et `secret_delete` retire les
+versions **du coffre**, pas le mot de passe de la machine ni la clé chez son fournisseur.
+Seule une révocation ou rotation **coordonnée chez l'émetteur** invalide effectivement un
+credential externe. Corrigé aux trois surfaces avant publication.
+
 **1. `ttl_seconds` ne borne pas la vie du secret livré — #156.** Ni le README ni le contrat
 ne le disaient, et la lecture naturelle allait dans le mauvais sens : `mcp-mission` a posé
 la question le 19/08, ce qui prouve que le malentendu était atteignable. L'enveloppe est à

@@ -176,7 +176,9 @@ Sovereign CA for the ecosystem: Caddy WAFs enroll via ACME exactly like with Let
 
 Contract for the mcp-mission `CredentialBrokerService`: single-use credential delivery via OpenBao response wrapping (cubbyhole), with a write-ahead registry on S3 for orphan compensation, and anti-confused-deputy validation (C18).
 
-> ⚠️ **`ttl_seconds` bounds the window to OBTAIN the secret, NOT the lifetime of the secret OBTAINED** *(#156)*. The envelope is single-use and dies at its TTL (bounded here between **60 s and 3600 s**; `mcp-mission` caps itself at 300 s, which is **their** choice, not our ceiling). The KV secret delivered has **no expiry and no rotation**: it stays valid until its owner rewrites it (`secret_write`) or deletes it (`secret_delete`). If a mission dies after an unwrap, **the exposure window is bounded by no one on our side** — the only remedy is to rotate the secret, and nothing triggers that automatically.
+> ⚠️ **`ttl_seconds` bounds the window to OBTAIN the secret, NOT the lifetime of the secret OBTAINED** *(#156)*. The envelope is single-use and dies at its TTL (bounded here between **60 s and 3600 s**; `mcp-mission` caps itself at 300 s, which is **their** choice, not our ceiling). MCP Vault imposes **no expiry** on the KV secret nor on the credential it contains, and **its actual validity depends on its issuer** — not on us.
+> ⚠️ Neither of our two verbs is enough to invalidate it: `secret_write` **adds a version** (the previous one stays readable by number), and `secret_delete` removes the versions **from the vault**, not the host's password nor the key at its provider. **Only a revocation or rotation coordinated at the issuer actually invalidates an external credential.**
+> ⇒ If a mission dies after an unwrap, **the exposure window is bounded by no one**, and the remedy is not in this tool.
 > What we do **not** keep: no copy of the unwrapped value. It is returned to the caller without being stored, the `data` field is stripped from the audit trail, and no log carries it. The registry entry keeps the accessor, `vault_id` and `secret_path` — **never the value**.
 
 | Tool | Perm | Description |

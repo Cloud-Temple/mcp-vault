@@ -509,11 +509,14 @@ async def secret_wrap(
             entre 60 et 3600).
             ⚠️ Ce TTL borne la fenêtre pour OBTENIR le secret, PAS la durée de vie
             du secret OBTENU (#156). L'enveloppe est à usage unique et meurt à son
-            TTL ; le secret livré, lui, n'a AUCUNE expiration ni rotation côté
-            vault — il reste valide jusqu'à ce que son propriétaire le réécrive ou
-            le supprime. Si la mission meurt après un déballage, la durée
-            d'exposition n'est bornée par personne ici : le seul remède est de
-            faire tourner le secret, et rien ne le déclenche automatiquement.
+            TTL. MCP Vault n'impose AUCUNE expiration au secret KV ni au credential
+            qu'il contient : sa validité réelle dépend de son ÉMETTEUR, pas de nous.
+            Ni `secret_write` (qui ajoute une version — la précédente reste lisible
+            par son numéro) ni `secret_delete` (qui retire les versions du coffre,
+            pas le mot de passe de la machine) n'invalide un credential externe.
+            Seule une révocation ou rotation coordonnée chez l'émetteur le fait.
+            ⇒ Si la mission meurt après un déballage, la durée d'exposition n'est
+            bornée par personne, et le remède n'est pas dans cet outil.
         tenant_id: Locataire propriétaire (binding C18). Optionnel hors mode
             durci ; **REQUIS** si ENFORCE_MISSION_TOKEN_VALIDATION=true — aucune
             source serveur ne peut le suppléer, un locataire déduit attesterait
