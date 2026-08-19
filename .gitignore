@@ -1,5 +1,11 @@
 # --- Secrets & config locale ---
 .env
+# ⚠️ Tout fichier d'environnement dérivé — jetons d'exploitation, bearers de
+# lecture, credentials de banc. Motif LARGE et non un nom exact : ce dépôt a
+# déjà connu une exposition (historique réécrit, jetons révoqués).
+.env.*
+*.env
+!.env.example
 .clinerules/
 
 # --- Python ---
