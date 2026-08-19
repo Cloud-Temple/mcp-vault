@@ -631,6 +631,11 @@ async def check_mission_active(
     Retourne (True, "") si active, (False, raison) sinon.
     Fail-close : erreur de connexion, HTTP != 200, état hors allow-list → inactive.
     Cache TTL court pour réduire la fenêtre post-abort (mcp-mission recommande ≤ 30s).
+
+    #86 finding 5 — SINGLE-FLIGHT par `mission_id`. Un seul appel sortant est en vol
+    par mission ; les appelants concurrents attendent SON résultat. Mesuré avant :
+    onze ouvriers d'un même éventail produisaient onze appels sortants vers un
+    endpoint MONO-INSTANCE partagé avec l'exécution des missions.
     """
     import time as _time
     now = _time.time()
@@ -640,6 +645,47 @@ async def check_mission_active(
             if now - cached_at < cache_ttl:
                 return cached_ok, "" if cached_ok else "mission_inactive_cached"
 
+        en_vol = _mission_status_en_vol.get(mission_id)
+        suiveur = en_vol is not None
+        if not suiveur:
+            en_vol = asyncio.get_running_loop().create_future()
+            _mission_status_en_vol[mission_id] = en_vol
+
+    if suiveur:
+        # ⚠️ `shield` OBLIGATOIRE : sans lui, l'annulation d'UN suiveur annulerait la
+        # future PARTAGÉE, donc casserait le meneur et tous les autres suiveurs. Le
+        # cas n'est pas théorique — `mcp-agent` coupe ses appels d'outils sur
+        # échéance, et cette échéance peut valoir quelques millisecondes.
+        return await asyncio.shield(en_vol)
+
+    verdict = (False, "service_unavailable")
+    try:
+        verdict = await _resoudre_statut_mission(
+            mission_id, status_url_template, now, cache_ttl
+        )
+        return verdict
+    finally:
+        # Publier AVANT de retirer l'entrée : un suiveur qui arrive entre les deux
+        # doit trouver une future déjà résolue, jamais une future orpheline.
+        # Sur annulation du meneur, les suiveurs reçoivent le fail-close ci-dessus —
+        # refuser est sûr, les laisser attendre indéfiniment ne l'est pas.
+        if not en_vol.done():
+            en_vol.set_result(verdict)
+        # Pas de verrou : `pop` ne contient aucun `await`, donc aucune préemption
+        # possible dans la boucle coopérative.
+        _mission_status_en_vol.pop(mission_id, None)
+
+
+async def _resoudre_statut_mission(
+    mission_id: str, status_url_template: str, now: float, cache_ttl: int
+) -> tuple[bool, str]:
+    """L'interrogation réelle de mcp-mission. Un seul appelant à la fois par mission.
+
+    ⚠️ Les ERREURS ne sont volontairement PAS mises en cache : le fail-close répond
+    déjà « inactive », et cacher l'échec retarderait la détection du retour à la
+    normale. Le single-flight suffit à borner l'amplification — sans lui, onze
+    ouvriers payaient onze fois le délai d'attente.
+    """
     try:
         url = status_url_template.format(mission_id=mission_id)
         async with httpx.AsyncClient(timeout=3.0) as http:
@@ -650,6 +696,7 @@ async def check_mission_active(
             active = state.upper() in _ACTIVE_MISSION_STATES
             async with _mission_status_lock:
                 _mission_status_cache[mission_id] = (active, now)
+                _purger_statuts_perimes_locked(now, cache_ttl)
             if active:
                 return True, ""
             # #78/D5 : reason FERMÉ — l'état renvoyé par le service mission est une valeur
