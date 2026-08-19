@@ -135,7 +135,7 @@ enfant ne démarre qu'après la sortie du verrou), aucune fuite quand `cache_ttl
 auto-référentielle, et le 404 re-tentable reste fail-close sans oracle exploitable — un
 appelant ne peut pas atteindre ce contrôle sans un JWT ES256 valide.
 
-**Tests** : 1596 verts, 33 ignorés. **15 mutations, toutes détectées** — dont trois
+**Tests** : 1595 verts, 33 ignorés. **15 mutations, toutes détectées** — dont trois
 instructives : une a d'abord **survécu** et révélé un garde-fou **auto-référentiel**
 (l'assertion de borne du cache se comparait à la constante qu'elle devait protéger, donc ne
 pouvait pas échouer quand on relevait cette constante) ; les deux autres verrouillent
