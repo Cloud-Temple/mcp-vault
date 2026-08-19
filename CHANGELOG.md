@@ -1,5 +1,125 @@
 # Changelog — MCP Vault
 
+## [0.17.0] — 2026-08-19
+
+### Durcissement du PEP mission — #86, findings 4, 5 et 7
+
+⚠️ **MINEURE et non correctif : une configuration qui démarrait hier peut désormais être
+REFUSÉE au boot.** `MISSION_JWKS_CACHE_TTL` est borné à `[10,60]` s dès que la validation
+mission est active. La production tourne à 60 s : elle n'est pas concernée. Tout autre
+déploiement posant une valeur hors bornes devra la corriger.
+
+#### ⚠️ Ce que la fiche #86 réclamait est en grande partie DÉJÀ livré
+
+L'inventaire, refait dans le code et non dans le texte de la fiche : **F1 (config) et F6**
+sont livrés (Lot 1, avec leurs tests), **F2** l'est (Lot 2), **F3** l'est (Lot 3), et la
+partie « gel de la boucle » de **F4** l'est par #148 (v0.16.1). Il restait le résidu de
+F4, F5, et l'arbitrage de F7.
+
+#### 🔴 Le défaut le plus grave n'était pas dans la fiche — trouvé en revue de plan
+
+`secret_consume` fondait **tout** verdict négatif du service de missions en
+`mission_inactive`. Or `check_mission_active` distinguait déjà l'indisponibilité
+(`service_unavailable`), et le **PEP transport en tenait compte** (503 contre 403) : c'est
+`secret_consume` qui était l'exception — exactement l'incohérence entre les deux points
+d'application que le finding 2 de #86 dénonçait.
+
+Conséquence : `mcp-agent` lisant tout code ≠ `backend_unavailable` en consommation
+incertaine (leur #135), une panne du service de statut **mono-instance** de `mcp-mission`
+se lisait chez eux comme une **mission révoquée** ⇒ secret condamné et, depuis leur #49,
+arrêt terminal de mission **avec alerte de sécurité**.
+
+⇒ **Troisième occurrence du défaut de #152 et #154 sur un troisième chemin.** Corrigé :
+une indisponibilité rend `backend_unavailable` (aucun déballage tenté, re-tentable) ; une
+mission réellement hors allow-list reste `mission_inactive`.
+
+#### Taxonomie — un seul cas est un fait sur la mission
+
+| Situation | Motif | Lecture |
+| --- | --- | --- |
+| 200, état hors allow-list | `mission_inactive` | **fait** attesté par le service de missions |
+| 200, état dans l'allow-list | — | mission active |
+| **tout non-200** (404 compris), exception réseau | `service_unavailable` | **notre** incapacité à vérifier |
+
+⚠️ **Le 404 est classé indisponibilité, CONTRE l'avis de la revue de plan** qui proposait
+« mission inconnue ⇒ inactive ». Nous ne pouvons pas distinguer « la mission n'existe
+pas » de « notre URL est fausse » : un proxy mal configuré rend précisément 404 — cas déjà
+rencontré en production sur le JWKS de `mcp-mission`. Sous la lecture « inactive », une
+erreur de route de **notre** côté condamnerait les secrets de **toutes** les missions.
+Sous `service_unavailable`, un `mission_id` forgé obtient un refus re-tentable : le
+fail-close tient, seule l'imputation change.
+
+#### F5 — stampede sur le service de statut, mesuré
+
+Onze appelants concurrents sur la **même** mission produisaient **onze appels sortants**
+vers un endpoint mono-instance partagé avec l'exécution des missions. Le verrou était pris
+pour lire le cache, relâché, puis l'appel HTTP partait hors verrou.
+
+Corrigé par un **single-flight par `mission_id`** :
+
+- ⚠️ **pas** un verrou global tenu pendant l'appel — mesuré : onze missions *différentes*
+  se résolvent en 0,30 s, un verrou global les sérialiserait à ~3,3 s et un endpoint lent
+  bloquerait **toutes** les missions au lieu d'une ;
+- une **tâche** partagée, pas une future portée par le meneur : `mcp-agent` coupe ses
+  appels d'outils sur « le budget restant de l'agent », qui peut valoir quelques
+  millisecondes. Avec une future, l'annulation d'un seul appelant faisait échouer tous les
+  autres. Correction issue de la revue de plan, verrouillée par deux tests d'annulation ;
+- registre des appels en vol **auto-nettoyant** (un dictionnaire de verrous par mission ne
+  se viderait jamais et déplacerait la fuite d'un cran) ;
+- cache **borné** (mesuré avant : 5 000 entrées après 5 000 missions) par purge
+  opportuniste des périmées ;
+- indisponibilité mise en cache **1 s** seulement, et le cache stocke désormais le
+  **motif** : sans lui, une panne ressortait en `mission_inactive_cached`, donc en fait
+  sur la mission. Le même mensonge que #152, dans le cache.
+
+#### F4 résiduel — un réglage documenté comme une protection, qui ne fait rien
+
+`MISSION_JWKS_MAX_REFRESH_PER_MIN` était décrit dans `.env.example` et `TECHNICAL.md`
+comme un « rate-limit refresh JWKS (anti-DoS) ». Il n'a **jamais** été appliqué : le
+validateur l'accepte puis l'ignore. La protection réelle est le throttle des refresh
+« kid inconnu » (10 s), le backoff exponentiel, et le déport hors boucle de #148.
+
+⚠️ **Il n'est PAS supprimé, et c'est une divergence assumée avec la revue de plan** qui
+demandait son retrait de la surface opérateur : le modèle de configuration refuse les
+variables inconnues, donc retirer le champ ferait **échouer le démarrage** de tout
+déploiement qui le pose encore — et nous ne pouvons pas lire la configuration de
+production. Il est donc conservé, documenté comme inerte partout, et **signalé au
+démarrage** s'il est posé (`Settings.reglages_sans_effet()`).
+
+⚠️ **Ne pas le « câbler »** en dérivant `60/valeur` du throttle : ce serait mélanger deux
+politiques et retarder l'adoption d'une clé fraîchement rotée.
+
+Et `MISSION_JWKS_CACHE_TTL` est désormais **borné** `[10,60]` : ce n'est pas un réglage de
+latence mais la **fenêtre de propagation d'une révocation** de clé de signature. Trop
+grand, une clé révoquée reste acceptée ; nul ou négatif, chaque validation peut déclencher
+un fetch et fait de nous un amplificateur sur un endpoint mono-instance.
+
+#### F7 — arbitrage de NE PAS corriger, motivé
+
+Le TTL de 300 s du Mission Binding Store ne retarde **pas** une révocation faite par notre
+API : les mutations publient l'instantané en mémoire après un `PUT` confirmé, et
+`expires_at` est évalué à **chaque** résolution. Il ne retarde qu'une mutation faite hors
+de notre API — édition directe du fichier S3, ou une autre réplique. Nous sommes
+mono-instance et l'édition directe n'est pas une procédure supportée : **l'exposition est
+nulle aujourd'hui**.
+
+Réduire le TTL coûterait des lectures S3 pour un gain nul. Les **déclencheurs** qui
+rendraient le compromis réel sont nommés dans le code et renvoyés à **#51** : passage
+multi-instance, second writer, ou reconnaissance de l'édition S3 comme procédure
+d'exploitation.
+
+#### Restent ouverts, délibérément
+
+- La classification d'un `kid_unknown_or_revoked` **non vérifié** (throttle ou backoff
+  ayant empêché la tentative) : attend un contrat de re-tentative avec `mcp-agent`.
+- Un client HTTP partagé pour le service de statut : le single-flight supprime déjà le
+  coût dominant ; à mesurer avant d'ajouter un cycle de vie.
+
+**Tests** : 1592 verts, 33 ignorés. **12 mutations, toutes détectées** — dont une qui a
+d'abord **survécu** et révélé un garde-fou auto-référentiel : l'assertion de borne du cache
+se comparait à la constante qu'elle devait protéger, et ne pouvait donc pas échouer quand
+on relevait cette constante.
+
 ## [Non publié]
 
 ### Documentation — deux limites qui n'étaient écrites nulle part

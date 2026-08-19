@@ -220,9 +220,17 @@ class TestLeCacheEstBorne:
         assert len(appels) == 3000, (
             f"témoin : 3000 appels sortants attendus, {len(appels)} observés"
         )
-        assert len(mj._mission_status_cache) <= mj._MISSION_STATUS_CACHE_MAX, (
-            f"{len(mj._mission_status_cache)} entrées en cache pour une borne de "
-            f"{mj._MISSION_STATUS_CACHE_MAX}"
+        # ⚠️ Borne EN DUR, jamais `mj._MISSION_STATUS_CACHE_MAX` : une assertion qui
+        # se compare à la constante qu'elle est censée protéger ne peut pas échouer
+        # quand on relève la constante. Le banc de mutations l'a démontré — cette
+        # assertion a d'abord SURVÉCU à un passage de 1024 à 10 000 000.
+        assert len(mj._mission_status_cache) <= 2048, (
+            f"{len(mj._mission_status_cache)} entrées en cache après 3000 missions "
+            "distinctes : le dictionnaire n'est pas borné"
+        )
+        assert len(mj._mission_status_cache) < 3000, (
+            "le cache croît avec le nombre de missions vues — c'est la fuite que ce "
+            "lot corrige"
         )
 
 
