@@ -883,4 +883,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.16.3
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.17.0

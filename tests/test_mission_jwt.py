@@ -657,12 +657,30 @@ class TestCheckMissionActive:
         active, why = self._check(state=state, mission=f"mis_u{state or 'empty'}")
         assert active is False, f"état inconnu '{state}' traité comme actif (fail-open) !"
 
-    def test_http_404_fail_close(self):
-        active, why = self._check(status_code=404, mission="mis_404")
-        assert active is False
-        # #78/D5 : reason FERMÉ — le code HTTP (valeur externe) n'est plus reflété.
-        assert why == "mission_status_error"
-        assert "404" not in why, "le code HTTP ne doit plus fuiter dans le reason"
+    @pytest.mark.parametrize("code", [404, 429, 500, 502, 503])
+    def test_tout_non_200_est_une_INDISPONIBILITE_pas_un_fait(self, code):
+        """⚠️ #86 — RUPTURE ASSUMÉE avec la rédaction d'origine, qui rendait
+        `mission_status_error` sur tout non-200, et CONTRE la revue de plan, qui
+        proposait de lire un 404 comme « mission inconnue ⇒ inactive ».
+
+        Nous ne pouvons pas distinguer « la mission n'existe pas » de « notre URL est
+        fausse » : un proxy mal configuré rend précisément 404 — cas rencontré en
+        production sur le JWKS de `mcp-mission`. Sous la lecture « inactive », une
+        erreur de route de NOTRE côté condamnerait les secrets de TOUTES les missions
+        et lèverait une alerte de sécurité chez `mcp-agent` (leur #49). C'est le défaut
+        de #152/#154 une quatrième fois.
+
+        Un seul cas reste un FAIT sur la mission : une réponse 200 dont l'état est hors
+        allow-list (cf. `test_inactive_state_reason_is_closed`).
+        """
+        active, why = self._check(status_code=code, mission=f"mis_{code}")
+
+        assert active is False, "fail-close attendu quel que soit le code"
+        assert why == "service_unavailable", (
+            f"HTTP {code} doit dire NOTRE incapacité à vérifier, pas un fait sur la "
+            f"mission — obtenu {why!r}"
+        )
+        assert str(code) not in why, "le code HTTP ne doit pas fuiter dans le motif"
 
     def test_inactive_state_reason_is_closed(self):
         """#78/D5 : un état renvoyé par le service mission (valeur EXTERNE, ici même

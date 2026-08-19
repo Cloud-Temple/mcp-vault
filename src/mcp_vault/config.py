@@ -119,7 +119,16 @@ class Settings(BaseSettings):
     # TTL du cache JWKS en secondes (défaut 60s — compromis révocation/performance).
     mission_jwks_cache_ttl: int = 60
 
-    # Nombre max de refreshes JWKS par minute (rate-limit anti-DoS).
+    # ⚠️ RÉGLAGE SANS EFFET — #86 finding 4. Il était documenté comme un
+    # « rate-limit refresh JWKS (anti-DoS) » et n'a JAMAIS été appliqué : le
+    # validateur l'accepte puis l'ignore. Ce qui protège réellement, ce sont le
+    # throttle des refresh « kid inconnu » (10 s) et le backoff exponentiel sur
+    # échec — plus le déport hors boucle de #148.
+    # ⚠️ CONSERVÉ, PAS SUPPRIMÉ : le modèle est en extra="forbid", donc retirer le
+    # champ ferait ÉCHOUER LE DÉMARRAGE de tout déploiement qui pose encore la
+    # variable. Un avertissement au boot le signale à l'exploitant (lifecycle.py).
+    # Ne pas le « câbler » en dérivant 60/valeur du throttle : ce serait mélanger
+    # deux politiques et retarder l'adoption d'une clé fraîchement rotée.
     mission_jwks_max_refresh_per_min: int = 3
 
     # Leeway JWT en secondes (tolérance clock skew inter-services).
@@ -179,6 +188,30 @@ class Settings(BaseSettings):
         les deux sont renseignés et divergent, le service refuse de démarrer.
         """
         return self.mcp_instance_id or self.mission_token_aud
+
+    def reglages_sans_effet(self) -> list[str]:
+        """Réglages exposés à l'exploitant qui n'ont AUCUN effet (#86 finding 4).
+
+        Un réglage offert et inerte est pire qu'absent : il laisse croire à une
+        protection. Ils ne sont pas SUPPRIMÉS parce que le modèle refuse les variables
+        inconnues — retirer le champ ferait échouer le démarrage de tout déploiement qui
+        le pose encore. Le démarrage journalise donc ce que rend cette méthode.
+        """
+        inertes = []
+        # Documenté comme « rate-limit refresh JWKS (anti-DoS) », jamais appliqué : le
+        # validateur l'accepte puis l'ignore. La protection réelle est le throttle des
+        # refresh « kid inconnu » plus le backoff exponentiel.
+        #
+        # ⚠️ Le critère est « l'exploitant l'a POSÉ », PAS « la valeur diffère du
+        # défaut » — trouvaille de revue. Un déploiement qui écrit
+        # `MISSION_JWKS_MAX_REFRESH_PER_MIN=3` a posé la variable, garde la fausse
+        # assurance anti-DoS, et une comparaison au défaut resterait muette : le lot
+        # aurait manqué exactement le cas qu'il prétend traiter.
+        # `model_fields_set` porte les champs fournis par une source (env, .env,
+        # argument), même quand leur valeur coïncide avec le défaut.
+        if "mission_jwks_max_refresh_per_min" in self.model_fields_set:
+            inertes.append("MISSION_JWKS_MAX_REFRESH_PER_MIN")
+        return inertes
 
     def check_mission_pep_config(self) -> tuple[bool, str]:
         """Valide la cohérence de la config mission JWT (fail-fast au boot).
@@ -267,6 +300,16 @@ class Settings(BaseSettings):
                     "le placeholder littéral '{mission_id}' — une URL statique "
                     "validerait silencieusement n'importe quelle mission comme "
                     "active."
+                )
+            if not (10 <= self.mission_jwks_cache_ttl <= 60):
+                return False, (
+                    f"MISSION_JWKS_CACHE_TTL={self.mission_jwks_cache_ttl} hors bornes "
+                    "[10,60] secondes. ⚠️ Ce TTL est la FENÊTRE DE PROPAGATION D'UNE "
+                    "RÉVOCATION de clé de signature — une clé révoquée disparaît du "
+                    "JWKS de mcp-mission. Trop grand, une clé révoquée reste acceptée ; "
+                    "trop petit (ou nul), chaque validation peut déclencher un fetch et "
+                    "transforme le service en amplificateur de charge sur un endpoint "
+                    "mono-instance (#86 finding 4)."
                 )
             if not (0 <= self.mission_status_cache_ttl <= 30):
                 return False, (
