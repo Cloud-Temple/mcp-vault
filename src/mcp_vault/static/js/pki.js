@@ -58,9 +58,18 @@ function _renderPkiPage(s, certs, roles, roleDetail) {
     const certRows = (certs.certs || []).map(c => {
         const sans = (c.sans || []).join(', ') || '—';
         const exp  = c.not_after ? fmtDate(c.not_after) : '—';
+        // SÉCURITÉ #128 : « actif » ne disait PAS « valide », il disait « non
+        // révoqué » — un certificat EXPIRÉ s'affichait donc en badge VERT. Sur un
+        // écran de sécurité, un libellé qui affirme autre chose que le fait peut
+        // faire sauter un renouvellement. Trois états, la révocation d'abord
+        // (elle prime : un certificat révoqué ET expiré reste « révoqué »).
+        const notAfter = c.not_after ? new Date(c.not_after) : null;
+        const perime   = notAfter && !isNaN(notAfter.getTime()) && notAfter <= now;
         const rev  = c.revoked
             ? '<span class="badge badge-danger">révoqué</span>'
-            : '<span class="badge badge-ok">actif</span>';
+            : perime
+                ? '<span class="badge badge-danger">expiré</span>'
+                : '<span class="badge badge-ok">valide</span>';
         // SÉCURITÉ : JSON.stringify évite le XSS onclick (esc() n'échappe pas les quotes simples)
         const revokeBtn = (!c.revoked && isAdmin())
             ? `<button class="btn btn-sm btn-danger" onclick="pkiRevoke(${JSON.stringify(c.serial)})">Révoquer</button>`

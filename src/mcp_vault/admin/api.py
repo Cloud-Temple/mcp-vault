@@ -1577,15 +1577,61 @@ async def _api_pki_status(send):
 
 
 async def _api_pki_setup(send, body):
-    """POST /admin/api/pki/setup — Initialiser la PKI (admin)."""
+    """POST /admin/api/pki/setup — Initialiser la PKI (admin).
+
+    ⚠️ `lab_mode` et `allowed_domains` sont OBLIGATOIRES dans le corps (#128).
+    """
+    # ── SÉCURITÉ #128 : aucun défaut silencieux sur l'installation d'une AC ──
+    # Cette route est la TROISIÈME surface du même défaut (avec l'outil MCP et la
+    # CLI), et c'était la plus permissive : `lab_mode` valait True par défaut et
+    # des domaines absents devenaient `None`, ce que setup_pki_ca traduisait en
+    # `*.lesur.lan`. Un POST au corps VIDE (`{}`) suffisait donc à rétrograder une
+    # production saine — domaines réels écrasés (plus aucun certificat émissible)
+    # et `eab_policy` ramené de `new-account-required` à `not-required`
+    # (enrôlement ACME ouvert), les deux écritures de setup_pki_ca étant
+    # INCONDITIONNELLES.
+    #
+    # La console web envoie toujours les deux champs ; c'est la route nue qui
+    # était exposée. Le remède est celui des deux autres surfaces : l'ABSENCE de
+    # défaut. Un corps illisible ou incomplet est un 400, jamais une installation.
     from ..vault.pki_ca import setup_pki_ca
     try:
         data = json.loads(body) if body else {}
     except json.JSONDecodeError:
-        data = {}
-    lab_mode = data.get("lab_mode", True)
+        return await _json_response(send, 400, {
+            "status": "error", "error_type": "invalid_input",
+            "message": "Corps JSON illisible. `lab_mode` et `allowed_domains` sont requis.",
+        })
+    if not isinstance(data, dict):
+        return await _json_response(send, 400, {
+            "status": "error", "error_type": "invalid_input",
+            "message": "Corps JSON attendu : un objet.",
+        })
+
+    if not isinstance(data.get("lab_mode"), bool):
+        return await _json_response(send, 400, {
+            "status": "error", "error_type": "invalid_input",
+            "message": "`lab_mode` est requis et doit être un booléen. false = "
+                       "enrôlement ACME sur invitation (new-account-required) ; "
+                       "true = enrôlement LIBRE (bancs uniquement). Aucun défaut "
+                       "n'est appliqué : installer une AC ne se devine pas.",
+        })
+    lab_mode = data["lab_mode"]
+
     raw_domains = data.get("allowed_domains")
-    allowed_domains = [d.strip() for d in raw_domains.split(",") if d.strip()] if isinstance(raw_domains, str) else raw_domains
+    if isinstance(raw_domains, str):
+        allowed_domains = [d.strip() for d in raw_domains.split(",") if d.strip()]
+    elif isinstance(raw_domains, list):
+        allowed_domains = [str(d).strip() for d in raw_domains if str(d).strip()]
+    else:
+        allowed_domains = []
+    if not allowed_domains:
+        return await _json_response(send, 400, {
+            "status": "error", "error_type": "invalid_input",
+            "message": "`allowed_domains` est requis et ne peut pas être vide : "
+                       "la liste ÉCRASE les domaines du rôle ACME en place.",
+        })
+
     leaf_ttl = data.get("leaf_ttl", "720h")
     result = await setup_pki_ca(lab_mode, allowed_domains, leaf_ttl)
     await _json_response(send, 200 if result.get("status") == "ok" else 500, result)
