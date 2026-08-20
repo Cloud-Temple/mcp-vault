@@ -304,6 +304,20 @@ class PolicyStore:
             if norm["policy_id"] in validated:
                 self._mark_invalid(f"policy_id dupliqué: {norm['policy_id']!r}")
                 return
+            # SÉCURITÉ #128 : AVERTIR, jamais refuser. Une policy déjà persistée
+            # peut porter un motif devenu inopérant (faute de frappe d'hier, ou
+            # outil renommé depuis). La refuser ici rendrait le Policy Store
+            # indisponible AU DÉMARRAGE pour un défaut qui n'expose rien de
+            # plus qu'avant — leçon `extra="forbid"` de #86. Le refus vit au
+            # chemin d'écriture (`create`), là où c'est corrigeable.
+            from ..tool_catalog import inoperative_patterns
+            morts = (inoperative_patterns(norm["allowed_tools"])
+                     + inoperative_patterns(norm["denied_tools"]))
+            if morts:
+                logger.warning(
+                    "policy %r : motif(s) ne désignant aucun outil réel — "
+                    "enregistré(s) sans rien protéger : %s",
+                    norm["policy_id"], ", ".join(repr(m) for m in morts))
             validated[norm["policy_id"]] = norm
 
         self._policies = validated
@@ -455,6 +469,34 @@ class PolicyStore:
             policy = _validate_and_normalize_policy(draft)
         except ValueError as e:
             return {"status": "error", "message": str(e)}
+
+        # ── SÉCURITÉ #128 : refuser un motif qui ne désigne AUCUN outil réel ──
+        # Une faute de frappe (`ssx_*` pour `ssh_*`) est lexicalement
+        # irréprochable et totalement inopérante : la règle est enregistrée, a
+        # l'air d'être là, et ne protège rien. Cas réel trouvé en production le
+        # 19/08/2026 — policy `judilibre-prod-api-key-readonly`, motif *denied*
+        # `token_create` (aucun outil de ce nom ; l'outil réel `token_update`
+        # n'était donc pas couvert). Sans dommage, parce que `token_update` exige
+        # la permission `admin` — de la chance, pas de la conception.
+        #
+        # ⚠️ ASYMÉTRIE VOULUE : on refuse ICI (chemin d'écriture, un humain est
+        # devant son clavier et peut corriger) et on se contente d'AVERTIR au
+        # chargement (`_load`). Refuser au chargement ferait d'un simple
+        # renommage d'outil une indisponibilité du Policy Store au démarrage —
+        # exactement la faute de `extra="forbid"` corrigée dans #86.
+        from ..tool_catalog import inoperative_patterns
+        morts = (inoperative_patterns(policy["allowed_tools"])
+                 + inoperative_patterns(policy["denied_tools"]))
+        if morts:
+            return {
+                "status": "error", "error_type": "invalid_input",
+                "message": (
+                    "motif(s) ne désignant aucun outil réel : "
+                    + ", ".join(repr(m) for m in morts)
+                    + " — une règle portant un tel motif est enregistrée sans "
+                      "rien protéger. Corrigez le motif ou retirez-le."
+                ),
+            }
 
         # Copy-on-write (#123) : on construit le candidat, on persiste, et on ne
         # publie qu'après confirmation. Il n'y a plus de rollback à écrire — donc

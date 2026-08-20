@@ -1,6 +1,6 @@
 # Architecture — MCP Vault
 
-> **Version** : 0.18.0 | **Date** : 2026-08-20 | **Auteur** : Cloud Temple
+> **Version** : 0.19.0 | **Date** : 2026-08-20 | **Auteur** : Cloud Temple
 > **Projet** : mcp-vault | **Licence** : Apache 2.0  
 > **Statut** : ✅ Implémenté — Production-ready (PKI interne v0.5.x + C18 v0.6.x)
 
