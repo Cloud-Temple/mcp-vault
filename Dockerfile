@@ -26,7 +26,7 @@ FROM python:3.12-slim@sha256:3d5ed973e45820f5ba5e46bd065bd88b3a504ff0724d85980dc
 # Metadata
 LABEL maintainer="Cloud Temple" \
       description="MCP Vault — Secure secrets management for AI agents" \
-      version="0.17.0"
+      version="0.18.0"
 
 # System deps for OpenBao
 RUN apt-get update && apt-get install -y --no-install-recommends \

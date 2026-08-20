@@ -1,5 +1,150 @@
 # Changelog — MCP Vault
 
+## [0.18.0] — 2026-08-20
+
+### Aucun défaut silencieux sur l'installation de l'autorité de certification — #128
+
+⚠️ **RUPTURE, sur les TROIS surfaces qui installent l'autorité de certification.**
+
+| Surface | Ce qui change |
+| --- | --- |
+| outil MCP `pki_ca_setup` | `lab_mode` et `allowed_domains` n'ont plus de défaut ⇒ `required` dans le schéma MCP |
+| CLI `pki setup` | `--lab` ou `--prod` **et** `--domains` sont obligatoires |
+| route `POST /admin/api/pki/setup` | `lab_mode` (booléen réel) et `allowed_domains` sont obligatoires dans le corps ⇒ **400** sinon |
+
+Un appelant qui les omettait reçoit une erreur : c'est l'effet voulu, et c'est le seul
+remède au défaut ci-dessous.
+
+⚠️ **Les trois surfaces ont été trouvées l'une après l'autre**, en cherchant la **classe**
+du défaut après chaque occurrence corrigée. La CLI — corrigée en premier — est la seule que
+**aucun script du dépôt n'appelle**. L'outil MCP est celui que la plateforme utilise ; la
+route HTTP était la plus permissive des trois. La leçon est là : corriger l'occurrence
+laisse la classe ouverte.
+
+#### 🔴 Ce que le défaut permettait — mesuré, pas supposé
+
+`lab_mode` ne décide pas d'un détail de laboratoire : il décide de la **politique
+d'enrôlement ACME**.
+
+| `lab_mode` | `eab_policy` | Qui obtient un certificat de notre AC |
+| --- | --- | --- |
+| `True` (ancien défaut) | `not-required` | toute machine passant la vérification de nom |
+| `False` | `new-account-required` | seulement sur invitation d'un administrateur |
+
+Or dans `setup_pki_ca`, **les deux écritures sont INCONDITIONNELLES** : le rôle
+`roles/acme-servers` (donc `allowed_domains` et `max_ttl`) et `config/acme` (donc
+`eab_policy`) sont réécrits depuis les arguments à chaque appel.
+
+⇒ **Un appel `pki_ca_setup()` sans argument — le geste naturel de qui veut « installer la
+PKI » — rétrogradait une production saine :**
+
+- `allowed_domains` écrasé par `*.lesur.lan` ⇒ **plus aucun certificat émissible pour les
+  vrais domaines** (panne, bruyante) ;
+- `eab_policy` passé de `new-account-required` à `not-required` ⇒ **enrôlement ACME ouvert**
+  (silencieux) ;
+- `max_ttl` du rôle ramené à `720h`.
+
+✅ **La production n'était PAS dans cet état.** Relevé le 20/08/2026 par
+`GET /admin/api/pki/status` avec un jeton de **lecture seule** :
+`eab_policy=new-account-required`, `eab_required=true`, domaines
+`internal.agentic.cloud-temple.app`, 23 certificats. Le correctif est préventif.
+
+#### Le défaut d'analyse d'arguments de la CLI, refermé par le même geste
+
+`pki setup --ttl --prod` : une option à valeur chaîne avale l'option suivante, `--prod`
+devient la valeur de `--ttl`, et le drapeau manquant retombait sur son défaut permissif
+**sans un mot**. Combiné à des `--domains` fournis à la main, on obtenait la pire
+combinaison — de VRAIS domaines et l'enrôlement libre — avec tout qui a l'air correct.
+
+⇒ Le remède n'est pas « un défaut plus sûr », c'est **l'absence de défaut** : rendre le
+choix obligatoire transforme l'option avalée en **erreur**. Même principe que #78 : ne
+jamais laisser une ignorance se présenter comme une décision.
+
+#### Correction de documentation : l'outil n'est PAS « idempotent »
+
+L'ancienne docstring l'affirmait. C'est vrai de la **création** des autorités (une autorité
+existante n'est pas recréée), **faux** du rôle ACME et de la configuration ACME. Un lecteur
+qui se fiait au mot pouvait croire qu'un second appel était sans effet. Encore un mot qui
+disait autre chose que le fait.
+
+#### La route HTTP était la plus permissive des trois
+
+    lab_mode = data.get("lab_mode", True)        # défaut PERMISSIF
+    raw_domains = data.get("allowed_domains")    # absent → None → *.lesur.lan
+
+⇒ **un POST au corps VIDE (`{}`) suffisait à rétrograder la production.** Aucune validation
+n'existait : ni corps illisible, ni domaines vides, ni `lab_mode` non booléen.
+
+⚠️ **Le cas le plus sournois : `lab_mode: "false"`**, la CHAÎNE. Une chaîne non vide est
+**vraie** en Python : un appelant qui croyait demander la production obtenait l'enrôlement
+LIBRE. Un booléen réel est désormais exigé — c'est la seule chose qui ferme ce cas.
+
+La console web envoie toujours les deux champs ; **c'est la route nue qui était exposée**, et
+elle n'a pas besoin de la console pour être appelée. Elle reste réservée aux administrateurs
+(403 sinon), donc bornée comme l'outil MCP.
+
+Un corps illisible rend maintenant un **400 qui nomme sa cause** plutôt qu'un message de
+champ manquant : un corps malformé et un champ absent sont deux faits différents sur
+l'appelant, et annoncer l'un pour l'autre envoie l'opérateur corriger la mauvaise chose
+(#154, #86).
+
+#### Interface d'administration : révoqué / expiré / valide
+
+Dans l'inventaire des certificats, le badge **« actif » signifiait « non révoqué »**, pas
+« valide » : un certificat **expiré** s'affichait en **vert**. Sur un écran de sécurité, un
+libellé qui affirme autre chose que le fait peut faire sauter un renouvellement. Trois états
+désormais, la révocation primant sur l'expiration.
+
+#### Tests — 47 neufs, et le banc de mutations
+
+`tests/cli/test_pki_setup_mode_explicite.py` (8), `tests/test_pki_ca_setup_sans_defaut.py`
+(10) et `tests/test_pki_setup_route_admin_128.py` (29) — un fichier par surface. La propriété
+vérifiée n'est pas « un refus se produit » mais **« aucune installation d'AC n'est tentée »**
+— un code de retour non nul ne prouverait rien.
+
+| Mutation | Échecs |
+| --- | --- |
+| ancien défaut `--lab` restauré (CLI) | 3 |
+| ancien défaut de domaines restauré (CLI) | 2 |
+| garde du mode supprimée (CLI) | 3 |
+| garde des domaines supprimée (CLI) | 3 |
+| garde du mode écrite `is False` au lieu de `is None` | 5 |
+| `strip()` retiré (domaines blancs acceptés) | 1 |
+| défaut `allowed_domains` restauré (MCP) | 1 |
+| garde des domaines vides supprimée (MCP) | 4 |
+| `leaf_ttl` rendu obligatoire (durcissement excessif) | 8 |
+| défaut `lab_mode=True` restauré (route HTTP) | 11 |
+| `lab_mode` non booléen accepté (route HTTP) | 6 |
+| garde des domaines vides supprimée (route HTTP) | 9 |
+| le code complète la liste avec un domaine de labo (route HTTP) | 12 |
+| corps illisible retombe sur `{}` (route HTTP) | **0 puis 1** |
+
+⚠️ **Une mutation a SURVÉCU au premier jet et il faut le dire** : « corps illisible retombe
+sur `{}` ». Indétectable de l'extérieur — la garde sur `lab_mode` renvoie 400 dans les deux
+cas, donc la propriété de sécurité tient. Seule la **cause annoncée** changeait. Le test a
+été renforcé pour exiger que le message nomme la bonne cause ; le correctif était dans le
+test, pas dans le code.
+
+Trois **gardes-fous inversés** verrouillent la propriété réelle plutôt que le symptôme :
+aucun domaine de laboratoire ne doit atteindre le réseau sans avoir été tapé, et le code ne
+doit jamais compléter la liste fournie. Un test qui vérifierait seulement le refus resterait
+vert si un défaut permissif revenait sous un autre nom.
+
+#### Ce qui n'est PAS changé, et pourquoi
+
+- **`setup_pki_ca` garde ses défauts internes.** Ce n'est pas une surface d'appelant : ses
+  deux appelants (outil MCP et CLI) passent désormais toujours les valeurs explicitement.
+  La classe corrigée est « défaut silencieux sur un paramètre qui décide de la sécurité,
+  **à une surface exposée** ».
+- **`pki setup --prod --lab` reste « le dernier gagne ».** C'est la sémantique universelle
+  des options répétées, et le cas ne relève plus de l'inattention une fois le choix
+  obligatoire — il faut taper les deux. Résidu assumé et documenté.
+- **Aucun outil de délivrance d'invitation (EAB) n'est ajouté.** La production exige une
+  invitation que notre produit ne sait pas émettre : ACME y est donc configuré, strict, et
+  inutilisé (aucune ligne ACME dans les journaux du conteneur). Le finir ou l'assumer est
+  une décision produit, pas un correctif — et rien ne presse.
+
+
 ## [0.17.0] — 2026-08-19
 
 ### Durcissement du PEP mission — #86, findings 4, 5 et 7

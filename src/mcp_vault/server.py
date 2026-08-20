@@ -1504,21 +1504,50 @@ async def ssh_ca_role_info(vault_id: str, role_name: str) -> dict:
 # ═══════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
-async def pki_ca_setup(lab_mode: bool = True,
-                       allowed_domains: str = "*.lesur.lan,lesur.lan",
+async def pki_ca_setup(lab_mode: bool,
+                       allowed_domains: str,
                        leaf_ttl: str = "720h") -> dict:
     """
     Configure la PKI interne complète (CA racine + intermédiaire + ACME).
 
-    Idempotent. Le serveur ACME est activé sur la CA intermédiaire.
+    ⚠️ `lab_mode` et `allowed_domains` sont OBLIGATOIRES et n'ont AUCUN défaut
+    (#128) : voir la note de sécurité ci-dessous.
+
+    ⚠️ PAS idempotent au sens courant du terme. La CRÉATION des autorités l'est
+    (une autorité existante n'est pas recréée), mais le rôle d'émission ACME et
+    la configuration ACME sont RÉÉCRITS depuis les arguments à chaque appel :
+    un second appel aux arguments différents MODIFIE la production.
+
     En lab, la racine est self-signed (opération entièrement locale).
     En prod, générer le CSR avec lab_mode=False et importer le cert signé.
 
     Args:
-        lab_mode: True = CA racine self-signed (lab/dev). False = CSR pour CA externe (prod).
-        allowed_domains: Domaines autorisés par le rôle ACME, séparés par des virgules.
+        lab_mode: OBLIGATOIRE. True = racine self-signed ET enrôlement ACME
+            LIBRE (`eab_policy=not-required`) — bancs uniquement. False = CSR
+            pour CA externe ET enrôlement sur invitation
+            (`eab_policy=new-account-required`).
+        allowed_domains: OBLIGATOIRE. Domaines autorisés par le rôle ACME,
+            séparés par des virgules. Écrase la liste en place.
         leaf_ttl: TTL max des certificats feuilles (ex: 720h = 30 jours).
+            Écrase le `max_ttl` du rôle en place.
     """
+    # ── SÉCURITÉ #128 : aucun défaut silencieux sur l'installation d'une AC ──
+    # `lab_mode` valait True et `allowed_domains` valait "*.lesur.lan,lesur.lan".
+    # Un appel SANS ARGUMENT — le cas naturel pour un appelant qui veut
+    # « installer la PKI » — rétrogradait donc une production saine :
+    #   * domaines du rôle ACME écrasés par `*.lesur.lan` ⇒ plus aucun
+    #     certificat émissible pour les vrais domaines (panne) ;
+    #   * `eab_policy` passé de `new-account-required` à `not-required`
+    #     ⇒ enrôlement ACME OUVERT (silencieux).
+    # Les deux écritures (`roles/<acme>` et `config/acme`) sont
+    # INCONDITIONNELLES dans setup_pki_ca — le mot « Idempotent » de l'ancienne
+    # docstring couvrait la création des AC, pas ces deux-là.
+    #
+    # Le remède est le même qu'en CLI : l'ABSENCE de défaut. Retirer les valeurs
+    # par défaut rend les deux paramètres OBLIGATOIRES dans le schéma MCP, donc
+    # un appel sans argument échoue au lieu de rétrograder sans le dire.
+    # ⚠️ RUPTURE assumée : un appelant qui omettait ces paramètres reçoit
+    # désormais une erreur de validation. C'est l'effet voulu.
     from .auth.context import check_admin_permission, check_policy
     from .vault.pki_ca import setup_pki_ca
 
@@ -1530,6 +1559,11 @@ async def pki_ca_setup(lab_mode: bool = True,
         return admin_err
 
     domains_list = [d.strip() for d in allowed_domains.split(",") if d.strip()]
+    if not domains_list:
+        return {"status": "error", "error_type": "invalid_input",
+                "message": "allowed_domains ne peut pas être vide : les domaines "
+                           "autorisés par le rôle ACME doivent être nommés "
+                           "explicitement (ils écrasent la liste en place)."}
     return _r("pki_ca_setup", await setup_pki_ca(lab_mode, domains_list, leaf_ttl))
 
 

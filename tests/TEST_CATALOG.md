@@ -1,6 +1,6 @@
 # Catalogue des Tests E2E — MCP Vault
 
-> **Version** : v0.17.0 — Durcissement PEP mission (#86) : une panne du service de missions n'est plus annoncée « mission inactive », le statut de mission passe en single-flight par mission, le TTL du cache JWKS est borné et un réglage sans effet est signalé
+> **Version** : v0.18.0 — Aucun défaut silencieux sur l'installation de l'autorité de certification (#128) : les trois surfaces (`pki_ca_setup`, `pki setup`, `POST /admin/api/pki/setup`) exigent désormais le mode et les domaines, un appel incomplet ne rétrograde plus la politique d'enrôlement ACME
 > **Dernière exécution** : 349 assertions e2e sur 15 catégories (+ 18 tests crypto)
 > **Décompte reproductible** : comptage AST des appels `check` / `check_true` / `check_value` / `check_traversed` dans les fonctions `test_*` de `tests/test_e2e.py`, boucles littérales expansées
 > **Durée** : ~5 secondes (e2e) + <1s (crypto)

@@ -762,8 +762,11 @@ def pki_group(ctx):
 
 
 @pki_group.command("setup")
-@click.option("--lab/--prod", default=True, help="Lab=CA self-signed, prod=CSR pour CA externe")
-@click.option("--domains", default="*.lesur.lan,lesur.lan", help="Domaines ACME autorisés (virgules)")
+@click.option("--lab/--prod", default=None,
+              help="OBLIGATOIRE. --lab : enrôlement ACME LIBRE (bancs). "
+                   "--prod : enrôlement sur invitation (new-account-required).")
+@click.option("--domains", default=None,
+              help="OBLIGATOIRE. Domaines ACME autorisés (virgules). Aucun défaut.")
 @click.option("--ttl", default="720h", help="TTL max des certificats feuilles")
 @click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
 @click.pass_context
@@ -775,6 +778,41 @@ def pki_setup_cmd(ctx, lab, domains, ttl, output_json):
       pki setup --lab --domains '*.lesur.lan,lesur.lan'
       pki setup --prod --domains 'mcp.cloud-temple.app' --ttl 720h
     """
+    # ── SÉCURITÉ #128 : aucun défaut silencieux sur l'installation d'une AC ──
+    # Cette commande installe l'autorité de certification à laquelle toute la
+    # plateforme fait confiance. `--lab` valait défaut, et `lab_mode` décide de
+    # la POLITIQUE D'ENRÔLEMENT ACME : `not-required` (n'importe quelle machine
+    # passant la vérification de nom obtient un certificat) contre
+    # `new-account-required` (il faut en plus une invitation délivrée par un
+    # administrateur). Le mode décidait aussi des domaines (`*.lesur.lan`).
+    #
+    # Conséquence mesurée du défaut, déjà documentée au CHANGELOG :
+    # `pki setup --domains vrai-domaine.fr --prod` posait une AC aux VRAIS
+    # domaines avec l'enrôlement LIBRE — car une option à valeur chaîne avale
+    # l'option suivante (`--ttl --prod` : `--prod` devient la valeur de `--ttl`),
+    # et le drapeau manquant retombait sur son défaut permissif SANS RIEN DIRE.
+    #
+    # Le remède n'est pas un défaut plus sûr, c'est l'ABSENCE de défaut : rendre
+    # le choix obligatoire transforme l'option avalée en ERREUR au lieu d'un
+    # mode permissif silencieux. Même famille que #78 — ne jamais laisser une
+    # ignorance se présenter comme une décision.
+    #
+    # ⚠️ Résidu ASSUMÉ : `--prod --lab` reste « le dernier gagne ». C'est la
+    # sémantique universelle des options répétées, et le cas ne relève plus de
+    # l'inattention une fois le choix obligatoire (il faut taper les DEUX).
+    if lab is None:
+        raise click.UsageError(
+            "Le mode est OBLIGATOIRE et n'a aucun défaut : --lab (enrôlement ACME "
+            "libre, réservé aux bancs) ou --prod (enrôlement sur invitation). "
+            "Cette commande installe une autorité de certification : le mode ne "
+            "peut pas être deviné."
+        )
+    if not domains or not domains.strip():
+        raise click.UsageError(
+            "--domains est OBLIGATOIRE et n'a aucun défaut : nommez explicitement "
+            "les domaines ACME autorisés (ex. --domains 'mcp.cloud-temple.app')."
+        )
+
     async def _run():
         client = MCPClient(ctx.obj["url"], ctx.obj["token"])
         result = await client.call_tool("pki_ca_setup", {
