@@ -86,7 +86,7 @@ class PkiMiddleware:
         acme_suffix = path[len("/acme"):]  # /directory, /new-nonce, ...
 
         # SÉCURITÉ CRITIQUE : validation anti-traversal du path ACME
-        if ".." in acme_suffix or "//" in acme_suffix or not _SAFE_ACME_SUFFIX.match(acme_suffix):
+        if ".." in acme_suffix or "//" in acme_suffix or not _SAFE_ACME_SUFFIX.fullmatch(acme_suffix):
             logger.warning(f"⚠️ PkiMiddleware : path ACME rejeté (traversal) : {acme_suffix!r}")
             return await self._error(send, 400, "Invalid ACME path")
 
@@ -96,7 +96,7 @@ class PkiMiddleware:
         query_bytes = scope.get("query_string", b"")
         if query_bytes:
             query_str = query_bytes.decode(errors="replace")
-            if ".." in query_str or not _SAFE_QUERY_STRING.match(query_str):
+            if ".." in query_str or not _SAFE_QUERY_STRING.fullmatch(query_str):
                 logger.warning(f"⚠️ PkiMiddleware : query string ACME rejetée : {query_str!r}")
                 return await self._error(send, 400, "Invalid query parameters")
             target += f"?{query_str}"
@@ -109,7 +109,7 @@ class PkiMiddleware:
         prefix = f"/v1/{_PKI_INT_MOUNT}"
         acme_suffix = path[len(prefix):]  # /acme/new-nonce, /acme/directory, etc.
 
-        if ".." in acme_suffix or "//" in acme_suffix or not _SAFE_ACME_SUFFIX.match(acme_suffix):
+        if ".." in acme_suffix or "//" in acme_suffix or not _SAFE_ACME_SUFFIX.fullmatch(acme_suffix):
             logger.warning(f"⚠️ PkiMiddleware (long path) : path ACME rejeté : {acme_suffix!r}")
             return await self._error(send, 400, "Invalid ACME path")
 
@@ -117,7 +117,7 @@ class PkiMiddleware:
         query = scope.get("query_string", b"")
         if query:
             query_str = query.decode(errors="replace")
-            if ".." in query_str or not _SAFE_QUERY_STRING.match(query_str):
+            if ".." in query_str or not _SAFE_QUERY_STRING.fullmatch(query_str):
                 return await self._error(send, 400, "Invalid query parameters")
             target += f"?{query_str}"
 
@@ -161,6 +161,19 @@ class PkiMiddleware:
                     headers=req_headers,
                     follow_redirects=False,  # SÉCURITÉ : pas de SSRF via redirections
                 )
+        except (httpx.InvalidURL, httpx.UnsupportedProtocol) as e:
+            # #160 : une URL que NOTRE client refuse est un défaut de la requête
+            # entrante, pas une panne d'OpenBao — qui n'a jamais été contacté.
+            # L'ancien `except Exception` unique répondait « PKI backend
+            # unavailable » et journalisait « connexion OpenBao échouée » : un
+            # appelant NON AUTHENTIFIÉ pouvait donc faire émettre à notre service
+            # une fausse panne de tiers, et toute supervision branchée sur ce
+            # signal devenait un générateur d'alarme déclenchable de l'extérieur.
+            # Même faute que #86/#152/#154 : ne jamais présenter un fait sur
+            # l'appelant comme une indisponibilité d'un tiers.
+            logger.warning("⚠️ PkiMiddleware : requête invalide (%s) — %s",
+                           type(e).__name__, e)
+            return await self._error(send, 400, "Invalid ACME request")
         except Exception as e:
             logger.error(f"❌ PkiMiddleware : connexion OpenBao échouée ({target}) : {e}")
             return await self._error(send, 502, "PKI backend unavailable")

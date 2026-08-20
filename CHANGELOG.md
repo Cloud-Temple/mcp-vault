@@ -1,5 +1,72 @@
 # Changelog — MCP Vault
 
+## [0.19.1] — 2026-08-20
+
+### Balayage des `.match()` sur motif ancré — la classe, pas l'occurrence (#160)
+
+**Correctif** — aucun appelant conforme ne casse : `fullmatch` refuse uniquement un saut de
+ligne **final**, qu'aucun appelant légitime n'émet. Vérifié : tous les domaines réels de
+production, TTL et numéros de série passent **à l'identique**.
+
+#### Origine — un conseil venu d'une autre équipe
+
+`mcp-mission` publie #582 : une garde en `.match()` au lieu de `.fullmatch()`. Leur remède :
+« une ligne, **plus balayage des autres `.match()` ancrés** ».
+
+⚠️ **Nous avions rencontré ce défaut un mois plus tôt** (#78/D6, `is_safe_id`), corrigé
+l'occurrence… et **jamais balayé**. Le balayage a trouvé **dix sites** d'appel pour sept
+motifs, dont quatre sur la **surface ACME non authentifiée**.
+
+#### Ce n'était PAS une faille — mesuré avant d'être qualifié
+
+Sur `^…$` avec `.match()`, Python accepte un `\n` **final** et rien d'autre : `x\r\n` échoue,
+`x\nX` échoue. Aucune charge ne peut donc suivre le saut de ligne — **pas d'injection
+d'en-tête, pas de découpe de requête**. Et httpx refuse de toute façon une URL contenant un
+caractère non imprimable.
+
+#### 🔴 Le résidu RÉEL, et c'est une faute de la famille #78
+
+Une requête **non authentifiée** `GET /acme/directory%0A` (le `path` ASGI est décodé)
+franchissait la garde, mourait dans le client HTTP, tombait dans un `except Exception` unique
+et recevait **`502 "PKI backend unavailable"`** avec un `ERROR` nommant OpenBao — **alors
+qu'OpenBao n'avait jamais été contacté**.
+
+⇒ Une seule requête forgée, sans authentification, faisait émettre à notre service une
+**fausse panne de tiers**. Toute supervision branchée sur ce statut ou cette ligne devenait un
+générateur d'alarme déclenchable de l'extérieur — l'inverse exact de ce que v0.17.0 a apporté
+à `mcp-agent`. Même faute que #86, #152 et #154 : ne jamais présenter un fait sur l'appelant
+comme l'indisponibilité d'un tiers.
+
+Désormais : une URL refusée par notre propre client rend **400** ; une panne de connexion rend
+toujours **502**.
+
+#### Aussi : le motif de numéro de série était DUPLIQUÉ
+
+`admin/api.py` en portait une copie littérale de celui de `vault/pki_ca.py`. Deux copies d'un
+validateur, c'est deux occasions de divergence — **la cause exacte qui avait rouvert #78**
+(trois copies d'un motif d'identifiant avaient divergé). Source unique désormais.
+
+#### Tests — 14 neufs, banc de 5 mutations, 5 attrapées
+
+| Mutation | Échecs |
+| --- | --- |
+| retour au `.match()` sur le chemin ACME | 2 |
+| retour au `.match()` sur la query string | 2 |
+| branche 400 supprimée (tout redevient 502) | 1 |
+| tout devient 400 (le 502 légitime disparaît) | 1 |
+| motif de numéro de série de nouveau dupliqué | 2 |
+
+⚠️ **Deux gardes de CLASSE, et ce sont elles qui comptent** — pas les correctifs :
+
+- plus aucun `.match()` sur motif ancré dans `src/` : le test balaie l'arborescence et échoue
+  sur le onzième site que quelqu'un ajouterait ;
+- le motif de numéro de série n'existe qu'en **un seul** exemplaire.
+
+Trois **gardes-fous inversés** : une requête ACME légitime est toujours proxifiée, les
+domaines réels de production passent toujours, et une vraie panne de connexion rend toujours
+502 — sans quoi « tout renvoyer en 400 » passerait le test.
+
+
 ## [0.19.0] — 2026-08-20
 
 ### Un motif d'outil qui ne désigne rien est refusé à l'écriture — #128

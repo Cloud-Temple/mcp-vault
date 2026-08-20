@@ -46,7 +46,7 @@ def _ttl_to_seconds(ttl) -> Optional[int]:
     if not isinstance(ttl, str):
         return None
     ttl = ttl.strip()
-    if not _TTL_PATTERN.match(ttl):
+    if not _TTL_PATTERN.fullmatch(ttl):
         return None
     return int(ttl[:-1]) * _TTL_UNITS[ttl[-1]]
 
@@ -233,7 +233,7 @@ async def setup_pki_ca(lab_mode: bool = True,
 
     # MOYEN : validation du format des domaines autorisés (FQDN ou wildcard *.domain.tld)
     for domain in allowed_domains:
-        if not _DOMAIN_PATTERN.match(domain.strip()):
+        if not _DOMAIN_PATTERN.fullmatch(domain.strip()):
             return {"status": "error", "message": f"Domaine invalide : '{domain}' (format FQDN requis)"}
 
     client = _get_hvac_client()
@@ -663,7 +663,7 @@ async def issue_certificate(common_name: str, ttl: str = "720h",
     common_name = (common_name or "").strip().lower()
     if not common_name:
         return {"status": "error", "error_type": "invalid_input", "message": "common_name requis"}
-    if not _TTL_PATTERN.match(ttl or ""):
+    if not _TTL_PATTERN.fullmatch(ttl or ""):
         return {"status": "error", "error_type": "invalid_input",
                 "message": "ttl invalide (ex: 720h, 30m, 90d)"}
 
@@ -776,7 +776,7 @@ async def revoke_cert(serial_number: str) -> dict:
     if not serial_number:
         return {"status": "error", "message": "serial_number requis"}
     # CRITIQUE : validation stricte du serial_number (format hex:xx:xx)
-    if not _SERIAL_NUMBER_PATTERN.match(serial_number.strip()):
+    if not _SERIAL_NUMBER_PATTERN.fullmatch(serial_number.strip()):
         return {"status": "error", "message": "serial_number invalide (format attendu : aa:bb:cc:...)"}
     if not is_pki_initialized():
         return {"status": "error", "message": "PKI non initialisée"}
