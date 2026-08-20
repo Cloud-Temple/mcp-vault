@@ -1,6 +1,6 @@
 # Catalogue des Tests E2E — MCP Vault
 
-> **Version** : v0.18.0 — Aucun défaut silencieux sur l'installation de l'autorité de certification (#128) : les trois surfaces (`pki_ca_setup`, `pki setup`, `POST /admin/api/pki/setup`) exigent désormais le mode et les domaines, un appel incomplet ne rétrograde plus la politique d'enrôlement ACME
+> **Version** : v0.19.0 — Un motif d'outil ne désignant aucun outil réel est refusé à l'écriture (#128) ; au chargement, il est seulement signalé, pour qu'un renommage d'outil ne devienne pas une panne au démarrage
 > **Dernière exécution** : 349 assertions e2e sur 15 catégories (+ 18 tests crypto)
 > **Décompte reproductible** : comptage AST des appels `check` / `check_true` / `check_value` / `check_traversed` dans les fonctions `test_*` de `tests/test_e2e.py`, boucles littérales expansées
 > **Durée** : ~5 secondes (e2e) + <1s (crypto)

@@ -1,5 +1,89 @@
 # Changelog — MCP Vault
 
+## [0.19.0] — 2026-08-20
+
+### Un motif d'outil qui ne désigne rien est refusé à l'écriture — #128
+
+⚠️ **RUPTURE.** `policy_create` (outil MCP) et `POST /admin/api/policies` refusent désormais
+tout motif de `allowed_tools` / `denied_tools` qui ne correspond à **aucun** des 39 outils
+exposés. Un appelant qui enregistrait un motif fantaisiste reçoit une erreur nommant le motif.
+
+#### Le défaut
+
+La validation vérifiait seulement qu'il s'agissait de **chaînes**. Une faute de frappe —
+`ssx_*` au lieu de `ssh_*` — était acceptée, enregistrée, et ne protégeait **rien**. Sans
+message. La règle avait l'air d'être là.
+
+⚠️ **Cas réel en production**, trouvé le 19/08 : la policy `judilibre-prod-api-key-readonly`
+porte un motif *denied* `token_create`, absent du catalogue — l'outil qui existe,
+`token_update`, n'était donc pas couvert. **Aucun dommage** : `token_update` exige la
+permission `admin`, contrôlée indépendamment de toute policy. De la chance, pas de la
+conception.
+
+⚠️ Une validation **lexicale** ne ferme pas le trou : `ssx_*` est irréprochable et
+totalement inopérant. Seule la correspondance au **catalogue réel** l'attrape.
+
+#### L'asymétrie, qui est le cœur du lot
+
+| Moment | Comportement | Pourquoi |
+| --- | --- | --- |
+| `create()` — écriture | **refus**, motif nommé | un humain est devant son clavier |
+| `load()` — chargement | **avertissement seul** | refuser ici ferait d'un renommage d'outil une indisponibilité du Policy Store **au démarrage** — la faute `extra="forbid"` corrigée dans #86 |
+
+⇒ **La policy de production existante continuera de se charger**, avec un avertissement
+nommant la policy et le motif. Sa correction est une action d'exploitation, pas un blocage.
+
+#### `tool_catalog.py` — et le risque qu'il porte
+
+Le catalogue est une **liste explicite** : lire les outils depuis `server.py` créerait un
+cycle d'import (`auth/policies.py` est importé PAR `server.py`), et `@mcp.tool()` rend la
+fonction nue — il n'y a pas d'objet-catalogue à interroger.
+
+⚠️ Une liste tenue à la main **dérive**. C'est le risque réel de ce lot, fermé par un test
+qui la compare à l'ensemble des `@mcp.tool()` : un outil absent du catalogue ferait **refuser
+des motifs légitimes**, un outil fantôme ferait **accepter des motifs morts**. Les deux sens
+échouent.
+
+#### Tests — 27 neufs, banc de 6 mutations, 6 attrapées
+
+| Mutation | Échecs |
+| --- | --- |
+| garde d'écriture supprimée | 3 |
+| seul `allowed_tools` vérifié (`denied_tools` oublié) | 2 |
+| le chargement **refuse** au lieu d'avertir | 1 |
+| avertissement émis inconditionnellement | 1 |
+| catalogue amputé d'un outil réel | 2 |
+| catalogue citant un outil fantôme | 4 |
+
+Deux **gardes-fous inversés** : « allow-list vide = tout autorisé » reste accepté (choix
+documenté, le refuser casserait toutes les policies existantes sans traiter la cause), et un
+chargement sain ne doit émettre **aucun** avertissement — le bruit fait ignorer les vrais.
+
+#### Ce que la revue adversariale a corrigé — dans les TESTS, pas dans le code
+
+Une passe de revue isolée (`scripts/revue_isolee.sh`, copie de travail dédiée, lecture seule)
+a rendu **NO_GO**. Elle a confirmé le code de production — aucun chemin d'écriture n'échappe
+à la garde (surfaces énumérées : outil MCP, route admin, CLI et console, toutes convergentes
+sur `create()` ; aucun `update` ni chemin d'import), aucun scénario où le chargement rend le
+store indisponible, convention `fnmatch` identique à celle de la décision d'accès. **Deux
+défauts réels, tous deux dans les tests :**
+
+- **le test de dérive lisait `server.py` avec une regex** `@mcp.tool()` + `async def`. Elle ne
+  voit ni `@mcp.tool(name=...)`, ni un outil synchrone, ni un décorateur empilé, ni un
+  `add_tool()` programmatique : le test restait vert alors qu'un motif légitime serait refusé.
+  ⇒ il interroge désormais le **registre réel de FastMCP** (`mcp.list_tools()`), c'est-à-dire
+  ce que le serveur expose vraiment. Plus solide qu'une regex élargie ;
+- **aucun test ne prouvait que les deux surfaces d'écriture ATTEIGNENT la garde** — je le
+  savais en lisant le code, pas en le mesurant. Deux tests de bout en bout ajoutés (outil MCP
+  et route admin), vérifiés non complaisants : retirer la garde les fait échouer. ⚠️ C'est
+  exactement l'erreur qui m'avait fait rater deux surfaces sur trois au lot précédent.
+
+Trois faiblesses secondaires fermées : les jokers `?` et `[seq]` sont testés (une
+implémentation ne gérant que les préfixes passait), le cas « listes vides » prouve désormais
+l'**écriture** et pas seulement le code de retour, et le test de silence exige **aucun**
+enregistrement au lieu de filtrer sur un libellé — un avertissement reformulé passait.
+
+
 ## [0.18.0] — 2026-08-20
 
 ### Aucun défaut silencieux sur l'installation de l'autorité de certification — #128
