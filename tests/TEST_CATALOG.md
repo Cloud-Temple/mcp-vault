@@ -1,6 +1,6 @@
 # Catalogue des Tests E2E — MCP Vault
 
-> **Version** : v0.19.0 — Un motif d'outil ne désignant aucun outil réel est refusé à l'écriture (#128) ; au chargement, il est seulement signalé, pour qu'un renommage d'outil ne devienne pas une panne au démarrage
+> **Version** : v0.19.1 — Balayage des `.match()` sur motif ancré (#160) : dix sites fermés, et une requête invalide sur la surface ACME non authentifiée n'est plus annoncée « panne du backend PKI »
 > **Dernière exécution** : 349 assertions e2e sur 15 catégories (+ 18 tests crypto)
 > **Décompte reproductible** : comptage AST des appels `check` / `check_true` / `check_value` / `check_traversed` dans les fonctions `test_*` de `tests/test_e2e.py`, boucles littérales expansées
 > **Durée** : ~5 secondes (e2e) + <1s (crypto)

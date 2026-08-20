@@ -130,7 +130,7 @@ def _validate_and_normalize_token(raw) -> dict:
         raise ValueError("token doit être un objet")
 
     token_hash = raw.get("hash")
-    if not isinstance(token_hash, str) or not _HASH_RE.match(token_hash):
+    if not isinstance(token_hash, str) or not _HASH_RE.fullmatch(token_hash):
         raise ValueError(f"hash invalide (SHA-256 hex 64 caractères minuscules attendu) : {token_hash!r}")
 
     client_name = raw.get("client_name", "")

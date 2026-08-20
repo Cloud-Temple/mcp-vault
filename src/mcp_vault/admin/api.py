@@ -463,9 +463,14 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
         if not is_admin:
             return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
         serial = path[len("/admin/api/pki/certs/"):-len("/revoke")]
-        # Défense en profondeur : validation format serial avant transmission à pki_ca
-        import re as _re
-        if not _re.match(r'^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2})+$', serial):
+        # Défense en profondeur : validation format serial avant transmission à pki_ca.
+        # #160 : le motif était DUPLIQUÉ ici. Deux copies d'un validateur, c'est
+        # deux occasions de divergence — la cause exacte qui avait rouvert la
+        # faille de #78 (trois copies d'un motif d'identifiant avaient divergé).
+        # Source unique, et `fullmatch` : `.match()` sur un motif ancré `^…$`
+        # accepte un saut de ligne FINAL, donc `AA:BB\n` passait.
+        from ..vault.pki_ca import _SERIAL_NUMBER_PATTERN
+        if not _SERIAL_NUMBER_PATTERN.fullmatch(serial):
             return await _json_response(send, 400, {"status": "error", "message": "Serial invalide"})
         return await _api_pki_revoke_cert(send, serial)
 
