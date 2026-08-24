@@ -109,7 +109,40 @@ et l'écriture (TOCTOU) »*.
 l'objet le plus critique du produit, celui dont la corruption rend le coffre définitivement
 illisible. Le commentaire devient une fausse assurance.
 
-⇒ **Ce relevé doit être demandé indépendamment de #146, et il est plus urgent que #146.**
+### 🔴 Et la documentation de référence dit que ça NE DEVRAIT PAS marcher
+
+> « **To use conditional writes, you must use AWS Signature Version 4 to sign the request.** »
+> — documentation AWS S3, *conditional writes*
+
+Or notre client de **données** est **SigV2** — délibérément : `s3_client.py` documente une
+configuration **hybride**, *« SigV2 pour les opérations de données (PUT/GET/DELETE), SigV4
+pour les métadonnées (HEAD/LIST) »*, avec le commentaire `# SigV2 legacy — requis par Dell
+ECS`.
+
+⚠️ **Et `rotate_bootstrap_key.py` utilise `get_s3_data_client()`**, donc **SigV2**, pour son
+`IfMatch`. ⇒ Sur l'implémentation de référence, cette écriture conditionnelle serait
+**inopérante**. Reste à savoir ce que fait ECS : l'honorer sous SigV2, la refuser, ou —
+le pire — **l'ignorer en silence**.
+
+### Calibrage honnête de la gravité — ce n'est PAS une alarme
+
+Vérifié dans le script : `IfMatch` n'est **pas la seule barrière**. Trois couches protègent
+cette rotation :
+
+| # | Barrière | État |
+| --- | --- | --- |
+| 1 | **Quiescence opérationnelle** : « ARRÊTER TOUTES LES INSTANCES » — dans la docstring, affiché au lancement (« EXÉCUTION EXCLUSIVE REQUISE »), et remède de tous les messages de conflit | intacte |
+| 2 | **Relecture avant écriture** (étape 7) : contenu **et** ETag comparés, abandon sur divergence | intacte |
+| 3 | `IfMatch` : ferme la fenêtre résiduelle **entre** l'étape 7 et l'écriture | ⚠️ **peut-être inopérante** |
+
+⇒ **Une couche de défense en profondeur possiblement muette**, sur l'objet dont la corruption
+rend le coffre définitivement illisible. À mesurer et à signaler — **pas à dramatiser**.
+
+⇒ **Mais la conséquence pour ce sujet est brutale** : la conception du §4 ferait du CAS la
+**SEULE** barrière — sans quiescence, sans relecture. Si le CAS n'est pas honoré sur le chemin
+de données, **le §4 est mort**, et #51 reste ouvert.
+
+⇒ **Ce relevé doit être demandé indépendamment de #146.**
 
 ### La sonde — ce qu'il faut, et pourquoi la mienne ne valait rien
 
@@ -129,6 +162,17 @@ CAS ». Une sonde **positive ne prouve rien** sans, au minimum :
 5. la vérification **read-after-write** de l'ETag après conflit ;
 6. ⚠️ le cas **réponse perdue** : un PUT accepté puis coupé doit être reconnu comme
    « mutation déjà appliquée », **jamais rejoué aveuglément**.
+
+**Sémantique documentée à implémenter telle quelle** (doc AWS) — trois codes, trois
+conduites différentes, et les confondre serait la faute du #78 :
+
+| Code | Cause | Conduite |
+| --- | --- | --- |
+| **412** Precondition Failed | la précondition est fausse : quelqu'un a écrit avant nous | **recharger et rejouer la mutation** |
+| **409** Conflict | requêtes concurrentes ; ou une suppression a gagné | **re-tentable** pour `PutObject` (documenté) |
+| **404** Not Found | avec `If-Match`, une suppression concurrente a gagné, ou l'objet n'existe pas | **ré-écrire** — ce n'est pas un conflit de version |
+
+⚠️ Et `If-None-Match: *` attend **littéralement `*`**, jamais un ETag.
 
 ---
 
@@ -173,7 +217,19 @@ sérialise. Le `last-write-wins` disparaît — **sous réserve du §3**.
 
 ## 5. 🔴 Les coûts et les pièges, nommés
 
-### 5.1 Le rafraîchissement devient K requêtes — et sa parade
+### 5.1 🔴 Le rafraîchissement devient K requêtes — et il est sur le CHEMIN CHAUD
+
+⚠️ **Correction à ma propre formulation** : j'écrivais « le rafraîchisseur de fond fera K
+requêtes ». **Faux — les chemins de décision appellent `registry._maybe_refresh()`
+SYNCHRONEMENT** : vérifié à `wrapping.py` dans `_revoke_wrap_blocking`,
+`_status_by_operation_id_blocking` et `_consume_wrap_secret_blocking`.
+
+⇒ Quand l'instantané est périmé (après une erreur, ou une inactivité), **c'est l'appelant qui
+paie le rechargement** — donc, en partitionné, LIST + n GET **sur le chemin critique**, celui
+où un dépassement de délai perd le secret. Le rafraîchisseur de fond ne fait que rendre ce
+cas rare ; il ne l'élimine pas.
+
+**La parade**
 
 C'est l'amplification de lecture qu'on achète. **Parade** : le rafraîchisseur fait un
 `list_objects_v2` (1 requête par 1000 clés) qui rend les **ETags**, compare avec ce qu'il
@@ -182,6 +238,11 @@ changent entre deux rafraîchissements.
 
 ⚠️ **À mesurer, pas à supposer** : coût réel d'un LIST + n GET depuis la production. C'est le
 trou de mesure qui décide de K.
+
+⚠️ **Et le LIST est sous SigV4** (client métadonnées) tandis que les GET/PUT sont sous SigV2
+(client données) : la parade mélange donc les deux clients. À vérifier — pagination
+(1000 clés par page), cohérence du listing, et ETag des objets multipart (qui n'est pas un
+MD5 simple).
 
 ### 5.2 🔴 La sémantique de fraîcheur doit être ÉCLATÉE
 
@@ -312,9 +373,10 @@ Seul le retrait de `indent=2` l'est : cela reste du JSON, lisible par les deux v
 
 ## 9. Questions ouvertes — à trancher avant toute ligne de code
 
-1. 🔴 **Le CAS est-il honoré**, avec le client SigV2/path-style de production, sur le bucket de
-   production, **en concurrence réelle** (§3) ? — **relevé à demander à la plateforme, et il
-   concerne d'abord `rotate_bootstrap_key.py`, pas ce sujet.**
+1. 🔴 **Le CAS est-il honoré SOUS SigV2** ? La documentation AWS exige SigV4 ; notre client de
+   données est SigV2 « requis par Dell ECS ». ⇒ Soit ECS l'honore quand même, soit il faut
+   passer ce chemin en SigV4 (et savoir POURQUOI il est en SigV2), soit le §4 est mort.
+   **Relevé à demander à la plateforme, et il concerne d'abord la rotation de la clé racine.**
 2. 🔴 **Coût réel d'un rafraîchissement LIST + n GET** depuis la production (§5.1) : c'est lui
    qui dimensionne K.
 3. **Latence d'écriture S3 réelle de la production** — aucune mesure à ce jour (§1).
