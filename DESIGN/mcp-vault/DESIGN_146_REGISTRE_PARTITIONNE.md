@@ -114,10 +114,20 @@ illisible. Le commentaire devient une fausse assurance.
 > « **To use conditional writes, you must use AWS Signature Version 4 to sign the request.** »
 > — documentation AWS S3, *conditional writes*
 
-Or notre client de **données** est **SigV2** — délibérément : `s3_client.py` documente une
-configuration **hybride**, *« SigV2 pour les opérations de données (PUT/GET/DELETE), SigV4
-pour les métadonnées (HEAD/LIST) »*, avec le commentaire `# SigV2 legacy — requis par Dell
-ECS`.
+Or notre client de **données** est **SigV2**, et ce n'est pas une préférence : l'en-tête de
+`s3_client.py` l'énonce comme une **contrainte de compatibilité** —
+
+> « Dell ECS (**ViPR/1.0**) Cloud Temple nécessite : SigV2 pour les opérations de données
+> (PUT/GET/DELETE), SigV4 pour les opérations métadonnées (HEAD/LIST) »
+
+⇒ 🔴 **Les deux exigences sont en conflit direct sur le chemin de données** : l'écriture
+conditionnelle veut SigV4, cet ECS veut SigV2 pour écrire. Et le SigV4 que nous utilisons pour
+les métadonnées tourne avec `payload_signing=False` — indice supplémentaire que la signature
+V4 de cette génération d'ECS a des limites.
+
+⇒ **La question n'est donc pas seulement « ECS honore-t-il `If-Match` ? » mais « sous quelle
+version de signature, et cette génération d'ECS accepte-t-elle une écriture de données en
+SigV4 ? »** C'est une question d'infrastructure, pas de conception.
 
 ⚠️ **Et `rotate_bootstrap_key.py` utilise `get_s3_data_client()`**, donc **SigV2**, pour son
 `IfMatch`. ⇒ Sur l'implémentation de référence, cette écriture conditionnelle serait
