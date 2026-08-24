@@ -297,13 +297,50 @@ conception** : le nombre détermine K, donc le nombre de GET, la durée du verro
 d'intégrité et la migration.
 
 La bonne raison de l'écarter : la garde d'usage unique est **définitive et par présence**.
-⚠️ **Mais la revue propose une variante que je n'avais pas vue** : purger la **charge lourde**
-en conservant un **tombstone compact** `(operation_id, mission_id, état terminal)` — ~100
-octets contre 462. La garde reste satisfaite (la présence subsiste), le poids chute ×4,6.
+La revue proposait une variante : purger la **charge lourde** en gardant un **tombstone
+compact**, en estimant le gain à ~100 octets contre 462, soit ×4,6. Je l'ai reprise comme
+« potentiellement la meilleure première étape ».
 
-⇒ **À instruire sérieusement** : c'est une amplification d'espace échangée contre rien, sans
-partitionnement, sans CAS, sans migration de disposition. **Potentiellement la meilleure
-première étape**, et elle n'est pas exclusive du partitionnement.
+### 🔴 MESURÉE, elle ne tient pas — et l'estimation ×4,6 est fausse
+
+Champs réellement imposés par les contrats existants : `_entry_well_formed`
+(`wrapping.py:1057`) exige `operation_id`, `vault_id`, `secret_path`, `status` en `str`, et
+`accessor` en `str` **ou** `None` ; `_visible_entries` consomme `vault_id` **et**
+`secret_path`. Un tombstone ne peut donc lâcher que `created_at`, `expires_at`, `tenant_id`,
+`expected_aud` — et, au prix d'un contrat, `accessor`.
+
+**Mesure sur 5 000 entrées :**
+
+| Variante | brut/entrée | **gzip/entrée** | gain brut | **gain gzip** |
+| --- | --- | --- | --- | --- |
+| entrée pleine (actuel) | 403,8 o | 11,8 o | 1,00× | 1,00× |
+| tombstone **avec** accessor | 265,8 o | **11,9 o** | 1,52× | **0,99× — aucun gain** |
+| tombstone **sans** accessor | 227,8 o | 8,6 o | 1,77× | **1,37× seulement** |
+
+⚠️ **Explication, et c'est la leçon générale de tout ce sujet** : les champs qu'un tombstone
+supprime (`created_at`, `expires_at`, `tenant_id`, `expected_aud`) sont **très répétitifs
+d'une entrée à l'autre** — la compression les élimine déjà presque entièrement. Ce qui reste
+est **la haute entropie** : identifiants et chemins. **Exactement ce qu'aucune compression ne
+réduit.**
+
+⇒ **Une fois compressé, purger la charge lourde ne gagne rien** (×0,99 avec accessor, ×1,37
+sans). Et « sans accessor » coûte un contrat : `secret_revoke_wrap(lease_id)` cherche **par
+accessor**. Sans lui sur les entrées terminales, une ré-révocation répondrait `not_found` au
+lieu de `already_revoked` — sur un chemin que `mcp-mission` appelle **onze fois par clôture**.
+
+### ⇒ La conclusion de l'étude, maintenant mesurée
+
+Le poids du registre est dominé par des **identifiants irréductibles**.
+
+1. la compression retire l'échafaudage répétitif — **gain unique de ×21 à ×26** ;
+2. après quoi le poids est ∝ (nombre d'entrées × entropie des identifiants) ;
+3. ⇒ **seuls deux leviers changent la FORME** : écrire moins d'octets par transition
+   (partitionner) ou avoir moins d'entrées (supprimer). **Et supprimer est interdit** par la
+   garde d'usage unique, définitive et par présence.
+
+**Donc le partitionnement n'est pas un choix parmi d'autres : c'est le seul levier de forme
+disponible.** Et sa viabilité tient entièrement à la question du §3 (CAS sous SigV2). ⇒
+**Variante tombstone ÉCARTÉE, sur mesure et non sur argument.**
 
 ### 6.3 Séparation chaud/froid — écartée en l'état
 
@@ -383,6 +420,7 @@ Seul le retrait de `indent=2` l'est : cela reste du JSON, lisible par les deux v
 4. La lecture de l'arbitrage #123 (§8) est-elle la bonne ?
 5. L'éclatement de la sémantique de fraîcheur (§5.2) est-il acceptable pour nos appelants, qui
    viennent d'apprendre le contrat actuel ?
-6. **La variante tombstone (§6.2) doit-elle passer AVANT le partitionnement ?** Elle est plus
-   simple, sans migration de disposition, et gagne ×4,6.
-7. Distribution des états en production (combien de terminales) — dimensionne §6.2.
+6. ✅ **RÉPONDU (§6.2) — la variante tombstone est écartée, mesurée à ×0,99 avec accessor et
+   ×1,37 sans.** Le poids est dominé par des identifiants que rien ne comprime.
+7. Distribution des états en production — n'est **plus** un préalable (elle ne servait qu'à
+   dimensionner la variante tombstone, désormais écartée). Reste utile au diagnostic.
