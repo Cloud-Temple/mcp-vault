@@ -1,6 +1,7 @@
 # Registre wrap partitionné — étude de conception (#146)
 
-> **Statut** : ⚠️ **ÉTUDE — v2, après revue adversariale (NO_GO sur la v1)** | 2026-08-24
+> **Statut** : 🔴 **ÉTUDE — v6, DEUX revues adversariales, DEUX NO_GO.** *« Une bonne reprise
+> d'étude, pas encore une conception exécutable »* | 2026-08-24
 > **Ne pas implémenter** : le §3 porte un fait non mesuré qui conditionne tout, et il
 > concerne **une garantie de production déjà en place**, indépendamment de ce sujet.
 
@@ -145,14 +146,29 @@ cette rotation :
 | 2 | **Relecture avant écriture** (étape 7) : contenu **et** ETag comparés, abandon sur divergence | intacte |
 | 3 | `IfMatch` : ferme la fenêtre résiduelle **entre** l'étape 7 et l'écriture | ⚠️ **peut-être inopérante** |
 
-⇒ **Une couche de défense en profondeur possiblement muette**, sur l'objet dont la corruption
-rend le coffre définitivement illisible. À mesurer et à signaler — **pas à dramatiser**.
+⇒ **Une couche de défense en profondeur possiblement muette.**
+
+⚠️⚠️ **La seconde revue juge cette alarme ENCORE SUR-VENDUE, et elle a raison.** Deux
+corrections que je dois à mon propre texte :
+
+- le script **dit lui-même** que le CAS *« ne remplace pas l'exclusion »* (l. 14). ⇒ **la
+  fenêtre TOCTOU n'existe pas si la procédure obligatoire est respectée.** `If-Match` protège
+  contre une **violation** de la quiescence ou une seconde rotation concurrente : c'est une
+  défense supplémentaire, **pas une dépendance du fonctionnement courant** ;
+- j'écrivais « rend le coffre définitivement illisible ». **Incomplet** : le script conserve
+  une sauvegarde locale, une copie S3 de retour arrière, l'ancienne clé, et impose un test de
+  redémarrage à froid.
+
+⇒ **Affirmer que ce sujet est « plus urgent que #146 » n'est pas fondé** en l'absence de
+rotation planifiée ou de doute sur l'exécution exclusive. Ce qui reste vrai et suffisant :
+**l'exclusion n'est que procédurale — aucun verrou, aucun fencing ne l'impose — donc tester
+le CAS avant toute rotation réelle si l'on veut garder cette défense.**
 
 ⇒ **Mais la conséquence pour ce sujet est brutale** : la conception du §4 ferait du CAS la
 **SEULE** barrière — sans quiescence, sans relecture. Si le CAS n'est pas honoré sur le chemin
 de données, **le §4 est mort**, et #51 reste ouvert.
 
-⇒ **Ce relevé doit être demandé indépendamment de #146.**
+⇒ **Relevé à demander avant toute rotation réelle, et pour dimensionner ce sujet.**
 
 ### La sonde — ce qu'il faut, et pourquoi la mienne ne valait rien
 
@@ -280,7 +296,54 @@ génération 2K ; **la clé paraît vierge et un second wrap devient possible.**
 ligne**, basculement atomique, et **fencing** des écrivains. La génération dans un manifeste
 ne suffit pas. ⇒ **Hors v1.** Changer K = migration administrative avec quiescence (§7).
 
-### 5.4 Ce que le CAS ne couvre pas
+### 5.4 🔴 BLOQUANT — un tiroir absent est indiscernable d'un tiroir supprimé
+
+Le §4 prévoit `If-None-Match: *` quand le tiroir n'existe pas encore. Mais après un
+redémarrage, **un tiroir absent est indiscernable d'un tiroir ayant existé puis disparu** :
+
+- premier cas : **nominal** — le tiroir n'a jamais servi ;
+- second cas : **catastrophique** — toutes les clés qu'il contenait redeviennent vierges, donc
+  **rejouables**, et la garde d'usage unique est définitivement contournée pour elles.
+
+⚠️ **Le monolithe porte déjà cette faiblesse** sur son objet unique (un `NoSuchKey` est traité
+comme « premier démarrage »). **Mais partitionner la multiplie par K** — K occasions au lieu
+d'une — **et le §4 ne la traitait pas.** Il faut un registre de tiroirs *attendus* dont
+l'absence est une **panne** et non un démarrage.
+
+### 5.5 🔴 BLOQUANT — le tiroir n'est pas toujours recalculable depuis l'entrée
+
+`_entry_well_formed` (`wrapping.py:1057`) exige `operation_id` **mais PAS `mission_id`**.
+⇒ Une entrée legacy sélectionnable **par accessor** est révocable aujourd'hui tout en étant
+**impossible à rattacher à un tiroir** par son couple.
+
+⇒ **La provenance du tiroir doit être conservée dans l'instantané mémoire**, jamais recalculée
+depuis l'entrée. Et l'index par accessor doit être un **multimap** (plusieurs entrées peuvent
+partager un accessor), portant cette provenance.
+
+### 5.6 🔴 La fonction de partition n'est pas spécifiée
+
+Les valeurs sont utilisables telles quelles — `operation_id` et `mission_id` passent
+`is_safe_id` (ASCII `[a-zA-Z0-9_-:.]`, 1–256), **aucune normalisation, aucune casse touchée,
+égalité strictement sensible à la casse**. Mais rien n'est figé :
+
+⚠️ `hash((operation_id, mission_id))` serait **catastrophique** — randomisé par processus.
+À figer explicitement : encodage UTF-8, séparateur non ambigu, algorithme, calcul du modulo K.
+
+### 5.7 Ce que ECS ajoute — spécificités documentées par Dell
+
+- Dell documente `List Objects V2` **et** les écritures conditionnelles par ETag ;
+- ⚠️ **ECS peut basculer en cohérence ÉVENTUELLE pendant une panne de site si `ADO` est
+  activé sur le bucket.** La configuration ADO de notre bucket est **inconnue** — et une
+  cohérence éventuelle annule le raisonnement CAS ;
+- ⚠️ ECS 3.6 signale un **ETag `00` sur `CompleteMultipartUpload`** ⇒ les tiroirs doivent être
+  écrits **exclusivement par `PutObject` simple**, et les ETags traités comme **opaques** ;
+- ⚠️ le LIST **n'offre aucun instantané atomique entre pages** ; la pagination complète est
+  obligatoire ;
+- ⚠️ le LIST est sous le client **SigV4** (métadonnées) et le CAS sous le client **SigV2**
+  (données) : **deux clients distincts dans la même parade**, ce que la v2 ne posait pas
+  clairement.
+
+### 5.8 Ce que le CAS ne couvre pas
 
 Le CAS porte sur **un objet**. Toute conception exigeant deux objets mutés atomiquement est
 hors d'atteinte — **c'est pourquoi l'index durable de la v1 est abandonné** (§6.1).
@@ -349,8 +412,24 @@ Le poids du registre est dominé par des **identifiants irréductibles**.
    garde d'usage unique, définitive et par présence.
 
 **Donc le partitionnement n'est pas un choix parmi d'autres : c'est le seul levier de forme
-disponible.** Et sa viabilité tient entièrement à la question du §3 (CAS sous SigV2). ⇒
-**Variante tombstone ÉCARTÉE, sur mesure et non sur argument.**
+disponible.** Et sa viabilité tient entièrement à la question du §3.
+
+⚠️ **Nuance imposée par la seconde revue — nous ne mesurions pas la même chose.** Elle calcule
+le tombstone en **brut** (108 à 306 octets selon les champs, contre 462,58) et conclut à un
+gain réaliste de **×1,5 à ×2,2** ; je mesurais en **compressé** et je trouvais ×0,99.
+
+⇒ **Les deux sont justes, et la conclusion est que tombstone et compression sont des
+SUBSTITUTS, pas des compléments** : la compression capture déjà exactement ce que le tombstone
+retirerait. **Si l'on compresse, le tombstone n'apporte rien. Si l'on ne compresse pas, il
+apporte ×1,5 à ×2,2.** Comme la compression est plus simple et sans effet de contrat, elle
+domine.
+
+⚠️ Et la revue ajoute deux obstacles que je n'avais pas vus :
+- **un tombstone à trois champs serait classé MALFORMÉ** et déclencherait `registry_inconsistent`
+  pour l'administration ;
+- **la liste des états compactables n'est pas définie** : `failed` est terminal pour la machine
+  d'état mais porte **encore une ressource possible jusqu'au TTL** ; un `pending` de plantage
+  peut rester éternel.
 
 ### 6.3 Séparation chaud/froid — écartée en l'état
 
@@ -394,6 +473,11 @@ Pour mémoire, la formulation exacte (ma v1 l'avait inversée) : un filtre **pro
   et **le schéma n'a ni `updated_at`, ni version logique, ni règle de précédence**
   (`wrapping.py:148`).
 
+⚠️ **Et un défaut de plus, trouvé par la seconde revue** : en R2, lire legacy **et** tiroirs
+**duplique chaque entrée** matérialisée dans les deux. **Sans règle de déduplication et de
+précédence, `status` devient ambigu et une consommation peut échouer.** ⇒ **La quiescence ne
+résout PAS cette duplication** — c'est un problème de lecture, pas de concurrence.
+
 ⇒ **R1→R2 et R2→R1 exigent l'arrêt des écrivains**, la matérialisation vérifiée de l'état, puis
 le redémarrage. **Un déploiement progressif est interdit.** À écrire dans la procédure, pas
 seulement ici.
@@ -418,19 +502,36 @@ Seul le retrait de `indent=2` l'est : cela reste du JSON, lisible par les deux v
 
 ---
 
-## 9. Questions ouvertes — à trancher avant toute ligne de code
+## 9. 🔴 Verdict : NON exécutable — sept contrats à fermer avant tout code
 
-1. 🔴 **Le CAS est-il honoré SOUS SigV2** ? La documentation AWS exige SigV4 ; notre client de
-   données est SigV2 « requis par Dell ECS ». ⇒ Soit ECS l'honore quand même, soit il faut
-   passer ce chemin en SigV4 (et savoir POURQUOI il est en SigV2), soit le §4 est mort.
-   **Relevé à demander à la plateforme, et il concerne d'abord la rotation de la clé racine.**
-2. 🔴 **Coût réel d'un rafraîchissement LIST + n GET** depuis la production (§5.1) : c'est lui
-   qui dimensionne K.
-3. **Latence d'écriture S3 réelle de la production** — aucune mesure à ce jour (§1).
-4. La lecture de l'arbitrage #123 (§8) est-elle la bonne ?
-5. L'éclatement de la sémantique de fraîcheur (§5.2) est-il acceptable pour nos appelants, qui
-   viennent d'apprendre le contrat actuel ?
-6. ✅ **RÉPONDU (§6.2) — la variante tombstone est écartée, mesurée à ×0,99 avec accessor et
-   ×1,37 sans.** Le poids est dominé par des identifiants que rien ne comprime.
-7. Distribution des états en production — n'est **plus** un préalable (elle ne servait qu'à
-   dimensionner la variante tombstone, désormais écartée). Reste utile au diagnostic.
+Deux revues adversariales, deux **NO_GO**. Verdict de la seconde : *« une bonne reprise
+d'étude, pas encore une conception exécutable »*. **Le prochain travail n'est pas du code de
+production.**
+
+| # | Contrat à fermer | Où |
+| --- | --- | --- |
+| 1 | **Fonction de partition stable** et format exact des tiroirs | §5.6 |
+| 2 | **Index accessor en multimap**, portant la provenance du tiroir | §5.5 |
+| 3 | **Mutation touchant plusieurs tiroirs** : séquentielle et partielle, ou contrat changé explicitement | §5.8 |
+| 4 | **Algorithme CAS complet** : ETag mémorisé, mise à jour après PUT, boucle sur 412, fusion, bornes de retry, **réponse PUT perdue** | §3 |
+| 5 | **Rafraîchissement tout-ou-rien** et fail-close sur page, GET, JSON ou **tiroir manquant** | §5.1, §5.4 |
+| 6 | **Migration dual-read** : règle de déduplication et de précédence entre legacy et tiroirs | §7 |
+| 7 | **K réel**, budget d'octets par tiroir, horizon, **et configuration `ADO` du bucket** | §5.7 |
+
+### Deux mesures à demander à la plateforme — et nous ne pouvons pas les prendre
+
+| Mesure | Pourquoi elle décide |
+| --- | --- |
+| **CAS sous le couple exact de clients de production** (SigV2 pour PUT, SigV4 pour LIST), sur le bucket de production, **en concurrence réelle** | sans CAS, le §4 est mort et #51 reste ouvert |
+| **Coût réel d'un LIST paginé + n GET** depuis la production | c'est lui qui dimensionne K |
+| *(bonus)* configuration **ADO** du bucket | une cohérence éventuelle annule tout le raisonnement CAS |
+
+⚠️ Aucune n'est prenable depuis un poste de travail : le bucket local est **`MCP-RECETTE`** et
+son endpoint est injoignable d'ici.
+
+### Ce que l'étude a produit de plus solide
+
+Ce n'est pas la conception — c'est la démonstration que **ce registre porte des contrats
+implicites qu'un découpage casse en silence**, et il en a fallu deux revues pour en trouver
+sept. Toute implémentation qui ne les fermerait pas d'abord échangerait un problème de
+volumétrie contre un trou dans la garde d'usage unique.
