@@ -1,317 +1,326 @@
 # Registre wrap partitionné — étude de conception (#146)
 
-> **Statut** : ⚠️ **ÉTUDE, aucune décision** | **Date** : 2026-08-24 | **Auteur** : Cloud Temple
-> **Ne pas implémenter sur la base de ce document** : le §3 porte un fait non encore mesuré
-> qui départage deux conceptions incompatibles.
+> **Statut** : ⚠️ **ÉTUDE — v2, après revue adversariale (NO_GO sur la v1)** | 2026-08-24
+> **Ne pas implémenter** : le §3 porte un fait non mesuré qui conditionne tout, et il
+> concerne **une garantie de production déjà en place**, indépendamment de ce sujet.
 
 ---
 
 ## 1. Le problème, mesuré
 
-Le registre wrap est **un fichier JSON unique** (`_system/wrap_registry.json`) que
-`WrapRegistry._save()` **réécrit intégralement à chaque transition d'état**.
+`WrapRegistry._save()` sérialise **tout** le registre (`_system/wrap_registry.json`) et le
+réécrit à **chaque transition d'état**.
 
-| Relevé (production `vault-01`) | Entrées | Octets | Octets/entrée |
+### Relevés de production (`system_health.stores.wrap_registry`)
+
+| Date | Entrées | Octets | Octets/entrée |
 | --- | --- | --- | --- |
-| 20/08 12h40 | 219 | 101 195 | 462,1 |
-| 20/08 13h27 | 220 | 101 658 | 462,1 |
-| 21/08 21h40 | 221 | 102 121 | 462,1 |
-| 23/08 13h00 | 243 | 112 307 | 462,2 |
-| **24/08 ~09h** | **486** | **224 816** | **462,6** |
+| 20/08 12h40 | 219 | 101 195 | 462,08 |
+| 20/08 13h27 | 220 | 101 658 | 462,08 |
+| 21/08 21h40 | 221 | 102 121 | 462,09 |
+| 23/08 13h00 | 243 | 112 307 | 462,17 |
+| **24/08 ~09h** | **486** | **224 816** *(219,5 Kio)* | **462,58** |
 
-**463 octets par entrée, stable sur cinq points, strictement linéaire.** La nuit du
-23 au 24/08, un banc de 20 runs de `mcp-mission` a **doublé le registre** (+243 entrées,
-soit ~12 par run — un run mobilise 12 ouvriers, chacun tirant une enveloppe).
+**+243 entrées en une nuit** (banc de 20 runs `mcp-mission`, 12 ouvriers par run) : le
+registre a **doublé**.
+
+⚠️ **Précisions imposées par la revue — la v1 de ce document arrondissait trop vite :**
+- la moyenne va de **462,08 à 462,58** o/entrée. Les *incréments* observés valent exactement
+  463, mais **sur ce corpus homogène uniquement** : ce n'est pas une borne générale ;
+- 🔴 **les champs ne sont PAS de taille bornée.** `operation_id`, `mission_id`,
+  `secret_path`, `accessor` peuvent atteindre des centaines de caractères, et `tenant_id`
+  n'est contrôlé que comme non blanc (`server.py:631`). ⇒ **Tout seuil exprimé en « nombre
+  d'entrées » est faux. Un seuil doit être exprimé en OCTETS.**
 
 ### La forme du coût
 
-Réécrire un fichier de taille ∝ N à chacune de N opérations coûte **O(N²)** en octets
-transférés cumulés. Ce n'est pas un facteur constant : c'est la forme qui est fautive.
+Réécrire Θ(N) octets à chacune de N transitions ⇒ **O(N²)** cumulé. **Structurel, indépendant
+de toute mesure de latence.**
 
-**Mesures locales** (`json.dumps` + gzip, 5 répétitions) :
+**Mesures locales de sérialisation** (corpus synthétique, 5 répétitions — ⚠️ synthétique,
+d'où l'écart avec les 219,5 Kio de production à 486 entrées : les deux chiffres ne se
+réconcilient pas et ne doivent pas être présentés côte à côte comme une même mesure) :
 
-| Entrées | `indent=2` (actuel) | compact | compact + gzip |
-| --- | --- | --- | --- |
-| 486 | 234 Ko / 0,8 ms | 191 Ko | **9 Ko** / 1,8 ms |
-| 5 000 | 2,4 Mo / 5,9 ms | 2,0 Mo | 92 Ko / 10,7 ms |
-| 50 000 | 24 Mo / 58 ms | 20 Mo | 906 Ko / 113 ms |
+| Entrées | `indent=2` | compact | compact+gzip | gain gzip |
+| --- | --- | --- | --- | --- |
+| 486 | 234 Ko / 0,8 ms | 191 Ko | 9 Ko / 1,8 ms | ×26,0 / ×21,2 |
+| 5 000 | 2,4 Mo / 5,9 ms | 2,0 Mo | 92 Ko / 10,7 ms | ×26,3 / ×21,5 |
+| 50 000 | 24 Mo / 58 ms | 20 Mo | 906 Ko / 113 ms | ×26,5 / ×22,1 |
 
-⇒ **Le processeur n'est pas le sujet** (58 ms à 50 000 entrées). Le coût est le **transfert**.
+⚠️ Le « facteur 25 » de la v1 n'est vrai **que contre le format indenté actuel** (26,0–26,5) ;
+contre du compact il vaut 21,2–22,1. Et **« le processeur est hors sujet » était trop
+affirmatif** : 113 ms à 50 000 extrapole à ~2,26 s de gzip à 1 000 000 — **sous le verrou qui
+sérialise les opérations wrap** (#123). Ce n'est plus négligeable.
 
-⚠️ **La compression est un facteur, pas une forme.** À 200 000 entrées on réécrit encore
-3,5 Mo compressés par opération ; à 1 000 000, 17,8 Mo. Elle achète du temps — au rythme
-mesuré, 5 000 entrées sont atteintes en ~21 nuits de banc — elle ne résout rien.
-
-### Pourquoi c'est un sujet de sécurité et pas de performance
+### Pourquoi c'est un sujet de sécurité
 
 `secret_consume` réécrit le registre **sur le chemin critique**, et OpenBao a un **point de
-non-retour** : un dépassement de délai après le déballage perd le secret **définitivement**.
-Or la latence de ce stockage est mesurément imprévisible — défaillances non déterministes
-relevées les 20/08 et 23/08, et un PUT+GET de 1 Mo mesuré à **124 s** le 24/08 dans une
-fenêtre dégradée. **La charge utile est la seule variable que nous contrôlons.**
+non-retour** : une lenteur après le déballage perd le secret **définitivement**.
+
+⚠️ **Nous n'avons AUCUNE mesure de la latence d'écriture S3 de la production.** La v1 de ce
+document invoquait des défaillances « mesurées » : **elles portaient sur le bucket
+`MCP-RECETTE` depuis un poste de travail** (endpoint `takinc5acc…`, actuellement injoignable
+d'ici — DNS résolu, TCP en échec), alors que la production écrit sur
+`agentic-platform-mcp-vault-prod` depuis l'intérieur de la plateforme. **Deux chemins sans
+rapport.** Argument retiré ; le trou de mesure est listé en §9.
 
 ---
 
-## 2. Ce que dit la littérature
+## 2. Ce que dit la littérature — et quel compromis nous choisissons
 
-Le problème « registre clé-valeur mutable sur stockage objet » est résolu, et son patron
-canonique est celui des formats de table (Iceberg, Delta Lake, Hudi).
+Le problème est résolu ailleurs. Le cadre qui le **juge** est la conjecture RUM : on ne peut
+pas minimiser simultanément les trois amplifications.
+
+| Amplification | Définition | Notre situation aujourd'hui |
+| --- | --- | --- |
+| **Écriture** | octets réécrits par octet muté | 🔴 **catastrophique** : tout le registre par transition |
+| **Lecture** | objets à consulter pour répondre | ✅ optimale : 1 objet, et les décisions lisent la **mémoire** (`store_refresh.py`) |
+| **Espace** | octets stockés / octets utiles | ✅ optimale : aucune duplication |
+
+⇒ **Nous sommes au coin « lecture et espace optimaux, écriture catastrophique ».** Partitionner
+échange de l'amplification d'écriture contre de l'amplification de lecture. **C'est le
+compromis, et il faut l'assumer explicitement** — c'est ce que la v1 ne faisait pas.
 
 | Élément retenu | Source | Ce qu'on en prend |
 | --- | --- | --- |
-| **Échange atomique de pointeur + concurrence optimiste** : lire le pointeur, écrire le nouveau contenu, `compare-and-swap` sur le pointeur, le perdant reprend sur le nouvel instantané | spécification Iceberg | c'est **exactement** notre besoin : un registre mutable sans verrou distribué |
-| **Écritures conditionnelles S3** (`If-Match` sur l'ETag, `If-None-Match: *`) disponibles depuis nov. 2024 | AWS | fournit le CAS que #123 déclarait indisponible |
-| **Hachage cohérent « jump »** (Lamping & Veach) — sans état, ~5 lignes, buckets numérotés séquentiellement | arXiv 1406.2294 | assignation d'un couple `(operation_id, mission_id)` à un tiroir, avec déplacement minimal quand K change |
-| **Doublement de l'échelle** ⇒ migration de **1/2** des données (DxHash) | arXiv | borne le coût d'un re-partitionnement |
-| **Filtre de Bloom : jamais de faux négatif**, seulement des faux positifs | littérature classique | ⚠️ l'asymétrie est **dans notre sens** (§5.3) |
-| ⚠️ **Problème des petits fichiers / manifestes fragmentés** : des centaines de GET là où quelques lectures larges suffiraient ; nécessite compaction | communauté Iceberg | c'est **le coût** du découpage, et il faut le payer explicitement (§5.2) |
+| Échange atomique de pointeur + concurrence optimiste (lire, écrire, CAS, le perdant reprend) | spécification Iceberg | le patron de mutation sans verrou distribué |
+| Écritures conditionnelles S3 (`If-Match`, `If-None-Match: *`) depuis nov. 2024 ; Dell ECS les expose | AWS, doc Dell | le CAS que #123 déclarait indisponible |
+| **Problème des petits fichiers / manifestes fragmentés** : des centaines de GET là où quelques lectures suffiraient ; exige compaction | communauté Iceberg | 🔴 **c'est le prix du découpage**, à payer explicitement (§5) |
+| Segments immuables + compaction périodique ; **tiering vs leveling** | survol LSM, arXiv 2507.09642 | la compaction n'est pas une option, c'est une composante |
+| Filtre de Bloom : **jamais de faux négatif** | littérature classique | asymétrie exploitable, mais **inutile ici** (§6.4) |
+| Hachage cohérent « jump » ; doublement ⇒ migration de 1/2 | arXiv 1406.2294, DxHash | ⚠️ **écarté en v1** (§5.3) |
 
-⚠️ **Ce que la littérature ne nous donne pas** : nos contraintes de sécurité (garde d'usage
-unique par présence d'entrée, refus de purger, fail-close sur instantané ambigu) sont
-propres à notre produit. Aucun format de table ne les porte.
-
----
-
-## 3. ⚠️ LE FAIT QUI DÉPARTAGE — non encore mesuré
-
-**Notre stockage (Dell ECS) honore-t-il les écritures conditionnelles ?**
-
-La documentation Dell expose `If-Match` / `If-None-Match` sur `PutObject`. **La documentation
-n'est pas une mesure** : la version déployée peut l'ignorer silencieusement — et un CAS
-silencieusement ignoré est **pire que pas de CAS**, parce que le code croirait avoir une
-garantie qu'il n'a pas.
-
-**Sonde à exécuter** (en cours au moment de la rédaction), sous le préfixe `_test/` déjà
-utilisé par la suite d'intégration, objet supprimé après :
-
-| # | Requête | Attendu si le CAS est honoré |
-| --- | --- | --- |
-| 1 | `PUT If-None-Match: *` sur objet absent | ACCEPTÉ |
-| 2 | `PUT If-None-Match: *` sur objet présent | **REFUSÉ 412** |
-| 3 | `PUT If-Match: <bon etag>` | ACCEPTÉ |
-| 4 | `PUT If-Match: <mauvais etag>` | **REFUSÉ 412** |
-
-⚠️ **Si 2 et 4 sont ACCEPTÉS, le CAS n'existe pas** et la conception B (§5) est la seule
-recevable. Si un client lève avant l'envoi (paramètre inconnu de la version botocore), le
-résultat est *indéterminé*, pas négatif : à retester autrement.
+⚠️ **Ce que la littérature ne donne pas** : nos contraintes de sécurité — garde d'usage unique
+**par présence d'entrée et définitive**, refus de purger, fail-close sur instantané ambigu.
+Aucun format de table ne les porte.
 
 ---
 
-## 4. Conception A — avec CAS (préférée si le §3 est positif)
+## 3. 🔴 Un fait non mesuré qui DÉPASSE ce sujet
 
-### 4.1 Disposition
+**Nous dépendons DÉJÀ du CAS en production, et personne ne l'a vérifié.**
+
+`scripts/rotate_bootstrap_key.py:247` écrit la clé de chiffrement racine avec `IfMatch`, et
+le commentaire dit explicitement pourquoi : *« `IfMatch` rend la vérification ATOMIQUE côté
+stockage : la relecture de l'étape 7 ne ferme pas à elle seule la fenêtre entre le contrôle
+et l'écriture (TOCTOU) »*.
+
+⚠️ **Si le stockage ignore silencieusement `IfMatch`, cette fenêtre TOCTOU est OUVERTE** — sur
+l'objet le plus critique du produit, celui dont la corruption rend le coffre définitivement
+illisible. Le commentaire devient une fausse assurance.
+
+⇒ **Ce relevé doit être demandé indépendamment de #146, et il est plus urgent que #146.**
+
+### La sonde — ce qu'il faut, et pourquoi la mienne ne valait rien
+
+Tentée le 24/08 depuis un poste : **échec sur délai de connexion**, et elle visait le bucket
+de **recette** avec un client **SigV4 par défaut**. Or le client de données de production est
+**SigV2, path-style** (`s3_client.py`, `get_s3_data_client`). ⇒ **Sonde nulle et non avenue.**
+
+Une sonde **négative** (les 4 requêtes séquentielles : création `If-None-Match:*`, re-création
+refusée 412, `If-Match` bon etag accepté, mauvais etag refusé 412) suffit à conclure « pas de
+CAS ». Une sonde **positive ne prouve rien** sans, au minimum :
+
+1. **le client exact de production** — SigV2, path-style, même bucket ;
+2. **deux PUT réellement concurrents** avec le même ETag, depuis deux connexions
+   indépendantes : exactement **un** succès, **un** 412, contenu final = celui du gagnant ;
+3. le même test concurrent sur `If-None-Match: *` ;
+4. des répétitions **traversant les différents nœuds** derrière le point d'accès ECS ;
+5. la vérification **read-after-write** de l'ETag après conflit ;
+6. ⚠️ le cas **réponse perdue** : un PUT accepté puis coupé doit être reconnu comme
+   « mutation déjà appliquée », **jamais rejoué aveuglément**.
+
+---
+
+## 4. La conception retenue — partitionner l'ÉCRITURE seulement
+
+Issue de la revue adversariale, qui a écarté la mienne. **Le point que j'avais manqué : les
+décisions ne lisent pas le réseau, elles lisent la mémoire.** Le partitionnement n'a donc à
+servir que l'**écriture**.
 
 ```
-_system/wrap_registry/manifest.json     ← minuscule, muté sous CAS
-_system/wrap_registry/shard-0000.json   ← entrées du tiroir 0
-_system/wrap_registry/shard-0001.json
+_system/wrap_registry/g001/shard-0000.json   ← préfixe VERSIONNÉ par génération
+_system/wrap_registry/g001/shard-0001.json
 ...
-_system/wrap_registry.json              ← LEGACY, conservé en lecture (§6)
+_system/wrap_registry.json                  ← legacy, lu tant que R3 n'est pas atteint
 ```
 
-Le manifeste porte **K** (nombre de tiroirs), la génération, et **rien d'autre qui change à
-chaque écriture** (voir §4.3 — c'est un point de conception, pas un détail).
-
-### 4.2 Assignation
-
-`tiroir = jump_consistent_hash(h64(operation_id + "\x00" + mission_id), K)`
-
-- déterministe et sans état : **la garde d'usage unique est préservée** — on sait toujours
-  dans quel tiroir chercher une clé, ce que la piste « purge » aurait détruit ;
-- `h64` = 8 premiers octets de SHA-256 (pas de `hash()` Python : non stable entre processus).
-
-### 4.3 ⚠️ Le manifeste ne doit PAS être muté à chaque écriture
-
-Tentation naturelle : y maintenir les compteurs (total, par tiroir) pour que `system_health`
-lise un seul petit objet. **Refusé** : cela ferait du manifeste un **point de sérialisation
-global**, chaque écriture le mettant en concurrence avec toutes les autres — on remplacerait
-un coût de taille par un coût de contention, et sous CAS cela produirait des reprises en
-cascade.
-
-⇒ **Le manifeste ne change que lors d'un re-partitionnement.** Le compteur total exposé par
-`system_health` vient du dernier chargement complet du rafraîchisseur de fond — qui
-**expose déjà son âge** (`age_seconds`). Le chiffre devient donc explicitement *« à cette
-date »*, ce qui est honnête et déjà le cas aujourd'hui.
-
-### 4.4 Écriture d'une transition
-
-1. charger le tiroir de la clé (avec son ETag) ;
-2. muter l'entrée en mémoire ;
-3. `PUT If-Match: <etag>` sur le tiroir ;
-4. sur **412** : recharger le tiroir, **rejouer la mutation**, réessayer (borné, avec
-   attente croissante).
-
-⇒ **Coût d'écriture : un tiroir.** Mesuré à ~400 entrées par tiroir : **7 Ko compressés,
-plat, quelle que soit la taille de l'histoire** — 486 entrées ou 1 000 000.
-
-⚠️ **Et cela FERME #51**, la course d'écriture multi-instance, au lieu de la reporter : deux
-instances qui mutent des clés différentes ne se croisent plus (tiroirs distincts) ; deux
-instances sur la même clé sont sérialisées par le CAS. Le `last-write-wins` disparaît.
-
-### 4.5 Re-partitionnement
-
-Déclenché quand un tiroir dépasse un seuil de taille (proposition : 400 entrées).
-**Doublement de K** ⇒ ~1/2 des entrées changent de tiroir. Opération d'administration
-explicite, jamais sur le chemin critique, sous CAS du manifeste, et **idempotente**.
-
----
-
-## 5. ⚠️ Les parties difficiles — nommées, non résolues
-
-### 5.1 Le rafraîchisseur de fond devient K requêtes
-
-C'est **le coût du découpage**, et la littérature le nomme (problème des petits fichiers).
-Aujourd'hui : 1 GET par rafraîchissement. Avec K = N/400, à 200 000 entrées : **500 GET**.
-
-Piste : rendre le rafraîchissement **paresseux par tiroir** — le chemin de décision n'a
-besoin de la fraîcheur que du tiroir qu'il touche.
-
-⚠️ **Mais cela touche la garde de fail-close** dont nous venons de discuter avec
-`mcp-mission` (23/08) : aujourd'hui `_last_load_ok` est **global**. Par tiroir, la sémantique
-devient « ce tiroir est-il frais ? », ce qui est plus juste **mais change le contrat
-d'erreur** (`backend_unavailable`) que nos appelants viennent d'apprendre. **À instruire, pas
-à trancher ici.**
-
-### 5.2 Compaction
-
-Des tiroirs trop petits reproduisent le problème des petits fichiers à l'envers. Un seuil
-bas de re-partitionnement produirait des centaines de tiroirs quasi vides. La compaction
-(fusion de tiroirs quand K décroît) n'est **pas** traitée dans cette étude.
-
-### 5.3 Filtre de Bloom : utile, mais pas nécessaire ici
-
-Avec l'assignation déterministe (§4.2), la garde d'usage unique n'a besoin que **d'un**
-tiroir : le filtre de Bloom ne sert à rien. Il ne redeviendrait utile que si l'on voulait
-éviter le GET du tiroir dans le cas « clé jamais vue ».
-
-⚠️ Si un jour on l'introduit, la formulation exacte compte — ma première rédaction était
-confuse, je la corrige ici. Un filtre de Bloom **prouve l'absence** (aucun faux négatif) et
-**ne prouve jamais la présence** (faux positifs possibles). Donc :
-
-| Réponse du filtre | Ce qu'on peut en conclure | Usage légitime |
-| --- | --- | --- |
-| « absent » | **certain** : cette clé n'a jamais été vue | ✅ **autoriser sans lire le tiroir** |
-| « peut-être présent » | rien | ❌ ne jamais refuser sur cette base — **lire le tiroir** |
-
-⇒ L'asymétrie est **dans notre sens** : le seul coût d'un faux positif est une lecture de
-plus, jamais une mauvaise décision de sécurité. Ce qui serait une faute, c'est de **refuser**
-sur un « peut-être » — cela produirait des refus de demandes légitimes.
-
-### 5.4 🔴 DEUX clés de recherche, pas une — la version naïve du §4 est FAUSSE
-
-Vérifié dans le code (`server.py`, `_select_wrap_entries` à `wrapping.py:1069`) :
-
-| Point d'entrée | Clé disponible à l'appel |
+| Élément | Décision |
 | --- | --- |
-| `secret_revoke_wrap(lease_id)` | **l'accessor SEUL** |
-| `secret_wrap_status(operation_id, mission_id)` | le couple |
-| `secret_wrap_lookup(operation_id, mission_id)` | le couple |
-| `secret_consume(wrap_token, operation_id, …)` | `operation_id` |
-| `secret_wrap(…)` (création) | le couple |
+| **K** | **FIXE par version**, dimensionné en **octets** sur un horizon mesuré. Jamais dynamique (§5.3) |
+| Clé de partition | `(operation_id, mission_id)` — **le couple dont dispose la création**, seul appelant de la garde d'usage unique (`wrapping.py:401` : *« cette garde n'est appelée QUE par `wrap_secret` »*) |
+| Toutes les lectures | **l'instantané complet en mémoire**, comme aujourd'hui — inchangé |
+| Index par accessor | **en mémoire uniquement**, reconstruit par le rafraîchisseur. ⚠️ **Aucun index durable** |
+| Écriture | CAS sur **le seul tiroir muté** ; `If-None-Match: *` si le tiroir n'existe pas encore |
+| Re-partitionnement | **absent de la v1** |
 
-⇒ **Ranger les tiroirs par `(operation_id, mission_id)` rend `secret_revoke_wrap` coûteux :
-sans le couple, il faudrait balayer les K tiroirs.** Et c'est le chemin le plus chaud que
-nous connaissions — `mcp-mission` l'appelle **onze fois par clôture de mission**.
+### Ce que cela préserve, vérifié dans le code
 
-Ranger par accessor inverse le problème : la garde d'usage unique, qui interroge par couple,
-devient O(K).
+- **la garde d'usage unique** : la création dispose du couple, donc du tiroir. Inchangée ;
+- **`secret_revoke_wrap(lease_id)`** : ne dispose que de l'accessor — mais il lit la
+  **mémoire**, où l'instantané est complet. **Le problème des « deux clés » de la v1
+  disparaît** ;
+- **`registry_inconsistent`** : `saw_malformed` signale une entrée malformée *n'importe où*.
+  Le chargement complet voyant toujours tous les tiroirs, **le contrat est préservé** ;
+- **aucune purge**, **une seule technologie durable**, **le verrou de #123 intact**.
 
-**Résolution proposée — l'index secondaire, patron standard :** deux structures partitionnées.
+### Et cela FERME #51 au lieu de le reporter
 
-| Structure | Clé de partition | Sert |
+Deux instances mutant des clés différentes ne se croisent plus. Sur la même clé, le CAS
+sérialise. Le `last-write-wins` disparaît — **sous réserve du §3**.
+
+---
+
+## 5. 🔴 Les coûts et les pièges, nommés
+
+### 5.1 Le rafraîchissement devient K requêtes — et sa parade
+
+C'est l'amplification de lecture qu'on achète. **Parade** : le rafraîchisseur fait un
+`list_objects_v2` (1 requête par 1000 clés) qui rend les **ETags**, compare avec ce qu'il
+détient, et ne fait un GET que sur les tiroirs **changés**. En régime établi, peu de tiroirs
+changent entre deux rafraîchissements.
+
+⚠️ **À mesurer, pas à supposer** : coût réel d'un LIST + n GET depuis la production. C'est le
+trou de mesure qui décide de K.
+
+### 5.2 🔴 La sémantique de fraîcheur doit être ÉCLATÉE
+
+Aujourd'hui `_save()` réussi remet `_last_load_ok = True` — un PUT prouve que S3 répond.
+⚠️ **En partitionné, c'est FAUX** : un PUT réussi sur le tiroir A remettrait le registre au
+vert alors que le tiroir B est resté inconnu.
+
+Quatre notions à séparer, contre une aujourd'hui :
+1. fraîcheur du dernier **instantané global** ;
+2. fraîcheur des **tiroirs requis par une décision** ;
+3. succès de la **dernière écriture** ;
+4. **poids** du dernier tiroir écrit *versus* poids logique **total**.
+
+⚠️ Cela change le contrat d'erreur `backend_unavailable` que nos appelants **viennent
+d'apprendre** (`mcp-mission` v0.8.30, taxonomie `backend:`/`transport:`). À leur annoncer,
+pas à leur imposer.
+
+### 5.3 Pourquoi PAS de re-partitionnement dynamique en v1
+
+Scénario démontré en revue : l'administration copie K→2K ; une instance encore en K écrit une
+intention **après** la copie ; le manifeste bascule ; l'intention **n'existe pas** en
+génération 2K ; **la clé paraît vierge et un second wrap devient possible.**
+
+⇒ Un re-partitionnement sûr exige : noms **versionnés par génération**, construction **hors
+ligne**, basculement atomique, et **fencing** des écrivains. La génération dans un manifeste
+ne suffit pas. ⇒ **Hors v1.** Changer K = migration administrative avec quiescence (§7).
+
+### 5.4 Ce que le CAS ne couvre pas
+
+Le CAS porte sur **un objet**. Toute conception exigeant deux objets mutés atomiquement est
+hors d'atteinte — **c'est pourquoi l'index durable de la v1 est abandonné** (§6.1).
+
+---
+
+## 6. Alternatives évaluées — et pourquoi elles sont écartées
+
+### 6.1 Index secondaire durable (ma v1) — 🔴 rédhibitoire
+
+Un index orphelin bloque la clé, ce qui est fail-close et **correct**. Mais il la bloque
+**pour toujours** : rien ne libère une clé (`wrapping.py:401`). Et la réconciliation ne peut
+pas trancher, car deux cas sont **indiscernables** sans phase transactionnelle durable :
+- un plantage avant OpenBao ⇒ supprimer l'index serait sûr ;
+- la perte ultérieure de l'entrée d'un wrap **réellement créé** ⇒ supprimer **rouvrirait une
+  clé utilisée**.
+
+De plus, au moment d'écrire l'index, **l'accessor n'existe pas encore**. ⇒ Abandonné.
+
+### 6.2 Purge des entrées terminales — écartée, mais la v1 la rejetait pour une raison FAUSSE
+
+La v1 écrivait *« le sujet était le poids, pas le nombre »*. **Faux dans ma propre
+conception** : le nombre détermine K, donc le nombre de GET, la durée du verrou, le coût
+d'intégrité et la migration.
+
+La bonne raison de l'écarter : la garde d'usage unique est **définitive et par présence**.
+⚠️ **Mais la revue propose une variante que je n'avais pas vue** : purger la **charge lourde**
+en conservant un **tombstone compact** `(operation_id, mission_id, état terminal)` — ~100
+octets contre 462. La garde reste satisfaite (la présence subsiste), le poids chute ×4,6.
+
+⇒ **À instruire sérieusement** : c'est une amplification d'espace échangée contre rien, sans
+partitionnement, sans CAS, sans migration de disposition. **Potentiellement la meilleure
+première étape**, et elle n'est pas exclusive du partitionnement.
+
+### 6.3 Séparation chaud/froid — écartée en l'état
+
+Objet chaud borné par la **concurrence** (les enveloppes en vol : quelques dizaines, TTL
+≤ 300 s), archive pour les terminales.
+
+🔴 **Réserve dirimante de la revue** : une archive **unique réécrite à chaque terminaison**
+reste **O(N²)**, et cette écriture est **sur le chemin critique** (la terminaison suit le
+déballage). Ne vaut que si l'archive est **append-only ou écrite par lots**, avec tombestones
+durables et transition idempotente — c'est-à-dire si l'on construit un LSM. ⇒ Pas plus simple.
+
+### 6.4 Filtre de Bloom — inutile ici
+
+Avec l'instantané complet en mémoire, la garde n'a besoin d'aucun filtre.
+
+Pour mémoire, la formulation exacte (ma v1 l'avait inversée) : un filtre **prouve l'absence**
+(aucun faux négatif) et **ne prouve jamais la présence**.
+
+| Réponse | Conclusion | Usage légitime |
 | --- | --- | --- |
-| **entrées** | `accessor` | `secret_revoke_wrap` |
-| **index** | `(operation_id, mission_id)` → accessor(s) | garde d'usage unique, `status`, `lookup`, `consume` |
-
-Chaque chemin chaud ne touche **qu'un tiroir de la bonne structure**. L'index est minuscule
-(clé → clé, ~100 octets contre 463).
-
-⚠️ **Mais une création touche alors DEUX objets** (une entrée + son index), et le CAS ne
-porte que sur **un** objet : un état partiel est donc possible — index écrit sans entrée, ou
-l'inverse.
-
-⇒ Ce n'est pas rédhibitoire, parce que **nous avons déjà ce patron** : `register_pending`
-écrit l'intention *avant* l'appel OpenBao et l'ordre write-ahead est délibéré. La même
-discipline s'applique : écrire l'index d'abord (un index sans entrée = une clé réservée,
-donc **fail-close**, l'inverse serait un trou), et prévoir la réconciliation.
-
-**Non tranché** : l'ordre exact, la détection et la reprise d'un état partiel. C'est le
-vrai chantier de ce sujet.
-
-### 5.5 🔴 `registry_inconsistent` repose sur un balayage GLOBAL
-
-`_select_wrap_entries` positionne `saw_malformed` sur une entrée inexploitable **n'importe
-où dans le registre**, matchante ou non — la docstring le dit explicitement, et
-`status_by_operation_id` s'en sert pour rendre `registry_inconsistent` à l'administration.
-
-⇒ **Partitionner rétrécit cette garantie** : une entrée malformée dans un autre tiroir ne
-serait plus vue. Ce n'est pas un détail d'implémentation, c'est **un contrat d'erreur qui
-change** — et nos appelants viennent d'apprendre le vocabulaire actuel (dossier du 23/08,
-taxonomie `backend:`/`transport:` de `mcp-mission` v0.8.30).
-
-Deux voies, aucune décidée : accepter le rétrécissement en le **documentant** (la détection
-devient « dans le tiroir consulté »), ou déplacer cette détection vers une **vérification
-d'intégrité périodique** hors chemin critique.
-
-⚠️ **Ce point est arrivé par la lecture du code, pas par la conception.** Il illustre le
-risque principal de ce sujet : le registre porte des contrats implicites qu'un découpage
-casse silencieusement.
+| « absent » | **certaine** | ✅ autoriser sans lire |
+| « peut-être présent » | aucune | ❌ ne jamais refuser dessus — lire |
 
 ---
 
-## 6. Migration et retour arrière
+## 7. 🔴 Migration : PAS de déploiement progressif
 
-| Étape | Ce que la version fait | Retour arrière |
+| Étape | La version… | Retour arrière |
 | --- | --- | --- |
-| **R1** | **lit** les deux dispositions (legacy + tiroirs), **écrit** en legacy | sûr |
-| **R2** | écrit en tiroirs ; le legacy reste, figé, jamais réécrit | sûr vers R1 |
-| **R3** (bien plus tard) | le legacy n'est plus lu | ⚠️ irréversible |
+| **R1** | lit legacy **et** tiroirs ; écrit **legacy** | sûr |
+| **R2** | écrit **tiroirs** | ⚠️ **uniquement avec quiescence** |
+| **R3** | ne lit plus le legacy | irréversible |
 
-⚠️ **Sans R1, R2 est un aller sans retour** : une version antérieure ne saurait pas lire les
-tiroirs. C'est le même piège que la compression, et la même parade.
+⚠️ **La v1 affirmait « R2 sûr vers R1 ». FAUX**, démontré en revue :
+- **instances mélangées** : une R2 écrit la clé dans les tiroirs, une R1 (cache frais mais
+  antérieur) ne la voit pas et l'écrit dans le legacy. **Les deux écritures ne visent pas le
+  même objet : aucun CAS ne les met en concurrence ⇒ deux wraps possibles.** « Le legacy reste
+  figé » est faux tant qu'une R1 tourne ;
+- **retour arrière** : une entrée `active` au legacy, consommée par R2, devient `consumed`
+  dans un tiroir ; le legacy reste `active`. Après retour à R1, deux états contradictoires —
+  et **le schéma n'a ni `updated_at`, ni version logique, ni règle de précédence**
+  (`wrapping.py:148`).
 
-⚠️ **Rien n'est supprimé** : l'objet legacy est conservé. Notre refus de purger reste entier,
-et la tension avec #156 ne s'ouvre pas.
+⇒ **R1→R2 et R2→R1 exigent l'arrêt des écrivains**, la matérialisation vérifiée de l'état, puis
+le redémarrage. **Un déploiement progressif est interdit.** À écrire dans la procédure, pas
+seulement ici.
+
+⚠️ **Et la compression seule a le même problème** : `load()` fait
+`json.loads(resp["Body"].read().decode())` sans détection de format (`wrapping.py:245`). Une
+version antérieure confrontée à du gzip tombe en **panne de registre**. ⇒ Elle exige aussi
+lecteur double **puis** activation différée. **Elle n'est donc pas « gratuite ».**
+Seul le retrait de `indent=2` l'est : cela reste du JSON, lisible par les deux versions.
 
 ---
 
-## 7. Ce que cette étude ne fait PAS
+## 8. Ce que cette étude ne fait pas
 
-- **Ne désérialise pas les opérations wrap.** Le verrou de #123 protège l'atomicité vis-à-vis
-  du rafraîchisseur, pas le débit. Le découpage réduit la *taille* écrite, pas le nombre
-  d'opérations sérialisées.
-- **N'introduit pas de seconde source de vérité.** Même stockage, même technologie durable,
-  un seul registre logique. ⚠️ **C'est une LECTURE de l'arbitrage de #123** (« un seul
-  support durable ») : nous la lisons comme portant sur la technologie, pas sur le nombre
-  d'objets. **Si cette lecture est fausse, la conception A tombe entièrement.** À confirmer
-  par le propriétaire de l'arbitrage.
-- **Ne purge rien.** La mesure rend la purge inutile : le sujet était le poids, pas le nombre.
-- **Ne propose pas de calendrier.**
-
----
-
-## 8. Conception B — si le §3 est négatif
-
-Sans CAS, deux écritures concurrentes sur le même tiroir s'écrasent : on **retrouve #51**,
-mais sur un périmètre **réduit** (un tiroir au lieu du registre entier). Ce n'est pas une
-solution, c'est une atténuation.
-
-⇒ Dans ce cas, la seule chose défendable à court terme est la **compression** (facteur 25,
-aucun changement de disposition), et le découpage devient un chantier **subordonné** à
-l'obtention d'un CAS — par une version d'ECS le supportant, ou un service de verrous, ce qui
-rouvrirait la question de la seconde source de vérité (§7).
+- ne désérialise rien (le verrou de #123 protège l'atomicité, pas le débit) ;
+- n'introduit **pas** de seconde source de vérité : même technologie, un seul registre
+  logique. ⚠️ **C'est une LECTURE de l'arbitrage #123** (« un seul support durable ») comme
+  portant sur la technologie et non sur le nombre d'objets. **Si cette lecture est fausse, le
+  §4 tombe.** À confirmer par le propriétaire de l'arbitrage ;
+- ne purge rien **en v1** (mais §6.2 mérite instruction) ;
+- ne propose aucun calendrier.
 
 ---
 
 ## 9. Questions ouvertes — à trancher avant toute ligne de code
 
-1. **Le §3** : le CAS est-il honoré ? *(sonde en cours)*
-2. **La lecture de l'arbitrage #123** (§7) est-elle la bonne ?
-3. ✅ **RÉPONDU (§5.4) — et la réponse casse la conception naïve** : il y a **deux clés de
-   recherche**. Reste à trancher l'ordre d'écriture des deux structures et la reprise d'un
-   état partiel.
-6. Le rétrécissement de `registry_inconsistent` (§5.5) est-il acceptable, ou faut-il une
-   vérification d'intégrité séparée ?
-4. Le passage du fail-close **global** à **par tiroir** (§5.1) est-il acceptable pour nos
-   appelants, qui viennent d'apprendre le contrat actuel ?
-5. Seuil de tiroir, et politique de compaction (§5.2).
+1. 🔴 **Le CAS est-il honoré**, avec le client SigV2/path-style de production, sur le bucket de
+   production, **en concurrence réelle** (§3) ? — **relevé à demander à la plateforme, et il
+   concerne d'abord `rotate_bootstrap_key.py`, pas ce sujet.**
+2. 🔴 **Coût réel d'un rafraîchissement LIST + n GET** depuis la production (§5.1) : c'est lui
+   qui dimensionne K.
+3. **Latence d'écriture S3 réelle de la production** — aucune mesure à ce jour (§1).
+4. La lecture de l'arbitrage #123 (§8) est-elle la bonne ?
+5. L'éclatement de la sémantique de fraîcheur (§5.2) est-il acceptable pour nos appelants, qui
+   viennent d'apprendre le contrat actuel ?
+6. **La variante tombstone (§6.2) doit-elle passer AVANT le partitionnement ?** Elle est plus
+   simple, sans migration de disposition, et gagne ×4,6.
+7. Distribution des états en production (combien de terminales) — dimensionne §6.2.
