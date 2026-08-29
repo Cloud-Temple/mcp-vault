@@ -1,6 +1,6 @@
 # Catalogue des Tests E2E — MCP Vault
 
-> **Version** : v0.20.0 — migration `mcp==2.1.1`, double compatibilité wire moderne/legacy et transport stateless
+> **Version** : v0.20.1 — migration `mcp==2.1.1`, double compatibilité wire moderne/legacy et disponibilité alignée sur la fraîcheur des magasins
 > **Dernière exécution** : 349 assertions e2e sur 15 catégories (+ 18 tests crypto)
 > **Décompte reproductible** : comptage AST des appels `check` / `check_true` / `check_value` / `check_traversed` dans les fonctions `test_*` de `tests/test_e2e.py`, boucles littérales expansées
 > **Durée** : ~5 secondes (e2e) + <1s (crypto)

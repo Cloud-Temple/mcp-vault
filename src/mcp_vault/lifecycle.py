@@ -117,6 +117,7 @@ async def availability_status() -> tuple[str, str]:
 
         sealed       ⇔ sonde : OpenBao joignable ET scellé
         healthy      ⇔ démarrage abouti ET sonde : initialisé ET descellé
+                       ET tous les magasins configurés sont frais
         unavailable  ⇔ tous les autres cas
 
     `sealed` est prioritaire : « joignable mais scellé » est l'information
@@ -134,6 +135,21 @@ async def availability_status() -> tuple[str, str]:
         return HEALTH_SEALED, probe.detail
     if probe.ok:
         if startup_is_ready():
+            # Le premier chargement d'un magasin capture une panne S3 et lance
+            # malgré tout son rafraîchisseur. Le démarrage peut donc aboutir
+            # alors qu'aucun instantané d'autorisation fiable n'est disponible.
+            # Lire ce rapport reste strictement mémoire : `/health` ne doit
+            # jamais devenir une sonde S3 bloquante.
+            try:
+                from .store_refresh import freshness_report
+                magasins = freshness_report()
+                if any(vue.get("stale") is True for vue in magasins.values()):
+                    return HEALTH_UNAVAILABLE, "magasins d'autorisation indisponibles"
+            except Exception:
+                # Une observation inexploitable ne prouve pas la disponibilité.
+                # Diagnostic volontairement générique : ce détail atteint les
+                # journaux et la surface admin authentifiée.
+                return HEALTH_UNAVAILABLE, "fraîcheur des magasins indisponible"
             return HEALTH_HEALTHY, probe.detail
         # OpenBao répond, mais la séquence de démarrage n'a pas abouti (par
         # exemple restauration S3 ambiguë, magasins non chargés). Fail-close :

@@ -725,11 +725,12 @@ et nous n'avions aucun chiffre pour dimensionner ce coût.
 > cause du problème qu'elle mesure. `entries`, lui, est un simple décompte en
 > mémoire.
 
-> ⚠️ **Les sondes HTTP `/health` et `/healthz` sont volontairement INCHANGÉES.**
-> Un magasin périmé n'y bascule pas le conteneur en `unhealthy` : redémarrer ne
-> réparerait pas un stockage injoignable, et le `HEALTHCHECK` déclencherait une
-> boucle de redémarrage pendant l'incident. La péremption est une information
-> d'exploitation — elle vit sur `system_health`, pas sur la sonde d'orchestration.
+> `/health` et `/ready` lisent désormais la fraîcheur **en mémoire** : un magasin
+> configuré jamais chargé ou périmé rend le service `503 unavailable`, car les
+> décisions d'autorisation ne peuvent plus être garanties. Ces sondes ne font
+> aucun appel S3 ; les rafraîchisseurs existants peuvent les rétablir sans
+> redémarrage. `/healthz` reste une liveness indépendante. `system_health` reste
+> plus strict et vérifie en plus la connectivité S3 courante.
 
 ⚠️ **Limite inchangée** : rien ici ne ferme la race d'écriture multi-instance
 (#13/#51). Le dernier écrivain gagne toujours, et un rafraîchissement de fond
@@ -749,7 +750,10 @@ Deux questions distinctes, deux contrats :
 
 Le `HEALTHCHECK` du conteneur vise `/health` : un coffre indisponible apparaît désormais `unhealthy`. Branchez une éventuelle sonde de *liveness* ou un autoheal sur `/healthz`, jamais sur `/health` — redémarrer un coffre **scellé** ne le descelle pas.
 
-Après un démarrage non abouti, l'état est **latché** : le signal ne repasse pas au vert tout seul, un redémarrage est requis.
+Après un démarrage non abouti, l'état est **latché** : le signal ne repasse pas
+au vert tout seul, un redémarrage est requis. Cette règle ne concerne pas un
+magasin temporairement périmé après un démarrage abouti : son refresher peut
+rétablir `/health` sans nouvelle génération.
 
 ### Lifecycle OpenBao
 ```
@@ -898,4 +902,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.20.0
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.20.1

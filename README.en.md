@@ -719,11 +719,12 @@ figure to size that cost.
 > Serializing the registry on every supervision call would make the probe a cause
 > of the very problem it measures. `entries` is a plain in-memory count.
 
-> ⚠️ **The HTTP probes `/health` and `/healthz` are deliberately UNCHANGED.** A
-> stale store does not flip the container to `unhealthy`: restarting would not fix
-> an unreachable store, and the `HEALTHCHECK` would trigger a restart loop during
-> the incident. Staleness is operational information — it lives on
-> `system_health`, not on the orchestration probe.
+> `/health` and `/ready` now read freshness **from memory**: a configured store
+> that has never loaded or has become stale makes the service return `503
+> unavailable`, because authorization decisions can no longer be guaranteed.
+> These probes perform no S3 call; the existing refreshers can restore them
+> without a restart. `/healthz` remains an independent liveness probe.
+> `system_health` remains stricter and also checks current S3 connectivity.
 
 ⚠️ **Unchanged limit**: none of this closes the multi-instance write race
 (#13/#51). Last write still wins, and a background refresh even widens the window
@@ -742,7 +743,10 @@ Two distinct questions, two contracts:
 
 The container `HEALTHCHECK` targets `/health`: an unavailable vault now shows as `unhealthy`. Point any *liveness* probe or autoheal at `/healthz`, never at `/health` — restarting a **sealed** vault does not unseal it.
 
-After a failed startup the state is **latched**: the signal does not turn green again on its own, a restart is required.
+After a failed startup the state is **latched**: the signal does not turn green
+again on its own, so a restart is required. This does not apply to a store that
+temporarily becomes stale after a successful startup: its refresher can restore
+`/health` without opening a new generation.
 
 ### OpenBao lifecycle
 ```
@@ -893,4 +897,4 @@ mcp-vault/
 
 ---
 
-**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.20.0
+**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.20.1

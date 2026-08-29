@@ -1,5 +1,24 @@
 # Changelog — MCP Vault
 
+## [0.20.1] — 2026-08-29
+
+### Readiness alignée sur les magasins d'autorisation
+
+- `/health` et `/ready` rendent désormais `503 unavailable` lorsqu'au moins un
+  magasin configuré n'a jamais été chargé ou que son instantané est périmé.
+  Leur lecture reste strictement en mémoire : aucune requête S3 n'est ajoutée à
+  ces sondes publiques.
+- Les rafraîchisseurs existants peuvent rétablir automatiquement la
+  disponibilité après une panne transitoire, sans redémarrage. `/healthz` reste
+  une liveness toujours indépendante ; `system_health` reste plus strict et
+  vérifie en plus la connectivité S3 courante.
+- Une erreur interne de production du rapport de fraîcheur échoue fermée en
+  `503`, sans exposer l'exception sur la surface publique.
+- Aucun changement de données ni de configuration. Le `HEALTHCHECK` de l'image
+  continue de viser `/health` et reflète donc cette indisponibilité ; conserver
+  `/healthz` pour les mécanismes d'autoheal qui doivent juger uniquement la
+  vie du processus.
+
 ## [0.20.0] — 2026-08-29
 
 ### Migration maîtrisée vers le SDK MCP Python v2
