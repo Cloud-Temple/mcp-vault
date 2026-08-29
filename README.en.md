@@ -616,10 +616,23 @@ The WAF protects the API against L7 attacks (SQL injection, XSS, LFI, RCE, SSRF)
 
 ### ASGI stack (6 layers)
 ```
-PkiMiddleware → AdminMiddleware → HealthCheckMiddleware → AuthMiddleware → LoggingMiddleware → FastMCP
+PkiMiddleware → AdminMiddleware → HealthCheckMiddleware → AuthMiddleware → LoggingMiddleware → MCPServer
 ```
 
 `PkiMiddleware` (v0.5.0) is the outermost layer — it intercepts `/acme/*` and `/pki/ca/*.pem` before auth (public endpoints by PKI/ACME design).
+
+Since v0.20.0, the server uses `mcp==2.1.1` and accepts both the modern
+`2026-07-28` protocol and legacy clients through `2025-11-25`. HTTP transport
+is **stateless** in both eras and no longer requires session affinity. MCP Vault
+nevertheless remains **single-instance**: embedded OpenBao, last-write-wins S3
+sync and authorization caches do not yet allow a safe multi-replica deployment. The SDK
+automatically advertises `subscriptions/listen`, but MCP Vault publishes no
+resource or event and configures no replay store; this capability is inert and
+must be reviewed again on every SDK upgrade.
+
+After a connection closes without a terminal response, clients must not
+automatically retry a mutation: its effect may already have happened. This
+includes `secret_wrap_lookup`, which revokes wraps despite its lookup name.
 
 ### The decision point reads memory, never the network *(v0.15.0, #123)*
 
@@ -834,7 +847,7 @@ mcp-vault/
 │       └── display.py        # Rich display
 ├── src/mcp_vault/
 │   ├── config.py             # pydantic-settings configuration
-│   ├── server.py             # FastMCP + 39 MCP tools + lifecycle + audit
+│   ├── server.py             # MCPServer + 39 MCP tools + lifecycle + audit
 │   ├── lifecycle.py          # startup/shutdown orchestrator
 │   ├── s3_client.py          # Hybrid SigV2/SigV4 S3 client
 │   ├── s3_sync.py            # File backend ↔ S3 sync
@@ -880,4 +893,4 @@ mcp-vault/
 
 ---
 
-**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.19.1
+**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.20.0

@@ -104,18 +104,24 @@ async def mcp(tool_name: str, args: dict, token_override: str = None) -> dict:
     Appelle un outil MCP via Streamable HTTP.
     Équivalent de ce que le CLI fait en coulisses.
     """
-    from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
+    import httpx2
+    from mcp import Client
+    from mcp.client.streamable_http import streamable_http_client
 
     use_token = token_override or TOKEN
     headers = {"Authorization": f"Bearer {use_token}"}
     try:
-        async with streamablehttp_client(
-            f"{BASE_URL}/mcp", headers=headers, timeout=30, sse_read_timeout=60,
-        ) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                result = await session.call_tool(tool_name, args)
+        async with httpx2.AsyncClient(
+            headers=headers, timeout=httpx2.Timeout(60, connect=30),
+        ) as http:
+            transport = streamable_http_client(
+                f"{BASE_URL}/mcp", http_client=http,
+            )
+            async with Client(transport, mode="auto", read_timeout_seconds=60) as client:
+                result = await client.call_tool(tool_name, args)
+                if result.is_error:
+                    message = getattr(result.content[0], "text", "") if result.content else ""
+                    return {"status": "error", "message": message or "Erreur serveur MCP"}
                 text = getattr(result.content[0], "text", "") if result.content else ""
                 return json.loads(text) if text else {"status": "error", "message": "Réponse vide"}
     except Exception as e:

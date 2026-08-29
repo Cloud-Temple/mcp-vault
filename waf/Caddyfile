@@ -28,9 +28,9 @@
 	# ── Rate Limiting — Protection brute-force et DoS ─────────────
 	# 10 000 requêtes par 5 minutes par IP (~33 req/s soutenu)
 	# SÉCURITÉ : empêche le brute-force de tokens et le DoS applicatif
-	# Note : le protocole MCP (Streamable HTTP) génère 3-4 requêtes
-	# HTTP par appel outil (POST init + GET SSE + POST call + DELETE).
-	# Un agent actif fait 10-20 appels MCP/s = 30-80 req/s en burst.
+	# Note : le protocole moderne stateless porte chaque appel dans un POST ;
+	# le mode legacy peut en émettre plusieurs (initialisation + appel + SSE).
+	# La limite couvre donc les deux ères sans supposer leur même profil.
 	# La fenêtre de 5 min lisse les pics tout en protégeant contre
 	# les attaques soutenues.
 	rate_limit {

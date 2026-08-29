@@ -3,7 +3,7 @@
 Tests unitaires pour la protection anti-DNS-rebinding du transport MCP.
 
 Régression de l'issue #3 : /mcp renvoyait HTTP 421 « Invalid Host header » sur
-le FQDN public car FastMCP auto-active la protection avec uniquement le loopback
+le FQDN public car le SDK MCP auto-active la protection avec uniquement le loopback
 en allowed_hosts. Le correctif construit explicitement les TransportSecuritySettings
 à partir de MCP_ALLOWED_HOSTS (loopback toujours inclus).
 

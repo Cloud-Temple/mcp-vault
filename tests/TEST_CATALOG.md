@@ -1,6 +1,6 @@
 # Catalogue des Tests E2E — MCP Vault
 
-> **Version** : v0.19.1 — Balayage des `.match()` sur motif ancré (#160) : dix sites fermés, et une requête invalide sur la surface ACME non authentifiée n'est plus annoncée « panne du backend PKI »
+> **Version** : v0.20.0 — migration `mcp==2.1.1`, double compatibilité wire moderne/legacy et transport stateless
 > **Dernière exécution** : 349 assertions e2e sur 15 catégories (+ 18 tests crypto)
 > **Décompte reproductible** : comptage AST des appels `check` / `check_true` / `check_value` / `check_traversed` dans les fonctions `test_*` de `tests/test_e2e.py`, boucles littérales expansées
 > **Durée** : ~5 secondes (e2e) + <1s (crypto)
@@ -507,6 +507,29 @@ mission B qui partagerait l'`operation_id`.
 **8 mutations mesurées, 8 détectées** — le défaut destructif est attrapé par 5
 tests. Les bancs opt-in OpenBao ont été rejoués contre un moteur 2.5.1 réel :
 leurs appels portaient l'ancienne signature et SKIPaient en silence.
+
+### 19. Contrat SDK MCP v2 et compatibilité legacy
+
+- `test_mcp_sdk_v2_contract.py` — majeur v2 réellement installé, API publique
+  `MCPServer`, sécurité et mode stateless fixés à la frontière HTTP, absence
+  d'API v1 supprimée/privée et absence de publication ou persistance sur le bus
+  de souscription annoncé automatiquement par le SDK.
+- `test_mcp_transport_context.py` — vraie application `create_app()` et vrai
+  lifespan : identité relue sur chaque requête, A→B sur la même connexion,
+  entrelacement A/B suspendu sur `await`, nettoyage après erreur/fermeture,
+  reset explicite du ContextVar, protocoles legacy et moderne, aucune session
+  HTTP, sécurité Host testée dans les deux sens, puis wire
+  `subscriptions/listen` protégé et inerte pendant une mutation concurrente.
+- `test_mcp_cli_v2.py` — le CLI livré traite sans réémission un HTTP 200 dont
+  le flux SSE se ferme avant toute réponse terminale, et propage une annulation
+  directe ou encapsulée par le TaskGroup du SDK.
+- `verify_mcp_legacy_v1.sh` — preuve opt-in au travers du WAF : environnement
+  temporaire, client exact `mcp==1.26.0`, `initialize`, `tools/list` et
+  `tools/call(system_about)`.
+
+**4 mutations ciblées, 4 détectées** : `stateless_http=False`, retrait de
+`transport_security`, retrait du reset du ContextVar et absorption de
+`CancelledError` par le CLI.
 
 ---
 

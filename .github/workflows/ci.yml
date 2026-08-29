@@ -66,7 +66,7 @@ jobs:
             echo "::error::l'image installe mcp ${installed}, le verrou épingle ${expected}"
             exit 1
           fi
-          docker run --rm mcp-vault:ci python -c "from mcp.server.fastmcp import FastMCP"
+          docker run --rm mcp-vault:ci python -c "from mcp.server import MCPServer"
 
       # Critère d'acceptation explicite de l'issue #125 : « Le conteneur Vault
       # démarre et passe sa sonde de santé. » Construire et importer ne le

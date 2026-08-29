@@ -8,8 +8,8 @@ Ce client gère :
 - La gestion des erreurs et reconnexion
 """
 
+import asyncio
 import json
-from typing import Optional, Callable
 
 
 class MCPClient:
@@ -24,7 +24,6 @@ class MCPClient:
         self,
         tool_name: str,
         arguments: dict,
-        on_progress: Optional[Callable] = None,
     ) -> dict:
         """
         Appelle un outil MCP via Streamable HTTP.
@@ -32,50 +31,33 @@ class MCPClient:
         Args:
             tool_name: Nom de l'outil (ex: "system_health")
             arguments: Paramètres de l'outil
-            on_progress: Callback optionnel pour les notifications (async callable)
-
         Returns:
             Le résultat de l'outil (dict)
         """
-        from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
+        import httpx2
+        from mcp import Client
+        from mcp.client.streamable_http import streamable_http_client
 
         headers = {}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
 
         try:
-            async with streamablehttp_client(
-                f"{self.base_url}/mcp",
+            timeout = httpx2.Timeout(self.timeout, connect=30)
+            async with httpx2.AsyncClient(
                 headers=headers,
-                timeout=30,
-                sse_read_timeout=self.timeout,
-            ) as (read, write, _):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-
-                    # Capturer les notifications de progression
-                    if on_progress:
-                        _original = session._received_notification
-
-                        async def _patched(notification):
-                            try:
-                                root = getattr(notification, 'root', notification)
-                                params = getattr(root, 'params', None)
-                                if params:
-                                    msg = getattr(params, 'data', None)
-                                    if msg:
-                                        await on_progress(str(msg))
-                            except Exception:
-                                pass
-                            await _original(notification)
-
-                        session._received_notification = _patched
-
-                    result = await session.call_tool(tool_name, arguments)
+                timeout=timeout,
+            ) as http:
+                transport = streamable_http_client(
+                    f"{self.base_url}/mcp", http_client=http,
+                )
+                async with Client(
+                    transport, mode="auto", read_timeout_seconds=self.timeout,
+                ) as client:
+                    result = await client.call_tool(tool_name, arguments)
 
                     # Parser la réponse MCP
-                    if getattr(result, 'isError', False):
+                    if result.is_error:
                         error_msg = "Erreur serveur MCP"
                         if result.content:
                             error_msg = getattr(result.content[0], 'text', '') or error_msg
@@ -94,9 +76,25 @@ class MCPClient:
 
         except ConnectionRefusedError:
             return {"status": "error", "message": f"Serveur non accessible: {self.base_url}"}
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            raise
         except BaseException as e:
+            if self._contains_control_flow(e):
+                raise
             msg = self._extract_error(e)
             return {"status": "error", "message": msg}
+
+    @staticmethod
+    def _contains_control_flow(exc: BaseException) -> bool:
+        """Détecte annulation/interrupt même encapsulée par un TaskGroup."""
+        if isinstance(exc, (
+            asyncio.CancelledError, KeyboardInterrupt, SystemExit, GeneratorExit,
+        )):
+            return True
+        if isinstance(exc, BaseExceptionGroup):
+            return any(MCPClient._contains_control_flow(sub)
+                       for sub in exc.exceptions)
+        return False
 
     @staticmethod
     def _extract_error(exc: BaseException) -> str:

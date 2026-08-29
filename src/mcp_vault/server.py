@@ -3,7 +3,7 @@
 MCP Vault — Serveur principal.
 
 Stack ASGI :
-    AdminMiddleware → HealthCheckMiddleware → AuthMiddleware → LoggingMiddleware → FastMCP
+    AdminMiddleware → HealthCheckMiddleware → AuthMiddleware → LoggingMiddleware → MCPServer
 
 Lifecycle :
     startup  → S3 download → OpenBao start → unseal
@@ -14,7 +14,7 @@ import logging
 import sys
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 
 from .config import get_settings
 
@@ -73,13 +73,13 @@ def _r(tool: str, result: dict, vault_id: str = "", detail: str = "") -> dict:
     log_audit(tool, status, vault_id, readable)
     return result
 
-# --- FastMCP instance ---
+# --- MCPServer instance ---
 def _build_transport_security(cfg=None):
     """
     Construit les réglages anti-DNS-rebinding du SDK MCP pour le transport
     streamable-http.
 
-    Sans ce réglage explicite, FastMCP auto-active la protection avec pour seul
+    Sans ce réglage explicite, MCPServer auto-active la protection avec pour seul
     `host` le loopback (défaut interne 127.0.0.1), ce qui rejette toute requête
     portant le FQDN public en HTTP 421 « Invalid Host header » (cf. issue #3).
 
@@ -118,10 +118,9 @@ def _build_transport_security(cfg=None):
     )
 
 
-mcp = FastMCP(
+mcp = MCPServer(
     settings.mcp_server_name,
     instructions="MCP Vault — Gestion sécurisée des secrets pour agents IA (OpenBao embedded)",
-    transport_security=_build_transport_security(),
 )
 
 
@@ -205,7 +204,7 @@ async def system_about() -> dict:
         "openbao_addr": settings.openbao_addr,
         "platform": platform.platform(),
         "python": platform.python_version(),
-        "tools_count": len(mcp._tool_manager._tools) if hasattr(mcp, "_tool_manager") else "unknown",
+        "tools_count": len(await mcp.list_tools()),
     }
 
 
@@ -1859,7 +1858,7 @@ async def audit_log(limit: int = 50, client: str = "", vault_id: str = "",
 
 def _install_vault_lifespan(inner_app) -> None:
     """
-    Compose le lifecycle du coffre AUTOUR du lifespan FastMCP (issue #110, lot 1).
+    Compose le lifecycle du coffre AUTOUR du lifespan MCPServer (issue #110, lot 1).
 
     ⚠️ DÉFAUT CORRIGÉ : `vault_shutdown()` était appelé APRÈS `server.serve()`.
     uvicorn ré-émet le SIGTERM qu'il a capturé une fois son arrêt interne
@@ -1869,10 +1868,10 @@ def _install_vault_lifespan(inner_app) -> None:
     Placé dans le lifespan ASGI, l'arrêt s'exécute pendant la phase de shutdown
     d'uvicorn, donc AVANT la ré-émission du signal.
 
-    ⚠️ Le lifespan de FastMCP (`session_manager.run()`) DOIT être conservé :
+    ⚠️ Le lifespan de MCPServer (`session_manager.run()`) DOIT être conservé :
     sans lui, toute requête MCP échoue sur « Task group is not initialized ».
     D'où la composition (et non le remplacement), dans cet ordre :
-        vault_startup → lifespan FastMCP → service → arrêt FastMCP → vault_shutdown
+        vault_startup → lifespan MCPServer → service → arrêt MCPServer → vault_shutdown
 
     Le mode dégradé est préservé à l'identique : `ok = False` par défaut et
     capture de l'exception, pour que `skip_upload=not ok` reste fail-close
@@ -1880,7 +1879,7 @@ def _install_vault_lifespan(inner_app) -> None:
     """
     import contextlib
 
-    fastmcp_lifespan = inner_app.router.lifespan_context
+    mcp_lifespan = inner_app.router.lifespan_context
 
     @contextlib.asynccontextmanager
     async def _combined_lifespan(app):
@@ -1911,7 +1910,7 @@ def _install_vault_lifespan(inner_app) -> None:
                 logger.error(f"❌ Erreur critique au démarrage : {e}")
                 logger.warning("⚠️ Démarrage en mode dégradé")
 
-            async with fastmcp_lifespan(app) as state:
+            async with mcp_lifespan(app) as state:
                 yield state
         finally:
             try:
@@ -1989,7 +1988,10 @@ def create_app():
     from .pki_middleware import PkiMiddleware
 
     # Stack ASGI (ordre d'application : Pki → Admin → Health → Auth → Logging → MCP)
-    app = mcp.streamable_http_app()
+    app = mcp.streamable_http_app(
+        stateless_http=True,
+        transport_security=_build_transport_security(),
+    )
     _install_vault_lifespan(app)
     app = LoggingMiddleware(app)
     app = AuthMiddleware(app, mcp)

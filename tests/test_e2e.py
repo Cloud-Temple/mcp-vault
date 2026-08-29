@@ -59,18 +59,24 @@ RESULTS = []
 
 async def call_tool(tool_name: str, arguments: dict, token_override: str = None) -> dict:
     """Appelle un outil MCP via Streamable HTTP."""
-    from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
+    import httpx2
+    from mcp import Client
+    from mcp.client.streamable_http import streamable_http_client
 
     use_token = token_override or TOKEN
     headers = {"Authorization": f"Bearer {use_token}"}
     try:
-        async with streamablehttp_client(
-            f"{BASE_URL}/mcp", headers=headers, timeout=30, sse_read_timeout=60,
-        ) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                result = await session.call_tool(tool_name, arguments)
+        async with httpx2.AsyncClient(
+            headers=headers, timeout=httpx2.Timeout(60, connect=30),
+        ) as http:
+            transport = streamable_http_client(
+                f"{BASE_URL}/mcp", http_client=http,
+            )
+            async with Client(transport, mode="auto", read_timeout_seconds=60) as client:
+                result = await client.call_tool(tool_name, arguments)
+                if result.is_error:
+                    message = getattr(result.content[0], "text", "") if result.content else ""
+                    return {"status": "error", "message": message or "Erreur serveur MCP"}
                 text = ""
                 if result.content:
                     text = getattr(result.content[0], "text", "") or ""
@@ -2312,7 +2318,7 @@ async def test_15_waf_security():
 
     # ── 15h-septies. Grammaire du Content-Type alignée sur le handler ──
     #
-    # Le SDK MCP (`streamable_http.py:415`) découpe le Content-Type sur `;` puis
+    # Le SDK MCP 2.1.1 (`streamable_http.py:489-492`) découpe le Content-Type sur `;` puis
     # sur `,` et accepte si UN jeton vaut exactement `application/json`. Donc
     # `text/plain, application/json` atteint le handler. Un ancrage WAF en
     # `^application/json` le laissait passer SANS le parseur, SANS la borne 64 Ko,

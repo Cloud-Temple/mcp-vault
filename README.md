@@ -616,10 +616,25 @@ Le WAF protège l'API contre les attaques L7 (injections SQL, XSS, LFI, RCE, SSR
 
 ### Stack ASGI (6 couches)
 ```
-PkiMiddleware → AdminMiddleware → HealthCheckMiddleware → AuthMiddleware → LoggingMiddleware → FastMCP
+PkiMiddleware → AdminMiddleware → HealthCheckMiddleware → AuthMiddleware → LoggingMiddleware → MCPServer
 ```
 
 `PkiMiddleware` (v0.5.0) est la couche la plus externe — intercepte `/acme/*` et `/pki/ca/*.pem` avant l'auth (endpoints publics par design PKI/ACME).
+
+Depuis la v0.20.0, le serveur utilise `mcp==2.1.1` et accepte à la fois le
+protocole moderne `2026-07-28` et les clients legacy jusqu'à `2025-11-25`.
+Le transport HTTP est **stateless** dans les deux ères : il n'exige plus
+d'affinité de session. MCP Vault reste néanmoins **mono-instance** : OpenBao
+embarqué, la synchronisation S3 last-write-wins et les caches d'autorisation ne
+permettent pas encore un déploiement multi-réplica sûr. Le SDK annonce automatiquement la
+capability `subscriptions/listen`, mais MCP Vault ne publie ni ressource ni
+événement et ne configure aucun store de reprise ; cette capability est donc
+inerte et doit être réauditée à chaque montée de version du SDK.
+
+Après une fermeture de connexion sans réponse terminale, un client ne doit pas
+réessayer automatiquement une mutation : son effet peut déjà avoir eu lieu.
+Cela vaut notamment pour `secret_wrap_lookup`, qui révoque des wraps malgré son
+nom de consultation.
 
 ### Le point de décision lit la mémoire, jamais le réseau *(v0.15.0, #123)*
 
@@ -839,7 +854,7 @@ mcp-vault/
 │       └── display.py        # Affichage Rich
 ├── src/mcp_vault/
 │   ├── config.py             # Configuration pydantic-settings
-│   ├── server.py             # FastMCP + 39 outils MCP + lifecycle + audit
+│   ├── server.py             # MCPServer + 39 outils MCP + lifecycle + audit
 │   ├── lifecycle.py          # Orchestrateur startup/shutdown
 │   ├── s3_client.py          # Client S3 hybride SigV2/SigV4
 │   ├── s3_sync.py            # Sync file backend ↔ S3
@@ -883,4 +898,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.19.1
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.20.0

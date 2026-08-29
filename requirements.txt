@@ -1,11 +1,7 @@
 # --- MCP Framework ---
-# SÉCURITÉ V3-01 : >=1.23.0 corrige CVE-2025-53366 (DoS) et CVE-2025-66416 (DNS rebinding)
-# BORNE HAUTE (issue #125) : `mcp 2.0.0` a supprimé `mcp.server.fastmcp`, importé
-# par src/mcp_vault/server.py. Sans cette borne, un `pip install -r` hors Docker
-# (venv de développement, où la suite est exécutée avant chaque livraison)
-# réinstalle le défaut que le verrou corrige côté image. Le passage à MCP 2.x
-# est une migration à part entière.
-mcp[cli]>=1.23.0,<2
+# v0.20.0 : migration explicite vers MCP SDK v2. Le majeur suivant reste exclu
+# jusqu'à une migration auditée ; le verrou fixe la version réellement livrée.
+mcp[cli]>=2,<3
 
 # --- Configuration ---
 pydantic-settings>=2.0
@@ -25,8 +21,11 @@ cryptography>=42.0
 # --- JWT (validation mission_token ES256/JWKS — issue #26) ---
 PyJWT>=2.10.0
 
-# --- HTTP client (health checks, CLI) ---
+# --- HTTP clients (health checks + transport CLI MCP v2) ---
 httpx>=0.27.0
+# Dépendance directe : scripts/cli/client.py fournit l'auth bearer au transport
+# MCP v2 via un AsyncClient httpx2 préconfiguré.
+httpx2>=2,<3
 
 # --- ASGI ---
 # Épinglé (issue #110) : le comportement de ré-émission du SIGTERM après
