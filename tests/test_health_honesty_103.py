@@ -159,13 +159,19 @@ class Harnais:
 @pytest.fixture(autouse=True)
 def _etat_demarrage_propre():
     """
-    `_startup_ready` est un état de MODULE. Sans réarmement, un test qui le pose
-    contaminerait les suivants — et un test de latch passerait pour de mauvaises
-    raisons.
+    `_startup_ready` et les singletons de magasins sont des états de MODULE.
+    Sans réarmement, un test qui les pose contaminerait les suivants — et un
+    test de latch ou de disponibilité passerait pour de mauvaises raisons.
+
+    Chaque test qui exerce la fraîcheur remplace explicitement `_magasins` dans
+    sa propre portée ; tous les autres déclarent ainsi leur prémisse standalone.
     """
-    lifecycle.mark_startup_starting()
-    yield
-    lifecycle.mark_startup_starting()
+    from mcp_vault import store_refresh
+
+    with patch.object(store_refresh, "_magasins", return_value=[]):
+        lifecycle.mark_startup_starting()
+        yield
+        lifecycle.mark_startup_starting()
 
 
 # =============================================================================
@@ -266,6 +272,169 @@ class TestPredicatADeuxTermes:
         # Une génération suivante qui échoue REDESCEND l'état.
         lifecycle.mark_startup_starting()
         assert h.corps(h.appel("/health"))["status"] == lifecycle.HEALTH_UNAVAILABLE
+
+
+# =============================================================================
+# 2b) Les magasins configurés font partie de la disponibilité
+# =============================================================================
+
+class TestFraicheurDesMagasins:
+
+    @staticmethod
+    def _magasin(*, frais: bool):
+        from mcp_vault.store_refresh import Freshness
+
+        magasin = SimpleNamespace(CACHE_TTL=300.0, freshness=Freshness())
+        if frais:
+            magasin.freshness.mark_success()
+        return magasin
+
+    @pytest.mark.parametrize("chemin", ["/health", "/ready"])
+    def test_un_seul_magasin_stale_suffit_a_refuser_la_disponibilite(self, chemin):
+        """RED : OpenBao + latch ne suffisent pas si une décision lit un état périmé."""
+        from mcp_vault import store_refresh
+
+        lifecycle.mark_startup_ready()
+        magasins = [
+            ("token", self._magasin(frais=True)),
+            ("policy", self._magasin(frais=False)),
+        ]
+        h = Harnais(SondeFactice(reponse=SAIN))
+
+        with patch.object(store_refresh, "_magasins", return_value=magasins):
+            events = h.appel(chemin)
+
+        assert h.statut(events) == 503
+        assert h.corps(events)["status"] == lifecycle.HEALTH_UNAVAILABLE
+
+    def test_tous_les_magasins_doivent_etre_frais(self):
+        """Rendre frais un store ne doit pas masquer qu'un autre reste périmé."""
+        from mcp_vault import store_refresh
+
+        lifecycle.mark_startup_ready()
+        token = self._magasin(frais=False)
+        policy = self._magasin(frais=False)
+        h = Harnais(SondeFactice(reponse=SAIN))
+
+        token.freshness.mark_success()
+        with patch.object(
+            store_refresh, "_magasins", return_value=[("token", token), ("policy", policy)]
+        ):
+            events = h.appel("/health")
+
+        assert h.statut(events) == 503
+        assert h.corps(events)["status"] == lifecycle.HEALTH_UNAVAILABLE
+
+    def test_le_vrai_refresher_retablit_la_disponibilite_sans_redemarrage(self):
+        """Le correctif doit préserver la récupération autonome déjà architecturée."""
+        from mcp_vault import store_refresh
+
+        lifecycle.mark_startup_ready()
+        token = self._magasin(frais=True)
+
+        class MagasinRecuperable:
+            CACHE_TTL = 300.0
+
+            def __init__(self):
+                self.freshness = store_refresh.Freshness()
+                self.refresh_lock = asyncio.Lock()
+                self.chargements = 0
+
+            def load(self):
+                self.chargements += 1
+                self.freshness.mark_success()
+
+        policy = MagasinRecuperable()
+        h = Harnais(SondeFactice(reponse=SAIN))
+
+        async def scenario():
+            with patch.object(
+                store_refresh,
+                "_magasins",
+                return_value=[("token", token), ("policy", policy)],
+            ):
+                avant = await h.appel_async("/health")
+                await store_refresh.StoreRefresher("policy", policy)._refresh_once()
+                apres = await h.appel_async("/health")
+            return avant, apres
+
+        avant, apres = h.lance(scenario)
+
+        assert h.statut(avant) == 503
+        assert h.corps(avant)["status"] == lifecycle.HEALTH_UNAVAILABLE
+        assert policy.chargements == 1
+        assert h.statut(apres) == 200
+        assert h.corps(apres)["status"] == lifecycle.HEALTH_HEALTHY
+
+    def test_un_instantane_ancien_devient_indisponible(self):
+        """La garde couvre aussi une péremption après succès, pas seulement le boot."""
+        from mcp_vault import store_refresh
+
+        lifecycle.mark_startup_ready()
+        token = self._magasin(frais=True)
+        token.freshness._last_success -= token.CACHE_TTL + 1
+        h = Harnais(SondeFactice(reponse=SAIN))
+
+        with patch.object(store_refresh, "_magasins", return_value=[("token", token)]):
+            events = h.appel("/health")
+
+        assert h.statut(events) == 503
+        assert h.corps(events)["status"] == lifecycle.HEALTH_UNAVAILABLE
+
+    def test_aucun_magasin_configure_conserve_le_mode_standalone(self):
+        """Un Vault sans stores S3 ne doit pas devenir indisponible par défaut."""
+        from mcp_vault import store_refresh
+
+        lifecycle.mark_startup_ready()
+        h = Harnais(SondeFactice(reponse=SAIN))
+
+        with patch.object(store_refresh, "_magasins", return_value=[]):
+            events = h.appel("/health")
+
+        assert h.statut(events) == 200
+        assert h.corps(events)["status"] == lifecycle.HEALTH_HEALTHY
+
+    def test_la_sonde_de_fraicheur_ne_declenche_aucun_chargement(self):
+        """La readiness lit la mémoire ; elle ne doit jamais devenir un appel S3."""
+        from mcp_vault import store_refresh
+
+        lifecycle.mark_startup_ready()
+        token = self._magasin(frais=True)
+        token.load = lambda: (_ for _ in ()).throw(
+            AssertionError("load() appelé depuis /health")
+        )
+        h = Harnais(SondeFactice(reponse=SAIN))
+
+        with patch.object(store_refresh, "_magasins", return_value=[("token", token)]), \
+             patch.object(
+                 store_refresh,
+                 "run_blocking",
+                 side_effect=AssertionError("run_blocking() appelé depuis /health"),
+             ):
+            events = h.appel("/health")
+
+        assert h.statut(events) == 200
+        assert h.corps(events)["status"] == lifecycle.HEALTH_HEALTHY
+
+    def test_un_rapport_inexploitable_echoue_ferme_sans_fuite(self):
+        """Une erreur d'observation ne doit devenir ni 500, ni diagnostic public."""
+        from mcp_vault import store_refresh
+
+        lifecycle.mark_startup_ready()
+        h = Harnais(SondeFactice(reponse=SAIN))
+
+        with patch.object(
+            store_refresh, "_magasins", side_effect=RuntimeError(DETAIL_SENSIBLE)
+        ):
+            events = h.appel("/health")
+            status, detail = h.lance(lifecycle.availability_status)
+
+        assert h.statut(events) == 503
+        assert h.corps(events)["status"] == lifecycle.HEALTH_UNAVAILABLE
+        assert DETAIL_SENSIBLE not in json.dumps(h.corps(events))
+        assert status == lifecycle.HEALTH_UNAVAILABLE
+        assert detail == "fraîcheur des magasins indisponible (RuntimeError)"
+        assert DETAIL_SENSIBLE not in detail
 
 
 # =============================================================================

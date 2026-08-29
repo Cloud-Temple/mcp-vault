@@ -683,7 +683,7 @@ coroutines**, and all three now go off-loop through `run_blocking`:
 | --- | --- |
 | Loading leaves the loop | The **fail-close** of #86/#69: on the Policy Store, the Mission Binding Store and the wrap registry, a snapshot stale beyond its TTL serves no decision |
 | Mutations too (`acreate`, `adelete`, `arevoke`, …) | The **shape**, **error codes** and **signatures** of existing tools. Two bounded changes: `system_health` gains `stores` / `stores_stale`, and the revocation `warning` **text** now states uncertainty instead of a certain future |
-| A wrap operation is atomic with respect to a reload | The Token Store's posture: `available` stays **diagnostic** there, a stale snapshot keeps authenticating |
+| A wrap operation is atomic with respect to a reload | The Token Store's decision-time posture: `available` stays **diagnostic** and a stale snapshot technically keeps authenticating. Since v0.20.1, readiness nevertheless returns `503` to signal that this decision is no longer guaranteed |
 
 **Two clocks, not one.** The historical code carried a single one, used both to
 date the snapshot and to throttle retries. A failure put the two at odds: pushing
@@ -719,11 +719,20 @@ figure to size that cost.
 > Serializing the registry on every supervision call would make the probe a cause
 > of the very problem it measures. `entries` is a plain in-memory count.
 
-> ⚠️ **The HTTP probes `/health` and `/healthz` are deliberately UNCHANGED.** A
-> stale store does not flip the container to `unhealthy`: restarting would not fix
-> an unreachable store, and the `HEALTHCHECK` would trigger a restart loop during
-> the incident. Staleness is operational information — it lives on
-> `system_health`, not on the orchestration probe.
+> `/health` and `/ready` now read freshness **from memory**: a configured store
+> that has never loaded or has become stale makes the service return `503
+> unavailable`, because authorization decisions can no longer be guaranteed.
+> These probes perform no S3 call; the existing refreshers can restore them
+> without a restart. `/healthz` remains an independent liveness probe.
+> `system_health` remains stricter and also checks current S3 connectivity.
+
+This **readiness** fail-close is uniform, including for the Token Store: it does
+not itself stop an MCP request that was already routed, but asks the orchestrator
+to remove the instance. Because the product is single-instance, an S3 outage
+long enough to make every store stale therefore causes total load-balancer
+unavailability. This is the contract explicitly retained in v0.20.1: an
+authorization decision that is no longer guaranteed must not be advertised as
+available.
 
 ⚠️ **Unchanged limit**: none of this closes the multi-instance write race
 (#13/#51). Last write still wins, and a background refresh even widens the window
@@ -740,9 +749,12 @@ Two distinct questions, two contracts:
 
 `status` belongs to a closed enumeration, one per question: `healthy` \| `sealed` \| `unavailable` for availability, `alive` for liveness. A sealed vault is therefore identifiable from the outside, without exposing any dependency detail — diagnostics stay in the logs and on `/admin/api/health`, which requires a valid bearer.
 
-The container `HEALTHCHECK` targets `/health`: an unavailable vault now shows as `unhealthy`. Point any *liveness* probe or autoheal at `/healthz`, never at `/health` — restarting a **sealed** vault does not unseal it.
+The container `HEALTHCHECK` targets `/health`: an unavailable vault now shows as `unhealthy`. Point any *liveness* probe or autoheal at `/healthz`, never at `/health` — restarting a **sealed** vault does not unseal it, and restarting does not restore S3.
 
-After a failed startup the state is **latched**: the signal does not turn green again on its own, a restart is required.
+After a failed startup the state is **latched**: the signal does not turn green
+again on its own, so a restart is required. This does not apply to a store that
+temporarily becomes stale after a successful startup: its refresher can restore
+`/health` without opening a new generation.
 
 ### OpenBao lifecycle
 ```
@@ -893,4 +905,4 @@ mcp-vault/
 
 ---
 
-**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.20.0
+**License**: Apache 2.0 | **Author**: Cloud Temple | **Version**: 0.20.1

@@ -688,7 +688,7 @@ menaient, **tous des coroutines**, et les trois sont déportés hors boucle par
 | --- | --- |
 | Le chargement quitte la boucle | Le **fail-close** de #86/#69 : sur le Policy Store, le Mission Binding Store et le registre wrap, un instantané périmé au-delà de son TTL ne sert plus aucune décision |
 | Les mutations aussi (`acreate`, `adelete`, `arevoke`, …) | La **forme**, les **codes d'erreur** et les **signatures** des outils existants. Deux évolutions bornées : `system_health` gagne `stores` / `stores_stale`, et le **texte** du `warning` de révocation énonce désormais l'incertitude au lieu d'un futur certain |
-| Une opération wrap est atomique vis-à-vis d'un rechargement | La posture du Token Store : `available` y reste **diagnostique**, un instantané périmé continue d'authentifier |
+| Une opération wrap est atomique vis-à-vis d'un rechargement | La posture du Token Store au point de décision : `available` y reste **diagnostique** et un instantané périmé continue techniquement d'authentifier. Depuis v0.20.1, la readiness passe néanmoins à `503` pour signaler que cette décision n'est plus garantie |
 
 **Deux horloges, pas une.** Le code historique n'en portait qu'une, qui servait à
 la fois à dater l'instantané et à brider les re-tentatives. Une panne les mettait
@@ -725,11 +725,19 @@ et nous n'avions aucun chiffre pour dimensionner ce coût.
 > cause du problème qu'elle mesure. `entries`, lui, est un simple décompte en
 > mémoire.
 
-> ⚠️ **Les sondes HTTP `/health` et `/healthz` sont volontairement INCHANGÉES.**
-> Un magasin périmé n'y bascule pas le conteneur en `unhealthy` : redémarrer ne
-> réparerait pas un stockage injoignable, et le `HEALTHCHECK` déclencherait une
-> boucle de redémarrage pendant l'incident. La péremption est une information
-> d'exploitation — elle vit sur `system_health`, pas sur la sonde d'orchestration.
+> `/health` et `/ready` lisent désormais la fraîcheur **en mémoire** : un magasin
+> configuré jamais chargé ou périmé rend le service `503 unavailable`, car les
+> décisions d'autorisation ne peuvent plus être garanties. Ces sondes ne font
+> aucun appel S3 ; les rafraîchisseurs existants peuvent les rétablir sans
+> redémarrage. `/healthz` reste une liveness indépendante. `system_health` reste
+> plus strict et vérifie en plus la connectivité S3 courante.
+
+Ce fail-close de **readiness** est uniforme, y compris pour le Token Store : il
+ne bloque pas lui-même une requête MCP déjà routée, mais demande à
+l'orchestrateur de retirer l'instance. Le produit étant mono-instance, une panne
+S3 assez longue pour périmer tous les magasins provoque donc une indisponibilité
+totale côté load balancer. C'est le contrat explicitement retenu en v0.20.1 :
+une décision d'autorisation non garantie ne doit pas être annoncée disponible.
 
 ⚠️ **Limite inchangée** : rien ici ne ferme la race d'écriture multi-instance
 (#13/#51). Le dernier écrivain gagne toujours, et un rafraîchissement de fond
@@ -747,9 +755,12 @@ Deux questions distinctes, deux contrats :
 
 `status` appartient à une énumération fermée, une par question : `healthy` \| `sealed` \| `unavailable` pour la disponibilité, `alive` pour la liveness. Un coffre scellé est donc identifiable de l'extérieur, sans qu'aucun détail de dépendance ne soit exposé — le diagnostic reste dans les journaux et sur `/admin/api/health`, qui exige un bearer valide.
 
-Le `HEALTHCHECK` du conteneur vise `/health` : un coffre indisponible apparaît désormais `unhealthy`. Branchez une éventuelle sonde de *liveness* ou un autoheal sur `/healthz`, jamais sur `/health` — redémarrer un coffre **scellé** ne le descelle pas.
+Le `HEALTHCHECK` du conteneur vise `/health` : un coffre indisponible apparaît désormais `unhealthy`. Branchez une éventuelle sonde de *liveness* ou un autoheal sur `/healthz`, jamais sur `/health` — redémarrer un coffre **scellé** ne le descelle pas, et redémarrer ne rétablit pas S3.
 
-Après un démarrage non abouti, l'état est **latché** : le signal ne repasse pas au vert tout seul, un redémarrage est requis.
+Après un démarrage non abouti, l'état est **latché** : le signal ne repasse pas
+au vert tout seul, un redémarrage est requis. Cette règle ne concerne pas un
+magasin temporairement périmé après un démarrage abouti : son refresher peut
+rétablir `/health` sans nouvelle génération.
 
 ### Lifecycle OpenBao
 ```
@@ -898,4 +909,4 @@ mcp-vault/
 
 ---
 
-**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.20.0
+**Licence** : Apache 2.0 | **Auteur** : Cloud Temple | **Version** : 0.20.1

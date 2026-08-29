@@ -1,6 +1,6 @@
 # Architecture — MCP Vault
 
-> **Version** : 0.20.0 | **Date** : 2026-08-29 | **Auteur** : Cloud Temple
+> **Version** : 0.20.1 | **Date** : 2026-08-29 | **Auteur** : Cloud Temple
 > **Projet** : mcp-vault | **Licence** : Apache 2.0  
 > **Statut** : ✅ Implémenté — Production-ready (PKI interne v0.5.x + C18 v0.6.x)
 
@@ -218,6 +218,18 @@ Depuis l'issue #103, ces endpoints répondent à **deux questions distinctes** :
 | --- | --- | --- | --- |
 | `/healthz` | *liveness* — le processus répond-il ? | 200 `alive` | **200 `alive`** |
 | `/health`, `/ready` | *disponibilité* — le coffre peut-il servir ? | 200 `healthy` | **503** |
+
+La disponibilité exige OpenBao initialisé et descellé, un démarrage abouti et
+des magasins configurés frais. La fraîcheur est lue uniquement en mémoire :
+aucun appel S3 ne part de `/health` ou `/ready`, et les rafraîchisseurs peuvent
+rétablir le signal après une panne transitoire. `system_health` ajoute une
+vérification distincte de la connectivité S3 courante.
+
+Le fail-close est uniforme, Token Store compris. Il ne bloque pas directement
+une requête déjà routée, mais rend l'instance indisponible pour l'orchestrateur.
+En mono-instance, une panne S3 assez longue pour périmer tous les magasins
+produit donc une indisponibilité totale assumée ; un autoheal doit sonder
+`/healthz`, car un redémarrage ne rétablit pas S3.
 
 ```json
 {"status": "healthy", "service": "mcp-vault", "version": "0.15.0", "transport": "streamable-http"}
