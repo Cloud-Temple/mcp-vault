@@ -4,11 +4,13 @@ Contrat de reproductibilité de l'image (issue #125).
 
 ## Le défaut
 
-`src/mcp_vault/server.py` importe `mcp.server.fastmcp.FastMCP`. Le Dockerfile
-n'installait que `requirements.txt`, où MCP est déclaré par un PLANCHER
+Jusqu'à la v0.19.1, `src/mcp_vault/server.py` importait
+`mcp.server.fastmcp.FastMCP`. Le Dockerfile n'installait que
+`requirements.txt`, où MCP était déclaré par un PLANCHER
 (`mcp[cli]>=1.23.0`). Le jour où `mcp 2.0.0` est paru en amont — sans ce module
-—, toute construction fraîche a cessé de démarrer :
-`ModuleNotFoundError: No module named 'mcp.server.fastmcp'`, conteneur code 1.
+—, toute construction fraîche a cessé de démarrer. La v0.20.0 migre vers
+`mcp.server.MCPServer` ; le verrou et la garde d'import continuent de protéger
+chaque stage contre une publication amont incompatible.
 
 Ce n'était pas une régression de la version en cours : la ligne est non bornée
 depuis la v0.4.5 et le Dockerfile n'a JAMAIS consommé `requirements.lock`, livré
@@ -31,7 +33,7 @@ Classification VÉRIFIÉE en retirant le correctif et en rejouant le fichier
 (`git stash` des 3 fichiers modifiés) — 4 échecs, 2 succès :
 
 - **RED sans le correctif** (preuves du défaut) : `..._consumes_the_lock`,
-  `..._bounds_mcp_below_the_breaking_major`, `..._verifies_the_import...`,
+  `..._bounds_mcp_to_the_supported_v2_major`, `..._verifies_the_import...`,
   `..._never_installs_the_test_tooling`.
 - **Déjà GREEN** (gardes contre une dérive FUTURE du verrou, pas des preuves) :
   `..._satisfies_every_declared_floor`, `..._is_pinned_in_the_lock`.
@@ -130,19 +132,18 @@ def test_every_dockerfile_pip_install_consumes_the_lock() -> None:
     )
 
 
-def test_requirements_bounds_mcp_below_the_breaking_major() -> None:
-    """
-    Le verrou protège l'IMAGE. Un `pip install -r requirements.txt` hors Docker
-    (venv de développement) réinstallerait le défaut.
-    """
+def test_requirements_bounds_mcp_to_the_supported_v2_major() -> None:
+    """Le développement et l'image doivent résoudre le même majeur MCP v2."""
     mcp = _requirements().get("mcp")
     assert mcp is not None, "mcp absent de requirements.txt"
-    assert not mcp.specifier.contains(Version("2.0.0"), prereleases=True), (
-        f"requirements.txt autorise mcp 2.0.0 ({mcp.specifier}) — or ce majeur a "
-        "supprimé `mcp.server.fastmcp`, importé par src/mcp_vault/server.py"
+    assert mcp.specifier.contains(Version("2.1.1"), prereleases=True), (
+        f"requirements.txt exclut la version v2 verrouillée : {mcp.specifier}"
     )
-    assert mcp.specifier.contains(Version("1.26.0")), (
-        f"la borne haute ne doit pas exclure la version verrouillée : {mcp.specifier}"
+    assert not mcp.specifier.contains(Version("1.26.0"), prereleases=True), (
+        f"requirements.txt autorise encore le SDK v1 : {mcp.specifier}"
+    )
+    assert not mcp.specifier.contains(Version("3.0.0"), prereleases=True), (
+        f"requirements.txt autorise un futur majeur non audité : {mcp.specifier}"
     )
 
 
@@ -192,10 +193,9 @@ def test_every_runtime_requirement_is_pinned_in_the_lock() -> None:
     )
 
 
-# NOTE (revue pré-commit) : un test « le verrou épingle mcp en 1.x » a été retiré
-# ici — il est logiquement impliqué par les deux tests ci-dessus (le `.txt` borne
-# `<2`, et le verrou doit satisfaire tous les specifiers déclarés). Le garder
-# n'ajoutait aucun invariant, seulement une maintenance.
+# NOTE : une assertion séparée « le verrou épingle mcp en 2.x » serait
+# logiquement impliquée par les deux tests ci-dessus (le `.txt` borne `>=2,<3`
+# et le verrou doit satisfaire tous les specifiers déclarés).
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -211,7 +211,7 @@ def test_build_verifies_the_import_that_broke_production() -> None:
     global laisserait passer deux gardes dans le même stage, en laissant un
     autre stage capable de produire une image qui ne démarre pas.
     """
-    guard = re.compile(r"^RUN python -c .from mcp\.server\.fastmcp import FastMCP.$", re.M)
+    guard = re.compile(r"^RUN python -c .from mcp\.server import MCPServer.$", re.M)
 
     unguarded = [
         name for name, body in _stages().items()

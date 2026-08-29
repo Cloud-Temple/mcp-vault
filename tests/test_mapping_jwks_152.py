@@ -322,7 +322,7 @@ class TestSecretWrapNeValidePasDeJetonDeMission:
 
         from mcp_vault import server as s
 
-        cible = getattr(s.secret_wrap, "fn", s.secret_wrap)  # tolère l'enrobage FastMCP
+        cible = getattr(s.secret_wrap, "fn", s.secret_wrap)  # tolère le décorateur MCP
         params = list(inspect.signature(cible).parameters)
         assert "mission_token" not in params, (
             f"`secret_wrap` prend désormais un mission_token ({params}) — le "

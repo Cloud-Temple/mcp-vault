@@ -26,7 +26,7 @@ FROM python:3.12-slim@sha256:3d5ed973e45820f5ba5e46bd065bd88b3a504ff0724d85980dc
 # Metadata
 LABEL maintainer="Cloud Temple" \
       description="MCP Vault — Secure secrets management for AI agents" \
-      version="0.19.1"
+      version="0.20.0"
 
 # System deps for OpenBao
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -47,20 +47,18 @@ WORKDIR /app
 
 # Install Python dependencies — LE VERROU FAIT FOI (issue #125)
 # `requirements.txt` déclare des CONTRAINTES, pas des versions résolues : des
-# planchers pour la plupart, plus une borne haute sur `mcp` et une égalité
+# planchers pour la plupart, plus des bornes de majeur sur `mcp` et une égalité
 # stricte sur `uvicorn`. Une construction fraîche y résout donc la dernière
-# version publiée en amont qui les satisfait. Quand `mcp 2.0.0` est sorti — sans
-# `mcp.server.fastmcp`, importé par server.py — toute image reconstruite a cessé
-# de démarrer, sur TOUTES les versions depuis la v0.4.5. Le verrou existait déjà
-# mais n'était pas consommé ici.
+# version publiée en amont qui les satisfait. Le verrou empêche qu'une publication
+# amont change silencieusement le SDK livré.
 COPY requirements.lock .
 RUN pip install --no-cache-dir -r requirements.lock
 
-# Garde de CONSTRUCTION (issue #125) : l'import qui a cassé la production est
+# Garde de CONSTRUCTION (issue #125) : l'import public du serveur réellement livré est
 # vérifié ici, à la construction. Une résolution de dépendances incompatible
 # fait désormais échouer le `build` — elle ne se découvre plus au démarrage du
 # conteneur, en aval de la chaîne de livraison.
-RUN python -c "from mcp.server.fastmcp import FastMCP"
+RUN python -c "from mcp.server import MCPServer"
 
 # Python path pour les imports
 ENV PYTHONPATH=/app/src
@@ -104,7 +102,7 @@ WORKDIR /app
 # la résolution, donc le build — bruyamment, et non en production.
 COPY requirements.lock requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.lock -r requirements.txt
-RUN python -c "from mcp.server.fastmcp import FastMCP"
+RUN python -c "from mcp.server import MCPServer"
 
 ENV PYTHONPATH=/app/src
 COPY src/ ./src/

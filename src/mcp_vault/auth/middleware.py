@@ -3,7 +3,7 @@
 Middlewares ASGI : authentification, logging, health check.
 
 Pile d'exécution (ordre) :
-    AdminMiddleware → HealthCheckMiddleware → AuthMiddleware → LoggingMiddleware → FastMCP
+    AdminMiddleware → HealthCheckMiddleware → AuthMiddleware → LoggingMiddleware → MCPServer
 """
 
 import functools

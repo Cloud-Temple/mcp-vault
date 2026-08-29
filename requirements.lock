@@ -1,63 +1,53 @@
 # requirements.lock — Versions exactes pinnées (P2-3 / V3-08)
 #
-# Généré initialement le 2026-03-26 depuis
-#   docker compose run --rm --no-deps --entrypoint pip mcp-vault freeze
-# sur python:3.12-slim@sha256:3d5ed973e45820f5ba5e46bd065bd88b3a504ff0724d85980dcd05eab361fcf4
-# puis amendé à la main (2026-08-11, issue #125 : ajout de python-dateutil).
-#
-# ⚠️ RÉGÉNÉRATION (issue #125) — l'ancienne procédure n'est plus valable telle
-# quelle : depuis que le Dockerfile installe CE fichier et non `requirements.txt`,
-# reconstruire l'image de production puis y faire un `pip freeze` réinstallerait
-# simplement l'ancien verrou. Pour prendre en compte une modification de
-# `requirements.txt`, il faut résoudre à partir des CONTRAINTES, dans la même
-# image de base :
-#   docker run --rm -v "$PWD:/w" -w /w \
+# Régénéré le 2026-08-29 depuis les contraintes de requirements.txt dans
+# l'image Python 3.12 exacte du Dockerfile :
+#   docker run --rm -v "$PWD:/w:ro" -w /w \
 #     python:3.12-slim@sha256:3d5ed973e45820f5ba5e46bd065bd88b3a504ff0724d85980dcd05eab361fcf4 \
 #     sh -c 'pip install -q -r requirements.txt && pip freeze'
-# puis retirer de la sortie l'outillage de test (pytest, pytest-asyncio, pluggy,
+# puis retrait de l'outillage de test (pytest, pytest-asyncio, pluggy,
 # iniconfig), qui ne doit pas entrer dans l'image de production. Le contrat est
 # vérifié par tests/test_packaging_contract_125.py.
 #
-# Ce fichier garantit une résolution reproductible des dépendances PYTHON et
-# protège contre les attaques supply chain (typosquatting, version hijacking).
-# Il ne fige ni les paquets système (apt), ni le binaire OpenBao.
+# Ce fichier garantit une résolution reproductible des dépendances Python et
+# protège contre les dérives de publication amont. Il ne fige ni les paquets
+# système (apt), ni le binaire OpenBao.
 #
 # Usage :
 #   pip install --no-cache-dir -r requirements.lock
-#
-# Pour mettre à jour : voir la procédure de RÉGÉNÉRATION en tête de fichier.
-# (L'ancienne procédure — rebuild de l'image puis `pip freeze` dedans — a été
-#  retirée ici : elle réinstallerait ce verrou et ne prendrait donc jamais en
-#  compte une modification de requirements.txt.)
 
-# --- MCP Framework ---
-mcp==1.26.0
-httpx-sse==0.4.3
-sse-starlette==3.3.3
-starlette==1.0.0
+# --- MCP Framework v2 ---
+mcp==2.1.1
+mcp-types==2.1.1
+httpx2==2.12.0
+httpcore2==2.12.0
+opentelemetry-api==1.44.0
+truststore==0.10.4
+sse-starlette==3.4.8
+starlette==1.6.0
 
 # --- Configuration ---
-pydantic==2.12.5
-pydantic-settings==2.13.1
-pydantic_core==2.41.5
+pydantic==2.13.5
+pydantic-settings==2.15.0
+pydantic_core==2.46.5
 
 # --- S3 (Token Store + Vault Storage Sync) ---
-boto3==1.42.73
-botocore==1.42.73
-s3transfer==0.16.0
+boto3==1.43.83
+botocore==1.43.83
+s3transfer==0.19.2
 jmespath==1.1.0
 python-dateutil==2.9.0.post0
 
-# --- OpenBao client (compatible Vault API) ---
+# --- OpenBao client ---
 hvac==2.4.0
-requests==2.32.5
+requests==2.34.2
 
-# --- Crypto (chiffrement clés unseal — Option C) ---
-cryptography==46.0.5
-cffi==2.0.0
+# --- Crypto ---
+cryptography==50.0.1
+cffi==2.1.1
 pycparser==3.0
 
-# --- HTTP client (health checks, CLI) ---
+# --- HTTP client applicatif ---
 httpx==0.28.1
 httpcore==1.0.9
 h11==0.16.0
@@ -65,49 +55,44 @@ h11==0.16.0
 # --- ASGI ---
 uvicorn==0.42.0
 uvloop==0.22.1
-httptools==0.7.1
-watchfiles==1.1.1
-websockets==16.0
-python-multipart==0.0.22
+httptools==0.8.0
+watchfiles==1.2.0
+websockets==17.1
+python-multipart==0.0.32
 
 # --- CLI ---
-click==8.3.1
-rich==14.3.3
-python-dotenv==1.2.2
+click==8.5.0
+rich==15.0.0
+python-dotenv==1.2.3
+typer==0.27.2
+shellingham==1.5.4
+annotated-doc==0.0.5
+markdown-it-py==4.2.0
+mdurl==0.1.2
+Pygments==2.21.0
 
 # --- Common dependencies ---
-anyio==4.12.1
-annotated-types==0.7.0
+anyio==4.14.2
+annotated-types==0.8.0
 attrs==26.1.0
-certifi==2026.2.25
-charset-normalizer==3.4.6
-idna==3.11
-markdown-it-py==4.0.0
-mdurl==0.1.2
-packaging==26.0
-Pygments==2.19.2
+certifi==2026.7.22
+charset-normalizer==3.5.1
+idna==3.19
+packaging==26.3
 PyYAML==6.0.3
 referencing==0.37.0
-rpds-py==0.30.0
+rpds-py==2026.6.3
 six==1.17.0
-typing-inspection==0.4.2
-typing_extensions==4.15.0
-urllib3==2.6.3
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+urllib3==2.7.0
 
-# --- JSON Schema (transitive) ---
+# --- JSON Schema ---
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
 
-# --- Auth (transitive) ---
-PyJWT==2.12.1
+# --- Auth ---
+PyJWT==2.13.0
 
-# --- Typer/Shell (transitive) ---
-typer==0.24.1
-shellingham==1.5.4
-
-# --- Annotation (transitive) ---
-annotated-doc==0.0.4
-
-# NOTE: Les dépendances de test (pytest, pytest-asyncio) sont dans
-# le stage Docker "test" uniquement, pas dans l'image de production.
-# Voir requirements.txt pour les bornes >= et Dockerfile stage 3.
+# NOTE: pytest, pytest-asyncio, pluggy et iniconfig restent uniquement dans le
+# stage Docker "test" via requirements.txt.

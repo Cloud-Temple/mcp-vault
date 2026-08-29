@@ -1,6 +1,6 @@
 # Documentation Technique — MCP Vault
 
-> **Version** : 0.19.1 | **Date** : 2026-08-20 | **Auteur** : Cloud Temple
+> **Version** : 0.20.0 | **Date** : 2026-08-29 | **Auteur** : Cloud Temple
 > **Licence** : Apache 2.0 | **Statut** : ✅ Production-ready (audit V2.1 complété + PKI interne v0.5.1)
 
 ---
@@ -53,7 +53,7 @@ MCP Vault est un serveur MCP (Model Context Protocol) qui fournit une gestion s�
 │  │  HealthCheckMiddleware → /health, /healthz, /ready       │  │
 │  │  AuthMiddleware     → Bearer token → contextvars         │  │
 │  │  LoggingMiddleware  → stderr + ring buffer (200 entrées) │  │
-│  │  FastMCP            → /mcp (Streamable HTTP, 39 outils)  │  │
+│  │  MCPServer          → /mcp (Streamable HTTP, 39 outils)  │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │                                                                │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
@@ -85,9 +85,22 @@ Les requêtes traversent 6 couches middleware dans cet ordre :
 | 2   | `HealthCheckMiddleware` | Liveness 200 / disponibilité 200-503  | `/health`, `/healthz`, `/ready` |
 | 3   | `AuthMiddleware`        | Extraction et validation Bearer token | Toutes sauf publiques           |
 | 4   | `LoggingMiddleware`     | Log stderr + ring buffer mémoire      | Toutes les requêtes HTTP        |
-| 5   | `FastMCP`               | Outils MCP via Streamable HTTP        | `/mcp`                          |
+| 5   | `MCPServer`             | Outils MCP via Streamable HTTP        | `/mcp`                          |
 
 `PkiMiddleware` (v0.5.0) est la couche la plus externe — intercepte avant l'auth. Les endpoints `/acme/*` et `/pki/ca/*.pem` sont délibérément non-authentifiés (standard PKI/ACME). Sécurité : anti-traversal path, validation query string, `follow_redirects=False`.
+
+Le transport MCP v0.20.0 repose sur `mcp==2.1.1`, sert le protocole moderne
+`2026-07-28` et les clients legacy jusqu'à `2025-11-25`, avec
+`stateless_http=True` dans les deux ères. L'identité bearer est donc évaluée à
+chaque requête et le transport n'exige plus d'affinité de session. Le produit
+reste mono-instance : OpenBao embarqué, synchronisation S3 last-write-wins et
+caches d'autorisation excluent encore une topologie multi-réplica sûre.
+`subscriptions/listen` est annoncé par le SDK mais reste inerte :
+aucune ressource MCP, publication applicative ou persistance d'événement.
+
+Une mutation dont la connexion se ferme avant la réponse terminale ne doit pas
+être réessayée automatiquement. Son effet peut déjà être appliqué ; cela inclut
+`secret_wrap_lookup`, qui révoque des wraps.
 
 ---
 
@@ -1129,7 +1142,8 @@ Voir `ARCHITECTURE.md §11.3` pour les diagrammes d'architecture et les étapes 
 
 | Package             | Version | Rôle                                          |
 | ------------------- | ------- | --------------------------------------------- |
-| `mcp[cli]`          | ≥1.23.0,<2 | Framework MCP (FastMCP, Streamable HTTP). Plancher : CVE-2025-53366 / CVE-2025-66416 (V3-01). Borne haute : `mcp 2.0.0` supprime `mcp.server.fastmcp` (#125) |
+| `mcp[cli]`          | ≥2,<3 ; verrou 2.1.1 | SDK MCP v2 (`MCPServer`, client moderne + compatibilité legacy, Streamable HTTP stateless). Le majeur suivant reste exclu jusqu'à audit |
+| `httpx2`            | ≥2,<3 ; verrou 2.12.0 | Transport HTTP du client MCP v2, configuré avec le bearer par le CLI |
 | `pydantic-settings` | ≥2.0    | Configuration env vars                        |
 | `boto3`             | ≥1.38.43 | Client S3 Dell ECS — plancher imposé par `PutObject.IfMatch` (écriture conditionnelle, issue #121) |
 | `hvac`              | ≥2.3.0  | Client Python pour OpenBao/Vault              |

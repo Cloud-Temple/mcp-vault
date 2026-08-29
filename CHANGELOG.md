@@ -1,5 +1,64 @@
 # Changelog — MCP Vault
 
+## [0.20.0] — 2026-08-29
+
+### Migration maîtrisée vers le SDK MCP Python v2
+
+- Dépendance livrée verrouillée sur `mcp==2.1.1` ; le serveur utilise l'API
+  publique `mcp.server.MCPServer` et le CLI le client public v2 avec `httpx2`.
+- Le même `/mcp` accepte le protocole moderne `2026-07-28` et les clients
+  legacy jusqu'à `2025-11-25`. Un probe versionné installe
+  `mcp==1.26.0` dans un environnement temporaire et traverse le WAF réel.
+- Le transport HTTP est stateless dans les deux ères. Ce choix ferme aussi un
+  héritage d'identité observé sous v1 : une connexion initialisée avec le jeton
+  A puis appelée avec B ne peut plus exécuter sous A. Le **transport** n'exige
+  plus d'affinité de session. Le produit reste toutefois mono-instance :
+  OpenBao embarqué, synchronisation S3 last-write-wins et caches
+  d'autorisation ne permettent pas encore un déploiement multi-réplica sûr.
+- Les invariants d'authentification, d'entrelacement `ContextVar`, de nettoyage
+  après erreur/fermeture et de lifespan réel (`startup` puis
+  `shutdown(skip_upload=False)`) sont testés à travers `create_app()`.
+- Le contrat historique « paramètre d'outil surnuméraire ignoré » est conservé.
+  Le commentaire WAF précise désormais que cette propriété vient du SDK et des
+  signatures actuelles, pas du WAF.
+- Le CLI ne dépend plus du hook privé de progression v1. Une réponse HTTP 200
+  dont le flux SSE se ferme sans résultat terminal rend une erreur bornée, sans
+  réémission de méthode ni tempête de reconnexion. Les annulations et
+  interruptions sont propagées, y compris lorsqu'un TaskGroup les encapsule.
+- La sécurité anti-DNS-rebinding est vérifiée sur la vraie `create_app()` dans
+  les deux sens : FQDN public accepté, Host étranger refusé. La grammaire WAF
+  du `Content-Type` a été revalidée contre le handler exact du SDK 2.1.1.
+
+Quatre mutations ciblées ont été exécutées sur une copie du dépôt, quatre ont
+été détectées : retrait du stateless, retrait de la sécurité transport, retrait
+du reset du `ContextVar` et absorption de l'annulation par le CLI.
+
+#### Capability de souscription imposée par le SDK
+
+Le SDK v2 annonce automatiquement `subscriptions/listen`. Cette capability est
+**inerte dans MCP Vault** : aucune ressource MCP, aucun appel applicatif de
+publication, aucun `EventStore`, aucun replay, transport stateless. Le wire est
+testé : l'appel sans bearer est refusé ; pendant une vraie mutation
+`vault_create` sous une autre identité, l'appel authentifié reçoit seulement
+l'accusé protocolaire et aucun événement applicatif.
+Ce résidu doit être réaudité à chaque montée de version du SDK et avant tout
+ajout de ressource, publication ou store d'événements.
+
+#### Exploitation, retry et rollback
+
+- Aucune migration de données ni de configuration n'est requise.
+- Après une coupure sans réponse terminale, **ne pas réessayer automatiquement
+  une mutation** : son effet peut déjà avoir eu lieu. `secret_wrap_lookup` est
+  notamment une mutation de révocation malgré son nom.
+- Rollback applicatif : redéployer un **artefact v0.19.1 déjà construit** ; ne
+  pas reconstruire ce tag, dont le Dockerfile historique ne consommait pas le
+  verrou et peut résoudre un SDK incompatible (#125). Les clients legacy
+  restent compatibles ; un client ayant adopté exclusivement le protocole
+  moderne `2026-07-28` ne pourra plus parler à v0.19.1 et devra repasser en
+  mode legacy.
+- Aucun journal d'idempotence générique ni vendoring du SDK n'a été ajouté :
+  ces couches ne répondent à aucun besoin actuel.
+
 ## [0.19.1] — 2026-08-20
 
 ### Balayage des `.match()` sur motif ancré — la classe, pas l'occurrence (#160)

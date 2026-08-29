@@ -6,8 +6,8 @@ de v0.12.0.
 v0.12.0 rend `mission_id` OBLIGATOIRE sur `secret_wrap_lookup` et
 `secret_wrap_status`. Faut-il une fenêtre de maintenance pour basculer Vault et le
 broker `mcp-mission` ensemble ? Non — et cela tient à une propriété **observée et
-verrouillée de notre pile MCP/FastMCP** (`mcp==1.26.0`, identique entre v0.11.0 et
-v0.12.0), pas à une garantie normative du protocole : un paramètre surnuméraire est
+verrouillée de notre pile MCPServer** (`mcp==2.1.1`), pas à une garantie
+normative du protocole : un paramètre surnuméraire est
 IGNORÉ, un paramètre requis manquant est REFUSÉ. Une release Mission qui envoie
 toujours `mission_id` fonctionne donc contre les deux versions.
 
@@ -21,8 +21,8 @@ compatibilité sans faire échouer ces tests.
 
 import pytest
 
-from mcp.server.fastmcp import FastMCP
-from mcp.shared.memory import create_connected_server_and_client_session
+from mcp import Client
+from mcp.server import MCPServer
 
 
 def _serveur_deux_signatures():
@@ -32,7 +32,7 @@ def _serveur_deux_signatures():
     indiscernable d'un refus à la validation — or c'est cette distinction qui
     borne les dégâts.
     """
-    srv = FastMCP("contrat-signatures")
+    srv = MCPServer("contrat-signatures")
     vus: list = []
 
     @srv.tool()
@@ -63,12 +63,12 @@ class TestToleranceAuxParametresParLeProtocole:
         PRÉVENIR, pas seulement corriger le test.
         """
         srv, vus = _serveur_deux_signatures()
-        async with create_connected_server_and_client_session(srv) as session:
-            res = await session.call_tool(
+        async with Client(srv) as client:
+            res = await client.call_tool(
                 "ancienne_signature",
                 {"operation_id": "op-1", "mission_id": "m-1"})
 
-        assert res.isError is False, (
+        assert res.is_error is False, (
             f"un paramètre surnuméraire a été REFUSÉ par le protocole : {res!r}")
         assert vus == [("ancienne", "op-1")], (
             f"le corps n'a pas reçu exactement l'argument attendu : {vus!r}")
@@ -80,11 +80,11 @@ class TestToleranceAuxParametresParLeProtocole:
         (`isError`), pas une enveloppe métier.
         """
         srv, vus = _serveur_deux_signatures()
-        async with create_connected_server_and_client_session(srv) as session:
-            res = await session.call_tool("nouvelle_signature",
-                                          {"operation_id": "op-1"})
+        async with Client(srv) as client:
+            res = await client.call_tool("nouvelle_signature",
+                                         {"operation_id": "op-1"})
 
-        assert res.isError is True, (
+        assert res.is_error is True, (
             f"un argument requis manquant n'a PAS été refusé : {res!r}")
         assert vus == [], (
             f"le corps de l'outil a été exécuté malgré un argument requis "
@@ -94,12 +94,12 @@ class TestToleranceAuxParametresParLeProtocole:
         """ANTI-COMPLAISANCE : sans ce test, un serveur qui refuserait TOUT
         passerait les deux précédents."""
         srv, vus = _serveur_deux_signatures()
-        async with create_connected_server_and_client_session(srv) as session:
-            res = await session.call_tool(
+        async with Client(srv) as client:
+            res = await client.call_tool(
                 "nouvelle_signature",
                 {"operation_id": "op-1", "mission_id": "m-1"})
 
-        assert res.isError is False, res
+        assert res.is_error is False, res
         assert vus == [("nouvelle", "op-1", "m-1")]
 
 
@@ -125,7 +125,7 @@ class TestContratPublieDesOutilsWrap:
     async def _schemas(self):
         """Surface PUBLIÉE : ce que `tools/list` annonce réellement."""
         from mcp_vault.server import mcp
-        return {t.name: (t.inputSchema or {}) for t in await mcp.list_tools()}
+        return {t.name: (t.input_schema or {}) for t in await mcp.list_tools()}
 
     @pytest.mark.parametrize("outil", sorted(ATTENDU))
     async def test_les_parametres_requis_sont_exactement_ceux_du_contrat(self, outil):

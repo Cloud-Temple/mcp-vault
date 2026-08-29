@@ -508,7 +508,7 @@ async def _api_health(send, mcp):
     if vf.exists():
         version = vf.read_text().strip()
 
-    tools = [t.name for t in mcp._tool_manager.list_tools()] if mcp else []
+    tools = [t.name for t in await mcp.list_tools()] if mcp else []
 
     availability, availability_detail = await availability_status()
 

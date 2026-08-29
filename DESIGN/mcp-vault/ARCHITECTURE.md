@@ -1,6 +1,6 @@
 # Architecture — MCP Vault
 
-> **Version** : 0.19.1 | **Date** : 2026-08-20 | **Auteur** : Cloud Temple
+> **Version** : 0.20.0 | **Date** : 2026-08-29 | **Auteur** : Cloud Temple
 > **Projet** : mcp-vault | **Licence** : Apache 2.0  
 > **Statut** : ✅ Implémenté — Production-ready (PKI interne v0.5.x + C18 v0.6.x)
 
@@ -50,7 +50,7 @@
                            ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │               MCP Vault Server (:8030, réseau interne)           │
-│               Python / FastMCP (starter-kit)                     │
+│               Python / MCPServer (SDK MCP v2)                   │
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │  Pile Middleware ASGI (6 couches, voir §2.3)               │  │
@@ -60,7 +60,7 @@
 │  │  HealthCheckMiddleware  → /health, /healthz, /ready        │  │
 │  │  AuthMiddleware         → Bearer Token + vault_ids         │  │
 │  │  LoggingMiddleware      → Ring buffer 200 entrées          │  │
-│  │  FastMCP app            → MCP Protocol (Streamable HTTP)   │  │
+│  │  MCPServer app          → MCP Protocol (Streamable HTTP)   │  │
 │  └────────────────────────────────────────────────────────────┘  │
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐  │
@@ -140,7 +140,7 @@
 | **HealthCheckMiddleware** | Health check HTTP (/health, /healthz, /ready)    | ASGI middleware               |
 | **AuthMiddleware**        | Auth Bearer Token + **PEP mission JWT** (#47) + **octroi périmètre vault** (MissionBindingStore, #69) + ContextVar | ASGI middleware (starter-kit) |
 | **LoggingMiddleware**     | Logging requêtes + ring buffer mémoire           | ASGI middleware (starter-kit) |
-| **Outils MCP**            | Façade MCP (39 outils)                           | FastMCP (starter-kit)         |
+| **Outils MCP**            | Façade MCP (39 outils)                           | `MCPServer` (`mcp==2.1.1`)    |
 | **hvac client**           | Client Python vers OpenBao                       | `hvac` library                |
 | **OpenBao process**       | Moteur de secrets (chiffrement, policies, audit) | Binaire `bao` (Go, embedded)  |
 | **S3 Sync Manager**       | Synchronisation storage local ↔ S3               | boto3 + tar/gzip              |
@@ -152,7 +152,7 @@ L'application MCP Vault est assemblée en 6 couches ASGI, empilées de l'extéri
 vers l'intérieur. Chaque couche intercepte les requêtes avant de les passer à la suivante :
 
 ```
-PkiMiddleware → AdminMiddleware → HealthCheckMiddleware → AuthMiddleware → LoggingMiddleware → FastMCP
+PkiMiddleware → AdminMiddleware → HealthCheckMiddleware → AuthMiddleware → LoggingMiddleware → MCPServer
 ```
 
 | Couche (ext → int)        | Intercepte                                  | Passe au suivant si        |
@@ -162,7 +162,7 @@ PkiMiddleware → AdminMiddleware → HealthCheckMiddleware → AuthMiddleware �
 | **HealthCheckMiddleware** | `/health`, `/healthz`, `/ready`             | Pas un chemin health       |
 | **AuthMiddleware**        | Toutes les requêtes MCP (Bearer **ou** PEP mission JWT) | Token valide → ContextVar  |
 | **LoggingMiddleware**     | Toutes les requêtes                         | Log + ring buffer 200 ent. |
-| **FastMCP app**           | MCP Protocol (Streamable HTTP)              | —                          |
+| **MCPServer app**         | MCP Protocol (Streamable HTTP)              | —                          |
 
 `PkiMiddleware` (v0.5.0) est la couche la plus externe : les endpoints ACME/PKI
 sont délibérément non-authentifiés (standard PKI/ACME — JWS RFC 8555), avec
@@ -176,15 +176,37 @@ def create_app():
     from .admin.middleware import AdminMiddleware
     from .pki_middleware import PkiMiddleware
 
-    app = mcp.streamable_http_app()       # FastMCP (innermost)
+    app = mcp.streamable_http_app(
+        stateless_http=True,
+        transport_security=_build_transport_security(),
+    )                                      # MCPServer (innermost)
     app = LoggingMiddleware(app)           # Logging + ring buffer
-    app = AuthMiddleware(app)              # Auth Bearer + ContextVar
+    app = AuthMiddleware(app, mcp)         # Auth Bearer + ContextVar
     app = HealthCheckMiddleware(app)       # /health, /healthz, /ready
     app = AdminMiddleware(app, mcp)        # /admin
     app = PkiMiddleware(app)               # /acme/*, /pki/ca/*.pem (outermost)
 
     return app
 ```
+
+#### Contrat transport MCP v0.20.0
+
+Le SDK livré est exactement `mcp==2.1.1`. Le même endpoint `/mcp` sert le
+protocole moderne `2026-07-28` et les clients legacy jusqu'à `2025-11-25`.
+`stateless_http=True` s'applique aux deux ères : l'identité est relue à chaque
+requête et le transport n'exige plus d'affinité de session. Cela ne rend pas le
+produit multi-réplica : OpenBao embarqué, la synchronisation S3 last-write-wins
+et les caches d'autorisation imposent toujours la topologie mono-instance
+documentée au §6.3b.
+
+Le SDK annonce automatiquement `subscriptions/listen`. MCP Vault n'expose
+aucune ressource MCP, ne publie aucun événement sur le bus et ne configure
+aucun `EventStore` : la capability est inerte, non persistante et sans replay.
+Ce point doit être réaudité à chaque montée de version du SDK.
+
+Une coupure avant réponse terminale laisse l'issue d'une mutation inconnue :
+les clients ne doivent pas la réessayer automatiquement. C'est notamment le
+cas de `secret_wrap_lookup`, qui est une opération de révocation.
 
 **HealthCheckMiddleware** — Middleware ASGI dédié qui intercepte les endpoints
 de health check et retourne un JSON directement, **sans passer par MCP** ni par
@@ -1861,7 +1883,7 @@ structurent la construction :
    parution de `mcp 2.0.0`, qui a supprimé `mcp.server.fastmcp`, a rendu
    l'image non démarrable sur toutes les versions depuis la v0.4.5.
 2. **La construction vérifie l'import critique.** Chaque stage qui installe des
-   dépendances exécute `python -c "from mcp.server.fastmcp import FastMCP"` :
+   dépendances exécute `python -c "from mcp.server import MCPServer"` :
    une résolution incompatible fait échouer le `build`, et non le démarrage du
    conteneur en production.
 3. **L'outillage de test reste hors de l'image de production.** Le verrou ne
@@ -2623,7 +2645,7 @@ Deux pièges rencontrés, tous deux détectés par la mesure et non par la relec
    l'initialisation explicite `setvar:'tx.mcp_json_body=0'` (règle 10007100,
    phase 1, déclarée avant 10008), la garde 10010 était silencieusement inopérante.
 2. `@beginsWith /mcp` matcherait aussi `/mcpfoo`. Le déclencheur du parseur est
-   ancré (`^/mcp(?:[/?]|$)`) et son `Content-Type` aligné sur ce que FastMCP
+   ancré (`^/mcp(?:[/?]|$)`) et son `Content-Type` aligné sur ce que le SDK MCP
    accepte réellement.
 
 `SecRequestBodyLimitAction Reject` est rendu explicite plutôt que laissé au défaut :
@@ -2696,7 +2718,7 @@ Le déclencheur du parseur JSON doit reconnaître **tout** ce que le handler acc
 sinon le POST atteint l'application en échappant aux quatre bornes (parseur,
 taille, profondeur, refus des corps non analysables).
 
-`mcp/server/streamable_http.py:415` (SDK 1.26) :
+`mcp/server/streamable_http.py:489-492` (SDK 2.1.1 livré) :
 
 ```python
 content_type_parts = [part.strip() for part in content_type.split(";")[0].split(",")]

@@ -92,7 +92,7 @@ async def test_le_catalogue_ne_derive_pas_de_server():
     une liste à jour aujourd'hui et fausse dans trois mois — et un catalogue
     faux refuserait des motifs légitimes ou laisserait passer des motifs morts.
 
-    ⚠️ On interroge le REGISTRE RÉEL de FastMCP, pas le texte source. Le premier
+    ⚠️ On interroge le REGISTRE RÉEL de MCPServer, pas le texte source. Le premier
     jet lisait `server.py` avec une regex `@mcp.tool()\n async def` ; la revue
     adversariale a montré qu'elle ne voit pas `@mcp.tool(name=...)`, un outil
     synchrone, un décorateur empilé, ni un `add_tool()` programmatique — le test
@@ -103,7 +103,7 @@ async def test_le_catalogue_ne_derive_pas_de_server():
 
     reels = {o.name for o in await mcp.list_tools()}
 
-    assert reels, "registre FastMCP vide — l'API d'introspection a changé"
+    assert reels, "registre MCPServer vide — l'API d'introspection a changé"
     manquants = reels - MCP_TOOL_NAMES
     fantomes = MCP_TOOL_NAMES - reels
     assert not manquants, (

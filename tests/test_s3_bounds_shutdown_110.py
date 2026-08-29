@@ -11,7 +11,7 @@ Deux défauts corrigés ici :
    `server.serve()`. uvicorn ré-émet le SIGTERM capturé une fois son arrêt
    interne terminé — ce code ne s'exécutait donc jamais sur un `docker stop`.
    L'arrêt est désormais porté par le lifespan ASGI, composé AUTOUR du lifespan
-   de FastMCP (qui doit être préservé, sinon toute requête MCP échoue).
+   du SDK MCP (qui doit être préservé, sinon toute requête MCP échoue).
 
 Preuve RED (état pré-correctif) : les tests de bornes échouent (aucun timeout
 dans la config, `max_attempts` au lieu de `total_max_attempts`), et
@@ -147,16 +147,16 @@ class _FakeApp:
         self.router = _FakeRouter(lifespan_context)
 
 
-def _fastmcp_lifespan_spy(calls):
-    """Imite le lifespan de FastMCP (session_manager.run) et trace son passage."""
+def _mcp_lifespan_spy(calls):
+    """Imite le lifespan du SDK MCP (session manager) et trace son passage."""
 
     @asynccontextmanager
     async def _lifespan(app):
-        calls.append("fastmcp_start")
+        calls.append("mcp_start")
         try:
             yield {"session_manager": "initialized"}
         finally:
-            calls.append("fastmcp_stop")
+            calls.append("mcp_stop")
 
     return _lifespan
 
@@ -176,7 +176,7 @@ def _composed_lifespan(app_calls, startup=None, shutdown=None):
     from mcp_vault import server
     import mcp_vault.lifecycle as lifecycle_mod
 
-    app = _FakeApp(_fastmcp_lifespan_spy(app_calls))
+    app = _FakeApp(_mcp_lifespan_spy(app_calls))
     startup = startup if startup is not None else AsyncMock(return_value=True)
     shutdown = shutdown if shutdown is not None else AsyncMock()
     with patch.object(lifecycle_mod, "vault_startup", startup), \
@@ -185,11 +185,11 @@ def _composed_lifespan(app_calls, startup=None, shutdown=None):
         yield app.router.lifespan_context(app), startup, shutdown
 
 
-def test_lifespan_preserves_fastmcp_and_orders_startup_shutdown():
-    """Ordre imposé : vault_startup → FastMCP start → service → FastMCP stop → shutdown.
+def test_lifespan_preserves_mcp_sdk_and_orders_startup_shutdown():
+    """Ordre imposé : vault_startup → MCP start → service → MCP stop → shutdown.
 
-    NON-COMPLAISANCE : si le lifespan FastMCP était REMPLACÉ (et non composé),
-    `fastmcp_start` n'apparaîtrait pas — et en production toute requête MCP
+    NON-COMPLAISANCE : si le lifespan MCP était REMPLACÉ (et non composé),
+    `mcp_start` n'apparaîtrait pas — et en production toute requête MCP
     échouerait sur « Task group is not initialized ».
     """
     calls = []
@@ -198,9 +198,9 @@ def test_lifespan_preserves_fastmcp_and_orders_startup_shutdown():
             async with ctx as state:
                 calls.append("serving")
                 assert state == {"session_manager": "initialized"}, \
-                    "l'état du lifespan FastMCP doit être propagé"
+                    "l'état du lifespan MCP doit être propagé"
         _run(_exercise())
-        assert calls == ["fastmcp_start", "serving", "fastmcp_stop"], calls
+        assert calls == ["mcp_start", "serving", "mcp_stop"], calls
         startup.assert_awaited_once()
         shutdown.assert_awaited_once_with(skip_upload=False)
 
@@ -234,8 +234,8 @@ def test_degraded_mode_when_startup_raises_forces_skip_upload():
                 calls.append("serving")
         _run(_exercise())
         assert "serving" in calls, "le service doit démarrer en mode dégradé"
-        assert "fastmcp_start" in calls, \
-            "le lifespan FastMCP doit tourner malgré le mode dégradé"
+        assert "mcp_start" in calls, \
+            "le lifespan MCP doit tourner malgré le mode dégradé"
         shutdown.assert_awaited_once_with(skip_upload=True)
 
 
@@ -259,47 +259,12 @@ def test_shutdown_error_does_not_mask_service_stop():
             async with ctx:
                 pass
         _run(_exercise())  # ne doit pas lever
-        assert calls == ["fastmcp_start", "fastmcp_stop"]
+        assert calls == ["mcp_start", "mcp_stop"]
 
 
 # =============================================================================
 # 3. Idempotence de l'arrêt (lifespan + filet post-serve)
 # =============================================================================
-
-def test_real_asgi_stack_runs_lifespan_startup_and_shutdown():
-    """SEAM RÉEL (revue pré-commit) : on construit la VRAIE stack via
-    `create_app()` et on pilote le protocole ASGI `lifespan`.
-
-    Prouve ce que le test synthétique ne prouvait pas : le wrapper est bien
-    installé sur l'application Starlette produite par FastMCP, et le scope
-    `lifespan` traverse les cinq middlewares (Pki → Admin → Health → Auth →
-    Logging) jusqu'à elle. Sans la composition, `lifespan.startup.complete`
-    n'arriverait pas — ou les requêtes MCP casseraient en production.
-    """
-    from mcp_vault import server
-    import mcp_vault.lifecycle as lifecycle_mod
-
-    startup = AsyncMock(return_value=True)
-    shutdown = AsyncMock()
-    with patch.object(lifecycle_mod, "vault_startup", startup), \
-         patch.object(lifecycle_mod, "vault_shutdown", shutdown):
-        app = server.create_app()
-
-        received = [{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}]
-        sent = []
-
-        async def _receive():
-            return received.pop(0)
-
-        async def _send(message):
-            sent.append(message["type"])
-
-        _run(app({"type": "lifespan", "asgi": {"version": "3.0"}}, _receive, _send))
-
-    assert sent == ["lifespan.startup.complete", "lifespan.shutdown.complete"], sent
-    startup.assert_awaited_once()
-    shutdown.assert_awaited_once_with(skip_upload=False)
-
 
 def test_shutdown_is_replayable_after_cancellation():
     """L'idempotence ne doit pas devenir un verrou définitif (revue pré-commit).

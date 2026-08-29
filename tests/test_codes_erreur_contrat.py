@@ -35,7 +35,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mcp.shared.memory import create_connected_server_and_client_session
+from mcp import Client
 
 OP = "op-codes"
 MISSION = "mission-codes"
@@ -512,7 +512,7 @@ class TestEnveloppesSansErrorType:
 class TestFormeDeTransport:
     """Nous avons écrit aux deux équipes : « tous nos codes métier arrivent en
     ENVELOPPE, `isError = false` ». Le vérifier sur un outil FABRIQUÉ pour le test
-    ne prouverait que le comportement de FastMCP — il resterait vert si
+    ne prouverait que le comportement du SDK MCP — il resterait vert si
     `secret_wrap` perdait ses codes. Le banc traverse donc le VRAI outil, avec un
     OpenBao et un registre simulés positionnés sur le chemin corrigé.
     """
@@ -535,8 +535,8 @@ class TestFormeDeTransport:
              patch.object(w, "_get_client", return_value=client), \
              patch.object(w, "_get_config", return_value=cfg), \
              patch("mcp_vault.auth.context.check_path_policy", return_value=None):
-            async with create_connected_server_and_client_session(server.mcp) as session:
-                return await session.call_tool("secret_wrap", {
+            async with Client(server.mcp) as client:
+                return await client.call_tool("secret_wrap", {
                     "vault_id": "mcp-mission", "secret_path": "missions/db",
                     "mission_id": MISSION, "operation_id": OP, "ttl_seconds": 300})
 
@@ -548,7 +548,7 @@ class TestFormeDeTransport:
             self, revocation_leve, code):
         res = await self._appel_protocolaire(revocation_leve=revocation_leve)
 
-        assert res.isError is False, (
+        assert res.is_error is False, (
             f"{code} remonte en erreur de protocole : un appelant qui lit "
             f"`isError` ne verra jamais la charge, contrairement à ce que nous "
             f"avons publié")
