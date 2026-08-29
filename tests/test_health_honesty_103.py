@@ -159,13 +159,19 @@ class Harnais:
 @pytest.fixture(autouse=True)
 def _etat_demarrage_propre():
     """
-    `_startup_ready` est un état de MODULE. Sans réarmement, un test qui le pose
-    contaminerait les suivants — et un test de latch passerait pour de mauvaises
-    raisons.
+    `_startup_ready` et les singletons de magasins sont des états de MODULE.
+    Sans réarmement, un test qui les pose contaminerait les suivants — et un
+    test de latch ou de disponibilité passerait pour de mauvaises raisons.
+
+    Chaque test qui exerce la fraîcheur remplace explicitement `_magasins` dans
+    sa propre portée ; tous les autres déclarent ainsi leur prémisse standalone.
     """
-    lifecycle.mark_startup_starting()
-    yield
-    lifecycle.mark_startup_starting()
+    from mcp_vault import store_refresh
+
+    with patch.object(store_refresh, "_magasins", return_value=[]):
+        lifecycle.mark_startup_starting()
+        yield
+        lifecycle.mark_startup_starting()
 
 
 # =============================================================================
@@ -421,10 +427,14 @@ class TestFraicheurDesMagasins:
             store_refresh, "_magasins", side_effect=RuntimeError(DETAIL_SENSIBLE)
         ):
             events = h.appel("/health")
+            status, detail = h.lance(lifecycle.availability_status)
 
         assert h.statut(events) == 503
         assert h.corps(events)["status"] == lifecycle.HEALTH_UNAVAILABLE
         assert DETAIL_SENSIBLE not in json.dumps(h.corps(events))
+        assert status == lifecycle.HEALTH_UNAVAILABLE
+        assert detail == "fraîcheur des magasins indisponible (RuntimeError)"
+        assert DETAIL_SENSIBLE not in detail
 
 
 # =============================================================================

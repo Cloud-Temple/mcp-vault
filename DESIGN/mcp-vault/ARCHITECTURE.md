@@ -225,6 +225,12 @@ aucun appel S3 ne part de `/health` ou `/ready`, et les rafraîchisseurs peuvent
 rétablir le signal après une panne transitoire. `system_health` ajoute une
 vérification distincte de la connectivité S3 courante.
 
+Le fail-close est uniforme, Token Store compris. Il ne bloque pas directement
+une requête déjà routée, mais rend l'instance indisponible pour l'orchestrateur.
+En mono-instance, une panne S3 assez longue pour périmer tous les magasins
+produit donc une indisponibilité totale assumée ; un autoheal doit sonder
+`/healthz`, car un redémarrage ne rétablit pas S3.
+
 ```json
 {"status": "healthy", "service": "mcp-vault", "version": "0.15.0", "transport": "streamable-http"}
 ```

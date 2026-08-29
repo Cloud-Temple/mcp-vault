@@ -145,11 +145,16 @@ async def availability_status() -> tuple[str, str]:
                 magasins = freshness_report()
                 if any(vue.get("stale") is True for vue in magasins.values()):
                     return HEALTH_UNAVAILABLE, "magasins d'autorisation indisponibles"
-            except Exception:
+            except Exception as e:
                 # Une observation inexploitable ne prouve pas la disponibilité.
-                # Diagnostic volontairement générique : ce détail atteint les
-                # journaux et la surface admin authentifiée.
-                return HEALTH_UNAVAILABLE, "fraîcheur des magasins indisponible"
+                # Seule la CLASSE atteint les journaux (sur transition) et la
+                # surface admin authentifiée : jamais le message, qui pourrait
+                # contenir un endpoint ou une donnée sensible. La réponse HTTP
+                # publique, elle, n'expose aucun détail.
+                return (
+                    HEALTH_UNAVAILABLE,
+                    f"fraîcheur des magasins indisponible ({type(e).__name__})",
+                )
             return HEALTH_HEALTHY, probe.detail
         # OpenBao répond, mais la séquence de démarrage n'a pas abouti (par
         # exemple restauration S3 ambiguë, magasins non chargés). Fail-close :
