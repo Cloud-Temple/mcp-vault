@@ -1,0 +1,40 @@
+# Valeurs propres à ce dépôt.
+#
+# Ce fichier est le seul de AGENTIC_RULES/ qui varie d'un projet à l'autre.
+# Il n'est pas comparé au corpus de référence par le contrôle de conformité.
+# Le copier en project.config.yml et le renseigner avant la première session.
+#
+# Trois états par champ, et un seul sens pour chacun :
+#   une valeur   le champ est renseigné, l'agent l'utilise
+#   disabled     le champ est volontairement inutilisé, l'agent l'ignore
+#   le marqueur  le champ n'a pas été traité, le contrôle de conformité échoue
+#
+# Un champ absent est traité comme non traité. Ne jamais supprimer une clé pour
+# faire passer le contrôle : le contrôle ne lit que les valeurs, pas ces
+# commentaires, mais une clé manquante reste une clé manquante.
+
+schema_version: 1
+
+project:
+  # Nom court du dépôt, tel qu'il apparaît sur GitHub.
+  name: TO_FILL
+  # Langue publique établie du projet, par exemple fr ou en. Porter disabled
+  # si le projet n'en a pas : l'agent écrit alors dans la langue de l'utilisateur.
+  public_language: TO_FILL
+
+memory:
+  live:
+    # Nom du serveur MCP Live Memory tel qu'il est déclaré côté client.
+    server: TO_FILL
+    # Espace mémoire du projet, casse exacte.
+    space_id: TO_FILL
+  graph:
+    # Index sémantique durable. Porter disabled sur les deux clés si le projet
+    # ne l'utilise pas ; ne pas retirer la section Graph Memory des règles.
+    server: disabled
+    memory_id: disabled
+
+review:
+  # Fournisseur du relecteur indépendant : claude, codex ou llmaas.
+  # Les modèles correspondants sont fixés dans AGENTIC_RULES/REVIEWERS.md.
+  reviewer_provider: TO_FILL
