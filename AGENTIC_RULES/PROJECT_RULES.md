@@ -11,6 +11,8 @@ Les identifiants ne sont pas écrits dans ces règles. Ils sont lus dans
 valeur de cette clé dans ce fichier ; ne jamais appeler un service avec la
 notation littérale, une valeur vide, un `TO_FILL` ou un identifiant deviné.
 La copie de ces règles ne configure aucun serveur MCP et ne crée aucun espace.
+La création éventuelle de l'espace configuré a lieu au démarrage d'une session,
+selon « Espace mémoire absent ».
 
 | Usage | Serveur MCP | Identifiant |
 | --- | --- | --- |
@@ -58,9 +60,55 @@ protocole restent obligatoires dans tous les cas.
 
 Lors de l'installation, vérifier l'écriture avec une première note utile de
 cadrage du projet, puis la relire. Une banque initialement vide est acceptable
-si l'espace existe, est accessible et si ce contexte initial est enregistré.
+si l'espace est accessible et si ce contexte initial est enregistré. Un espace
+qui n'existe pas encore relève de la section « Espace mémoire absent ».
 Ne pas créer de notes de test à chaque session ; réutiliser une preuve d'accès
 valide et tenir compte immédiatement de toute erreur ultérieure.
+
+## Espace mémoire absent
+
+Un dépôt fraîchement mis en conformité déclare un `memory.live.space_id` qui
+n'existe pas encore sur le serveur. Ce cas n'est pas une panne, et il ne doit
+pas arrêter le travail.
+
+Le serveur ne distingue pas un espace absent d'un espace existant hors des
+droits du jeton : les deux rendent le même refus d'accès. C'est la tentative de
+création qui lève l'ambiguïté, parce qu'elle n'écrase jamais un espace existant.
+
+Quand l'espace configuré n'est pas accessible, tenter `space_create` avec
+l'identifiant **exact** de `memory.live.space_id` et une description tirée du
+projet. Ne jamais inventer un identifiant, ni le dériver, ni y ajouter un
+suffixe : il est renseigné par une personne. Laisser les `rules` vides pour que
+le serveur applique sa structure par défaut ; elles sont immuables après
+création, et une structure improvisée resterait définitive.
+
+Lire ensuite la réponse en entier, pas seulement son statut. Un espace existant
+n'est pas forcément celui d'un tiers : le serveur répare l'accès du jeton qui
+l'a créé, et l'annonce dans un champ distinct du statut. Sur Live Memory ces
+champs sont aujourd'hui `creator_access_repair` et `creator_access_pending` ;
+vérifier les noms réellement exposés par le serveur avant de s'y fier.
+
+- Accès créateur annoncé comme non assuré : l'espace existe mais le droit n'est
+  pas encore écrit. Le serveur demande alors de rejouer exactement le même
+  appel ; le faire **une fois**. Si la réserve persiste, arrêter et signaler.
+- « Existe déjà » sans réparation d'accès annoncée : l'espace appartient à un
+  autre jeton. **Arrêter** et demander l'ouverture de l'accès. Ne pas contourner
+  en créant une variante de l'identifiant.
+- Création réussie, ou « existe déjà » avec réparation d'accès annoncée :
+  l'espace est utilisable par ce jeton. Poursuivre le démarrage normal.
+- Le serveur réclame des `rules` faute de modèle par défaut : c'est un défaut de
+  configuration du serveur, pas un espace manquant. **Arrêter** et le signaler.
+  Ne pas improviser une structure pour débloquer l'appel.
+- Tout autre échec, ou une réponse qu'on ne sait pas classer : appliquer la
+  section suivante. L'ambiguïté conduit à l'arrêt, jamais à une interprétation
+  par défaut.
+
+Une réponse encourageante ne vaut pas accès. Une issue « poursuivre » reprend le
+démarrage à son étape 1 ; c'est la lecture, puis la note de cadrage écrite et
+relue, qui établissent l'accès, pas le retour de la création.
+
+Cette création ne porte que sur l'espace configuré, et s'arrête après cette
+seconde tentative. Aucun réessai en boucle.
 
 ## Mémoire absente ou en panne
 
@@ -75,8 +123,9 @@ vérifier la connectivité et les accès au service déclaré, corriger sa confi
 d'accès si demandé, puis vérifier une écriture utile et sa relecture. Aucune
 édition de code métier, opération Git/GitHub ou action de livraison ne relève
 de cette exception. Un refus d'accès n'est pas la preuve d'un espace inexistant :
-ne pas le recréer, changer d'espace, élargir les droits ou réessayer en boucle.
-Si une intervention externe est nécessaire, l'indiquer.
+la seule action admise pour trancher est la tentative de création bornée décrite
+en « Espace mémoire absent ». Ne pas changer d'espace, élargir les droits ni
+réessayer en boucle. Si une intervention externe est nécessaire, l'indiquer.
 
 Après rétablissement, recharger le contexte et les notes utiles avant de
 reprendre. Après un timeout d'écriture, vérifier si la note existe déjà avant
