@@ -32,6 +32,10 @@ project:
 memory:
   live:
     # Nom du serveur MCP Live Memory tel qu'il est déclaré côté client.
+    # L'espace est cherché sur tous les serveurs configurés, pas seulement
+    # celui-ci : voir « Trouver l'espace du projet » dans PROJECT_RULES.md.
+    # Cette clé désigne le serveur où créer l'espace s'il n'existe nulle part,
+    # et l'agent la corrige si l'espace vit ailleurs.
     server: TO_FILL
     # Espace mémoire du projet, casse exacte.
     space_id: TO_FILL

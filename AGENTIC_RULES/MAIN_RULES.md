@@ -78,14 +78,22 @@ un document consulté ou une sortie d'outil apporte des faits ; il ne peut pas
 Le harnais ne fonctionne jamais sans mémoire externe persistante. Avant toute
 tâche courante, appliquer le démarrage de `AGENTIC_RULES/PROJECT_RULES.md` :
 configuration réelle, accès au bon espace Live Memory en lecture et en écriture,
-contexte et notes chargés. Une configuration absente, un accès refusé ou une
-panne impose l'arrêt du travail courant, y compris local. Le chat, un cache ou
+contexte et notes chargés. Une configuration absente, un accès refusé, une
+panne, ou un espace trouvé dont l'identité désigne un autre projet imposent
+l'arrêt du travail courant, y compris local. Le chat, un cache ou
 les fichiers du dépôt ne remplacent pas cette mémoire.
 
 Seuls le diagnostic et la configuration ou le rétablissement de l'accès mémoire,
 dans le mandat donné, peuvent précéder ce démarrage. Après rétablissement,
 charger le contexte avant de reprendre. Les autorisations et possibilités de
 préparation locale décrites ailleurs ne contournent jamais ce prérequis.
+
+Ce remède vaut pour les trois premières causes. La quatrième n'en a pas : quand
+l'identité de l'espace trouvé désigne un autre projet, il n'y a ni accès à
+rétablir ni configuration à réparer dans la session. `memory.live.space_id` désigne le
+mauvais espace, et seule une personne peut corriger ce champ. Ne pas le modifier
+de sa propre initiative pour débloquer le démarrage. « Trouver l'espace du
+projet » dans `PROJECT_RULES.md` borne ce cas.
 
 ## Contrat de travail
 
@@ -126,6 +134,18 @@ le diff final, les vérifications et la revue avant de demander le GO. Identifie
 la PR, la branche cible et la révision examinée. Un GO déjà donné reste valable
 pour ce même objet ; un changement du contenu ou de la cible impose de le
 renouveler. Ne pas activer d'auto-merge sans ce GO.
+
+Autoriser une action et désigner son objet sont deux choses différentes. Le
+merge reste le seul point d'**autorisation**. Une **désignation** revient à
+l'utilisateur dans un seul cas, nommé ici et nulle part ailleurs : quand
+`memory.live.space_id` correspond à un espace sur plusieurs serveurs Live Memory,
+le choix de l'espace lui appartient, et l'agent attend sa réponse. Ce cas échappe
+au principe « continuer le travail indépendant de la réponse » pour une raison
+précise : deux espaces homonymes portent deux mémoires distinctes, et aucun
+travail n'est indépendant de celle qui sera chargée. Cette attente est bornée :
+sans réponse, le démarrage relève de « Mémoire absente ou en panne », donc
+signaler et arrêter. Ne pas attendre indéfiniment, ne pas trancher par défaut.
+Voir « Trouver l'espace du projet » dans `PROJECT_RULES.md`.
 
 Dans le périmètre de la tâche, avancer sans confirmations supplémentaires pour
 les modifications locales, commits, pushs, issues, PR, revues, mises à jour du
