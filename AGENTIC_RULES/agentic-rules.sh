@@ -140,6 +140,64 @@ config_values() {
   sed -e 's/[[:space:]]#.*$//' -e 's/^[[:space:]]*#.*$//' "$1" | grep -v '^[[:space:]]*$'
 }
 
+# Valeur d'une clé de la configuration, désignée par son chemin complet, par
+# exemple project.instructions_file. Le chemin est obligatoire : le schéma
+# réutilise des noms terminaux d'une section à l'autre, ainsi `server` sous
+# memory.live et sous memory.graph, et chercher le seul nom terminal rendrait
+# la valeur de la mauvaise section. Rend une chaîne vide si la clé est absente.
+config_value() {
+  config_values "$1" | awk -v want="$2" '
+    {
+      line = $0
+      sub(/^[[:space:]]*-.*$/, "", line)
+      if (line ~ /^[[:space:]]*$/) next
+      if (line !~ /:/) next
+      match(line, /^[[:space:]]*/); ind = RLENGTH
+      key = line; sub(/^[[:space:]]*/, "", key)
+      val = key
+      sub(/^[^:]*:[[:space:]]*/, "", val)
+      sub(/:.*$/, "", key)
+      while (n > 0 && depth[n] >= ind) n--
+      n++; depth[n] = ind; name[n] = key
+      path = name[1]
+      for (i = 2; i <= n; i++) path = path "." name[i]
+      if (path == want) { found = val; seen = 1 }
+    }
+    END { if (seen) print found }' \
+    | sed -e 's/^["'"'"']//' -e 's/["'"'"']$//' -e 's/[[:space:]]*$//'
+}
+
+# Chemin réel d'un fichier, liens symboliques résolus, sans dépendre de
+# `readlink -f` qui n'existe pas partout. Rend un échec si le répertoire
+# conteneur n'existe pas.
+#
+# Le plafond de 40 itérations et l'échec qui le suit sont une défense en
+# profondeur qu'aucun test n'atteint, et c'est assumé : le seul appelant vérifie
+# `-f` avant d'appeler, or le noyau rend déjà ELOOP au-delà de sa propre limite
+# de liens. Fabriquer un test qui force cet état serait du théâtre. Les deux
+# restent parce que la fonction peut être appelée ailleurs un jour, et parce
+# qu'un chemin à demi résolu se trouve parfois dans le dépôt alors que la cible
+# réelle est dehors.
+resolve_path() {
+  local p="$1" t d b n=0
+  while [ -L "$p" ] && [ "$n" -lt 40 ]; do
+    t="$(readlink "$p")" || return 1
+    case "$t" in
+      /*) p="$t" ;;
+      *) p="$(dirname "$p")/$t" ;;
+    esac
+    n=$((n + 1))
+  done
+  # Plafond atteint sans avoir fini de dérouler : rendre un échec, jamais un
+  # chemin partiellement résolu. Un chemin à mi-parcours peut être à l'intérieur
+  # du dépôt alors que la cible réelle est dehors, et l'appelant conclurait à
+  # une conformité qui n'existe pas.
+  [ -L "$p" ] && return 1
+  d="$(dirname "$p")"; b="$(basename "$p")"
+  d="$(cd "$d" 2>/dev/null && pwd -P)" || return 1
+  printf '%s/%s\n' "$d" "$b"
+}
+
 cmd_install() {
   local target="$1" ref="$2" source="$3" force="$4" src stage f conflicts=""
   [ -d "$target" ] || die "cible inexistante : $target"
@@ -242,6 +300,47 @@ cmd_check() {
   if [ -e "$target/$CONFIG" ]; then
     config_values "$target/$CONFIG" | grep -q "$UNSET_MARKER" \
       && { printf 'A RENSEIGNER %s contient encore des %s\n' "$CONFIG" "$UNSET_MARKER"; rc=1; }
+    # Un pointeur vers un document propre au dépôt ne se vérifie pas tout seul :
+    # sans ce contrôle, un chemin devenu faux reste invisible jusqu'à ce qu'un
+    # agent cherche le fichier et ne le trouve pas.
+    local notes root real
+    notes="$(config_value "$target/$CONFIG" project.instructions_file)"
+    case "$notes" in
+      ""|disabled|"$UNSET_MARKER") ;;
+      /*) printf 'CHEMIN ABSOLU instructions_file doit être relatif à la racine : %s\n' "$notes"; rc=1 ;;
+      *)
+        # Le motif n'encadre que le segment `..`, pour ne pas refuser un nom de
+        # fichier qui contient légitimement deux points.
+        case "/$notes/" in
+          */../*) printf 'CHEMIN SORTANT instructions_file remonte hors du dépôt : %s\n' "$notes"; rc=1 ;;
+          *)
+            if [ ! -f "$target/$notes" ]; then
+              # Distinguer les trois échecs : le message sert au diagnostic,
+              # il ne doit pas dire « n'existe pas » d'un répertoire.
+              if [ -L "$target/$notes" ] && [ ! -e "$target/$notes" ]; then
+                printf 'LIEN CASSE instructions_file désigne %s, dont la cible est introuvable\n' "$notes"
+              elif [ -e "$target/$notes" ]; then
+                printf 'PAS UN FICHIER instructions_file désigne %s, qui n est pas un fichier régulier\n' "$notes"
+              else
+                printf 'POINTEUR MORT instructions_file désigne %s, qui n existe pas\n' "$notes"
+              fi
+              rc=1
+            else
+              # Le filtre sur la chaîne ne dit rien de la destination réelle :
+              # un lien symbolique au nom anodin sort du dépôt sans contenir
+              # un seul `..`. Seule la résolution le voit.
+              root="$(cd "$target" && pwd -P)"
+              if real="$(resolve_path "$target/$notes")"; then
+                case "$real" in
+                  "$root"/*) ;;
+                  *) printf 'HORS DEPOT instructions_file désigne %s, qui mène à %s\n' "$notes" "$real"; rc=1 ;;
+                esac
+              else
+                printf 'CHEMIN IRRESOLU instructions_file désigne %s\n' "$notes"; rc=1
+              fi
+            fi ;;
+        esac ;;
+    esac
   else
     printf 'MANQUANT   %s\n' "$CONFIG"; rc=1
   fi

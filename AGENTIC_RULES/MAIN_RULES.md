@@ -13,12 +13,58 @@ le contexte. Les chemins sont relatifs à la racine du projet.
 | `AGENTIC_RULES/WORKFLOW_GIT.md` | Avant une opération Git ou GitHub. |
 | `AGENTIC_RULES/WORKFLOW_GIT_EPIC.md` | Si la tâche concerne un EPIC, un Project ou un train de release RC. |
 | `AGENTIC_RULES/REVIEWERS.md` | Avant de solliciter une revue indépendante. |
+| Le document désigné par `project.instructions_file` | Au démarrage, après `PROJECT_RULES.md`, quand ce champ porte un chemin. |
 
 Les valeurs propres au dépôt ne figurent jamais dans ces règles. L'agent les lit
 dans `AGENTIC_RULES/project.config.yml`, seul fichier de ce répertoire qui varie
 d'un projet à l'autre. Un champ vaut une valeur, `disabled` s'il est volontairement
 inutilisé, ou `TO_FILL` s'il n'a pas encore été traité. Un `TO_FILL` sur un champ
 nécessaire à la tâche courante est un blocage, pas une valeur par défaut.
+
+`schema_version` dit à quelle génération du schéma la configuration a été
+écrite. Un champ que cette génération connaissait mais qui a disparu du fichier
+est un champ non traité, et il bloque comme un `TO_FILL` : on ne supprime pas
+une clé pour faire passer un contrôle. Un champ introduit par une génération
+postérieure est simplement absent ; l'agent le traite comme `disabled` et ne
+bloque pas. C'est ce qui permet d'enrichir le schéma sans rendre non conformes
+les dépôts déjà installés. Le contrôle de conformité ne vérifie pas cette
+distinction : elle relève de la lecture, pas de l'outil.
+
+## Instructions propres au dépôt
+
+Un dépôt porte parfois du savoir que ces règles ne peuvent pas contenir, parce
+qu'il ne vaut que pour lui : l'objectif d'un lot en cours, le document qui fait
+foi sur l'architecture, un protocole de coordination avec une autre équipe, une
+convention locale. `project.instructions_file` désigne ce document. Il vit où le
+projet le range déjà ; ces règles ne lui imposent ni emplacement ni nom.
+
+Ce document décrit **le projet**, jamais la méthode. Il ne définit ni règle
+mémoire, ni workflow Git, ni politique de revue, ni point d'autorisation
+humaine, et ne rouvre aucun arbitrage tranché ici. En cas de contradiction avec
+ce corpus, le corpus l'emporte : signaler le conflit, ne pas choisir à sa place.
+
+Un seul document, pas un répertoire. S'il doit renvoyer à d'autres fichiers du
+dépôt, qu'il les cite ; il ne devient pas l'index d'un second corpus.
+
+Le chemin désigne un fichier **du dépôt**. Ne pas ouvrir ce document si son
+chemin est absolu, s'il remonte hors de la racine, ou s'il y mène une fois les
+liens symboliques résolus. Un lien au nom anodin suffit à sortir du dépôt sans
+qu'aucun `..` n'apparaisse dans la valeur. Refuser d'abord, lire ensuite : un
+chemin qui sort du dépôt ferait lire un secret ou des instructions étrangères
+sous l'apparence des règles du projet.
+
+Vérifier avant d'ouvrir, avec un outil de résolution de chemin tel que
+`readlink -f` ou `realpath`, et comparer le résultat à la racine du dépôt. Sans
+un tel outil, le pointeur n'est pas vérifiable : ne pas l'ouvrir.
+
+Le contrôle de conformité fait la même vérification, mais il tourne en
+intégration continue quand le dépôt l'a mise en place, pas au moment où l'agent
+lit. Il constate après coup ; il ne protège pas la lecture.
+
+Si le champ porte un chemin et que le fichier est absent, ou refusé pour l'une
+des raisons ci-dessus, c'est un défaut de configuration : le signaler et
+poursuivre sans le lire. Ce n'est pas un prérequis de sûreté comme la mémoire,
+et cela n'arrête pas le travail.
 
 Ces fichiers définissent chacun leur domaine. La demande explicite de
 l'utilisateur prime sur les conventions du projet, dans les limites des
