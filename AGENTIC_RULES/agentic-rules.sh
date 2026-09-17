@@ -286,25 +286,46 @@ cmd_check() {
   done <<< "$(grep '^sha256 ' "$target/$PROVENANCE")"
 
   # 3. Aucun fichier local ajouté dans le répertoire des règles.
-  local allowed base listing
+  local base shown seen found a
+  local -a allowed=(".provenance" "project.config.yml")
   while IFS= read -r f; do
-    case "$f" in "$RULES_DIR"/*) allowed="${allowed:-}${f#"$RULES_DIR"/}"$'\n' ;; esac
+    case "$f" in "$RULES_DIR"/*) allowed+=("${f#"$RULES_DIR"/}") ;; esac
   done <<< "$payload"
-  allowed="${allowed:-}.provenance"$'\n'"project.config.yml"$'\n'
-  # `-printf` est une extension GNU que le find de BSD refuse. La substitution
-  # rendait alors une chaîne vide, la boucle tournait une fois sur cette ligne
-  # vide, et l'étape concluait à un ajout local au nom vide. Une énumération qui
-  # ne rend rien est un défaut d'outil ou un corpus disparu, jamais une preuve
-  # de dérive : le dire, plutôt que le traduire en constat sur le dépôt.
-  listing="$(cd "$target/$RULES_DIR" && find . -mindepth 1)"
-  if [ -z "$listing" ]; then
+  # Un nom de fichier peut contenir un saut de ligne, et le défaut avait deux
+  # moitiés. Découpée sur `\n`, l'énumération rendait deux noms autorisés pour
+  # le seul fichier `MAIN_RULES.md<LF>PROJECT_RULES.md`, et l'ajout passait ;
+  # d'où `-print0`, accepté par GNU comme par BSD. Mais la comparaison passait
+  # aussi par `grep -x`, où un motif contenant `\n` vaut plusieurs motifs
+  # alternatifs : lire le nom d'un bloc sans toucher à la comparaison aurait
+  # laissé le contournement intact. D'où l'égalité de chaînes, terme à terme.
+  # Le tri disparaît plutôt que d'appeler `sort -z`, absent de BSD : l'étape
+  # n'en dépend pas, il ne servait qu'à ranger l'affichage.
+  seen=0
+  while IFS= read -r -d '' base; do
+    seen=$((seen + 1))
+    base="${base#./}"
+    found=0
+    for a in "${allowed[@]}"; do
+      if [ "$a" = "$base" ]; then found=1; break; fi
+    done
+    if [ "$found" -eq 0 ]; then
+      # Un nom porteur de sauts de ligne étalerait le diagnostic sur plusieurs
+      # lignes, où il redeviendrait indéchiffrable. Le rendre visible d'un seul
+      # tenant plutôt que le recopier tel quel.
+      shown="$base"
+      shown="${shown//$'\r'/\\r}"
+      shown="${shown//$'\n'/\\n}"
+      shown="${shown//$'\t'/\\t}"
+      printf 'AJOUT LOCAL %s/%s ne fait pas partie du corpus\n' "$RULES_DIR" "$shown"
+      rc=1
+    fi
+  done < <(cd "$target/$RULES_DIR" && find . -mindepth 1 -print0)
+  # Une énumération qui ne rend rien est un défaut d'outil ou un corpus disparu,
+  # jamais une preuve de dérive : le dire, plutôt que le traduire en constat sur
+  # le dépôt.
+  if [ "$seen" -eq 0 ]; then
     printf 'ENUMERATION VIDE %s n a rendu aucun fichier : corpus absent ou find inutilisable\n' "$RULES_DIR"
     rc=1
-  else
-    while IFS= read -r base; do
-      printf '%s' "$allowed" | grep -qx "$base" \
-        || { printf 'AJOUT LOCAL %s/%s ne fait pas partie du corpus\n' "$RULES_DIR" "$base"; rc=1; }
-    done <<< "$(printf '%s\n' "$listing" | sed 's|^\./||' | sort)"
   fi
 
   # 4. Configuration présente et réellement renseignée.
