@@ -114,8 +114,11 @@ projet » dans `PROJECT_RULES.md` borne ce cas.
 1. **Partir du besoin.** Identifier le résultat attendu et comment le vérifier.
    Pour une tâche simple, une phrase suffit ; un plan sert aux travaux complexes.
 2. **Faire le minimum suffisant.** Réutiliser l'existant. Pas de refonte annexe,
-   d'abstraction, d'interface ou de paramètre sans besoin actuel. Vérifier la
-   cohérence des interfaces existantes concernées, sans imposer leur duplication.
+   d'abstraction, d'interface ou de paramètre sans besoin actuel. Un réglage que
+   l'exploitation devra changer est un besoin actuel, pas une abstraction. Vérifier
+   la cohérence des interfaces existantes concernées, sans imposer leur
+   duplication. `WORKFLOW_ENGINEERING.md` dit ce qui se règle et comment se pose
+   la question de l'autre public.
 3. **Expliquer les décisions.** Écrire dans la langue publique établie du projet,
    déclarée par `project.public_language` ; à défaut, dans la langue de
    l'utilisateur. Niveau métier et concision.
