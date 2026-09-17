@@ -1,13 +1,13 @@
 # Provenance du corpus de règles agentiques. Fichier généré, ne pas éditer.
 source_repo=https://github.com/Cloud-Temple/agentic-rules.git
-tag=v1.6.0
-commit=2deb0474f07ce8ffa40478d9d62a28bc115b4eeb
-installed_at=2026-09-17T10:02:13Z
+tag=v1.7.0
+commit=e524ea46d868ac82c42ab969909c1c074955c750
+installed_at=2026-09-17T10:48:08Z
 sha256 AGENTS.md 9d632d16ed5426e494f049e82faa6c06e509b03320c3dc7431c390061f612047
 sha256 CLAUDE.md 336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49
 sha256 QWEN.md ef9aef3084d88eba92effd3a2b0d0f96e160c61ed4c1badede702e2f9ae610d2
 sha256 AGENTIC_RULES/MANIFEST 1b83375cb8b1ac7318c301508e7c436b711dc06b893769e9e20ffc6b38a02902
-sha256 AGENTIC_RULES/agentic-rules.sh 3653e67f4f76e3b64a7eab8c38970ff4218c08667d77970cf0e5285dad728a8f
+sha256 AGENTIC_RULES/agentic-rules.sh 63978b5d554d5bc126c01354ba673c2ec305db1babd892effff263fbfed06198
 sha256 AGENTIC_RULES/MAIN_RULES.md 7dddc3e3455a5f1d8d72fe1742654f71579f1e46e9f2d1fe1c598e450359bcb9
 sha256 AGENTIC_RULES/PROJECT_RULES.md 4c4dd4ca38079d1214a61d7347b783c766dbcdd5f92614a9f0448fab5c98b827
 sha256 AGENTIC_RULES/REVIEWERS.md 945d0d9f703af541dd2396beee36336ee8693deb0daede24c9b2fe36915fff5b
