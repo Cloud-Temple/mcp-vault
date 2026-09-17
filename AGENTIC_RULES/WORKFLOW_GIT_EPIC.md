@@ -54,8 +54,13 @@ Respecter leurs valeurs existantes. Ne pas publier les arbitrages privés ou
 les données clients. Distinguer responsable de pilotage et personne assignée.
 
 Pour une mise à jour du Project : lire l'état, appliquer seulement les changements
-nécessaires, puis vérifier par une lecture distincte. Avant un lot important,
-vérifier le quota disponible. Après une erreur partielle, relire l'état et
+nécessaires, puis vérifier par une lecture distincte. Ces deux lectures paginent,
+et elles peuvent être tronquées de la même façon : la vérification confirmerait
+alors la troncature. Un board est par ailleurs écrit par plusieurs mains, et une
+relecture immédiate ne prouve que l'instant. Prouver ces lectures complètes, et
+relire les objets touchés une seconde fois en fin de lot, ou en dernier quand la
+mise à jour tient en une écriture, selon `WORKFLOW_ENGINEERING.md`. Avant un lot
+important, vérifier le quota disponible. Après une erreur partielle, relire l'état et
 reprendre les seules opérations manquantes. Ne pas déplacer les objets hors
 périmètre pour faire du rangement. Signaler les écarts pertinents non corrigés.
 
