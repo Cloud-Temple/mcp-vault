@@ -117,7 +117,8 @@ chaque session ; c'est le prix de la traçabilité, pas un défaut à contourner
 1. Résoudre le serveur effectif selon « Trouver l'espace du projet », puis
    vérifier qu'il est disponible et que les droits sur l'espace couvrent la
    lecture et l'écriture de notes. Ne pas confondre présence d'un outil et accès
-   réel à cet espace.
+   réel à cet espace. Une session de revue indépendante, qui n'écrit jamais,
+   s'arrête à la lecture : voir l'exception nommée dans `MAIN_RULES.md`.
 2. Lire `space_rules(space_id="<memory.live.space_id>")` une fois pour connaître la structure.
 3. Charger le contexte courant et les décisions utiles. Utiliser `bank_read_all`
    si la banque est compacte ; sinon `bank_list` puis `bank_read` sur le contexte
@@ -141,6 +142,13 @@ n'a rien trouvé sur aucun serveur et qu'aucun refus d'accès ne reste en suspen
 Un refus non élucidé interdit la création, quelle que soit la suite. Un dépôt fraîchement mis en conformité
 déclare un `memory.live.space_id` qui n'existe encore nulle part. Ce cas n'est
 pas une panne, et il ne doit pas arrêter le travail.
+
+Une session de revue indépendante ne crée pas cet espace : elle n'écrit jamais,
+et `MAIN_RULES.md` nomme cette exception. Pour elle seule, un espace introuvable
+sur tous les serveurs arrête la revue avec la portée d'un blocage mémoire. Elle
+n'en partage le remède d'aucune section, ni celui-ci ni celui de « Mémoire
+absente ou en panne » : tous deux supposent une écriture. Elle signale l'absence
+et s'arrête sans rendre de verdict. La création revient à une session ordinaire.
 
 Le serveur ne distingue pas un espace absent d'un espace existant hors des
 droits du jeton : les deux rendent le même refus d'accès. C'est la tentative de
@@ -199,6 +207,12 @@ les seules actions admises pour trancher sont la recherche sur les autres
 serveurs décrite en « Trouver l'espace du projet », puis la tentative de création
 bornée décrite en « Espace mémoire absent ». Ne pas changer d'espace, élargir les
 droits ni réessayer en boucle. Si une intervention externe est nécessaire, l'indiquer.
+
+Une session de revue indépendante ne mène que celles de ces actions qui
+n'écrivent rien. Elle ne corrige aucune configuration, ne tente aucune création
+et ne vérifie aucune écriture, quelle que soit la cause du blocage, y compris un
+refus d'accès non élucidé. Elle le signale et s'arrête sans rendre de verdict :
+voir l'exception nommée dans `MAIN_RULES.md`.
 
 Après rétablissement, recharger le contexte et les notes utiles avant de
 reprendre. Après un timeout d'écriture, vérifier si la note existe déjà avant

@@ -44,4 +44,4 @@ memory:
 review:
   # Fournisseur du relecteur indépendant : claude, codex ou llmaas.
   # Les modèles correspondants sont fixés dans AGENTIC_RULES/REVIEWERS.md.
-  reviewer_provider: claude
+  reviewer_provider: codex
