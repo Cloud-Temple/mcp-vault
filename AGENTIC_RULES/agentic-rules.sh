@@ -286,15 +286,26 @@ cmd_check() {
   done <<< "$(grep '^sha256 ' "$target/$PROVENANCE")"
 
   # 3. Aucun fichier local ajouté dans le répertoire des règles.
-  local allowed base
+  local allowed base listing
   while IFS= read -r f; do
     case "$f" in "$RULES_DIR"/*) allowed="${allowed:-}${f#"$RULES_DIR"/}"$'\n' ;; esac
   done <<< "$payload"
   allowed="${allowed:-}.provenance"$'\n'"project.config.yml"$'\n'
-  while IFS= read -r base; do
-    printf '%s' "$allowed" | grep -qx "$base" \
-      || { printf 'AJOUT LOCAL %s/%s ne fait pas partie du corpus\n' "$RULES_DIR" "$base"; rc=1; }
-  done <<< "$(cd "$target/$RULES_DIR" && find . -mindepth 1 -printf '%P\n' | sort)"
+  # `-printf` est une extension GNU que le find de BSD refuse. La substitution
+  # rendait alors une chaîne vide, la boucle tournait une fois sur cette ligne
+  # vide, et l'étape concluait à un ajout local au nom vide. Une énumération qui
+  # ne rend rien est un défaut d'outil ou un corpus disparu, jamais une preuve
+  # de dérive : le dire, plutôt que le traduire en constat sur le dépôt.
+  listing="$(cd "$target/$RULES_DIR" && find . -mindepth 1)"
+  if [ -z "$listing" ]; then
+    printf 'ENUMERATION VIDE %s n a rendu aucun fichier : corpus absent ou find inutilisable\n' "$RULES_DIR"
+    rc=1
+  else
+    while IFS= read -r base; do
+      printf '%s' "$allowed" | grep -qx "$base" \
+        || { printf 'AJOUT LOCAL %s/%s ne fait pas partie du corpus\n' "$RULES_DIR" "$base"; rc=1; }
+    done <<< "$(printf '%s\n' "$listing" | sed 's|^\./||' | sort)"
+  fi
 
   # 4. Configuration présente et réellement renseignée.
   if [ -e "$target/$CONFIG" ]; then
@@ -309,37 +320,31 @@ cmd_check() {
       ""|disabled|"$UNSET_MARKER") ;;
       /*) printf 'CHEMIN ABSOLU instructions_file doit être relatif à la racine : %s\n' "$notes"; rc=1 ;;
       *)
-        # Le motif n'encadre que le segment `..`, pour ne pas refuser un nom de
-        # fichier qui contient légitimement deux points.
-        case "/$notes/" in
-          */../*) printf 'CHEMIN SORTANT instructions_file remonte hors du dépôt : %s\n' "$notes"; rc=1 ;;
-          *)
-            if [ ! -f "$target/$notes" ]; then
-              # Distinguer les trois échecs : le message sert au diagnostic,
-              # il ne doit pas dire « n'existe pas » d'un répertoire.
-              if [ -L "$target/$notes" ] && [ ! -e "$target/$notes" ]; then
-                printf 'LIEN CASSE instructions_file désigne %s, dont la cible est introuvable\n' "$notes"
-              elif [ -e "$target/$notes" ]; then
-                printf 'PAS UN FICHIER instructions_file désigne %s, qui n est pas un fichier régulier\n' "$notes"
-              else
-                printf 'POINTEUR MORT instructions_file désigne %s, qui n existe pas\n' "$notes"
-              fi
-              rc=1
-            else
-              # Le filtre sur la chaîne ne dit rien de la destination réelle :
-              # un lien symbolique au nom anodin sort du dépôt sans contenir
-              # un seul `..`. Seule la résolution le voit.
-              root="$(cd "$target" && pwd -P)"
-              if real="$(resolve_path "$target/$notes")"; then
-                case "$real" in
-                  "$root"/*) ;;
-                  *) printf 'HORS DEPOT instructions_file désigne %s, qui mène à %s\n' "$notes" "$real"; rc=1 ;;
-                esac
-              else
-                printf 'CHEMIN IRRESOLU instructions_file désigne %s\n' "$notes"; rc=1
-              fi
-            fi ;;
-        esac ;;
+        if [ ! -f "$target/$notes" ]; then
+          # Distinguer les trois échecs : le message sert au diagnostic,
+          # il ne doit pas dire « n'existe pas » d'un répertoire.
+          if [ -L "$target/$notes" ] && [ ! -e "$target/$notes" ]; then
+            printf 'LIEN CASSE instructions_file désigne %s, dont la cible est introuvable\n' "$notes"
+          elif [ -e "$target/$notes" ]; then
+            printf 'PAS UN FICHIER instructions_file désigne %s, qui n est pas un fichier régulier\n' "$notes"
+          else
+            printf 'POINTEUR MORT instructions_file désigne %s, qui n existe pas\n' "$notes"
+          fi
+          rc=1
+        else
+          # Le filtre sur la chaîne ne dit rien de la destination réelle :
+          # un lien symbolique au nom anodin sort du dépôt sans contenir
+          # un seul `..`. Seule la résolution le voit.
+          root="$(cd "$target" && pwd -P)"
+          if real="$(resolve_path "$target/$notes")"; then
+            case "$real" in
+              "$root"/*) ;;
+              *) printf 'HORS DEPOT instructions_file désigne %s, qui mène à %s\n' "$notes" "$real"; rc=1 ;;
+            esac
+          else
+            printf 'CHEMIN IRRESOLU instructions_file désigne %s\n' "$notes"; rc=1
+          fi
+        fi ;;
     esac
   else
     printf 'MANQUANT   %s\n' "$CONFIG"; rc=1
