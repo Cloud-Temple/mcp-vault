@@ -5,12 +5,14 @@
 ### ACME lié à un rôle
 
 - Proxy des endpoints clients natifs `/v1/_sys_pki_int/roles/<role>/acme/…`,
-  limité à GET/HEAD/POST. Aucun proxy général `/v1`, ni accès opérateur
+  limité à GET/HEAD/POST, y compris `key-change` annoncé par OpenBao 2.5.1.
+  Aucun proxy général `/v1`, ni accès opérateur
   `new-eab`, `eab`, CRUD des rôles ou configuration OpenBao ajouté.
 - Le setup PKI conserve les rôles explicitement nommés dans `allowed_roles`,
   en plus de `acme-servers`, sans créer ni modifier leurs définitions.
   Une lecture en erreur ou une configuration illisible interrompt le setup
-  avant toute mutation. Le défaut OpenBao `["*"]` reste restreint à
+  avant toute mutation ; les rôles nommés doivent encore exister.
+  Aucun rôle supprimé n’est retiré silencieusement de la configuration. Le défaut OpenBao `["*"]` reste restreint à
   `acme-servers`, comme avant ; il n'autorise pas tous les rôles.
 - Aucun changement de version, variable d'environnement ou déploiement dans
   ce lot. L'ouverture WAF/Edge, les URL ACME, les rôles/EAB et la validation DNS

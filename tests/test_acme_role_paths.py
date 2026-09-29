@@ -67,7 +67,7 @@ async def proxy_call(path, method="POST", query=b"", backend_status=200):
     (f"order/{ORDER_ID}/cert", "POST"), (f"authorization/{ORDER_ID}", "POST"),
     (f"challenge/{ORDER_ID}/dns-01", "POST"),
     (f"challenge/{ORDER_ID}/http-01", "POST"),
-    (f"challenge/{ORDER_ID}/tls-alpn-01", "POST"), ("revoke-cert", "POST"),
+    (f"challenge/{ORDER_ID}/tls-alpn-01", "POST"), ("revoke-cert", "POST"), ("key-change", "POST"),
 ])
 async def test_native_role_client_paths_preserve_wire_contract(suffix, method):
     path = f"{ROLE_BASE}/{suffix}"
@@ -191,6 +191,31 @@ async def test_unknown_existing_config_stops_before_mutation(config):
 async def test_config_read_failure_cannot_erase_roles():
     client = setup_client(None)
     client.read.side_effect = RuntimeError("read unavailable")
+    assert (await run_setup(client))["status"] == "error"
+    client.write.assert_not_called()
+    client._adapter.post.assert_not_called()
+    client.sys.enable_secrets_engine.assert_not_called()
+
+
+@pytest.mark.parametrize("role_response", [None, {}, {"data": None}])
+async def test_missing_preserved_role_stops_before_any_mutation(role_response):
+    client = setup_client(None)
+    client.read.side_effect = [
+        {"data": {"allowed_roles": ["acme-servers", "dbaas-servers"]}},
+        role_response,
+    ]
+    assert (await run_setup(client))["status"] == "error"
+    client.write.assert_not_called()
+    client._adapter.post.assert_not_called()
+    client.sys.enable_secrets_engine.assert_not_called()
+
+
+async def test_preserved_role_read_failure_stops_before_any_mutation():
+    client = setup_client(None)
+    client.read.side_effect = [
+        {"data": {"allowed_roles": ["acme-servers", "dbaas-servers"]}},
+        RuntimeError("role read unavailable"),
+    ]
     assert (await run_setup(client))["status"] == "error"
     client.write.assert_not_called()
     client._adapter.post.assert_not_called()

@@ -240,3 +240,25 @@ Les tests valident les **3 couches d'isolation** :
 | Couverture fonctionnelle | 24 outils MCP, 14 types secrets                        |
 | Couverture sécurité      | 3 couches isolation, enforcement tool + path           |
 | Mocking                  | **Zéro** — tous les tests utilisent des services réels |
+
+
+### Qualification ACME par rôle sur OpenBao 2.5.1
+
+`tests/pki/qualify_role_acme.py` exerce le vrai setup et le proxy contre un
+conteneur OpenBao jetable, épinglé par digest. Il crée uniquement des clés de
+recette en mémoire, publie son port sur loopback et supprime son conteneur en
+fin de test. Docker et les dépendances Python du projet doivent être disponibles.
+L'image `openbao/openbao:2.5.1` doit être présente localement au digest indiqué
+dans le script. Depuis la racine du dépôt, avec le Python de l'environnement :
+
+```bash
+env -i PATH="$PATH" .venv/bin/python tests/pki/qualify_role_acme.py
+```
+
+La recette vérifie la seconde configuration avec conservation du rôle dédié,
+l'exigence EAB, la création réelle d'un compte et d'une commande ACME via le
+proxy, les chemins annoncés par OpenBao et l'arrêt avant écriture si un rôle
+configuré a été supprimé. Elle retourne un code non nul en cas d'échec et
+indique le reçu JSON dans un répertoire temporaire. La synchronisation S3 est
+simulée : cette recette ne prouve ni la durabilité, ni le passage WAF/TLS, ni
+l'émission finale d'un certificat par DNS-01.

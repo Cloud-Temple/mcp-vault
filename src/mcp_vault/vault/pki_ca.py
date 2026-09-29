@@ -231,7 +231,17 @@ def _configured_acme_roles(client) -> list[str]:
         return [_ACME_ROLE_NAME]
     if "*" in roles:
         raise ValueError("Configuration ACME ambiguë : wildcard et rôles nommés")
-    return list(dict.fromkeys([_ACME_ROLE_NAME, *roles]))
+    preserved = list(dict.fromkeys([_ACME_ROLE_NAME, *roles]))
+    # OpenBao refuse config/acme si un rôle autorisé a depuis été supprimé.
+    # Le détecter avant toute écriture, sans supprimer silencieusement ce rôle
+    # de la configuration ni énumérer les autres rôles du mount.
+    for role in preserved:
+        if role == _ACME_ROLE_NAME:  # Le setup crée/reconfigure ce rôle maison.
+            continue
+        response = client.read(f"{_INT_MOUNT}/roles/{role}")
+        if not isinstance(response, dict) or not isinstance(response.get("data"), dict):
+            raise ValueError(f"Rôle ACME configuré absent ou illisible : {role}")
+    return preserved
 
 
 async def setup_pki_ca(lab_mode: bool = True,

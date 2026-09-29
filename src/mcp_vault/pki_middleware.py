@@ -55,7 +55,7 @@ _SAFE_QUERY_STRING = re.compile(r'^[a-zA-Z0-9=&%+\-_.~!*\'(,):@/?#\[\]]*$')
 # Un seul segment de rôle ; aucun encodage, slash ou caractère de contrôle.
 _ROLE_ACME_PATH = re.compile(
     rf'/v1/{_PKI_INT_MOUNT}/roles/[a-zA-Z0-9_][a-zA-Z0-9_.-]*/acme/'
-    r'(?:directory|new-nonce|new-account|new-order|orders|revoke-cert'
+    r'(?:directory|new-nonce|new-account|new-order|orders|revoke-cert|key-change'
     r'|account/[a-zA-Z0-9_-]+|authorization/[a-zA-Z0-9_-]+'
     r'|challenge/[a-zA-Z0-9_-]+/(?:dns-01|http-01|tls-alpn-01)'
     r'|order/[a-zA-Z0-9_-]+(?:/(?:finalize|cert))?)'
