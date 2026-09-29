@@ -2396,6 +2396,7 @@ aucune de ces surfaces n'expose d'outil MCP :
 | Surface | Traitée par | Pourquoi |
 | --- | --- | --- |
 | `/acme/*`, `/v1/_sys_pki_int/acme/*` | `PkiMiddleware` | Protocole ACME : le client n'a pas encore de certificat |
+| `/v1/_sys_pki_int/roles/<role>/acme/<endpoint-client>` | `PkiMiddleware` | ACME/JWS natif lié au rôle ; GET/HEAD/POST, pas d'API opérateur |
 | `/pki/ca/*.pem` | `PkiMiddleware` | Chaîne de confiance publique par nature |
 | `/admin`, `/admin/` et ses fichiers statiques | `AdminMiddleware` | La SPA elle-même ; **son API `/admin/api/*` exige un jeton valide**, l'autorisation dépendant de la route |
 | `OPTIONS /admin/api/*` | `AdminMiddleware` | Préflight CORS, sans effet de bord |

@@ -326,9 +326,10 @@ class TestS3SyncAfterMutations:
                 "default": "issuer-uuid-old",
             }
         })
-        client.read = MagicMock(return_value={
-            "data": {"default": "issuer-uuid-old"}
-        })
+        client.read = MagicMock(side_effect=lambda path: (
+            None if path == "_sys_pki_int/config/acme"
+            else {"data": {"default": "issuer-uuid-old"}}
+        ))
         client.list = MagicMock(return_value={"data": {"keys": []}})
         client.delete = MagicMock()
         return client
@@ -519,6 +520,7 @@ class TestIssueCertificate:
         """
         from mcp_vault.vault.pki_ca import setup_pki_ca, _ACME_ROLE_NAME
         mock_client = MagicMock()
+        mock_client.read.return_value = None  # config/acme absente avant setup
         mock_client.write = MagicMock(return_value={"data": {
             "certificate": "", "csr": "-----BEGIN CERTIFICATE REQUEST-----\nM\n-----END CERTIFICATE REQUEST-----",
             "imported_issuers": ["i"], "default": "i",
@@ -674,7 +676,9 @@ class TestEabPolicyProd:
                 "csr": "-----BEGIN CERTIFICATE REQUEST-----\nMOCK\n-----END CERTIFICATE REQUEST-----",
             }
         })
-        client.read = MagicMock(return_value={"data": {}})
+        client.read = MagicMock(side_effect=lambda path: (
+            None if path == "_sys_pki_int/config/acme" else {"data": {}}
+        ))
         return client
 
     def _acme_write_kwargs(self, mock_client):

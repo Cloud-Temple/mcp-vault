@@ -533,10 +533,37 @@ CA interne souveraine basée sur l'engine PKI d'OpenBao. CA globale (non par vau
 
 **Sync S3 forcée** : `setup_pki_ca`, `revoke_cert`, `rotate_intermediate` appellent `upload_to_s3()` avant de retourner — la fenêtre de perte S3 est documentée comme acceptable si crash entre appel OpenBao et upload.
 
-**Middleware ACME** (`pki_middleware.py`) : couche ASGI la plus externe, proxy transparent sur trois patterns :
+**Middleware ACME** (`pki_middleware.py`) : couche ASGI la plus externe, proxy transparent :
 - `/acme/*` → `/v1/_sys_pki_int/acme/*` (URL courte user-facing)
 - `/v1/_sys_pki_int/acme/*` → idem (URL longue générée par OpenBao dans les réponses ACME directory)
+- `/v1/_sys_pki_int/roles/<role>/acme/<endpoint-client>` → chemin natif lié au rôle, sans réécriture du corps JWS ou des URL
 - `/pki/ca/*.pem` → endpoints CA/CRL OpenBao (lecture publique)
+
+Le chemin par rôle n'accepte que GET/HEAD/POST et les endpoints clients
+OpenBao 2.5.1 : directory, nonce, compte, ordres, autorisations, challenges,
+finalisation/certificat et révocation. `new-eab`, `eab`, configuration et CRUD
+des rôles ne sont pas proxifiés par ce nouveau chemin. Les en-têtes
+`Authorization`, `X-Vault-Token` et `Cookie` ne sont jamais transmis au backend.
+OpenBao reste responsable des autorisations ACME, de l'EAB et des SAN du rôle.
+
+Le setup lit `config/acme` avant toute mutation et conserve sa liste explicite
+`allowed_roles`, en ajoutant `acme-servers` s'il manque et en dédupliquant.
+Il ne rend pas éligibles les autres rôles du mount et n'en modifie pas les
+définitions. Un 404/None permet le premier setup ; une erreur de lecture ou une
+forme invalide l'arrête. Le défaut OpenBao `["*"]` est restreint au rôle maison
+comme auparavant ; un mélange wildcard/noms est refusé. Les paramètres EAB
+lab/prod et le directory par défaut gardent leur comportement existant.
+La configuration et l'admission EAB additionnelles restent des opérations
+privilégiées OpenBao ; aucun outil MCP ou écran d'édition nouveau n'est ajouté.
+Les interfaces d'inventaire des rôles existantes restent utilisables.
+
+**Limite de livraison** : ce code seul ne publie pas la nouvelle route dans le
+WAF/Edge, ne change ni `PKI_BASE_URL` ni les URL du directory et ne fournit pas
+la validation DNS-01. Ces opérations nécessitent une qualification distincte,
+notamment l'inventaire des consommateurs avant changement de l'origine ACME.
+Un retour à l'ancien code retire le proxy par rôle ; un ancien setup peut
+réduire `allowed_roles` à `acme-servers`. Ne pas présenter ce rollback comme
+transparent pour les clients des rôles additionnels.
 
 Non-authentifié par design (RFC 8555 ACME + JWS). Anti-traversal sur acme_suffix et query_string. WAF Coraza : exclusions ciblées par regex sur les 3 paths PEM et endpoints ACME normalisés RFC 8555. **Ces exclusions `ctl:ruleRemoveById` sont déclarées AVANT l'`Include` du CRS** (pattern « exclusions before CRS ») — sinon les règles CRS en phase:1 (ex. 920440 sur l'extension `.pem`) s'évaluent et scorent avant le `ctl`, qui devient inopérant (issue #42, fix v0.6.8). ⚠️ **Sémantique inverse pour `SecRuleUpdateTargetById`** (exclusions de CIBLES, ajoutées en v0.9.2 / issue #107) : cette directive réécrit la définition de la règle, qui doit donc être **déjà chargée** — elle se déclare APRÈS l'`Include`. Confondre les deux rend l'exclusion silencieusement inopérante. Validé par test d'intégration à travers le WAF (`tests/pki/` T3d : `.pem` connus → 200, `.pem` arbitraire → 403).
 

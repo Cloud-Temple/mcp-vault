@@ -15,6 +15,7 @@ SÉCURITÉ :
 
 Routes interceptées :
     /acme/*        → proxy vers OpenBao /v1/_sys_pki_int/acme/*
+    /v1/_sys_pki_int/roles/<role>/acme/<endpoint-client> → chemin natif inchangé
     /pki/ca/root.pem  → OpenBao /v1/_sys_pki_root/ca/pem
     /pki/ca/chain.pem → OpenBao /v1/_sys_pki_int/ca_chain
     /pki/ca/crl.pem   → OpenBao /v1/_sys_pki_int/crl
@@ -50,6 +51,16 @@ _SAFE_ACME_SUFFIX = re.compile(r'^(/[a-zA-Z0-9/_\-\.~%]*)?$')
 # Validation des query strings : caractères URL-safe seulement, pas de traversal
 _SAFE_QUERY_STRING = re.compile(r'^[a-zA-Z0-9=&%+\-_.~!*\'(,):@/?#\[\]]*$')
 
+# Endpoints CLIENTS ACME d'OpenBao 2.5.1, jamais l'API opérateur new-eab/eab.
+# Un seul segment de rôle ; aucun encodage, slash ou caractère de contrôle.
+_ROLE_ACME_PATH = re.compile(
+    rf'/v1/{_PKI_INT_MOUNT}/roles/[a-zA-Z0-9_][a-zA-Z0-9_.-]*/acme/'
+    r'(?:directory|new-nonce|new-account|new-order|orders|revoke-cert'
+    r'|account/[a-zA-Z0-9_-]+|authorization/[a-zA-Z0-9_-]+'
+    r'|challenge/[a-zA-Z0-9_-]+/(?:dns-01|http-01|tls-alpn-01)'
+    r'|order/[a-zA-Z0-9_-]+(?:/(?:finalize|cert))?)'
+)
+
 
 class PkiMiddleware:
     """
@@ -74,6 +85,11 @@ class PkiMiddleware:
         # URL longue générée par OpenBao dans les réponses ACME directory
         # (ex: {base}/v1/_sys_pki_int/acme/new-nonce) — proxy direct vers OpenBao
         if path.startswith(f"/v1/{_PKI_INT_MOUNT}/acme/") or path == f"/v1/{_PKI_INT_MOUNT}/acme":
+            return await self._proxy_acme_long(scope, receive, send, path)
+
+        if _ROLE_ACME_PATH.fullmatch(path):
+            if scope.get("method", "GET") not in ("GET", "HEAD", "POST"):
+                return await self._error(send, 405, "Method not allowed")
             return await self._proxy_acme_long(scope, receive, send, path)
 
         if path in ("/pki/ca/root.pem", "/pki/ca/chain.pem", "/pki/ca/crl.pem"):
@@ -104,7 +120,7 @@ class PkiMiddleware:
         await self._proxy_request(scope, receive, send, target)
 
     async def _proxy_acme_long(self, scope, receive, send, path: str) -> None:
-        """Proxy pour le path long /v1/_sys_pki_int/acme/* (généré par OpenBao)."""
+        """Proxy du chemin natif ACME, générique ou lié à un rôle."""
         settings = get_settings()
         prefix = f"/v1/{_PKI_INT_MOUNT}"
         acme_suffix = path[len(prefix):]  # /acme/new-nonce, /acme/directory, etc.

@@ -214,6 +214,26 @@ def _mount_pki_engine(client, mount: str, max_ttl: str) -> None:
             raise
 
 
+def _configured_acme_roles(client) -> list[str]:
+    """Conserve les rôles nommés dans config/acme, pas tous les rôles du mount."""
+    response = client.read(f"{_INT_MOUNT}/config/acme")
+    # hvac.read rend None pour un 404 (notamment avant le premier montage).
+    if response is None:
+        return [_ACME_ROLE_NAME]
+    data = response.get("data") if isinstance(response, dict) else None
+    roles = data.get("allowed_roles") if isinstance(data, dict) else None
+    if (not isinstance(roles, list) or not roles
+            or any(not isinstance(role, str) or not role.strip() for role in roles)):
+        raise ValueError("Configuration ACME existante invalide : allowed_roles")
+    # Le défaut OpenBao d'un mount neuf est ["*"]. Le setup le restreint
+    # toujours au rôle maison, comme auparavant ; aucun wildcard n'est promu.
+    if roles == ["*"]:
+        return [_ACME_ROLE_NAME]
+    if "*" in roles:
+        raise ValueError("Configuration ACME ambiguë : wildcard et rôles nommés")
+    return list(dict.fromkeys([_ACME_ROLE_NAME, *roles]))
+
+
 async def setup_pki_ca(lab_mode: bool = True,
                        allowed_domains: Optional[list] = None,
                        leaf_ttl: str = "720h") -> dict:
@@ -245,6 +265,10 @@ async def setup_pki_ca(lab_mode: bool = True,
     # ÉLEVÉ : lock global pour éviter les race conditions si setup_pki_ca est appelé en parallèle
     async with _get_setup_lock():
         try:
+            # Lecture avant toute mutation : un accès refusé ou un état illisible
+            # ne doit jamais être pris pour une liste vide à écraser.
+            acme_roles = _configured_acme_roles(client)
+
             # ── 1. CA Racine ────────────────────────────────────────────────
             _mount_pki_engine(client, _ROOT_MOUNT, "87600h")
 
@@ -378,7 +402,7 @@ async def setup_pki_ca(lab_mode: bool = True,
                 f"{_INT_MOUNT}/config/acme",
                 enabled=True,
                 default_directory_policy=f"role:{_ACME_ROLE_NAME}",
-                allowed_roles=[_ACME_ROLE_NAME],
+                allowed_roles=acme_roles,
                 allowed_issuers=["*"],
                 eab_policy=eab_policy,
             )
