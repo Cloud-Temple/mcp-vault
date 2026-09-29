@@ -149,6 +149,10 @@ Le fichier [`.env.example`](.env.example) est la référence exhaustive et test�
 
 Les valeurs sensibles doivent être injectées au déploiement, jamais intégrées dans une image ni commitées dans Git.
 
+Le proxy ACME supporte aussi les endpoints clients natifs liés à un rôle.
+La publication réseau, l'admission EAB et les restrictions du rôle restent à
+configurer côté opérateur : voir le [contrat PKI](DESIGN/mcp-vault/TECHNICAL.md#311b-vaultpki_capy--pki-certificate-authority-v051).
+
 ## Développement et tests
 
 ```bash

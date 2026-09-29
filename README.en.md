@@ -149,6 +149,10 @@ The [`.env.example`](.env.example) file is the exhaustive, tested reference. Its
 
 Sensitive values must be injected at deployment time, never baked into an image or committed to Git.
 
+The ACME proxy also supports native role-scoped client endpoints. Network
+publication, EAB admission and role restrictions remain operator configuration:
+see the [PKI contract](DESIGN/mcp-vault/TECHNICAL.md#311b-vaultpki_capy--pki-certificate-authority-v051).
+
 ## Development and tests
 
 ```bash
