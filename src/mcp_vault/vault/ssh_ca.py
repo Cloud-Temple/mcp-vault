@@ -7,6 +7,8 @@ Les agents demandent la signature de leur clé publique et reçoivent
 un certificat éphémère pour se connecter aux serveurs cibles.
 """
 
+from ..reserved_metadata import business_target, target_error
+
 import logging
 import re
 from typing import Optional
@@ -47,6 +49,7 @@ def _ssh_mount_point(vault_id: str) -> str:
     return f"{SSH_MOUNT_PREFIX}{vault_id}"
 
 
+@business_target(ssh=True)
 async def setup_ssh_ca(vault_id: str, role_name: str, allowed_users: str = "*",
                        default_user: str = "ubuntu", ttl: str = "30m") -> dict:
     """
@@ -118,6 +121,7 @@ async def setup_ssh_ca(vault_id: str, role_name: str, allowed_users: str = "*",
         return {"status": "error", "message": "Erreur backend OpenBao"}
 
 
+@business_target(ssh=True)
 async def sign_ssh_key(vault_id: str, role_name: str, public_key: str,
                        ttl: str = "30m", *, key_id: str = "",
                        valid_principals: str = "",
@@ -179,6 +183,7 @@ async def sign_ssh_key(vault_id: str, role_name: str, public_key: str,
 # pas passer par son propre garde d'exclusion.
 # ═══════════════════════════════════════════════════════════════════════
 
+@business_target(ssh=True)
 async def sign_ssh_key_generic(vault_id: str, role_name: str, public_key: str,
                                 ttl: str = "30m") -> dict:
     """Point d'entrée générique gardé pour signer une clé SSH.
@@ -193,6 +198,7 @@ async def sign_ssh_key_generic(vault_id: str, role_name: str, public_key: str,
     return await sign_ssh_key(vault_id, role_name, public_key, ttl)
 
 
+@business_target(ssh=True)
 async def setup_ssh_ca_generic(vault_id: str, role_name: str, allowed_users: str = "*",
                                 default_user: str = "ubuntu", ttl: str = "30m") -> dict:
     """Point d'entrée générique gardé pour configurer un rôle SSH CA.
@@ -206,6 +212,7 @@ async def setup_ssh_ca_generic(vault_id: str, role_name: str, allowed_users: str
     return await setup_ssh_ca(vault_id, role_name, allowed_users, default_user, ttl)
 
 
+@business_target(ssh=True)
 async def get_ca_public_key(vault_id: str) -> dict:
     """Récupère la clé publique de la CA SSH."""
     client = get_hvac_client()
@@ -230,6 +237,7 @@ async def get_ca_public_key(vault_id: str) -> dict:
         return {"status": "error", "message": "Erreur backend OpenBao"}
 
 
+@business_target(ssh=True)
 async def list_ssh_roles(vault_id: str) -> dict:
     """
     Liste les rôles SSH CA configurés dans un vault.
@@ -267,6 +275,7 @@ async def list_ssh_roles(vault_id: str) -> dict:
         return {"status": "error", "message": "Erreur backend OpenBao"}
 
 
+@business_target(ssh=True)
 async def get_ssh_role_info(vault_id: str, role_name: str) -> dict:
     """
     Récupère les détails d'un rôle SSH CA.
@@ -310,6 +319,7 @@ async def get_ssh_role_info(vault_id: str, role_name: str) -> dict:
         return {"status": "error", "message": "Erreur backend OpenBao"}
 
 
+@business_target(ssh=True, raises=True)
 async def cleanup_ssh_ca(vault_id: str) -> bool:
     """
     Supprime le mount SSH CA d'un vault (appelé lors de vault_delete).

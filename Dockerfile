@@ -36,7 +36,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy OpenBao binary from stage 1
 COPY --from=openbao-download /tmp/openbao/bao /usr/local/bin/bao
-RUN setcap cap_ipc_lock=+ep /usr/local/bin/bao || true
 
 # Create openbao directories
 RUN mkdir -p /openbao/file /openbao/config /openbao/logs && \

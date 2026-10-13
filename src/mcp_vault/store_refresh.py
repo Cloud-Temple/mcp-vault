@@ -257,6 +257,9 @@ def start_store_refreshers() -> list[str]:
 
     Retourne les noms démarrés, pour la trace de démarrage.
     """
+    from .config import get_settings
+    if getattr(get_settings(), "metadata_backend", "s3") == "postgres":
+        return []
     global _refreshers
     if _refreshers:
         return [r.name for r in _refreshers]
@@ -317,9 +320,17 @@ async def stop_store_refreshers() -> bool:
         except Exception as e:  # noqa: BLE001 — on récolte, on n'interrompt pas la séquence
             logger.warning("Arrêt du rafraîchissement %s : %s", r.name, type(e).__name__)
             atteste = False
+    from .config import get_settings
+    pg = getattr(get_settings(),"metadata_backend","s3")=="postgres"
+    end = time.monotonic()+10
     for nom, magasin in magasins:
         try:
-            await drain_store_lock(nom, magasin)
+            if pg:
+                # Le timeout ne libère JAMAIS le verrou d'un worker encore actif.
+                await asyncio.wait_for(asyncio.shield(drain_store_lock(nom,magasin)),
+                                       timeout=max(0.001,end-time.monotonic()))
+            else:
+                await drain_store_lock(nom, magasin)
         except Exception as e:  # noqa: BLE001
             logger.warning("Drainage du magasin %s : %s", nom, type(e).__name__)
             atteste = False

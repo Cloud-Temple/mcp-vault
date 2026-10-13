@@ -51,3 +51,6 @@ pytest-asyncio==1.4.0
 # déjà épinglée par le verrou (dépendance d'exécution).
 pluggy==1.6.0
 iniconfig==2.3.0
+
+# PostgreSQL metadata (#178), libpq public standard
+psycopg[binary]==3.3.6

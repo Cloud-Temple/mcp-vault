@@ -514,6 +514,9 @@ def list_operator_access_profiles() -> dict:
 
     visible = []
     for profile in profiles.values():
+        from .reserved_metadata import target_error
+        if target_error(profile.vault_id, ssh=True):
+            continue
         if profile.client_name != token_info["client_name"]:
             continue
         policy_err = _check_dedicated_policy(token_info, profile, TOOL_LIST)
@@ -549,6 +552,10 @@ async def request_operator_ssh_access(profile_id: str, public_key: str,
     if profile is None or profile.client_name != client_name:
         return _audit_denial(client_name, profile_id, "Profil SSH opérateur non autorisé")
 
+    from .reserved_metadata import target_error
+    reserved = target_error(profile.vault_id, ssh=True)
+    if reserved:
+        return reserved
     policy_err = _check_dedicated_policy(token_info, profile, TOOL_REQUEST)
     if policy_err:
         return policy_err

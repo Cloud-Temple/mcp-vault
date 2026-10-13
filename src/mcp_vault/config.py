@@ -3,6 +3,7 @@
 
 from functools import lru_cache
 from pydantic_settings import BaseSettings
+from pydantic import Field, model_validator
 
 
 class Settings(BaseSettings):
@@ -32,6 +33,56 @@ class Settings(BaseSettings):
 
     # --- Auth ---
     admin_bootstrap_key: str = "change_me_in_production"
+
+    # Métadonnées applicatives : une seule autorité, sans fallback.
+    metadata_backend: str = "s3"
+    metadata_instance_id: str = ""
+    metadata_pg_vault_id: str = ""
+    metadata_pg_secret_path: str = ""
+    metadata_pg_provisioner_secret_path: str = ""
+    metadata_pg_database: str = ""
+    metadata_pg_owner_role: str = ""
+    metadata_pg_app_role: str = ""
+    metadata_pg_provisioner_role: str = ""
+    metadata_pg_ca_file: str = ""
+    metadata_operator_mode: str = "disabled"
+    metadata_sql_concurrency: int = Field(default=4, ge=1, le=16)
+    metadata_sql_connect_seconds: int = Field(default=3, ge=1, le=30)
+    metadata_sql_statement_seconds: int = Field(default=5, ge=1, le=60)
+    metadata_sql_lock_seconds: int = Field(default=2, ge=1, le=30)
+    metadata_batch_max_ids: int = Field(default=50, ge=1, le=100)
+    metadata_initial_admin_hours: int = Field(default=24, ge=1, le=24)
+    metadata_pg_durability: str = "standalone"
+
+    @model_validator(mode="after")
+    def validate_metadata(self):
+        from .vault_ids import is_valid_vault_id
+        import re
+        if self.metadata_backend not in {"s3", "postgres"}:
+            raise ValueError("METADATA_BACKEND invalide")
+        if self.metadata_operator_mode not in {"disabled", "install", "restore"}:
+            raise ValueError("METADATA_OPERATOR_MODE invalide")
+        if self.metadata_pg_durability not in {"standalone", "ha"}:
+            raise ValueError("METADATA_PG_DURABILITY invalide")
+        if self.metadata_backend == "postgres":
+            if not all(is_valid_vault_id(v) for v in (
+                self.metadata_instance_id, self.metadata_pg_vault_id,
+                self.metadata_pg_database, self.metadata_pg_owner_role, self.metadata_pg_app_role,
+                self.metadata_pg_provisioner_role,
+            )):
+                raise ValueError("Identités PostgreSQL requises et canoniques")
+            segment = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*")
+            paths = (self.metadata_pg_secret_path, self.metadata_pg_provisioner_secret_path)
+            if (paths[0] == paths[1] or any(
+                not p or len(p) > 256 or p.startswith("_vault_meta")
+                or not all(segment.fullmatch(s) for s in p.split("/")) for p in paths
+            )):
+                raise ValueError("Chemins de connexion distincts et canoniques requis")
+            if len({self.metadata_pg_owner_role, self.metadata_pg_app_role, self.metadata_pg_provisioner_role}) != 3:
+                raise ValueError("Rôles propriétaire, app et provisionneur distincts requis")
+            if not self.metadata_pg_ca_file:
+                raise ValueError("CA PostgreSQL requise")
+        return self
 
     # --- Accès SSH JIT opérateur ---
     # Objet JSON profile_id -> profil nominatif. Vide = fonctionnalité désactivée.

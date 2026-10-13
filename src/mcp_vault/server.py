@@ -10,6 +10,8 @@ Lifecycle :
     shutdown → seal → S3 upload
 """
 
+from .storage.admission import request_target
+
 import logging
 import sys
 from pathlib import Path
@@ -213,6 +215,7 @@ async def system_about() -> dict:
 # ═══════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
+@request_target(ssh=False, creating=True)
 async def vault_create(vault_id: str, description: str = "") -> dict:
     """
     Crée un nouveau vault (coffre de secrets, mount KV v2 dans OpenBao).
@@ -262,6 +265,7 @@ async def vault_list() -> dict:
 
 
 @mcp.tool()
+@request_target(ssh=False, creating=False)
 async def vault_info(vault_id: str) -> dict:
     """
     Informations détaillées sur un vault.
@@ -288,6 +292,7 @@ async def vault_info(vault_id: str) -> dict:
 
 
 @mcp.tool()
+@request_target(ssh=False, creating=False)
 async def vault_update(vault_id: str, description: str = "") -> dict:
     """
     Met à jour les métadonnées d'un vault (description).
@@ -316,6 +321,7 @@ async def vault_update(vault_id: str, description: str = "") -> dict:
 
 
 @mcp.tool()
+@request_target(ssh=True, creating=False)
 async def vault_delete(vault_id: str, confirm: bool = False) -> dict:
     """
     Supprime un vault et TOUS ses secrets (irréversible).
@@ -355,6 +361,7 @@ async def vault_delete(vault_id: str, confirm: bool = False) -> dict:
 # ═══════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
+@request_target(ssh=False, creating=False)
 async def secret_write(vault_id: str, path: str, data: dict,
                        secret_type: str = "custom", tags: str = "",
                        favorite: bool = False) -> dict:
@@ -393,6 +400,7 @@ async def secret_write(vault_id: str, path: str, data: dict,
 
 
 @mcp.tool()
+@request_target(ssh=False, creating=False)
 async def secret_read(vault_id: str, path: str, version: int = 0) -> dict:
     """
     Lit un secret depuis un vault.
@@ -419,6 +427,7 @@ async def secret_read(vault_id: str, path: str, version: int = 0) -> dict:
 
 
 @mcp.tool()
+@request_target(ssh=False, creating=False)
 async def secret_list(vault_id: str, path: str = "") -> dict:
     """
     Liste les secrets d'un vault.
@@ -451,6 +460,7 @@ async def secret_list(vault_id: str, path: str = "") -> dict:
 
 
 @mcp.tool()
+@request_target(ssh=False, creating=False)
 async def secret_delete(vault_id: str, path: str) -> dict:
     """
     Supprime un secret et toutes ses versions.
@@ -483,6 +493,7 @@ async def secret_delete(vault_id: str, path: str) -> dict:
 # ═══════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
+@request_target(ssh=False, creating=False)
 async def secret_wrap(
     vault_id: str,
     secret_path: str,
@@ -1241,7 +1252,7 @@ async def policy_list() -> dict:
         return {"status": "error", "message": "Policy Store non configuré (S3 requis)"}
 
     try:
-        policies = store.list_all()
+        policies = await store.alist_all() if getattr(get_settings(), "metadata_backend", "s3") == "postgres" else store.list_all()
     except PolicyStoreUnavailable as e:
         return {"status": "error", "error_type": "policy_store_unavailable",
                 "message": f"Policy Store indisponible ({e})"}
@@ -1271,7 +1282,7 @@ async def policy_get(policy_id: str) -> dict:
         return {"status": "error", "message": "Policy Store non configuré (S3 requis)"}
 
     try:
-        policy = store.get(policy_id)
+        policy = await store.aget(policy_id) if getattr(get_settings(), "metadata_backend", "s3") == "postgres" else store.get(policy_id)
     except PolicyStoreUnavailable as e:
         return {"status": "error", "error_type": "policy_store_unavailable",
                 "message": f"Policy Store indisponible ({e})"}
@@ -1286,6 +1297,8 @@ async def policy_delete(policy_id: str, confirm: bool = False) -> dict:
     """
     Supprime une policy MCP (irréversible).
 
+    En profil PostgreSQL, une policy référencée ne peut être supprimée :
+    réassigner les octrois avant suppression. En profil S3 historique :
     ⚠️ Les tokens qui référencent cette policy seront BLOQUÉS sur tout outil
     soumis à policy (fail-close, cf. is_tool_allowed()) — ils ne deviennent
     PAS non-restreints. Réassigner une autre policy si un accès doit persister.
@@ -1310,6 +1323,8 @@ async def policy_delete(policy_id: str, confirm: bool = False) -> dict:
         return {"status": "error", "message": "Policy Store non configuré (S3 requis)"}
 
     result = await store.adelete(policy_id)
+    if isinstance(result,dict):
+        return result
     if result is True:
         return _r("policy_delete", {"status": "deleted", "policy_id": policy_id},
                   detail=f"policy={policy_id}")
@@ -1330,6 +1345,7 @@ async def policy_delete(policy_id: str, confirm: bool = False) -> dict:
 # ═══════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
+@request_target(ssh=True, creating=False)
 async def ssh_ca_setup(vault_id: str, role_name: str, allowed_users: str = "*",
                        default_user: str = "ubuntu", ttl: str = "30m") -> dict:
     """
@@ -1359,6 +1375,7 @@ async def ssh_ca_setup(vault_id: str, role_name: str, allowed_users: str = "*",
 
 
 @mcp.tool()
+@request_target(ssh=True, creating=False)
 async def ssh_sign_key(vault_id: str, role_name: str, public_key: str,
                        ttl: str = "30m") -> dict:
     """
@@ -1433,6 +1450,7 @@ async def ssh_request_operator_access(profile_id: str, public_key: str,
 
 
 @mcp.tool()
+@request_target(ssh=True, creating=False)
 async def ssh_ca_public_key(vault_id: str) -> dict:
     """
     Récupère la clé publique de la CA SSH (pour configurer les serveurs cibles).
@@ -1454,6 +1472,7 @@ async def ssh_ca_public_key(vault_id: str) -> dict:
 
 
 @mcp.tool()
+@request_target(ssh=True, creating=False)
 async def ssh_ca_list_roles(vault_id: str) -> dict:
     """
     Liste les rôles SSH CA configurés dans un vault.
@@ -1477,6 +1496,7 @@ async def ssh_ca_list_roles(vault_id: str) -> dict:
 
 
 @mcp.tool()
+@request_target(ssh=True, creating=False)
 async def ssh_ca_role_info(vault_id: str, role_name: str) -> dict:
     """
     Détails d'un rôle SSH CA (TTL, allowed_users, extensions, etc.).
@@ -1766,7 +1786,7 @@ async def token_update(hash_prefix: str, policy_id: str = "",
                 return {"status": "error",
                         "message": "Policy Store non configuré — policy_id ne peut être vérifié"}
             try:
-                policy_found = pstore.get(policy_id)
+                policy_found = await pstore.aget(policy_id) if getattr(get_settings(), "metadata_backend", "s3") == "postgres" else pstore.get(policy_id)
             except PolicyStoreUnavailable as e:
                 return {"status": "error", "error_type": "policy_store_unavailable",
                         "message": f"Policy Store indisponible — policy_id ne peut être vérifié ({e})"}
@@ -2100,3 +2120,10 @@ def main():
             logger.error(f"❌ Erreur au shutdown (filet) : {e}")
 
     asyncio.run(serve_with_lifecycle())
+
+
+@mcp.tool()
+async def vault_metadata_batch(vault_ids: list[str], limit: int = 50, cursor: str | None = None) -> dict:
+    """Lit un lot borné de metadata autorisées, sans contenu secret."""
+    from .storage.admission import batch_metadata
+    return await batch_metadata(vault_ids, limit, cursor)

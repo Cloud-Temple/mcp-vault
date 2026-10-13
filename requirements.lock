@@ -85,14 +85,18 @@ rpds-py==2026.6.3
 six==1.17.0
 typing-inspection==0.4.4
 typing_extensions==4.16.0
-urllib3==2.7.0
+urllib3==2.8.0
 
 # --- JSON Schema ---
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
 
 # --- Auth ---
-PyJWT==2.13.0
+PyJWT==2.15.0
 
 # NOTE: pytest, pytest-asyncio, pluggy et iniconfig restent uniquement dans le
 # stage Docker "test" via requirements.txt.
+
+# PostgreSQL metadata (#178), libpq public standard
+psycopg==3.3.6
+psycopg-binary==3.3.6

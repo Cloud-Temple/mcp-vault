@@ -6,6 +6,8 @@ Chaque secret est stocké dans un vault (= mount point KV v2).
 Supporte le versioning natif de KV v2.
 """
 
+from ..reserved_metadata import business_target, target_error
+
 import logging
 import re
 from typing import Optional
@@ -103,6 +105,7 @@ def _is_reserved_path(path: str) -> bool:
     )
 
 
+@business_target(ssh=False)
 async def write_secret(vault_id: str, path: str, data: dict,
                        secret_type: str = "custom", tags: str = "",
                        favorite: bool = False,
@@ -193,6 +196,7 @@ async def write_secret(vault_id: str, path: str, data: dict,
         }
 
 
+@business_target(ssh=False)
 async def read_secret(vault_id: str, path: str, version: int = 0) -> dict:
     """Lit un secret (dernière version ou version spécifique)."""
     # SÉCURITÉ V3-23 : validation du chemin
@@ -277,6 +281,7 @@ async def read_secret(vault_id: str, path: str, version: int = 0) -> dict:
         }
 
 
+@business_target(ssh=False)
 async def list_secrets(vault_id: str, path: str = "") -> dict:
     """
     Liste les entrées d'un niveau du vault (clés uniquement, pas les valeurs).
@@ -313,6 +318,7 @@ async def list_secrets(vault_id: str, path: str = "") -> dict:
         return {"status": "error", "message": str(e)}
 
 
+@business_target(ssh=False)
 async def delete_secret(vault_id: str, path: str) -> dict:
     """Supprime un secret et toutes ses versions."""
     # SÉCURITÉ V3-23 : validation du chemin

@@ -349,11 +349,14 @@ class TestPepDenyStderrSanitized:
 # =============================================================================
 
 class TestConsumeLogNoInjection:
-    """Le log de succès de consume_wrap_secret ne doit pas forger de lignes à partir de
-    vault_id/secret_path issus d'une entrée de registre S3 historique (écrite avant le
-    durcissement, quand `.match`+`$` acceptait des fins de ligne)."""
+    """Un path historique forgé est échappé dans le log de succès ; un coffre
+    invalide est refusé avant consommation et ne peut pas atteindre ce log."""
 
-    def test_forged_registry_fields_escaped_in_log(self, caplog):
+    @pytest.mark.parametrize("vault_id,expected_status", [
+        ("prod", "ok"),
+        ("prod\r\nFORGED-VAULT", "error"),
+    ])
+    def test_forged_registry_fields_escaped_in_log(self, caplog, vault_id, expected_status):
         import sys as _sys
         import logging
         from unittest.mock import MagicMock
@@ -363,7 +366,7 @@ class TestConsumeLogNoInjection:
             def __init__(self):
                 self._wraps = [{
                     "operation_id": "op-1", "accessor": "ACC", "mission_id": "m-1",
-                    "vault_id": "prod\r\nFORGED-VAULT", "secret_path": "p FORGED-PATH",
+                    "vault_id": vault_id, "secret_path": "p FORGED-PATH",
                     "created_at": "", "expires_at": "", "status": "active",
                     "tenant_id": "", "expected_aud": "",
                 }]
@@ -381,6 +384,8 @@ class TestConsumeLogNoInjection:
                 return True
 
         reg = _Reg()
+        from copy import deepcopy
+        before = deepcopy(reg._wraps)
         mock_hvac = MagicMock()
         mock_ephemeral = MagicMock()
         mock_hvac.Client.return_value = mock_ephemeral
@@ -391,11 +396,35 @@ class TestConsumeLogNoInjection:
              patch("mcp_vault.vault.wrapping._get_client", return_value=MagicMock()), \
              patch("mcp_vault.vault.wrapping._get_config", return_value=cfg), \
              patch("mcp_vault.vault.wrapping.get_wrap_registry", return_value=reg), \
+             patch.object(reg, "try_mark_consuming", wraps=reg.try_mark_consuming) as consuming, \
+             patch.object(reg, "mark_consumed", wraps=reg.mark_consumed) as consumed, \
+             patch.object(reg, "_save", wraps=reg._save) as saved, \
              caplog.at_level(logging.INFO, logger="mcp-vault.wrapping"):
             result = run(consume_wrap_secret(wrap_token="wt", operation_id="op-1",
                                              mission_id="m-1"))
 
-        assert result["status"] == "ok", f"consume inattendu: {result}"
+        assert result["status"] == expected_status, f"consume inattendu: {result}"
+        success_logs = [rec for rec in caplog.records
+                        if rec.name == "mcp-vault.wrapping"
+                        and "consume_wrap_secret : op=" in rec.getMessage()]
+        if expected_status == "ok":
+            assert result["data"] == {"data": {"k": "v"}, "metadata": {}}
+            assert result["secret_path"] == before[0]["secret_path"]
+            mock_ephemeral.sys.unwrap.assert_called_once_with()
+            consuming.assert_called_once_with("op-1", "m-1")
+            consumed.assert_called_once_with("op-1", "m-1")
+            assert reg._wraps[0]["status"] == "consumed"
+            assert len(success_logs) == 1
+            assert repr(before[0]["secret_path"]) in success_logs[0].getMessage()
+        else:
+            assert result["error_type"] == "backend_unavailable"
+            mock_hvac.Client.assert_not_called()
+            mock_ephemeral.sys.unwrap.assert_not_called()
+            consuming.assert_not_called()
+            consumed.assert_not_called()
+            saved.assert_not_called()
+            assert reg._wraps == before
+            assert success_logs == []
         for rec in caplog.records:
             msg = rec.getMessage()
             assert not _has_control_char(msg), \

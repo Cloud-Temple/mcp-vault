@@ -140,6 +140,20 @@ async def availability_status() -> tuple[str, str]:
             # alors qu'aucun instantané d'autorisation fiable n'est disponible.
             # Lire ce rapport reste strictement mémoire : `/health` ne doit
             # jamais devenir une sonde S3 bloquante.
+            from .config import get_settings
+            if getattr(get_settings(), "metadata_backend", "s3") == "postgres":
+                from .storage.postgres import connection, offload, MetadataUnavailable
+                def probe_metadata():
+                    with connection() as conn:
+                        conn.execute("SELECT 1 FROM vault_metadata.tokens LIMIT 1")
+                        conn.execute("SELECT 1 FROM vault_metadata.policies LIMIT 1")
+                        conn.execute("SELECT 1 FROM vault_metadata.mission_bindings LIMIT 1")
+                        conn.execute("SELECT 1 FROM vault_metadata.wrap_registry LIMIT 1")
+                try:
+                    await offload(probe_metadata)
+                    return HEALTH_HEALTHY, probe.detail
+                except MetadataUnavailable:
+                    return HEALTH_UNAVAILABLE, "métadonnées indisponibles"
             try:
                 from .store_refresh import freshness_report
                 magasins = freshness_report()

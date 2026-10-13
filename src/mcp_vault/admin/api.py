@@ -59,6 +59,18 @@ async def _policy_error_response(send, err: dict):
 
 async def handle_admin_api(scope, receive, send, mcp):
     """Routeur principal de l'API admin."""
+    if getattr(get_settings(), "metadata_backend", "s3") == "postgres":
+        path = scope.get("path", "")
+        if path.startswith("/admin/api/metadata-operator/"):
+            from ..storage.operator import handle_operator
+            return await handle_operator(scope, receive, send)
+        from ..storage.admission import admitted_call
+        return await admitted_call(scope, receive, send,
+            lambda sc, rc, sd: _handle_authenticated_admin(sc, rc, sd, mcp))
+    return await _handle_authenticated_admin(scope, receive, send, mcp)
+
+
+async def _handle_authenticated_admin(scope, receive, send, mcp):
     path = scope.get("path", "")
     method = scope.get("method", "GET")
 
@@ -149,6 +161,33 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
         if not is_admin:
             return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
         return await _api_jwks_reload(send)
+
+    if path == "/admin/api/vaults/metadata-batch" and method == "POST":
+        from ..storage.admission import batch_metadata
+        try:
+            body = json.loads(await _read_body(receive))
+            result = await batch_metadata(body.get("vault_ids"), body.get("limit", 50), body.get("cursor"))
+        except (ValueError, AttributeError):
+            return await _json_response(send, 400, {"status":"error","message":"Lot invalide"})
+        status = 200 if result.get("status") == "ok" else (403 if result.get("error_type") == "access_denied" else 503)
+        return await _json_response(send, status, result)
+
+    if getattr(get_settings(), "metadata_backend", "s3") == "postgres" and path.startswith("/admin/api/vaults/"):
+        from ..reserved_metadata import target_error
+        from ..storage.admission import preload_owners
+        from ..storage.postgres import MetadataUnavailable
+        vid = path[len("/admin/api/vaults/"):].split("/",1)[0]
+        composite = "/ssh/" in path or method == "DELETE" and "/secrets" not in path or method == "GET" and path == "/admin/api/vaults/" + vid
+        reserved = target_error(vid, ssh=composite)
+        if reserved:
+            return await _json_response(send,403,reserved)
+        if not allowed_vaults and not is_admin:
+            try:
+                await preload_owners([vid])
+            except PermissionError:
+                return await _json_response(send,403,{"status":"error","message":"Accès au coffre refusé"})
+            except MetadataUnavailable:
+                return await _json_response(send,503,{"status":"error","message":"Métadonnées indisponibles"})
 
     # --- Routes vaults (read = list/detail, write = create/update, admin = delete) ---
     if path == "/admin/api/vaults" and method == "GET":
@@ -530,7 +569,7 @@ async def _api_list_tokens(send):
     store = get_token_store()
     if not store:
         return await _json_response(send, 200, {"status": "ok", "tokens": [], "message": "S3 non configuré"})
-    await _json_response(send, 200, {"status": "ok", "tokens": store.list_all()})
+    await _json_response(send, 200, {"status": "ok", "tokens": (await store.alist_all() if getattr(get_settings(), "metadata_backend", "s3") == "postgres" else store.list_all())})
 
 
 async def _api_create_token(send, body):
@@ -590,7 +629,7 @@ async def _api_create_token(send, body):
             return await _json_response(send, 400, {"status": "error",
                     "message": "Policy Store non configuré — policy_id ne peut être vérifié"})
         try:
-            policy_found = pstore.get(policy_id)
+            policy_found = (await pstore.aget(policy_id) if getattr(get_settings(), "metadata_backend", "s3") == "postgres" else pstore.get(policy_id))
         except PolicyStoreUnavailable as e:
             return await _json_response(send, 503, {"status": "error",
                     "error_type": "policy_store_unavailable",
@@ -644,7 +683,7 @@ async def _api_update_token(send, hash_prefix, body):
             return await _json_response(send, 400, {"status": "error",
                     "message": "Policy Store non configuré — policy_id ne peut être vérifié"})
         try:
-            policy_found = pstore.get(policy_id)
+            policy_found = (await pstore.aget(policy_id) if getattr(get_settings(), "metadata_backend", "s3") == "postgres" else pstore.get(policy_id))
         except PolicyStoreUnavailable as e:
             return await _json_response(send, 503, {"status": "error",
                     "error_type": "policy_store_unavailable",
@@ -753,6 +792,13 @@ async def _api_create_vault(send, body, token_info):
     description = data.get("description", "")
     if not vault_id:
         return await _json_response(send, 400, {"status": "error", "message": "vault_id requis"})
+    if getattr(get_settings(), "metadata_backend", "s3") == "postgres":
+        from ..reserved_metadata import target_error
+        error = target_error(vault_id)
+        if error:
+            return await _json_response(send,403,error)
+        from ..storage.postgres import request_facts
+        request_facts.get()["creating"] = vault_id
     access_err = _check_vault_access(token_info, vault_id)
     if access_err:
         return await _json_response(send, 403, access_err)
@@ -872,10 +918,15 @@ async def _api_list_vaults(send, allowed_vault_ids=None, owner_filter=None):
     enriched = []
     for vault in result.get("vaults", []):
         vid = vault["vault_id"]
+        from ..reserved_metadata import target_error
+        if target_error(vid):
+            continue
         try:
             # #81 : cardinalité seulement si l'identité peut LISTER ce vault
             # (moindre privilège, test silencieux — pas de faux « denied »).
             info = await get_space_info(vid, count=can_read_vault_content(vid))
+            if getattr(get_settings(), "metadata_backend", "s3") == "postgres" and info.get("status") != "ok":
+                return await _json_response(send,503,{"status":"error","error_type":"metadata_incomplete", "message":"Projection incomplète"})
             enriched.append({
                 "vault_id": vid,
                 "description": info.get("description", vault.get("description", "")),
@@ -904,6 +955,10 @@ async def _api_list_vaults(send, allowed_vault_ids=None, owner_filter=None):
 
 async def _api_vault_detail(send, vault_id):
     """GET /admin/api/vaults/{vault_id} — Détail d'un vault."""
+    from ..reserved_metadata import target_error
+    reserved = target_error(vault_id, ssh=True)
+    if reserved:
+        return await _json_response(send, 403, reserved)
     from ..vault.spaces import get_space_info
     from ..vault.ssh_ca import list_ssh_roles
 
@@ -1036,7 +1091,7 @@ async def _api_list_policies(send):
     if not store:
         return await _json_response(send, 200, {"status": "ok", "policies": [], "message": "S3 non configuré"})
     try:
-        policies = store.list_all()
+        policies = (await store.alist_all() if getattr(get_settings(), "metadata_backend", "s3") == "postgres" else store.list_all())
     except PolicyStoreUnavailable as e:
         return await _json_response(send, 503, {"status": "error", "error_type": "policy_store_unavailable",
                 "message": f"Policy Store indisponible ({e})"})
@@ -1094,7 +1149,7 @@ async def _api_get_policy(send, policy_id):
         return await _json_response(send, 400, {"status": "error", "message": "S3 non configuré"})
 
     try:
-        policy = store.get(policy_id)
+        policy = await store.aget(policy_id) if getattr(get_settings(), "metadata_backend", "s3") == "postgres" else store.get(policy_id)
     except PolicyStoreUnavailable as e:
         return await _json_response(send, 503, {"status": "error", "error_type": "policy_store_unavailable",
                 "message": f"Policy Store indisponible ({e})"})
@@ -1112,6 +1167,8 @@ async def _api_delete_policy(send, policy_id):
         return await _json_response(send, 400, {"status": "error", "message": "S3 non configuré"})
 
     result = await store.adelete(policy_id)
+    if isinstance(result,dict):
+        return await _json_response(send,409 if result.get("error_type")=="policy_in_use" else 503,result)
     if result is True:
         log_audit("policy_delete", "deleted", detail=f"policy={policy_id}")
         await _json_response(send, 200, {"status": "deleted", "policy_id": policy_id})
@@ -1144,7 +1201,7 @@ async def _api_list_mission_bindings(send):
         return await _json_response(send, 200, {"status": "ok", "bindings": [],
                                                 "message": "Mission Binding Store non configuré"})
     try:
-        bindings = store.list_all()
+        bindings = (await store.alist_all() if getattr(get_settings(), "metadata_backend", "s3") == "postgres" else store.list_all())
     except MissionBindingStoreUnavailable as e:
         return await _json_response(send, 503, {"status": "error",
                 "message": f"Mission Binding Store indisponible ({e})"})
@@ -1213,7 +1270,7 @@ async def _api_get_mission_binding(send, tenant_id):
         return await _json_response(send, 400, {"status": "error",
                 "message": "Mission Binding Store non configuré"})
     try:
-        binding = store.get(tenant_id)
+        binding = await store.aget(tenant_id) if getattr(get_settings(), "metadata_backend", "s3") == "postgres" else store.get(tenant_id)
     except MissionBindingStoreUnavailable as e:
         return await _json_response(send, 503, {"status": "error",
                 "message": f"Mission Binding Store indisponible ({e})"})
@@ -1231,6 +1288,8 @@ async def _api_delete_mission_binding(send, tenant_id):
         return await _json_response(send, 400, {"status": "error",
                 "message": "Mission Binding Store non configuré"})
     result = await store.adelete(tenant_id)
+    if isinstance(result,dict):
+        return await _json_response(send,503,result)
     if result is True:
         did = _binding_decision_id()
         log_audit("mission_binding_delete", "deleted",
@@ -1437,6 +1496,8 @@ def _is_admin(token: str) -> bool:
     settings = get_settings()
     # Comparaison constant-time contre timing attacks
     if hmac.compare_digest(token, settings.admin_bootstrap_key):
+        if getattr(settings, "metadata_backend", "s3") == "postgres":
+            return False
         return True
     store = get_token_store()
     if store:
@@ -1454,6 +1515,8 @@ def _get_token_info(token: str) -> dict | None:
     settings = get_settings()
     # Bootstrap key = admin total (comparaison constant-time contre timing attacks)
     if hmac.compare_digest(token, settings.admin_bootstrap_key):
+        if getattr(settings, "metadata_backend", "s3") == "postgres":
+            return None
         return {
             "client_name": "admin",
             "permissions": ["read", "write", "admin"],
@@ -1491,8 +1554,15 @@ def _check_vault_access(token_info: dict, vault_id: str) -> dict | None:
     Returns:
         None si OK, dict {"status": "error", ...} si refusé
     """
+    if getattr(get_settings(), "metadata_backend", "s3") == "postgres":
+        from ..auth.context import check_access
+        return check_access(vault_id)
     perms = token_info.get("permissions", [])
 
+    from ..reserved_metadata import target_error
+    reserved = target_error(vault_id)
+    if reserved:
+        return reserved
     # Admin → accès total
     if "admin" in perms:
         return None
@@ -1557,6 +1627,8 @@ async def _json_response(send, status, data):
     est défini uniquement pour les requêtes same-origin depuis /admin.
     Les requêtes cross-origin depuis des domaines tiers sont bloquées.
     """
+    if isinstance(data,dict) and data.get("error_type") in {"storage_unavailable", "outcome_unknown", "metadata_incomplete", "backend_unavailable"}:
+        status = 503
     body = json.dumps(data, default=str).encode()
     await send({
         "type": "http.response.start",
