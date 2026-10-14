@@ -231,6 +231,12 @@ class AuthMiddleware:
         self.mcp = mcp
 
     async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope.get("path") not in self.PUBLIC_PATHS and getattr(get_settings(), "metadata_backend", "s3") == "postgres":
+            from ..storage.admission import admitted_call
+            return await admitted_call(scope, receive, send, self._call_authenticated)
+        return await self._call_authenticated(scope, receive, send)
+
+    async def _call_authenticated(self, scope, receive, send):
         if scope["type"] not in ("http", "websocket"):
             return await self.app(scope, receive, send)
 
@@ -244,7 +250,7 @@ class AuthMiddleware:
         token = self._extract_token(scope)
         settings = get_settings()
 
-        if settings.mcp_auth_mode == "bearer-anonymous":
+        if settings.mcp_auth_mode == "bearer-anonymous" and getattr(settings, "metadata_backend", "s3") != "postgres":
             # ── Mode d'exception EXPLICITE (issue #116) ────────────────────
             # Comportement historique : un appelant sans jeton — ou avec un
             # jeton invalide — atteint les outils dont les gardes ne contrôlent
@@ -252,7 +258,7 @@ class AuthMiddleware:
             # documenté, jamais comme défaut. Voir l'avertissement CRITICAL
             # émis par `create_app()`.
             token_info = self._validate_token(token) if token else None
-        elif settings.mcp_auth_mode == "bearer":
+        elif settings.mcp_auth_mode in {"bearer", "bearer-anonymous"}:
             # ── Refus ACTIF (issue #116) ──────────────────────────────────
             # Le défaut historique injectait `None` et poursuivait. Les gardes
             # des outils ALORS EXPOSÉS (`get_listing_filter`, `check_policy`,
@@ -310,6 +316,8 @@ class AuthMiddleware:
         # Bootstrap key admin : testée en constant-time AVANT tout dispatch JWT
         # (break-glass — jamais routée vers la validation JWT).
         if hmac.compare_digest(token, settings.admin_bootstrap_key):
+            if getattr(settings, "metadata_backend", "s3") == "postgres":
+                return None, (403, "bootstrap_business_forbidden", {})
             return {
                 "auth_type": "bootstrap",
                 "client_name": "admin",
@@ -547,6 +555,8 @@ class AuthMiddleware:
 
         # Bootstrap key → admin total (comparaison constant-time contre timing attacks)
         if hmac.compare_digest(token, settings.admin_bootstrap_key):
+            if getattr(settings, "metadata_backend", "s3") == "postgres":
+                return None
             return {
                 "auth_type": "bootstrap",
                 "client_name": "admin",

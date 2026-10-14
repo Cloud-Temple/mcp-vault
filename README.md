@@ -178,3 +178,11 @@ Certaines suites d’intégration nécessitent Docker, S3 et un serveur en fonct
 ## Licence
 
 MCP Vault est distribué sous licence [Apache License 2.0](LICENSE).
+
+### Métadonnées PostgreSQL (profil opt-in)
+
+Le [guide public](docs/postgres-metadata.md) décrit l'installation Vault-first,
+les deux topologies autonomes, les credentials/rôles séparés, les lectures
+metadata bornées et la reprise logique. En ce profil, la clé bootstrap est
+réservée à la voie opérateur finie ; elle ne donne aucun accès admin métier.
+Les secrets et backups OpenBao conservent leur mécanisme existant.

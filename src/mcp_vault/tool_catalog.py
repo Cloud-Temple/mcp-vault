@@ -35,7 +35,7 @@ test, ce fichier serait un piège de plus.
 
 import fnmatch
 
-# Les 39 outils exposés par `@mcp.tool()` dans `server.py`.
+# Les 40 outils exposés par `@mcp.tool()` dans `server.py`.
 # ⚠️ Modifier cette liste sans modifier `server.py` (ou l'inverse) fait échouer
 # `tests/test_tool_catalog_128.py::test_le_catalogue_ne_derive_pas_de_server`.
 MCP_TOOL_NAMES = frozenset({
@@ -52,7 +52,7 @@ MCP_TOOL_NAMES = frozenset({
     "ssh_request_operator_access", "ssh_sign_key",
     "system_about", "system_health",
     "token_update",
-    "vault_create", "vault_delete", "vault_info", "vault_list", "vault_update",
+    "vault_create", "vault_delete", "vault_info", "vault_metadata_batch", "vault_list", "vault_update",
 })
 
 

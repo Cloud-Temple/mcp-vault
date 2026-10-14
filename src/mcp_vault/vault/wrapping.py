@@ -80,7 +80,11 @@ def is_safe_id(value) -> bool:
 def _get_client():
     """Wrapper lazy autour de get_hvac_client."""
     from ..openbao.manager import get_hvac_client
-    return get_hvac_client()
+    client = get_hvac_client()
+    if client and getattr(_get_config(),"metadata_backend","s3")=="postgres":
+        import hvac
+        return hvac.Client(url=_get_config().openbao_addr,token=client.token,timeout=(1,2))
+    return client
 
 
 def _get_config():
@@ -98,6 +102,9 @@ _wrap_registry: Optional["WrapRegistry"] = None
 
 def get_wrap_registry() -> Optional["WrapRegistry"]:
     """Retourne le WrapRegistry (None si S3 non configuré)."""
+    if getattr(_get_config(), "metadata_backend", "s3") == "postgres":
+        from ..storage.stores import _wrap_scope
+        return _wrap_scope.get() or _wrap_registry
     return _wrap_registry
 
 
@@ -106,6 +113,10 @@ def init_wrap_registry():
     global _wrap_registry
     from ..config import get_settings
     settings = get_settings()
+    if getattr(settings, "metadata_backend", "s3") == "postgres":
+        from ..storage.stores import PGWrap
+        _wrap_registry = PGWrap()
+        return
     if settings.s3_endpoint_url and settings.s3_bucket_name:
         _wrap_registry = WrapRegistry(settings)
         _wrap_registry.load()
@@ -252,6 +263,9 @@ class WrapRegistry:
             self.freshness.mark_success()
             self._last_load_ok = True
         except Exception as e:
+            from ..storage.postgres import MetadataUnavailable
+            if isinstance(e, MetadataUnavailable):
+                raise
             if objet_absent(e):
                 self._wraps = []
                 self.freshness.mark_success()
@@ -294,6 +308,9 @@ class WrapRegistry:
             self._last_load_ok = True
             return True
         except Exception as e:
+            from ..storage.postgres import MetadataUnavailable
+            if isinstance(e, MetadataUnavailable):
+                raise
             logger.error("WrapRegistry S3 save FAILED: %s — compensation indisponible", type(e).__name__)
             return False
 
@@ -764,6 +781,23 @@ async def _offload_registre(fn, mutation, *args, **kwargs):
     écriture en vol ». La consultation d'état, elle, reste ouverte — elle ne mute
     rien, et la refuser dégraderait le diagnostic pendant l'arrêt.
     """
+    if getattr(_get_config(), "metadata_backend", "s3") == "postgres":
+        from ..storage.stores import wrap_for_worker
+        from ..storage.postgres import MetadataUnavailable, MutationUnknown
+        try:
+            registry = get_wrap_registry()
+            from ..store_refresh import magasin_ferme
+            if mutation and magasin_ferme(registry):
+                raise MetadataUnavailable("shutdown")
+            async with registry.refresh_lock:
+                if mutation and magasin_ferme(registry):
+                    raise MetadataUnavailable("shutdown")
+                return await run_blocking(functools.partial(wrap_for_worker, fn, args, kwargs))
+        except MutationUnknown as exc:
+            return {"status":"error","error_type":"outcome_unknown","mutation_id":exc.mutation_id,
+                    "message":"Résultat indéterminé ; ne pas rejouer"}
+        except MetadataUnavailable:
+            return {"status":"error","error_type":"backend_unavailable","message":"Métadonnées indisponibles"}
     registry = get_wrap_registry()
     if mutation and registry is not None:
         from ..store_refresh import magasin_ferme
@@ -834,6 +868,11 @@ def _wrap_secret_blocking(
         {status: "ok", wrap_token (SENSIBLE), secret_id, accessor, vault_url, expires_at, intended_use}
     """
     # ── Validation des inputs ────────────────────────────────────────
+    from ..reserved_metadata import target_error
+    reserved = target_error(vault_id)
+    if reserved:
+        return reserved
+
     err = _validate_inputs(vault_id, secret_path, mission_id, operation_id)
     if err:
         return {"status": "error", "error_type": "invalid_input", "message": err}
@@ -951,6 +990,9 @@ def _wrap_secret_blocking(
     try:
         response = client.read(kv_data_path, wrap_ttl=f"{ttl_seconds}s")
     except Exception as e:
+        from ..storage.postgres import MetadataUnavailable
+        if isinstance(e, MetadataUnavailable):
+            raise
         logger.warning("wrap_secret error for vault=%s path_len=%d: %s",
                        vault_id, len(secret_path), type(e).__name__)
         # Marquer le pending comme failed (pas d'accessor à révoquer)
@@ -979,7 +1021,17 @@ def _wrap_secret_blocking(
                 "message": "wrap_info incomplet (voir logs serveur)"}
 
     # ── Mettre à jour "pending" → "active" avec l'accessor ──────────
-    if not registry.mark_active(operation_id, mission_id, accessor):
+    from ..storage.postgres import MetadataUnavailable, MutationUnknown
+    metadata_result = {}
+    try:
+        active = registry.mark_active(operation_id, mission_id, accessor)
+    except MutationUnknown as exc:
+        active = False
+        metadata_result = {"metadata_outcome":"unknown","mutation_id":exc.mutation_id}
+    except MetadataUnavailable:
+        active = False
+        metadata_result = {"metadata_outcome":"unconfirmed"}
+    if not active:
         # Le wrap_token EXISTE côté OpenBao mais n'est pas corrélé au registre
         # (échec S3, ou entrée d'intention absente/ambiguë) → révoquer
         # immédiatement pour éviter une provision non compensable.
@@ -994,6 +1046,9 @@ def _wrap_secret_blocking(
         try:
             client.auth.token.revoke_accessor(accessor=accessor)
         except Exception as rev_e:
+            from ..storage.postgres import MetadataUnavailable
+            if isinstance(rev_e, MetadataUnavailable):
+                raise
             logger.error("wrap_secret: révocation d'urgence échouée: %s — "
                          "wrap token orphelin possible (TTL=%ss)", type(rev_e).__name__, ttl_seconds)
             # Révocation NON CONFIRMÉE. Elle a pu aboutir malgré l'exception
@@ -1001,13 +1056,15 @@ def _wrap_secret_blocking(
             # certain. L'appelant n'a pas l'accessor — aucune compensation
             # possible de son côté, seul le TTL borne la ressource.
             return {"status": "error", "error_type": "wrap_created_orphaned",
-                    "message": "Wrap créé mais non persisté, et sa révocation "
+                    **metadata_result,
+                    "message": "Wrap créé, corrélation des métadonnées non confirmée, et sa révocation "
                                f"n'est pas confirmée — il peut rester actif jusqu'à "
                                f"{ttl_seconds}s. Aucun accessor n'est exposé : "
                                "cette ressource n'est pas compensable. Ne pas "
                                "rejouer cette clé"}
         return {"status": "error", "error_type": "wrap_created_revoked",
-                "message": "Wrap créé mais non persisté — révocation confirmée, "
+                **metadata_result,
+                "message": "Wrap créé, corrélation des métadonnées non confirmée — révocation confirmée, "
                            "aucune ressource à compenser. Ne pas rejouer cette clé"}
 
     expires_at_dt = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
@@ -1118,6 +1175,8 @@ def _visible_entries(entries: list) -> list:
     Les entrées hors scope sont présentées comme ABSENTES (not_found en aval),
     pas comme refusées : aucune fuite d'existence inter-tenant.
     """
+    from ..reserved_metadata import target_error
+    entries = [e for e in entries if not target_error(e.get("vault_id"))]
     if _caller_is_admin():
         return list(entries)
     from ..auth.context import check_access, check_wrap_path_policy
@@ -1184,6 +1243,10 @@ def _revoke_wrap_blocking(lease_id: str) -> dict:
         return {"status": "error", "error_type": "backend_unavailable",
                 "message": "Registre non rafraîchi (S3 injoignable) — révocation refusée (réessayer)"}
     entries, _ = _select_wrap_entries(registry._wraps, accessor=lease_id)
+    from ..reserved_metadata import entries_error
+    reserved = entries_error(entries)
+    if reserved:
+        return reserved
     visible = _visible_entries(entries)
     if not visible:
         return {"status": "ok", "state": "not_found", "accessor": lease_id[:12] + "..."}
@@ -1209,6 +1272,10 @@ def _revoke_accessor_selected(registry, accessor: str, selection: list) -> dict:
     détacherait les références et invaliderait la décision de visibilité.
     Mapping idempotent : accessor inconnu/expiré côté OpenBao → already_revoked.
     """
+    from ..reserved_metadata import entries_error
+    reserved = entries_error(selection)
+    if reserved:
+        return reserved
     client = _get_client()
     if not client:
         return {"status": "error", "error_type": "backend_unavailable",
@@ -1247,6 +1314,9 @@ def _revoke_accessor_selected(registry, accessor: str, selection: list) -> dict:
         client.auth.token.revoke_accessor(accessor=accessor)
         return _rendre("revoked")
     except Exception as e:
+        from ..storage.postgres import MetadataUnavailable
+        if isinstance(e, MetadataUnavailable):
+            raise
         err_str = str(e).lower()
         # OpenBao : "bad accessor" ou token déjà révoqué/expiré → idempotent
         if any(k in err_str for k in ("bad accessor", "not found", "invalid accessor")):
@@ -1301,6 +1371,10 @@ def _lookup_and_revoke_blocking(operation_id: str, mission_id: str) -> dict:
                 "message": "Registre non rafraîchi (S3 injoignable) — compensation refusée (réessayer)"}
     all_matching, _ = _select_wrap_entries(registry._wraps, operation_id=operation_id,
                                            mission_id=mission_id)
+    from ..reserved_metadata import entries_error
+    reserved = entries_error(all_matching)
+    if reserved:
+        return reserved
     entries = _visible_entries(all_matching)
 
     if not entries:
@@ -1643,6 +1717,10 @@ def _status_by_operation_id_blocking(operation_id: str, mission_id: str) -> dict
         return {"status": "error", "error_type": "backend_unavailable",
                 "message": "Registre non rafraîchi (S3 injoignable) — état indéterminé"}
 
+    from ..reserved_metadata import entries_error
+    reserved = entries_error(all_matching)
+    if reserved:
+        return reserved
     entries = all_matching if is_admin else _visible_entries(all_matching)
 
     if not entries:
@@ -1787,6 +1865,11 @@ def _consume_wrap_secret_blocking(
         return {"status": "error", "error_type": "not_found",
                 "message": "Wrap introuvable (opération inconnue ou expirée)"}
 
+    from ..reserved_metadata import entries_error
+    reserved = entries_error([entry])
+    if reserved:
+        return reserved
+
     # ── 1b. Vérification binding C18 complet (P1 — issue #29) ───────
     # Vérification AVANT try_mark_consuming : pas d'état "consuming" orphelin si mismatch.
     # Hors enforce : les deux champs sont optionnels (rétrocompat wraps legacy).
@@ -1862,10 +1945,14 @@ def _consume_wrap_secret_blocking(
     try:
         # Utiliser un client éphémère avec le wrap_token comme token d'auth
         import hvac as _hvac
-        ephemeral_client = _hvac.Client(url=settings.openbao_addr, token=wrap_token)
+        ephemeral_client = _hvac.Client(url=settings.openbao_addr, token=wrap_token,
+            timeout=(1,2) if getattr(settings,"metadata_backend","s3")=="postgres" else 30)
         unwrap_response = ephemeral_client.sys.unwrap()
 
     except Exception as e:
+        from ..storage.postgres import MetadataUnavailable
+        if isinstance(e, MetadataUnavailable):
+            raise
         # Classification par CLASSE d'exception hvac (`InvalidRequest`) PUIS motif
         # OpenBao exact, recherché dans `errors` et `str(exc)`. L'ancien mapping
         # cherchait « 403 »/« 404 » sans contrainte de classe ; OpenBao répond

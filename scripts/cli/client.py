@@ -42,11 +42,23 @@ class MCPClient:
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
 
+        # Le SDK 2.1 remplace les erreurs HTTP non JSON-RPC par un message sans
+        # code. Conserver uniquement les codes du POST de CET appel, sans lire
+        # les corps (arguments/secrets) et sans interférer avec le transport.
+        endpoint = httpx2.URL(f"{self.base_url}/mcp")
+        failed_http_codes = set()
+
+        async def observe_response(response):
+            if (response.request.method == "POST" and response.request.url == endpoint
+                    and response.status_code >= 400):
+                failed_http_codes.add(response.status_code)
+
         try:
             timeout = httpx2.Timeout(self.timeout, connect=30)
             async with httpx2.AsyncClient(
                 headers=headers,
                 timeout=timeout,
+                event_hooks={"response": [observe_response]},
             ) as http:
                 transport = streamable_http_client(
                     f"{self.base_url}/mcp", http_client=http,
@@ -81,8 +93,31 @@ class MCPClient:
         except BaseException as e:
             if self._contains_control_flow(e):
                 raise
+            if failed_http_codes and self._lost_http_placeholder(e):
+                if failed_http_codes == {401}:
+                    msg = "Authentification refusée (401). Vérifiez MCP_TOKEN ou ADMIN_BOOTSTRAP_KEY dans .env"
+                elif failed_http_codes == {403}:
+                    msg = "Accès interdit (403). Token insuffisant."
+                elif failed_http_codes == {503}:
+                    msg = "Service indisponible ou réponse non confirmée (503)."
+                else:
+                    codes = ", ".join(str(code) for code in sorted(failed_http_codes))
+                    msg = f"Réponse HTTP non confirmée ({codes})."
+                return {"status": "error", "message": msg}
             msg = self._extract_error(e)
             return {"status": "error", "message": msg}
+
+    @staticmethod
+    def _lost_http_placeholder(exc: BaseException) -> bool:
+        """Ne pas transformer un timeout d'appel en refus d'auth tardif."""
+        if isinstance(exc, BaseExceptionGroup):
+            return bool(exc.exceptions) and all(MCPClient._lost_http_placeholder(e)
+                                                for e in exc.exceptions)
+        return (getattr(exc, "code", None), str(exc)) in {
+            (-32603, "Server returned an error response"),
+            (-32601, "Not Found"),
+            (-32600, "Session terminated"),
+        }
 
     @staticmethod
     def _contains_control_flow(exc: BaseException) -> bool:

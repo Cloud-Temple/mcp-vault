@@ -11,6 +11,8 @@ Métadonnées vault :
     Ce chemin est protégé contre l'écriture directe par les utilisateurs.
 """
 
+from ..reserved_metadata import business_target, target_error, pg_offload
+
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -37,6 +39,10 @@ def _read_vault_meta(client, vault_id: str) -> dict:
     Returns:
         dict des métadonnées, ou {} si absent
     """
+    from ..config import get_settings
+    if getattr(get_settings(), "metadata_backend", "s3") == "postgres":
+        from ..storage.reader import owner_metadata
+        return owner_metadata(vault_id)
     try:
         response = client.secrets.kv.v2.read_secret_version(
             path=VAULT_META_PATH,
@@ -49,6 +55,10 @@ def _read_vault_meta(client, vault_id: str) -> dict:
 
 def _write_vault_meta(client, vault_id: str, meta: dict):
     """Écrit les métadonnées dans le secret réservé _vault_meta."""
+    error = target_error(vault_id)
+    if error:
+        from ..reserved_metadata import ReservedMetadataAccess
+        raise ReservedMetadataAccess(error["message"])
     try:
         client.secrets.kv.v2.create_or_update_secret(
             path=VAULT_META_PATH,
@@ -56,6 +66,10 @@ def _write_vault_meta(client, vault_id: str, meta: dict):
             mount_point=vault_id,
         )
     except Exception as e:
+        from ..config import get_settings
+        if getattr(get_settings(), "metadata_backend", "s3") == "postgres":
+            from ..storage.postgres import MetadataUnavailable
+            raise MetadataUnavailable("metadata_write_unconfirmed") from e
         logger.warning(f"⚠️ Impossible d'écrire les métadonnées de {vault_id}: {e}")
 
 
@@ -74,6 +88,10 @@ def check_vault_owner(vault_id: str, client_name: str) -> bool:
 
     Note: synchrone car appelé depuis check_access() (contextvar).
     """
+    from ..config import get_settings
+    if getattr(get_settings(), "metadata_backend", "s3") == "postgres":
+        from ..auth.context import check_access
+        return check_access(vault_id) is None
     client = get_hvac_client()
     if not client:
         return False
@@ -122,6 +140,8 @@ def _validate_vault_id(vault_id: str) -> Optional[str]:
     return None
 
 
+@business_target(ssh=False)
+@pg_offload
 async def create_space(vault_id: str, description: str = "") -> dict:
     """
     Crée un espace vault (mount KV v2 dans OpenBao).
@@ -181,6 +201,7 @@ async def create_space(vault_id: str, description: str = "") -> dict:
 # CRUD — List
 # ═══════════════════════════════════════════════════════════════════════
 
+@pg_offload
 async def list_spaces(
     allowed_vault_ids: Optional[list] = None,
     owner_filter: Optional[str] = None,
@@ -204,6 +225,8 @@ async def list_spaces(
         for path, info in mounts.get("data", mounts).items():
             # Filtrer les mount points système (cubbyhole, identity, sys, secret)
             clean_path = path.rstrip("/")
+            if target_error(clean_path):
+                continue
             if info.get("type") == "kv" and clean_path not in ("cubbyhole", "identity", "sys", "secret"):
                 # ── Filtrage par liste explicite ──────────────────
                 if allowed_vault_ids and clean_path not in allowed_vault_ids:
@@ -233,6 +256,7 @@ async def list_spaces(
 # CRUD — Info (détaillé, avec métadonnées)
 # ═══════════════════════════════════════════════════════════════════════
 
+@business_target(ssh=False)
 async def get_space_info(vault_id: str, count: bool = True) -> dict:
     """
     Informations détaillées sur un espace vault, incluant les métadonnées.
@@ -245,6 +269,23 @@ async def get_space_info(vault_id: str, count: bool = True) -> dict:
     à `secret_list`). Évite un `list` indirect et une fuite de cardinalité à un
     token autorisé sur `vault_info` mais interdit sur `secret_list`.
     """
+    from ..config import get_settings
+    if getattr(get_settings(), "metadata_backend", "s3") == "postgres":
+        from ..storage.postgres import offload, request_facts, MetadataUnavailable
+        from ..storage.reader import owner_metadata
+        try:
+            meta = (request_facts.get() or {}).get("owners", {}).get(vault_id)
+            if meta is None:
+                meta = await offload(owner_metadata, vault_id)
+            result = {"status":"ok", "vault_id":vault_id,"type":"kv", "options":{"version":"2"},
+                      **{k:meta[k] for k in ("description","created_by","created_at","updated_by","updated_at") if k in meta}}
+            if count:
+                from ..storage.reader import root_keys
+                entries = await offload(root_keys,vault_id)
+                result.update(root_entries_count=len(entries),secrets_count=len(entries))
+            return result
+        except MetadataUnavailable:
+            return {"status":"error","error_type":"metadata_incomplete", "message":"Métadonnées indisponibles"}
     client = get_hvac_client()
     if not client:
         return {"status": "error", "message": "OpenBao non connecté"}
@@ -309,6 +350,8 @@ async def get_space_info(vault_id: str, count: bool = True) -> dict:
 # CRUD — Update
 # ═══════════════════════════════════════════════════════════════════════
 
+@business_target(ssh=False)
+@pg_offload
 async def update_space(vault_id: str, description: str = "") -> dict:
     """
     Met à jour les métadonnées d'un vault (description).
@@ -370,6 +413,8 @@ async def update_space(vault_id: str, description: str = "") -> dict:
 # CRUD — Delete
 # ═══════════════════════════════════════════════════════════════════════
 
+@business_target(ssh=True)
+@pg_offload
 async def delete_space(vault_id: str) -> dict:
     """
     Supprime un espace vault (unmount KV v2) et sa CA SSH associée.
@@ -397,6 +442,9 @@ async def delete_space(vault_id: str) -> dict:
         from .ssh_ca import cleanup_ssh_ca
         ssh_cleaned = await cleanup_ssh_ca(vault_id)
         if not ssh_cleaned:
+            from ..config import get_settings
+            if getattr(get_settings(), "metadata_backend", "s3") == "postgres":
+                return {"status":"error","error_type":"backend_unavailable", "message":"Cleanup SSH non confirmé ; suppression refusée"}
             logger.warning(f"⚠️ Impossible de nettoyer la SSH CA de {vault_id} (non bloquant)")
 
         # 2. Supprimer le mount KV v2 (secrets + métadonnées)

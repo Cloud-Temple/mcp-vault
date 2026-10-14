@@ -67,6 +67,11 @@ def init_policy_store():
     """Initialise le Policy Store au démarrage (charge depuis S3 si configuré)."""
     global _policy_store
     settings = get_settings()
+    if getattr(settings,"metadata_backend","s3") == "postgres":
+        from ..storage.stores import PGStore
+        _policy_store = PGStore("policy")
+        return
+
 
     if settings.s3_endpoint_url and settings.s3_bucket_name:
         _policy_store = PolicyStore(settings)

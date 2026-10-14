@@ -69,6 +69,11 @@ def init_token_store():
     """Initialise le Token Store au démarrage (charge depuis S3 si configuré)."""
     global _token_store
     settings = get_settings()
+    if getattr(settings,"metadata_backend","s3") == "postgres":
+        from ..storage.stores import PGStore
+        _token_store = PGStore("token")
+        return
+
 
     if settings.s3_endpoint_url and settings.s3_bucket_name:
         _token_store = TokenStore(settings)
@@ -113,6 +118,9 @@ def _validate_allowed_resources(allowed_resources) -> tuple:
     """
     if not isinstance(allowed_resources, list) or not all(isinstance(v, str) for v in allowed_resources):
         return None, "allowed_resources doit être une liste de chaînes"
+    from ..reserved_metadata import target_error
+    if any(target_error(v) for v in allowed_resources):
+        return None, "Périmètre de coffre refusé"
     return list(allowed_resources), ""
 
 
