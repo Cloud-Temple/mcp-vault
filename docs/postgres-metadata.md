@@ -119,6 +119,28 @@ budget SQL partagé 10 s ; metadata 4 slots, file 1 s, connect 1 s/read 2 s,
 deadline 5 s et corps 64 KiB ; batch défaut 50, max configurable 100. Libérer
 les slots/verrous après fin réelle des workers. Aucun retry mutatif implicite.
 
+La sonde PG de `/health` et `/ready` partage une seule lecture en cours et
+conserve son résultat pendant `METADATA_READINESS_TTL_SECONDS` (défaut 2 s).
+Ce cache de disponibilité ne sert jamais aux contrôles d'accès : chaque
+requête métier recharge ses faits d'autorisation dans PostgreSQL.
+
+En profil `METADATA_PG_DURABILITY=ha`, les noms de standbys synchrones doivent
+être configurés et stables pendant la transaction. Le COMMIT `remote_apply`
+attend leur application distante ; aucun droit `pg_read_all_stats` n'est
+accordé à l'application. L'attente est annulée côté client à l'échéance du
+budget SQL, via libpq 17+ fourni par le verrou `psycopg-binary`. Chaque demande
+d'annulation est bornée par `METADATA_SQL_CANCEL_SECONDS` (défaut 2 s).
+Une annulation ou un ACK perdu donne un résultat inconnu, jamais un succès ni
+une permission de rejouer. Le reçu peut alors être visible sur le primaire
+avant réplication : une bascule peut perdre cet état, y compris une révocation.
+Conserver l'incertitude et résoudre l'état avant de rouvrir les écrivains.
+
+Si l'enregistrement `active` échoue après création d'un wrap OpenBao, Vault
+tente sa révocation native indépendamment de PG. La réponse reste
+`wrap_created_revoked` ou `wrap_created_orphaned`, sans token ni accessor.
+Une issue SQL inconnue ajoute `metadata_outcome=unknown` et `mutation_id` ;
+une révocation OpenBao confirmée ne confirme pas le COMMIT SQL.
+
 ## Reprise logique et qualification
 
 Voir `tests/postgres/README.md`. Premier restore : dump logique de **la base du

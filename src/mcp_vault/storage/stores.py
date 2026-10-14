@@ -83,13 +83,13 @@ def key_of(kind, value):
 def validate(kind, value):
     from ..auth.token_store import _validate_and_normalize_token
     from ..auth.policies import _validate_and_normalize_policy
-    from ..auth.mission_bindings import validate_binding
+    from ..auth.mission_bindings import validate_binding_record
     if kind == "token":
         return _validate_and_normalize_token(value)
     if kind == "policy":
         return _validate_and_normalize_policy(value)
     if kind == "binding":
-        ok, _ = validate_binding(value)
+        ok, _ = validate_binding_record(value)
         if not ok:
             raise MetadataUnavailable("binding_corrupt")
     if kind == "wrap":

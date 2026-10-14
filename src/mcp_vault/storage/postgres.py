@@ -43,7 +43,40 @@ class BoundedConnection:
             raise MetadataUnavailable("sql_deadline")
         milliseconds = max(1,min(get_settings().metadata_sql_statement_seconds*1000,int(max(0,remaining)*1000)))
         self.conn.execute("SELECT set_config('statement_timeout',%s,false)",(str(milliseconds),))
+        if isinstance(query,str) and query.strip().upper()=="COMMIT":
+            return self._commit(query,params,kwargs)
         return self.conn.execute(query,params,**kwargs)
+
+    def _commit(self,query,params,kwargs):
+        # PostgreSQL désactive statement_timeout avant l'attente synchrone.
+        # Une annulation vise uniquement cette connexion, jamais partagée.
+        import psycopg
+        if not psycopg.capabilities.has_cancel_safe():
+            raise MetadataUnavailable("cancel_unavailable")
+        finished = threading.Event()
+        expired = threading.Event()
+        timeout = get_settings().metadata_sql_cancel_seconds
+        def cancel():
+            while not finished.is_set():
+                expired.set()
+                try:
+                    self.conn.cancel_safe(timeout=timeout)
+                except Exception:
+                    pass  # Aucun replay SQL ; attendre la fin réelle du COMMIT.
+                if finished.wait(0.1):
+                    return
+        timer = threading.Timer(max(0,self.end-time.monotonic()),cancel)
+        timer.daemon = True
+        timer.start()
+        try:
+            result = self.conn.execute(query,params,**kwargs)
+            if expired.is_set():
+                raise MetadataUnavailable("commit_deadline")
+            return result
+        finally:
+            finished.set()
+            timer.cancel()
+            timer.join()  # Aucun cancel tardif après fermeture/réutilisation.
 
 
 
@@ -212,10 +245,8 @@ def validate_durability(conn):
         raise MetadataUnavailable("durability_invalid")
     if s.metadata_pg_durability == "ha":
         names = conn.execute("SHOW synchronous_standby_names").fetchone()
-        replicas = conn.execute("SELECT state,sync_state FROM pg_stat_replication").fetchall()
-        if not names.get("synchronous_standby_names") or not any(
-            r["state"]=="streaming" and r["sync_state"] in {"sync","quorum"} for r in replicas):
-            raise MetadataUnavailable("synchronous_replica_unavailable")
+        if not names.get("synchronous_standby_names"):
+            raise MetadataUnavailable("synchronous_configuration_missing")
     if conn.execute("SHOW fsync").fetchone().get("fsync") != "on":
         raise MetadataUnavailable("durability_invalid")
 

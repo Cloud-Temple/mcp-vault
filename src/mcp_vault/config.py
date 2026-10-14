@@ -50,6 +50,8 @@ class Settings(BaseSettings):
     metadata_sql_connect_seconds: int = Field(default=3, ge=1, le=30)
     metadata_sql_statement_seconds: int = Field(default=5, ge=1, le=60)
     metadata_sql_lock_seconds: int = Field(default=2, ge=1, le=30)
+    metadata_sql_cancel_seconds: int = Field(default=2, ge=1, le=10)
+    metadata_readiness_ttl_seconds: float = Field(default=2, ge=0.1, le=30)
     metadata_batch_max_ids: int = Field(default=50, ge=1, le=100)
     metadata_initial_admin_hours: int = Field(default=24, ge=1, le=24)
     metadata_pg_durability: str = "standalone"

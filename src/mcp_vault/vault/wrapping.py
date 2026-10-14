@@ -1021,7 +1021,17 @@ def _wrap_secret_blocking(
                 "message": "wrap_info incomplet (voir logs serveur)"}
 
     # ── Mettre à jour "pending" → "active" avec l'accessor ──────────
-    if not registry.mark_active(operation_id, mission_id, accessor):
+    from ..storage.postgres import MetadataUnavailable, MutationUnknown
+    metadata_result = {}
+    try:
+        active = registry.mark_active(operation_id, mission_id, accessor)
+    except MutationUnknown as exc:
+        active = False
+        metadata_result = {"metadata_outcome":"unknown","mutation_id":exc.mutation_id}
+    except MetadataUnavailable:
+        active = False
+        metadata_result = {"metadata_outcome":"unconfirmed"}
+    if not active:
         # Le wrap_token EXISTE côté OpenBao mais n'est pas corrélé au registre
         # (échec S3, ou entrée d'intention absente/ambiguë) → révoquer
         # immédiatement pour éviter une provision non compensable.
@@ -1046,13 +1056,15 @@ def _wrap_secret_blocking(
             # certain. L'appelant n'a pas l'accessor — aucune compensation
             # possible de son côté, seul le TTL borne la ressource.
             return {"status": "error", "error_type": "wrap_created_orphaned",
-                    "message": "Wrap créé mais non persisté, et sa révocation "
+                    **metadata_result,
+                    "message": "Wrap créé, corrélation des métadonnées non confirmée, et sa révocation "
                                f"n'est pas confirmée — il peut rester actif jusqu'à "
                                f"{ttl_seconds}s. Aucun accessor n'est exposé : "
                                "cette ressource n'est pas compensable. Ne pas "
                                "rejouer cette clé"}
         return {"status": "error", "error_type": "wrap_created_revoked",
-                "message": "Wrap créé mais non persisté — révocation confirmée, "
+                **metadata_result,
+                "message": "Wrap créé, corrélation des métadonnées non confirmée — révocation confirmée, "
                            "aucune ressource à compenser. Ne pas rejouer cette clé"}
 
     expires_at_dt = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
