@@ -75,6 +75,10 @@ async def _handle_authenticated_admin(scope, receive, send, mcp):
     token = _extract_admin_token(scope)
     token_info = _get_token_info(token)
     if not token_info:
+        if getattr(get_settings(), 'metadata_backend', 's3') == 'postgres':
+            from ..storage.audit_pg import record_auth_denial
+            if not await record_auth_denial('bearer_auth'):
+                return await _json_response(send, 503, {"status": "error", "error_type": "audit_unavailable"})
         return await _json_response(send, 401, {"status": "error", "message": "Valid token required"})
 
     # Défense en profondeur (#69, reco red team) : l'Admin API est bearer/bootstrap-only.

@@ -180,6 +180,10 @@ async def admitted_call(scope, receive, send, fn):
         facts = await admit(raw)
     except (PermissionError,MetadataUnavailable) as exc:
         status = 403 if isinstance(exc,PermissionError) else 503
+        if isinstance(exc, PermissionError):
+            from .audit_pg import record_auth_denial
+            if not await record_auth_denial('bearer_auth'):
+                status = 503
         body = json.dumps({"status":"error","message":"Accès aux métadonnées indisponible"}).encode()
         await send({"type":"http.response.start","status":status,"headers":[(b"content-type",b"application/json")]})
         return await send({"type":"http.response.body","body":body})

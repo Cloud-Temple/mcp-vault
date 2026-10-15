@@ -157,3 +157,24 @@ async def append(call, phase, outcome, *, step_id=ZERO, mutation_id=None, reques
     # L'acteur historique n'est pas revalidé après effet ; aucun droit nouveau.
     await offload(_write, call, end,
         lambda conn: record_step(conn, call, phase, outcome, step_id=step_id, mutation_id=mutation_id))
+
+
+async def record_auth_denial(tool):
+    """Refus sans identité utilisable ; aucun claim/bearer n'entre dans l'audit.
+
+    Cette écriture ne valide ni n'accorde de droits. Elle n'utilise surtout pas
+    l'acteur éventuellement révoqué/expiré trouvé pendant la résolution PG.
+    """
+    if tool not in {'bearer_auth', 'mission_pep'}:
+        raise ValueError('invalid authentication audit tool')
+    settings = get_settings()
+    if settings.metadata_backend != 'postgres':
+        return True
+    call = Call(str(uuid.uuid4()), settings.metadata_instance_id, 'anonymous', tool, '',
+                None, None, None, time.monotonic())
+    try:
+        await admit(call, denied=True)
+        await append(call, 'public_terminal', 'denied')
+        return True
+    except MetadataUnavailable:
+        return False  # Le refus reste fermé ; sa durabilité n'est pas affirmée.

@@ -89,7 +89,6 @@ class HealthCheckMiddleware:
     async def _root_response(self, send):
         """GET / → status du service MCP Vault (public, sans auth)."""
         from pathlib import Path
-        import platform
 
         settings = get_settings()
         version = "dev"
@@ -278,6 +277,10 @@ class AuthMiddleware:
             if token_info is None:
                 self._audit_bearer_deny("missing_token" if not token
                                         else "invalid_token")
+                if getattr(settings, 'metadata_backend', 's3') == 'postgres':
+                    from ..storage.audit_pg import record_auth_denial
+                    if not await record_auth_denial('bearer_auth'):
+                        return await self._deny_response(scope, send, 503)
                 return await self._deny_response(scope, send, 401)
         else:
             # ── PEP mission JWT (modes jwt / dual-stack) ───────────────────
@@ -285,6 +288,10 @@ class AuthMiddleware:
             if deny is not None:
                 status, reason, claims_ctx = deny
                 self._audit_pep_deny(reason, claims_ctx)
+                if getattr(settings, 'metadata_backend', 's3') == 'postgres':
+                    from ..storage.audit_pg import record_auth_denial
+                    if not await record_auth_denial('mission_pep'):
+                        return await self._deny_response(scope, send, 503)
                 return await self._deny_response(scope, send, status)
 
         # Injecter dans le contextvar (même si None → les outils vérifieront)
