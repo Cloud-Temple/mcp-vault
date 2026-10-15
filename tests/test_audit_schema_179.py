@@ -46,3 +46,51 @@ def test_runtime_never_accepts_old_schema_as_audit_ready():
     with pytest.raises(MetadataUnavailable, match="audit_schema_invalid"):
         audit_schema.verify(conn, settings())
     assert conn.execute.call_count == 1
+
+
+def test_operator_close_after_commit_preserves_mutation_correlation():
+    from contextlib import contextmanager
+    from unittest.mock import patch
+    from mcp_vault.storage import operator
+    from mcp_vault.storage.postgres import MutationUnknown
+    conn = Mock()
+    conn.execute.return_value.fetchone.return_value = {"rolcanlogin": False, "rolsuper": False}
+
+    @contextmanager
+    def connection(**kwargs):
+        yield conn
+        raise MetadataUnavailable("close_unconfirmed")
+
+    conf = settings(metadata_instance_id="fixture", metadata_pg_vault_id="native")
+    with patch.object(operator, "get_settings", return_value=conf), \
+         patch.object(operator, "credentials"), patch.object(operator, "connection", connection), \
+         patch("mcp_vault.storage.postgres.validate_durability"), patch.object(audit_schema, "install"):
+        with pytest.raises(MutationUnknown) as error:
+            operator.action("audit-upgrade", {})
+    assert len(error.value.mutation_id) == 36
+    assert sum(c.args[0] == "COMMIT" for c in conn.execute.call_args_list) == 1
+
+
+def test_operator_app_verification_failure_does_not_lose_confirmed_ddl():
+    from contextlib import contextmanager
+    from unittest.mock import patch
+    from mcp_vault.storage import operator
+    conn = Mock()
+    conn.execute.return_value.fetchone.return_value = {"rolcanlogin": False, "rolsuper": False}
+
+    @contextmanager
+    def connection(**kwargs):
+        if not kwargs.get("provisioner"):
+            raise MetadataUnavailable("app_verification_failed")
+        yield conn
+
+    conf = settings(metadata_instance_id="fixture", metadata_pg_vault_id="native")
+    with patch.object(operator, "get_settings", return_value=conf), \
+         patch.object(operator, "credentials"), patch.object(operator, "connection", connection), \
+         patch("mcp_vault.storage.postgres.validate_durability"), patch.object(audit_schema, "install"):
+        result = operator.action("audit-upgrade", {})
+    assert result["status"] == "error"
+    assert result["error_type"] == "schema_verification_unconfirmed"
+    assert result["ddl_confirmed"] is True
+    assert len(result["mutation_id"]) == 36
+    assert sum(c.args[0] == "COMMIT" for c in conn.execute.call_args_list) == 1
