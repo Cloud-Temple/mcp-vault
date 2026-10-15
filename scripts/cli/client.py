@@ -49,6 +49,8 @@ class MCPClient:
         failed_http_codes = set()
 
         async def observe_response(response):
+            if response.is_redirect:
+                raise httpx2.HTTPStatusError("MCP_REDIRECT_REFUSED", request=response.request, response=response)
             if (response.request.method == "POST" and response.request.url == endpoint
                     and response.status_code >= 400):
                 failed_http_codes.add(response.status_code)
