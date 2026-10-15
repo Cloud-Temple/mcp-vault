@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Préparation Mission #846
+
+- Protection SQL locale des audits corrélés Mission, installée explicitement en
+  v3 sur domaine neuf ; aucune prolongation de token ni GC de coffre OpenBao.
+  Raccords opérateur signés et qualification PostgreSQL/flotte encore ouverts.
+
 ### ACME lié à un rôle
 
 - Proxy des endpoints clients natifs `/v1/_sys_pki_int/roles/<role>/acme/…`,

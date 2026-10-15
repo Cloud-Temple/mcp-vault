@@ -132,7 +132,8 @@ def action(name, body):
                     from .audit_schema import install
                     install(conn, s)
                     from psycopg.types.json import Jsonb
-                    target = {"schema_version":2,"expected_revision":0 if name == "schema-init" else 1,"result_revision":2}
+                    schema_version = 3 if getattr(s, "audit_mission_retention_enabled", False) else 2
+                    target = {"schema_version":schema_version,"expected_revision":0 if name == "schema-init" else 1,"result_revision":schema_version}
                     intent = hashlib.sha256(json.dumps(target,sort_keys=True).encode()).hexdigest()
                     conn.execute("INSERT INTO vault_metadata.operation_receipts(instance_id,mutation_id,kind,intent_hash,target,phase,database_result) VALUES(%s,%s,%s,%s,%s,%s,'committed')",
                                  (s.metadata_instance_id,mid,name,intent,Jsonb(target),name))
@@ -162,9 +163,9 @@ def action(name, body):
                 pass
         except Exception:
             return {"status":"error","error_type":"schema_verification_unconfirmed",
-                    "schema_version":2,"mutation_id":mid,"ddl_confirmed":True,
+                    "schema_version":schema_version,"mutation_id":mid,"ddl_confirmed":True,
                     "message":"DDL confirmé ; vérification finale non confirmée, ne pas rejouer"}
-        return {"status":"ok","schema_version":2,"mutation_id":mid}
+        return {"status":"ok","schema_version":schema_version,"mutation_id":mid}
     if name == "initial-admin":
         from psycopg.types.json import Jsonb
         if set(body)!={"token_hash","client_name","mutation_id"}:
