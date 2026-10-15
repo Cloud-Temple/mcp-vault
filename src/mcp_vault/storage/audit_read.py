@@ -2,7 +2,8 @@
 
 from dataclasses import dataclass
 
-from .audit_contract import AuditScope, project_entry
+from .audit_contract import ACTOR, IDENT, OUTCOMES, AuditScope, _utc, project_entry
+from ..vault_ids import is_valid_vault_id
 from .postgres import MetadataUnavailable, connection, revalidate_actor
 
 
@@ -34,7 +35,56 @@ def _revision(conn, instance):
     return row["revision"] if row else 0
 
 
-def read_page(scope, *, limit=100, cursor=None):
+def normalize_filters(filters):
+    if filters is None:
+        return {}
+    allowed = {"client", "vault_id", "tool", "category", "status", "since"}
+    if not isinstance(filters, dict) or set(filters)-allowed:
+        raise ValueError("audit filter invalid")
+    result = {}
+    for key, value in filters.items():
+        if not isinstance(value, str) or len(value) > 128:
+            raise ValueError("audit filter invalid")
+        if not value:
+            continue
+        if key == "client" and not ACTOR.fullmatch(value):
+            raise ValueError("audit filter invalid")
+        if key == "vault_id" and not is_valid_vault_id(value):
+            raise ValueError("audit filter invalid")
+        if key == "tool" and not IDENT.fullmatch(value[:-1] if value.endswith("*") else value):
+            raise ValueError("audit filter invalid")
+        if key == "category" and not IDENT.fullmatch(value):
+            raise ValueError("audit filter invalid")
+        if key == "status" and value not in OUTCOMES:
+            raise ValueError("audit filter invalid")
+        result[key] = _utc(value) if key == "since" else value
+    return result
+
+
+def where_filters(filters):
+    clauses, values = [], []
+    for key, value in filters.items():
+        if key in {"client", "vault_id", "status"}:
+            column = {"client": "c.actor_ref", "vault_id": "c.vault_id", "status": "e.outcome"}[key]
+            clauses.append(column+"=%s")
+            values.append(value)
+        elif key == "tool":
+            if value.endswith("*"):
+                clauses.append("left(c.tool,%s)=%s")
+                values.extend([len(value)-1, value[:-1]])
+            else:
+                clauses.append("c.tool=%s")
+                values.append(value)
+        elif key == "category":
+            clauses.append("split_part(c.tool,'_',1)=%s")
+            values.append(value)
+        else:
+            clauses.append("e.created_at>=%s")
+            values.append(value)
+    return clauses, values
+
+
+def read_page(scope, *, limit=100, cursor=None, filters=None):
     """Une page expurgée, total correspondant et invalidation si le journal change.
 
     Le futur raccord public doit décoder/authentifier son curseur et lier scope,
@@ -46,7 +96,11 @@ def read_page(scope, *, limit=100, cursor=None):
             or any(type(v) is not int or v < 0 for v in vars(cursor).values())
             or cursor.position > cursor.upper or cursor.delivered > cursor.total):
         raise ValueError("audit cursor invalid")
+    filters = normalize_filters(filters)
     clauses, values = where_scope(scope)
+    more_clauses, more_values = where_filters(filters)
+    clauses.extend(more_clauses)
+    values.extend(more_values)
     with connection() as conn:
         # Les verrous d'identité existants ne sont pas permis en TX READ ONLY.
         # Chaque vérification fraîche reste donc hors de la transaction snapshot.
@@ -81,6 +135,13 @@ def read_page(scope, *, limit=100, cursor=None):
                 raise ExportIncomplete("audit_export_count_invalid")
             if not rows and delivered != total:
                 raise ExportIncomplete("audit_export_count_invalid")
+            stats = {"total": total, "truncated": False}
+            for key, expression in (("by_category", "split_part(c.tool,'_',1)"),
+                                    ("by_status", "e.outcome"), ("by_client", "c.actor_ref")):
+                grouped = conn.execute("SELECT "+expression+" AS value,count(*) AS count"+joined+condition+
+                    " GROUP BY "+expression+" ORDER BY count(*) DESC,"+expression+" LIMIT 101", values).fetchall()
+                stats[key] = {row["value"]: row["count"] for row in grouped[:100]}
+                stats["truncated"] |= len(grouped) > 100
             conn.execute("COMMIT")
             begun = False
         except BaseException:
@@ -95,5 +156,5 @@ def read_page(scope, *, limit=100, cursor=None):
             raise ExportIncomplete("audit_export_changed")
         revalidate_actor(conn)
         complete = delivered == total
-        return {"entries": entries, "total": total, "complete": complete,
+        return {"entries": entries, "total": total, "stats": stats, "complete": complete,
                 "cursor": None if complete else Cursor(revision, upper, rows[-1]["seq"], total, delivered)}

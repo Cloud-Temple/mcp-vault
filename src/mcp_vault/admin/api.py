@@ -151,7 +151,7 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
         return await _api_logs(send)
 
     if path == "/admin/api/audit" and method == "GET":
-        if not is_admin:
+        if not is_admin and getattr(get_settings(), "metadata_backend", "s3") != "postgres":
             return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
         return await _api_audit(send, scope)
 
@@ -1040,6 +1040,43 @@ async def _api_jwks_reload(send):
 
 async def _api_audit(send, scope):
     """GET /admin/api/audit — Journal d'audit MCP avec filtres."""
+    original_send = send
+    async def no_store(message):
+        if message.get("type") == "http.response.start":
+            message = {**message, "headers": [*message.get("headers", []), (b"cache-control", b"no-store")]}
+        await original_send(message)
+    send = no_store
+    if getattr(get_settings(), "metadata_backend", "s3") == "postgres":
+        from urllib.parse import parse_qs
+        from ..storage.audit_service import query
+        try:
+            raw = scope.get("query_string", b"")
+            if len(raw) > 4096:
+                raise ValueError()
+            params = parse_qs(raw.decode("utf-8"), strict_parsing=True, keep_blank_values=True)
+            if any(len(values) != 1 for values in params.values()):
+                raise ValueError()
+            params = {key: values[0] for key, values in params.items()}
+            if set(params)-{"limit", "cursor", "format", "client", "vault_id", "tool", "category", "status", "since"}:
+                raise ValueError()
+            export = params.pop("format", "json")
+            if export not in {"json", "jsonl"}:
+                raise ValueError()
+            limit = int(params.pop("limit", "100"))
+            cursor = params.pop("cursor", "")
+            result = await query(limit=limit, cursor=cursor, filters=params)
+        except (ValueError, UnicodeError):
+            return await _json_response(send, 400, {"status": "error", "error_type": "invalid_request"})
+        code = 200 if result["status"] == "ok" else {
+            "access_denied": 403, "invalid_request": 400, "export_incomplete": 409}.get(result.get("error_type"), 503)
+        if export == "jsonl" and code == 200:
+            # Une page finie ; le dernier objet explicite compte/cursor/complete.
+            payload = "".join(json.dumps({"record_type": "event", **entry}, ensure_ascii=False)+"\n" for entry in result["entries"])
+            payload += json.dumps({"record_type": "page", **{key: value for key, value in result.items() if key != "entries"}})+"\n"
+            await send({"type": "http.response.start", "status": 200,
+                        "headers": [(b"content-type", b"application/x-ndjson")]})
+            return await send({"type": "http.response.body", "body": payload.encode("utf-8")})
+        return await _json_response(send, code, result)
     from ..audit import get_audit_store
 
     store = get_audit_store()

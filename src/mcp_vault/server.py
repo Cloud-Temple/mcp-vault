@@ -1819,11 +1819,13 @@ async def token_update(hash_prefix: str, policy_id: str = "",
 @mcp.tool()
 async def audit_log(limit: int = 50, client: str = "", vault_id: str = "",
                     tool: str = "", category: str = "", status: str = "",
-                    since: str = "") -> dict:
+                    since: str = "", cursor: str = "") -> dict:
     """
     Journal d'audit — toutes les opérations MCP avec filtres.
 
-    Requiert la permission admin.
+    Profil historique : admin. Profil PostgreSQL : admin ou auditeur read
+    avec policy audit_log explicite et coffres autorisés ; champs expurgés.
+    La pagination PG retourne total/complete/cursor ; un export invalidé reste incomplet.
 
     Retourne les événements les plus récents en premier. Chaque entrée
     contient : timestamp, client, outil, vault, statut, détail, durée.
@@ -1845,6 +1847,12 @@ async def audit_log(limit: int = 50, client: str = "", vault_id: str = "",
         status: Filtrer par statut
         since: Entrées après cette date
     """
+    if getattr(get_settings(), "metadata_backend", "s3") == "postgres":
+        from .storage.audit_service import query
+        return await query(limit=limit, cursor=cursor, filters={
+            "client": client, "vault_id": vault_id, "tool": tool,
+            "category": category, "status": status, "since": since})
+
     # SÉCURITÉ V2-03 : audit_log requiert admin (conformément à ARCHITECTURE.md §6.7)
     from .auth.context import check_admin_permission
     admin_err = check_admin_permission()

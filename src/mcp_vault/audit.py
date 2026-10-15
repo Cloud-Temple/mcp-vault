@@ -44,6 +44,10 @@ def init_audit_store():
     """Initialise l'Audit Store au démarrage."""
     global _audit_store
     settings = get_settings()
+    if getattr(settings, "metadata_backend", "s3") == "postgres":
+        _audit_store = None
+        print("📋 Audit applicatif : PostgreSQL uniquement (sans archive JSONL locale)", file=sys.stderr)
+        return
     log_dir = Path(settings.openbao_data_dir).parent / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     _audit_store = AuditStore(log_dir / "audit-mcp.jsonl")
