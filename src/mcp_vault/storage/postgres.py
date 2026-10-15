@@ -283,6 +283,13 @@ def _mutation(kind, target, operation, *, operator=False, mutation_id=None):
                 (instance_id,mutation_id,kind,actor_hash,intent_hash,target,phase,database_result)
                 VALUES(%s,%s,%s,%s,%s,%s,%s,'committed')""",
                 (s.metadata_instance_id,mid,kind,actor,intent,Jsonb(target),kind))
+            # Le reçu et l'étape SQL sont atomiques. L'appel public possède seul
+            # son terminal ; un registre intermédiaire ne conclut jamais le métier.
+            from .audit_pg import current_audit_call, record_step
+            audit_call = current_audit_call.get()
+            if audit_call is not None:
+                record_step(conn, audit_call, "sql_step_committed", "confirmed",
+                            step_id=mid, mutation_id=mid)
             committing = True
             conn.execute("COMMIT")
             if notices:

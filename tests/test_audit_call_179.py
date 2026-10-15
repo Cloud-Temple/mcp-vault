@@ -131,3 +131,69 @@ def test_existing_success_statuses_close_completed(status):
             await audit_call.audited_call(secret_write)()
         assert close.call_args.args[1:]==('public_terminal','completed')
     asyncio.run(exercise())
+
+
+def test_sql_receipt_and_audit_step_share_business_commit():
+    from contextlib import contextmanager
+    from mcp_vault.storage import postgres, audit_pg
+    order=[]
+    class Conn:
+        def add_notice_handler(self,_): pass
+        def execute(self,query,*_):
+            order.append(query)
+            return SimpleNamespace(fetchone=lambda:None)
+    conn=Conn()
+    @contextmanager
+    def connection(): yield conn
+    def step(observed,call,phase,outcome,**correlation):
+        assert observed is conn and phase=='sql_step_committed' and outcome=='confirmed'
+        assert correlation['step_id']==correlation['mutation_id']
+        order.append('AUDIT_SQL_STEP')
+    marker=current_audit_call.set(SimpleNamespace(call_id='fixed'))
+    try:
+        with patch.object(postgres,'connection',connection), \
+             patch.object(postgres,'get_settings',return_value=SimpleNamespace(metadata_instance_id='fixture')), \
+             patch.object(postgres,'validate_durability'),patch.object(audit_pg,'record_step',step):
+            result=postgres.mutation('write',{'coffer':'a'},lambda _:order.append('BUSINESS'),operator=True)
+        assert result is None and order[-2:]==['AUDIT_SQL_STEP','COMMIT']
+        assert order.index('BUSINESS')<next(i for i,q in enumerate(order) if 'INSERT INTO vault_metadata.operation_receipts' in q)<order.index('AUDIT_SQL_STEP')
+    finally:
+        current_audit_call.reset(marker)
+
+
+def test_bao_step_does_not_return_secret_before_durable_observation():
+    from mcp_vault.storage import audit_bao
+    async def exercise():
+        order=[]
+        def effect():
+            order.append('bao')
+            return {'private':'secret'}
+        async def record(*_,**kwargs):
+            assert 'step_id' in kwargs
+            order.append('pg')
+            raise MutationUnknown('fixed')
+        token=current_audit_call.set(SimpleNamespace(call_id='fixed'))
+        try:
+            with patch.object(audit_bao,'append',record):
+                with pytest.raises(MutationUnknown):
+                    await audit_bao.bao_step(effect)
+            assert order==['bao','pg']
+        finally:
+            current_audit_call.reset(token)
+    asyncio.run(exercise())
+
+
+def test_bao_transport_failure_is_unknown_not_failed_and_compensation_distinct():
+    from mcp_vault.storage import audit_bao
+    async def exercise():
+        close=AsyncMock()
+        def effect(): raise TimeoutError('lost acknowledgement')
+        token=current_audit_call.set(SimpleNamespace(call_id='fixed'))
+        try:
+            with patch.object(audit_bao,'append',close):
+                with pytest.raises(TimeoutError):
+                    await audit_bao.bao_step(effect,compensation=True)
+            assert close.call_args.args[1:]==('compensation_outcome','unknown')
+        finally:
+            current_audit_call.reset(token)
+    asyncio.run(exercise())
