@@ -301,3 +301,36 @@ def test_mcp_secret_read_bao_observation_and_terminal_precede_secret_return():
             request_facts.reset(facts)
             current_token_info.reset(identity)
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("terminal_failure",[False,True])
+def test_mcp_write_confirmed_bao_audit_failure_survives_backend_catch(terminal_failure):
+    from mcp_vault import server
+    from mcp_vault.storage import admission, audit_bao
+    from mcp_vault.vault import secrets
+    from mcp_vault.auth.context import current_token_info
+    from mcp_vault.storage.postgres import request_facts
+    from unittest.mock import MagicMock
+    async def exercise():
+        client=MagicMock()
+        client.secrets.kv.v2.create_or_update_secret.return_value={'data':{'version':1}}
+        identity=current_token_info.set({'auth_type':'token','permissions':['admin']})
+        facts=request_facts.set({'owners':{}})
+        terminal=AsyncMock(side_effect=MutationUnknown('fixed') if terminal_failure else None)
+        try:
+            with patch.object(audit_call,'get_settings',return_value=SimpleNamespace(metadata_backend='postgres')), \
+                 patch.object(admission,'get_settings',return_value=SimpleNamespace(metadata_backend='postgres')), \
+                 patch.object(audit_call,'make_call',return_value=SimpleNamespace(call_id='fixed')), \
+                 patch.object(audit_call,'admit',AsyncMock()),patch.object(audit_call,'append',terminal), \
+                 patch.object(audit_bao,'append',AsyncMock(side_effect=MutationUnknown('fixed'))), \
+                 patch.object(secrets,'get_hvac_client',return_value=client):
+                result=await server.secret_write('coffer-a','path',{'private':'CANARY'})
+            assert result=={'status':'error','error_type':'audit_closure_unconfirmed' if terminal_failure else 'audit_step_unconfirmed','audit_status':'unknown',
+                'audit_call_id':'fixed','business_outcome':'confirmed','replay_allowed':False}
+            assert 'CANARY' not in str(result)
+            client.secrets.kv.v2.create_or_update_secret.assert_called_once()
+            assert terminal.call_args.args[1:]==('public_terminal','unknown')
+        finally:
+            request_facts.reset(facts)
+            current_token_info.reset(identity)
+    asyncio.run(exercise())

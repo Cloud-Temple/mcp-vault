@@ -14,6 +14,7 @@ async def bao_step(operation, *, compensation=False):
     effects = current_audit_effects.get()
     if effects is not None:
         effects["dispatched"] = True
+        effects["steps"] += 1
     try:
         result = operation()
     except BaseException:
@@ -21,7 +22,16 @@ async def bao_step(operation, *, compensation=False):
         try:
             await append(call, phase, "unknown", step_id=step_id)
         except BaseException:
+            if effects is not None:
+                effects["audit_unknown"] = True
             pass  # append attend le drainage ; priorité à l'exception initiale.
         raise
-    await append(call, phase, "confirmed", step_id=step_id)
+    if effects is not None:
+        effects["confirmed"] += 1
+    try:
+        await append(call, phase, "confirmed", step_id=step_id)
+    except BaseException:
+        if effects is not None:
+            effects["audit_unknown"] = True
+        raise
     return result

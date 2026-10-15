@@ -274,6 +274,7 @@ def _mutation(kind, target, operation, *, operator=False, mutation_id=None):
             effects = current_audit_effects.get()
             if effects is not None:
                 effects["dispatched"] = True
+                effects["steps"] += 1
             result = operation(conn)
             if notices:
                 raise MetadataUnavailable("transaction_notice")
