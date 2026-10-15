@@ -58,6 +58,9 @@ def action(name, body):
     if name == 'audit-maintenance-connection':
         from .audit_maintenance import install_credential
         return install_credential(body)
+    if name in {'audit-retention-close', 'audit-retention-status'}:
+        from .retention_maintenance import action as retention_action
+        return retention_action(name, body)
     if name == 'audit-expire':
         from .audit_maintenance import expire
         return expire(body)
@@ -221,7 +224,7 @@ async def handle_operator(scope, receive, send):
     permitted = {"status","verify-connections"}
     if s.metadata_operator_mode == "install":
         permitted |= {"vault","connections","schema-init","audit-upgrade","initial-admin",
-                      "audit-maintenance-connection", "audit-expire"}
+                      "audit-maintenance-connection", "audit-expire", "audit-retention-close", "audit-retention-status"}
     if (s.metadata_operator_mode=="disabled" or scope.get("method")!=expected
             or name not in permitted and not name.startswith("installation-result/")):
         return await _json_response(send,403,{"status":"error","message":"Action opérateur refusée"})

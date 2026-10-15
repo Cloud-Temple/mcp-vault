@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     audit_maintenance_role: str = Field(default="vault_audit_maintenance", pattern=r"^[a-z][a-z0-9_]{0,62}$")
     audit_maintenance_secret_path: str = "sql/audit-maintenance"
     audit_mission_retention_enabled: bool = False
+    mission_retention_issuer: str = ""
+    mission_retention_audience: str = ""
+    mission_retention_callback_seconds: float = Field(default=5, ge=1, le=10)
     metadata_readiness_ttl_seconds: float = Field(default=2, ge=0.1, le=30)
     metadata_batch_max_ids: int = Field(default=50, ge=1, le=100)
     metadata_initial_admin_hours: int = Field(default=24, ge=1, le=24)
