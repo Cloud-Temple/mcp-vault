@@ -136,9 +136,10 @@ def test_requirements_bounds_mcp_to_the_supported_v2_major() -> None:
     """Le développement et l'image doivent résoudre le même majeur MCP v2."""
     mcp = _requirements().get("mcp")
     assert mcp is not None, "mcp absent de requirements.txt"
-    assert mcp.specifier.contains(Version("2.1.1"), prereleases=True), (
+    assert mcp.specifier.contains(Version("2.2.0"), prereleases=True), (
         f"requirements.txt exclut la version v2 verrouillée : {mcp.specifier}"
     )
+    assert not mcp.specifier.contains(Version("2.1.1"), prereleases=True), "SDK vulnérable encore autorisé"
     assert not mcp.specifier.contains(Version("1.26.0"), prereleases=True), (
         f"requirements.txt autorise encore le SDK v1 : {mcp.specifier}"
     )

@@ -6,7 +6,7 @@ de v0.12.0.
 v0.12.0 rend `mission_id` OBLIGATOIRE sur `secret_wrap_lookup` et
 `secret_wrap_status`. Faut-il une fenêtre de maintenance pour basculer Vault et le
 broker `mcp-mission` ensemble ? Non — et cela tient à une propriété **observée et
-verrouillée de notre pile MCPServer** (`mcp==2.1.1`), pas à une garantie
+verrouillée de notre pile MCPServer** (`mcp==2.2.0`), pas à une garantie
 normative du protocole : un paramètre surnuméraire est
 IGNORÉ, un paramètre requis manquant est REFUSÉ. Une release Mission qui envoie
 toujours `mission_id` fonctionne donc contre les deux versions.
