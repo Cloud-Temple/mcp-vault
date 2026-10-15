@@ -160,7 +160,7 @@ def connection(*, provisioner=False, schema=True):
                 raise MetadataUnavailable("rights_invalid")
         if schema:
             row = conn.execute("SELECT version FROM vault_metadata.schema_version").fetchall()
-            if row != [{"version": 1}]:
+            if row != [{"version": 2}]:
                 raise MetadataUnavailable("schema_invalid")
             if not provisioner:
                 if conn.execute("SELECT has_schema_privilege(current_user,'vault_metadata','CREATE') AS ddl").fetchone()["ddl"]:
@@ -189,6 +189,9 @@ def connection(*, provisioner=False, schema=True):
                         or not ownership or ownership["owner"]!=s.metadata_pg_owner_role
                         or default_public["allowed"] or schema_public["allowed"]):
                     raise MetadataUnavailable("rights_invalid")
+        if schema and not provisioner:
+            from .audit_schema import verify
+            verify(conn, s)
         yield conn
     except (MetadataUnavailable, MutationUnknown):
         raise
