@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     mcp_server_host: str = "0.0.0.0"
     mcp_server_port: int = 8030
     mcp_server_debug: bool = False
+    technical_log_directory: str = ""
 
     # --- WAF ---
     # Port externe du WAF Caddy (variable partagée avec docker-compose). Déclaré ici

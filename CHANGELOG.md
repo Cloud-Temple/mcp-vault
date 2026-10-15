@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- #846 : segments techniques UTC privés et nettoyage propriétaire borné à30jours minimum.
+
 ### Préparation Mission #846
 
 - Protection SQL locale des audits corrélés Mission, installée explicitement en
