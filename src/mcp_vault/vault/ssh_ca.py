@@ -7,6 +7,8 @@ Les agents demandent la signature de leur clé publique et reçoivent
 un certificat éphémère pour se connecter aux serveurs cibles.
 """
 
+from ..storage.audit_bao import bao_step
+
 from ..reserved_metadata import business_target, target_error
 
 import logging
@@ -73,11 +75,11 @@ async def setup_ssh_ca(vault_id: str, role_name: str, allowed_users: str = "*",
     try:
         # 1. Monter le SSH engine (ignore si déjà monté)
         try:
-            client.sys.enable_secrets_engine(
+            await bao_step(lambda: client.sys.enable_secrets_engine(
                 backend_type="ssh",
                 path=mount_point,
                 description=f"SSH CA for vault {vault_id}",
-            )
+            ))
             logger.info(f"✅ SSH engine monté: {mount_point}")
         except Exception as e:
             if "existing mount" not in str(e).lower() and "path is already in use" not in str(e).lower():
@@ -85,23 +87,23 @@ async def setup_ssh_ca(vault_id: str, role_name: str, allowed_users: str = "*",
 
         # 2. Générer la CA (ignore si déjà générée)
         try:
-            client.write(
+            await bao_step(lambda: client.write(
                 f"{mount_point}/config/ca",
                 generate_signing_key=True,
-            )
+            ))
             logger.info(f"✅ CA SSH générée pour {vault_id}")
         except Exception:
             pass  # Déjà générée
 
         # 3. Créer le rôle
-        client.write(
+        await bao_step(lambda: client.write(
             f"{mount_point}/roles/{role_name}",
             key_type="ca",
             ttl=ttl,
             allowed_users=allowed_users,
             default_user=default_user,
             allow_user_certificates=True,
-        )
+        ))
         logger.info(f"✅ Rôle SSH créé: {role_name} dans {vault_id}")
 
         return {
@@ -146,7 +148,7 @@ async def sign_ssh_key(vault_id: str, role_name: str, public_key: str,
             payload["valid_principals"] = valid_principals
         if critical_options is not None:
             payload["critical_options"] = critical_options
-        response = client.write(f"{mount_point}/sign/{role_name}", **payload)
+        response = await bao_step(lambda: client.write(f"{mount_point}/sign/{role_name}", **payload))
         signed_key = response.get("data", {}).get("signed_key", "")
         serial = response.get("data", {}).get("serial_number", "")
 
@@ -222,7 +224,7 @@ async def get_ca_public_key(vault_id: str) -> dict:
     mount_point = _ssh_mount_point(vault_id)
 
     try:
-        response = client.read(f"{mount_point}/config/ca")
+        response = await bao_step(lambda: client.read(f"{mount_point}/config/ca"))
         public_key = response.get("data", {}).get("public_key", "")
 
         return {
@@ -251,7 +253,7 @@ async def list_ssh_roles(vault_id: str) -> dict:
     mount_point = _ssh_mount_point(vault_id)
 
     try:
-        response = client.list(f"{mount_point}/roles")
+        response = await bao_step(lambda: client.list(f"{mount_point}/roles"))
         roles = safe_list_keys(response)  # None si aucun rôle (issue #38)
 
         logger.info(f"📋 Rôles SSH listés pour {vault_id}: {roles}")
@@ -295,7 +297,7 @@ async def get_ssh_role_info(vault_id: str, role_name: str) -> dict:
     mount_point = _ssh_mount_point(vault_id)
 
     try:
-        response = client.read(f"{mount_point}/roles/{role_name}")
+        response = await bao_step(lambda: client.read(f"{mount_point}/roles/{role_name}"))
         if not response or not response.get("data"):
             return {"status": "error", "message": f"Rôle SSH '{role_name}' non trouvé dans vault '{vault_id}'"}
 
@@ -334,10 +336,10 @@ async def cleanup_ssh_ca(vault_id: str) -> bool:
 
     try:
         # Vérifier si le mount SSH existe avant de le supprimer
-        mounts = client.sys.list_mounted_secrets_engines()
+        mounts = await bao_step(lambda: client.sys.list_mounted_secrets_engines())
         mount_key = f"{mount_point}/"
         if mount_key in mounts.get("data", mounts):
-            client.sys.disable_secrets_engine(path=mount_point)
+            await bao_step(lambda: client.sys.disable_secrets_engine(path=mount_point))
             logger.info(f"🗑️ SSH CA supprimée pour vault {vault_id} (mount: {mount_point})")
         else:
             logger.debug(f"ℹ️ Pas de SSH CA à supprimer pour vault {vault_id}")

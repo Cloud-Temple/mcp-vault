@@ -13,6 +13,8 @@ Sync S3 forcée après toute mutation critique (setup, rotate, revoke)
 pour éviter la perte d'inventaire/révocation lors d'un crash.
 """
 
+from ..storage.audit_bao import bao_step, bao_step_sync
+
 import asyncio
 import logging
 import re
@@ -169,7 +171,7 @@ def is_pki_initialized() -> bool:
     if not client:
         return False
     try:
-        mounts = client.sys.list_mounted_secrets_engines()
+        mounts = bao_step_sync(lambda: client.sys.list_mounted_secrets_engines())
         data = mounts.get("data", mounts)
         return f"{_ROOT_MOUNT}/" in data and f"{_INT_MOUNT}/" in data
     except Exception:
@@ -202,11 +204,11 @@ def _base_url() -> str:
 def _mount_pki_engine(client, mount: str, max_ttl: str) -> None:
     """Monte un engine PKI (idempotent — ignore si déjà monté)."""
     try:
-        client.sys.enable_secrets_engine(
+        bao_step_sync(lambda: client.sys.enable_secrets_engine(
             backend_type="pki",
             path=mount,
             config={"max_lease_ttl": max_ttl},
-        )
+        ))
         logger.info(f"✅ PKI engine monté : {mount}")
     except Exception as e:
         msg = str(e).lower()
@@ -216,7 +218,7 @@ def _mount_pki_engine(client, mount: str, max_ttl: str) -> None:
 
 def _configured_acme_roles(client) -> list[str]:
     """Conserve les rôles nommés dans config/acme, pas tous les rôles du mount."""
-    response = client.read(f"{_INT_MOUNT}/config/acme")
+    response = bao_step_sync(lambda: client.read(f"{_INT_MOUNT}/config/acme"))
     # hvac.read rend None pour un 404 (notamment avant le premier montage).
     if response is None:
         return [_ACME_ROLE_NAME]
@@ -238,7 +240,7 @@ def _configured_acme_roles(client) -> list[str]:
     for role in preserved:
         if role == _ACME_ROLE_NAME:  # Le setup crée/reconfigure ce rôle maison.
             continue
-        response = client.read(f"{_INT_MOUNT}/roles/{role}")
+        response = bao_step_sync(lambda: client.read(f"{_INT_MOUNT}/roles/{role}"))
         if not isinstance(response, dict) or not isinstance(response.get("data"), dict):
             raise ValueError(f"Rôle ACME configuré absent ou illisible : {role}")
     return preserved
@@ -284,14 +286,14 @@ async def setup_pki_ca(lab_mode: bool = True,
 
             root_cert_pem = ""
             try:
-                root_resp = client.write(
+                root_resp = await bao_step(lambda: client.write(
                     f"{_ROOT_MOUNT}/root/generate/internal",
                     common_name="MCP Vault Root CA",
                     ttl="87600h",
                     key_type="rsa",
                     key_bits=4096,
                     issuer_name="mcp-vault-root",
-                )
+                ))
                 root_cert_pem = root_resp.get("data", {}).get("certificate", "") if root_resp else ""
             except Exception as e:
                 if "issuer name already in use" in str(e).lower():
@@ -299,11 +301,11 @@ async def setup_pki_ca(lab_mode: bool = True,
                 else:
                     raise
 
-            client.write(
+            await bao_step(lambda: client.write(
                 f"{_ROOT_MOUNT}/config/urls",
                 issuing_certificates=[f"{base}/pki/ca/root.pem"],
                 crl_distribution_points=[f"{base}/pki/ca/crl.pem"],
-            )
+            ))
             logger.info("✅ CA racine PKI configurée")
 
             # ── 2. CA Intermédiaire ─────────────────────────────────────────
@@ -315,10 +317,10 @@ async def setup_pki_ca(lab_mode: bool = True,
             # en lab. C'est un prérequis dur : on fait échouer le setup si le tuning
             # échoue, plutôt que d'annoncer une PKI opérationnelle qui ne l'est pas.
             try:
-                client.sys.tune_mount_configuration(
+                await bao_step(lambda: client.sys.tune_mount_configuration(
                     path=_INT_MOUNT,
                     allowed_response_headers=_ACME_RESPONSE_HEADERS,
-                )
+                ))
                 logger.info("✅ Tuning ACME headers : %s", ", ".join(_ACME_RESPONSE_HEADERS))
             except Exception as e:
                 logger.error("❌ Tuning allowed_response_headers échoué : %s", type(e).__name__)
@@ -328,7 +330,7 @@ async def setup_pki_ca(lab_mode: bool = True,
                 ) from e
 
             try:
-                csr_resp = client.write(
+                csr_resp = await bao_step(lambda: client.write(
                     f"{_INT_MOUNT}/intermediate/generate/internal",
                     common_name="MCP Vault Intermediate CA",
                     ttl="43800h",
@@ -336,43 +338,43 @@ async def setup_pki_ca(lab_mode: bool = True,
                     key_bits=4096,
                     issuer_name="mcp-vault-int",
                     add_basic_constraints=True,
-                )
+                ))
                 csr = csr_resp["data"]["csr"]
 
                 # issuer_ref est un paramètre de PATH (pas de body) dans l'API OpenBao :
                 # /issuer/:issuer_ref/sign-intermediate.
-                sign_resp = client.write(
+                sign_resp = await bao_step(lambda: client.write(
                     f"{_ROOT_MOUNT}/issuer/mcp-vault-root/sign-intermediate",
                     csr=csr,
                     format="pem_bundle",
                     ttl="43800h",
-                )
+                ))
                 signed_cert = sign_resp["data"]["certificate"]
 
-                import_resp = client.write(
+                import_resp = await bao_step(lambda: client.write(
                     f"{_INT_MOUNT}/intermediate/set-signed",
                     certificate=signed_cert,
-                )
+                ))
                 imported_issuers = import_resp.get("data", {}).get("imported_issuers", []) if import_resp else []
                 new_issuer_id = imported_issuers[0] if imported_issuers else ""
 
                 if new_issuer_id:
-                    client.write(f"{_INT_MOUNT}/config/issuers", default=new_issuer_id)
+                    await bao_step(lambda: client.write(f"{_INT_MOUNT}/config/issuers", default=new_issuer_id))
             except Exception as e:
                 if "issuer name already in use" in str(e).lower():
                     logger.info("ℹ️  CA intermédiaire déjà générée — skip génération (idempotent)")
                 else:
                     raise
 
-            client.write(
+            await bao_step(lambda: client.write(
                 f"{_INT_MOUNT}/config/urls",
                 issuing_certificates=[f"{base}/pki/ca/chain.pem"],
                 crl_distribution_points=[f"{base}/pki/ca/crl.pem"],
-            )
+            ))
             logger.info("✅ CA intermédiaire PKI configurée")
 
             # ── 3. Rôle d'émission ACME ─────────────────────────────────────
-            client.write(
+            await bao_step(lambda: client.write(
                 f"{_INT_MOUNT}/roles/{_ACME_ROLE_NAME}",
                 server_flag=True,
                 client_flag=False,
@@ -389,7 +391,7 @@ async def setup_pki_ca(lab_mode: bool = True,
                 no_store=False,
                 key_type="any",   # clients ACME (Caddy) génèrent souvent des clés EC — ne pas imposer RSA
                 require_cn=False,
-            )
+            ))
             logger.info(f"✅ Rôle ACME '{_ACME_ROLE_NAME}' configuré pour {allowed_domains}")
 
             # ── 3b. Cluster path (requis par OpenBao pour ACME) ─────────────
@@ -400,22 +402,22 @@ async def setup_pki_ca(lab_mode: bool = True,
             # Note : hvac.write(path, **kwargs) a path en 1er arg → collision
             # avec le champ body OpenBao "path". On passe par l'adaptateur.
             _cluster_path = f"{base}/v1/{_INT_MOUNT}"
-            client._adapter.post(
+            await bao_step(lambda: client._adapter.post(
                 f"/v1/{_INT_MOUNT}/config/cluster",
                 json={"path": _cluster_path},
-            )
+            ))
             logger.info(f"✅ Cluster path PKI configuré : {_cluster_path}")
 
             # ── 4. Serveur ACME ─────────────────────────────────────────────
             eab_policy = _EAB_POLICY_LAB if lab_mode else _EAB_POLICY_PROD
-            client.write(
+            await bao_step(lambda: client.write(
                 f"{_INT_MOUNT}/config/acme",
                 enabled=True,
                 default_directory_policy=f"role:{_ACME_ROLE_NAME}",
                 allowed_roles=acme_roles,
                 allowed_issuers=["*"],
                 eab_policy=eab_policy,
-            )
+            ))
             logger.info("✅ Serveur ACME activé (eab_policy=%s)", eab_policy)
 
             # ── 5. Sync S3 forcée ───────────────────────────────────────────
@@ -481,7 +483,7 @@ async def get_pki_status() -> dict:
 
     try:
         try:
-            certs_resp = client.list(f"{_INT_MOUNT}/certs")
+            certs_resp = await bao_step(lambda: client.list(f"{_INT_MOUNT}/certs"))
             cert_count = len(certs_resp.get("data", {}).get("keys", []))
         except Exception:
             cert_count = 0
@@ -500,7 +502,7 @@ async def get_pki_status() -> dict:
             int_expires = "inconnu"
 
         try:
-            acme_cfg = client.read(f"{_INT_MOUNT}/config/acme")
+            acme_cfg = await bao_step(lambda: client.read(f"{_INT_MOUNT}/config/acme"))
             acme_data = acme_cfg.get("data", {}) if acme_cfg else {}
             acme_enabled = acme_data.get("enabled", False)
             eab_policy = acme_data.get("eab_policy", "unknown")
@@ -538,7 +540,7 @@ async def list_pki_roles() -> dict:
         return {"status": "error", "message": "OpenBao non connecté"}
 
     try:
-        response = client.list(f"{_INT_MOUNT}/roles")
+        response = await bao_step(lambda: client.list(f"{_INT_MOUNT}/roles"))
         roles = safe_list_keys(response)  # None si aucun rôle (issue #38)
         return {"status": "ok", "roles": roles, "count": len(roles)}
     except Exception as e:
@@ -561,7 +563,7 @@ async def get_pki_role_info(role_name: str) -> dict:
         return {"status": "error", "message": "OpenBao non connecté"}
 
     try:
-        response = client.read(f"{_INT_MOUNT}/roles/{role_name}")
+        response = await bao_step(lambda: client.read(f"{_INT_MOUNT}/roles/{role_name}"))
         if not response or not response.get("data"):
             return {"status": "error", "message": f"Rôle PKI '{role_name}' non trouvé"}
         data = response["data"]
@@ -595,7 +597,7 @@ async def list_issued_certs(limit: int = 100, offset: int = 0) -> dict:
         return {"status": "error", "message": "OpenBao non connecté"}
 
     try:
-        certs_resp = client.list(f"{_INT_MOUNT}/certs")
+        certs_resp = await bao_step(lambda: client.list(f"{_INT_MOUNT}/certs"))
         all_serials = safe_list_keys(certs_resp)  # None si aucun cert émis (issue #38)
         total = len(all_serials)
         page_serials = all_serials[offset:offset + limit]
@@ -603,7 +605,7 @@ async def list_issued_certs(limit: int = 100, offset: int = 0) -> dict:
         certs = []
         for serial in page_serials:
             try:
-                cert_resp = client.read(f"{_INT_MOUNT}/cert/{serial}")
+                cert_resp = await bao_step(lambda: client.read(f"{_INT_MOUNT}/cert/{serial}"))
                 cert_data = cert_resp.get("data", {}) if cert_resp else {}
                 cert_pem = cert_data.get("certificate", "")
                 revocation_time = cert_data.get("revocation_time", 0)
@@ -650,7 +652,7 @@ def _ensure_manual_role(client, allowed_domains: list, max_ttl: str) -> None:
     Distinct du rôle ACME : autorise les IP SANs, refuse les wildcards (émission
     manuelle nominative), no_store=False (inventaire). Domaines alignés sur la PKI.
     """
-    client.write(
+    bao_step_sync(lambda: client.write(
         f"{_INT_MOUNT}/roles/{_MANUAL_ROLE_NAME}",
         server_flag=True,
         client_flag=False,
@@ -668,7 +670,7 @@ def _ensure_manual_role(client, allowed_domains: list, max_ttl: str) -> None:
         key_type="rsa",
         key_bits=2048,
         require_cn=True,
-    )
+    ))
 
 
 async def issue_certificate(common_name: str, ttl: str = "720h",
@@ -703,7 +705,7 @@ async def issue_certificate(common_name: str, ttl: str = "720h",
 
     # Domaines autorisés de la PKI (lus sur le rôle ACME) — référence de validation.
     try:
-        role_resp = client.read(f"{_INT_MOUNT}/roles/{_ACME_ROLE_NAME}")
+        role_resp = await bao_step(lambda: client.read(f"{_INT_MOUNT}/roles/{_ACME_ROLE_NAME}"))
         role_data = (role_resp or {}).get("data") or {}
         # OpenBao peut renvoyer allowed_domains en liste OU chaîne CSV → normaliser.
         allowed_domains = _normalize_domain_list(role_data.get("allowed_domains"))
@@ -763,7 +765,7 @@ async def issue_certificate(common_name: str, ttl: str = "720h",
             issue_args["alt_names"] = ",".join(extra_dns)
         if ip_list:
             issue_args["ip_sans"] = ",".join(ip_list)
-        resp = client.write(f"{_INT_MOUNT}/issue/{_MANUAL_ROLE_NAME}", **issue_args)
+        resp = await bao_step(lambda: client.write(f"{_INT_MOUNT}/issue/{_MANUAL_ROLE_NAME}", **issue_args))
         data = (resp or {}).get("data") or {}
     except Exception as e:
         err = str(e).lower()
@@ -820,13 +822,13 @@ async def revoke_cert(serial_number: str) -> dict:
         return {"status": "error", "message": "OpenBao non connecté"}
 
     try:
-        revoke_resp = client.write(
+        revoke_resp = await bao_step(lambda: client.write(
             f"{_INT_MOUNT}/revoke",
             serial_number=serial_number.strip(),
-        )
+        ))
         rev_time = revoke_resp.get("data", {}).get("revocation_time", 0) if revoke_resp else 0
 
-        client.write(f"{_INT_MOUNT}/crl/rotate")
+        await bao_step(lambda: client.write(f"{_INT_MOUNT}/crl/rotate"))
 
         from ..s3_sync import upload_to_s3
         sync_ok = await upload_to_s3()
@@ -863,42 +865,42 @@ async def rotate_intermediate(keep_old_issuer: bool = True,
         return {"status": "error", "message": "OpenBao non connecté"}
 
     try:
-        old_config = client.read(f"{_INT_MOUNT}/config/issuers")
+        old_config = await bao_step(lambda: client.read(f"{_INT_MOUNT}/config/issuers"))
         old_default_id = old_config.get("data", {}).get("default", "") if old_config else ""
 
-        csr_resp = client.write(
+        csr_resp = await bao_step(lambda: client.write(
             f"{_INT_MOUNT}/intermediate/generate/internal",
             common_name="MCP Vault Intermediate CA (rotated)",
             key_type="rsa",
             key_bits=4096,
             issuer_name="mcp-vault-int-new",
             add_basic_constraints=True,
-        )
+        ))
         csr = csr_resp["data"]["csr"]
 
         # issuer_ref est un paramètre de PATH (cf. setup_pki_ca) — pas de body.
-        sign_resp = client.write(
+        sign_resp = await bao_step(lambda: client.write(
             f"{_ROOT_MOUNT}/issuer/mcp-vault-root/sign-intermediate",
             csr=csr,
             format="pem_bundle",
             ttl="43800h",
-        )
+        ))
         signed_cert = sign_resp["data"]["certificate"]
 
-        import_resp = client.write(
+        import_resp = await bao_step(lambda: client.write(
             f"{_INT_MOUNT}/intermediate/set-signed",
             certificate=signed_cert,
-        )
+        ))
         imported_issuers = import_resp.get("data", {}).get("imported_issuers", []) if import_resp else []
         new_issuer_id = imported_issuers[0] if imported_issuers else ""
 
         if new_issuer_id:
-            client.write(f"{_INT_MOUNT}/config/issuers", default=new_issuer_id)
+            await bao_step(lambda: client.write(f"{_INT_MOUNT}/config/issuers", default=new_issuer_id))
             logger.info(f"✅ Nouvel issuer intermédiaire défini comme default : {new_issuer_id}")
 
         if not keep_old_issuer and old_default_id:
             try:
-                client.delete(f"{_INT_MOUNT}/issuer/{old_default_id}")
+                await bao_step(lambda: client.delete(f"{_INT_MOUNT}/issuer/{old_default_id}"))
                 logger.info(f"🗑️ Ancien issuer supprimé : {old_default_id}")
             except Exception as e:
                 logger.warning(f"⚠️ Impossible de supprimer l'ancien issuer {old_default_id} : {e}")

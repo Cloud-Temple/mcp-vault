@@ -334,3 +334,63 @@ def test_mcp_write_confirmed_bao_audit_failure_survives_backend_catch(terminal_f
             request_facts.reset(facts)
             current_token_info.reset(identity)
     asyncio.run(exercise())
+
+
+def test_sync_bao_worker_audit_failure_blocks_following_normal_step():
+    from mcp_vault.storage import audit_bao, audit_pg
+    from unittest.mock import Mock
+    state={'dispatched':False,'steps':0,'confirmed':0,'audit_unknown':False}
+    call_token=current_audit_call.set(SimpleNamespace(call_id='fixed'))
+    effect_token=audit_pg.current_audit_effects.set(state)
+    first=Mock(return_value={'private':'CANARY'})
+    next_effect=Mock()
+    try:
+        with patch.object(audit_pg,'_write',side_effect=MutationUnknown('fixed')):
+            with pytest.raises(MutationUnknown):
+                audit_bao.bao_step_sync(first)
+            with pytest.raises(MetadataUnavailable) as error:
+                audit_bao.bao_step_sync(next_effect)
+        assert error.value.reason=='audit_step_unconfirmed'
+        assert state=={'dispatched':True,'steps':1,'confirmed':1,'audit_unknown':True}
+        first.assert_called_once()
+        next_effect.assert_not_called()
+    finally:
+        audit_pg.current_audit_effects.reset(effect_token)
+        current_audit_call.reset(call_token)
+
+
+def test_explicit_compensation_uses_separate_phase_after_prior_uncertainty():
+    from mcp_vault.storage import audit_bao, audit_pg
+    state={'dispatched':True,'steps':1,'confirmed':0,'audit_unknown':True}
+    marker=current_audit_call.set(SimpleNamespace(call_id='fixed'))
+    effects=audit_pg.current_audit_effects.set(state)
+    observed=[]
+    def write(call,deadline,operation):
+        operation(object())
+    try:
+        with patch.object(audit_pg,'_write',write), \
+             patch.object(audit_pg,'record_step',side_effect=lambda _,__,phase,outcome,**___:observed.append((phase,outcome))):
+            assert audit_bao.bao_step_sync(lambda:True,compensation=True) is True
+        assert observed==[('compensation_outcome','confirmed')]
+    finally:
+        audit_pg.current_audit_effects.reset(effects)
+        current_audit_call.reset(marker)
+
+
+def test_every_business_mcp_tool_refuses_dispatch_when_audit_admission_fails():
+    from mcp_vault import server
+    from mcp_vault.tool_catalog import MCP_TOOL_NAMES
+    import inspect
+    async def exercise():
+        admitted=AsyncMock(side_effect=MetadataUnavailable('offline'))
+        with patch.object(audit_call,'get_settings',return_value=SimpleNamespace(metadata_backend='postgres')), \
+             patch.object(audit_call,'make_call',return_value=SimpleNamespace(call_id='fixed')), \
+             patch.object(audit_call,'admit',admitted):
+            for name in sorted(MCP_TOOL_NAMES-{'audit_log'}):
+                function=getattr(server,name)
+                args={p.name:'fixture' for p in inspect.signature(function).parameters.values()
+                      if p.default is inspect.Parameter.empty}
+                result=await function(**args)
+                assert result['error_type']=='audit_unavailable',name
+        assert admitted.await_count==len(MCP_TOOL_NAMES)-1
+    asyncio.run(exercise())

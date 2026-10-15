@@ -39,6 +39,8 @@ Limites V1 (documentées) :
   distribué (S3 conditional write, Redis, etc.) pour multi-instance.
 """
 
+from ..storage.audit_bao import bao_step_sync
+
 import asyncio
 import functools
 import json
@@ -988,7 +990,7 @@ def _wrap_secret_blocking(
     # KV v2 : le chemin de données est "{mount_point}/data/{path}"
     kv_data_path = f"{vault_id}/data/{secret_path}"
     try:
-        response = client.read(kv_data_path, wrap_ttl=f"{ttl_seconds}s")
+        response = bao_step_sync(lambda: client.read(kv_data_path, wrap_ttl=f"{ttl_seconds}s"))
     except Exception as e:
         from ..storage.postgres import MetadataUnavailable
         if isinstance(e, MetadataUnavailable):
@@ -1044,7 +1046,7 @@ def _wrap_secret_blocking(
         # Deux codes DISTINCTS, jamais l'ancien `registry_unavailable` : celui-ci
         # promettait « rien n'a été créé », ce qui est faux sur ce chemin.
         try:
-            client.auth.token.revoke_accessor(accessor=accessor)
+            bao_step_sync(lambda: client.auth.token.revoke_accessor(accessor=accessor))
         except Exception as rev_e:
             from ..storage.postgres import MetadataUnavailable
             if isinstance(rev_e, MetadataUnavailable):
@@ -1311,7 +1313,7 @@ def _revoke_accessor_selected(registry, accessor: str, selection: list) -> dict:
         return r
 
     try:
-        client.auth.token.revoke_accessor(accessor=accessor)
+        bao_step_sync(lambda: client.auth.token.revoke_accessor(accessor=accessor))
         return _rendre("revoked")
     except Exception as e:
         from ..storage.postgres import MetadataUnavailable
@@ -1947,7 +1949,7 @@ def _consume_wrap_secret_blocking(
         import hvac as _hvac
         ephemeral_client = _hvac.Client(url=settings.openbao_addr, token=wrap_token,
             timeout=(1,2) if getattr(settings,"metadata_backend","s3")=="postgres" else 30)
-        unwrap_response = ephemeral_client.sys.unwrap()
+        unwrap_response = bao_step_sync(lambda: ephemeral_client.sys.unwrap())
 
     except Exception as e:
         from ..storage.postgres import MetadataUnavailable

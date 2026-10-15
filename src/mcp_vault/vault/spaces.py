@@ -11,6 +11,8 @@ Métadonnées vault :
     Ce chemin est protégé contre l'écriture directe par les utilisateurs.
 """
 
+from ..storage.audit_bao import bao_step, bao_step_sync
+
 from ..reserved_metadata import business_target, target_error, pg_offload
 
 import logging
@@ -44,10 +46,10 @@ def _read_vault_meta(client, vault_id: str) -> dict:
         from ..storage.reader import owner_metadata
         return owner_metadata(vault_id)
     try:
-        response = client.secrets.kv.v2.read_secret_version(
+        response = bao_step_sync(lambda: client.secrets.kv.v2.read_secret_version(
             path=VAULT_META_PATH,
             mount_point=vault_id,
-        )
+        ))
         return response.get("data", {}).get("data", {})
     except Exception:
         return {}
@@ -60,11 +62,11 @@ def _write_vault_meta(client, vault_id: str, meta: dict):
         from ..reserved_metadata import ReservedMetadataAccess
         raise ReservedMetadataAccess(error["message"])
     try:
-        client.secrets.kv.v2.create_or_update_secret(
+        bao_step_sync(lambda: client.secrets.kv.v2.create_or_update_secret(
             path=VAULT_META_PATH,
             secret=meta,
             mount_point=vault_id,
-        )
+        ))
     except Exception as e:
         from ..config import get_settings
         if getattr(get_settings(), "metadata_backend", "s3") == "postgres":
@@ -98,7 +100,7 @@ def check_vault_owner(vault_id: str, client_name: str) -> bool:
 
     # Vérifier si le vault (mount) existe
     try:
-        mounts = client.sys.list_mounted_secrets_engines()
+        mounts = bao_step_sync(lambda: client.sys.list_mounted_secrets_engines())
         mount_key = f"{vault_id}/"
         if mount_key not in mounts.get("data", mounts):
             return True  # Vault n'existe pas encore → autoriser (création)
@@ -163,12 +165,12 @@ async def create_space(vault_id: str, description: str = "") -> dict:
         return {"status": "error", "message": "OpenBao non connecté"}
 
     try:
-        client.sys.enable_secrets_engine(
+        await bao_step(lambda: client.sys.enable_secrets_engine(
             backend_type="kv",
             path=vault_id,
             description=description or f"Vault: {vault_id}",
             options={"version": "2"},
-        )
+        ))
 
         # ── Écrire les métadonnées ──────────────────────────────
         now = _now_iso()
@@ -220,7 +222,7 @@ async def list_spaces(
         return {"status": "error", "message": "OpenBao non connecté"}
 
     try:
-        mounts = client.sys.list_mounted_secrets_engines()
+        mounts = await bao_step(lambda: client.sys.list_mounted_secrets_engines())
         vaults = []
         for path, info in mounts.get("data", mounts).items():
             # Filtrer les mount points système (cubbyhole, identity, sys, secret)
@@ -291,7 +293,7 @@ async def get_space_info(vault_id: str, count: bool = True) -> dict:
         return {"status": "error", "message": "OpenBao non connecté"}
 
     try:
-        mounts = client.sys.list_mounted_secrets_engines()
+        mounts = await bao_step(lambda: client.sys.list_mounted_secrets_engines())
         mount_key = f"{vault_id}/"
         mount_info = mounts.get("data", mounts).get(mount_key)
 
@@ -307,7 +309,7 @@ async def get_space_info(vault_id: str, count: bool = True) -> dict:
         root_entries = None
         if count:
             try:
-                secrets = client.secrets.kv.v2.list_secrets(path="", mount_point=vault_id)
+                secrets = await bao_step(lambda: client.secrets.kv.v2.list_secrets(path="", mount_point=vault_id))
                 keys = secrets.get("data", {}).get("keys", [])
                 root_entries = len([k for k in keys if k != VAULT_META_PATH])
             except Exception as e:
@@ -366,17 +368,17 @@ async def update_space(vault_id: str, description: str = "") -> dict:
 
     try:
         # ── Vérifier que le vault existe ──────────────────────
-        mounts = client.sys.list_mounted_secrets_engines()
+        mounts = await bao_step(lambda: client.sys.list_mounted_secrets_engines())
         mount_key = f"{vault_id}/"
         if mount_key not in mounts.get("data", mounts):
             return {"status": "error", "message": f"Vault '{vault_id}' non trouvé"}
 
         # ── Mettre à jour la description du mount OpenBao ─────
         if description:
-            client.sys.tune_mount_configuration(
+            await bao_step(lambda: client.sys.tune_mount_configuration(
                 path=vault_id,
                 description=description,
-            )
+            ))
 
         # ── Mettre à jour les métadonnées ─────────────────────
         now = _now_iso()
@@ -448,7 +450,7 @@ async def delete_space(vault_id: str) -> dict:
             logger.warning(f"⚠️ Impossible de nettoyer la SSH CA de {vault_id} (non bloquant)")
 
         # 2. Supprimer le mount KV v2 (secrets + métadonnées)
-        client.sys.disable_secrets_engine(path=vault_id)
+        await bao_step(lambda: client.sys.disable_secrets_engine(path=vault_id))
         logger.info(f"🗑️ Vault supprimé: {vault_id}")
         return {"status": "deleted", "vault_id": vault_id}
     except Exception as e:
