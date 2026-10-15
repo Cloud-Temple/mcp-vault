@@ -17,6 +17,7 @@ def route(scope):
         ('GET', '/admin/api/vaults'): 'vault_list',
         ('POST', '/admin/api/vaults'): 'vault_create',
         ('POST', '/admin/api/vaults/metadata-batch'): 'vault_metadata_batch',
+        ('GET', '/admin/api/generate-password'): 'secret_generate_password',
         ('POST', '/admin/api/tokens'): 'token_create',
         ('GET', '/admin/api/tokens'): 'token_list',
         ('POST', '/admin/api/tokens/purge'): 'token_purge',
@@ -36,7 +37,9 @@ def route(scope):
     }
     if (method, path) in exact:
         return exact[method, path], ''
-    if re.fullmatch(r'/admin/api/tokens/[^/]+', path):
+    # Le routeur historique utilise le dernier segment, y compris pour les
+    # alias imbriqués : conserver son auth et couvrir les mêmes dispatchs.
+    if path.startswith('/admin/api/tokens/'):
         tool = {'PUT': 'token_update', 'DELETE': 'token_revoke'}.get(method)
         return (tool, '') if tool else None
     if re.fullmatch(r'/admin/api/policies/[^/]+', path):
@@ -47,7 +50,7 @@ def route(scope):
         return (tool, '') if tool else None
     if re.fullmatch(r'/admin/api/pki/roles/[^/]+', path) and method == 'GET':
         return 'pki_ca_role_info', ''
-    if re.fullmatch(r'/admin/api/pki/certs/[^/]+/revoke', path) and method == 'POST':
+    if path.startswith('/admin/api/pki/certs/') and path.endswith('/revoke') and method == 'POST':
         return 'pki_revoke_cert', ''
     match = re.fullmatch(r'/admin/api/vaults/([^/]+)(.*)', path)
     if not match:
@@ -66,7 +69,7 @@ def route(scope):
     elif tail.startswith('/ssh/'):
         tool = {('POST', '/ssh/setup'): 'ssh_ca_setup', ('POST', '/ssh/sign'): 'ssh_sign_key',
                 ('GET', '/ssh/ca-key'): 'ssh_ca_public_key', ('GET', '/ssh/roles'): 'ssh_ca_list_roles'}.get((method, tail))
-        if method == 'GET' and re.fullmatch(r'/ssh/roles/[^/]+', tail):
+        if method == 'GET' and tail.startswith('/ssh/roles/') and tail != '/ssh/roles/':
             tool = 'ssh_ca_role_info'
     return (tool, vault_id) if tool else None
 
@@ -94,7 +97,10 @@ async def audited_response(scope, receive, send, business):
         if len(starts) != 1 or len(bodies) != 1 or bodies[0].get('more_body'):
             raise ValueError('audit response incomplete')
         code = starts[0]['status']
-        outcome = {'status': 'ok' if 200 <= code < 300 else 'error'}
+        body = json.loads(bodies[0]['body'])
+        status = body.get('status') if isinstance(body, dict) else None
+        outcome = {'status': status if 200 <= code < 300 and isinstance(status, str) and status in {
+            'ok', 'created', 'updated', 'deleted'} else 'error'}
         if code in (401, 403):
             outcome['error_type'] = 'access_denied'
         return outcome

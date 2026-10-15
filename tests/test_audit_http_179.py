@@ -102,6 +102,55 @@ def test_failed_audit_admission_never_reads_request_or_sends_original_response()
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize('method,path', [
+    ('PUT', '/admin/api/tokens/ignored/valid-prefix'),
+    ('DELETE', '/admin/api/tokens/ignored/valid-prefix'),
+    ('GET', '/admin/api/generate-password'),
+    ('GET', '/admin/api/vaults/coffer-a/ssh/roles/nested/role'),
+])
+def test_dispatchable_aliases_have_no_business_effect_when_audit_admission_fails(method, path):
+    async def exercise():
+        settings = SimpleNamespace(metadata_backend='postgres')
+        with patch.object(api, '_get_token_info', return_value={'auth_type': 'token', 'permissions': ['admin']}), \
+             patch.object(audit_http, 'get_settings', return_value=settings), \
+             patch.object(audit_call, 'get_settings', return_value=settings), \
+             patch.object(audit_call, 'make_call', return_value=SimpleNamespace(call_id='fixed')), \
+             patch.object(audit_call, 'admit', AsyncMock(side_effect=MetadataUnavailable('offline'))), \
+             patch.object(api, '_handle_admin_routes', AsyncMock()) as business:
+            send = AsyncMock()
+            await api._handle_authenticated_admin({'method': method, 'path': path}, AsyncMock(), send, None)
+        business.assert_not_awaited()
+        assert send.call_args_list[0].args[0]['status'] == 503
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('terminal_error', [None, MutationUnknown('fixed')])
+def test_actual_pki_http200_error_never_becomes_confirmed_business(terminal_error):
+    from mcp_vault.vault import pki_ca
+
+    async def exercise():
+        settings = SimpleNamespace(metadata_backend='postgres')
+        terminal = AsyncMock(side_effect=terminal_error)
+        sent = []
+        with patch.object(api, '_get_token_info', return_value={'auth_type': 'token', 'permissions': ['admin']}), \
+             patch.object(audit_http, 'get_settings', return_value=settings), \
+             patch.object(audit_call, 'get_settings', return_value=settings), \
+             patch.object(audit_call, 'make_call', return_value=SimpleNamespace(call_id='fixed')), \
+             patch.object(audit_call, 'admit', AsyncMock()), patch.object(audit_call, 'append', terminal), \
+             patch.object(pki_ca, 'list_issued_certs', AsyncMock(return_value={'status': 'error', 'message': 'PKI unavailable'})):
+            await api._handle_authenticated_admin({'method': 'GET', 'path': '/admin/api/pki/certs'},
+                AsyncMock(), AsyncMock(side_effect=sent.append), None)
+        assert terminal.call_args.args[1:] == ('public_terminal', 'unknown')
+        body = json.loads(sent[1]['body'])
+        if terminal_error:
+            assert sent[0]['status'] == 503 and body['business_outcome'] == 'unknown'
+        else:
+            assert sent[0]['status'] == 200 and body['status'] == 'error'
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize('method,path,expected', [
     ('GET', '/admin/api/audit', None),
     ('GET', '/admin/api/logs', None),
