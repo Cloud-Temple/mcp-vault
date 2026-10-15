@@ -14,6 +14,7 @@ pour éviter la perte d'inventaire/révocation lors d'un crash.
 """
 
 from ..storage.audit_bao import bao_step, bao_step_sync
+from ..async_offload import run_blocking
 
 import asyncio
 import logging
@@ -279,10 +280,10 @@ async def setup_pki_ca(lab_mode: bool = True,
         try:
             # Lecture avant toute mutation : un accès refusé ou un état illisible
             # ne doit jamais être pris pour une liste vide à écraser.
-            acme_roles = _configured_acme_roles(client)
+            acme_roles = await run_blocking(_configured_acme_roles, client)
 
             # ── 1. CA Racine ────────────────────────────────────────────────
-            _mount_pki_engine(client, _ROOT_MOUNT, "87600h")
+            await run_blocking(_mount_pki_engine, client, _ROOT_MOUNT, "87600h")
 
             root_cert_pem = ""
             try:
@@ -309,7 +310,7 @@ async def setup_pki_ca(lab_mode: bool = True,
             logger.info("✅ CA racine PKI configurée")
 
             # ── 2. CA Intermédiaire ─────────────────────────────────────────
-            _mount_pki_engine(client, _INT_MOUNT, "43800h")
+            await run_blocking(_mount_pki_engine, client, _INT_MOUNT, "43800h")
 
             # Autoriser OpenBao à renvoyer les headers de réponse ACME (RFC 8555).
             # Sans ce tuning, OpenBao strippe Replay-Nonce/Link/Location et
@@ -455,7 +456,7 @@ async def setup_pki_ca(lab_mode: bool = True,
 
 async def get_ca_root_pem() -> dict:
     """Retourne la CA racine PEM avec empreinte SHA-256 et URL stable."""
-    if not is_pki_initialized():
+    if not await run_blocking(is_pki_initialized):
         return {"status": "error", "message": "PKI non initialisée — appelez pki_ca_setup"}
     try:
         pem = await _read_pem_url(f"{_ROOT_MOUNT}/ca/pem")
@@ -474,7 +475,7 @@ async def get_ca_root_pem() -> dict:
 
 async def get_pki_status() -> dict:
     """État complet de la PKI (issuers, expiration, ACME, compteur certs)."""
-    if not is_pki_initialized():
+    if not await run_blocking(is_pki_initialized):
         return {"status": "not_initialized", "message": "PKI non initialisée"}
 
     client = _get_hvac_client()
@@ -532,7 +533,7 @@ async def get_pki_status() -> dict:
 
 async def list_pki_roles() -> dict:
     """Liste les rôles d'émission PKI configurés sur la CA intermédiaire."""
-    if not is_pki_initialized():
+    if not await run_blocking(is_pki_initialized):
         return {"status": "error", "message": "PKI non initialisée"}
 
     client = _get_hvac_client()
@@ -555,7 +556,7 @@ async def get_pki_role_info(role_name: str) -> dict:
     """Détails d'un rôle d'émission PKI (domaines, TTL, flags TLS)."""
     if not role_name:
         return {"status": "error", "message": "role_name requis"}
-    if not is_pki_initialized():
+    if not await run_blocking(is_pki_initialized):
         return {"status": "error", "message": "PKI non initialisée"}
 
     client = _get_hvac_client()
@@ -589,7 +590,7 @@ async def get_pki_role_info(role_name: str) -> dict:
 
 async def list_issued_certs(limit: int = 100, offset: int = 0) -> dict:
     """Inventaire paginé des certificats émis (serials, SANs, expiration, révocation)."""
-    if not is_pki_initialized():
+    if not await run_blocking(is_pki_initialized):
         return {"status": "error", "message": "PKI non initialisée"}
 
     client = _get_hvac_client()
@@ -689,7 +690,7 @@ async def issue_certificate(common_name: str, ttl: str = "720h",
     Returns: {status, serial_number, certificate, private_key (SENSIBLE),
               ca_chain, expiration, common_name}
     """
-    if not is_pki_initialized():
+    if not await run_blocking(is_pki_initialized):
         return {"status": "error", "message": "PKI non initialisée"}
 
     client = _get_hvac_client()
@@ -753,7 +754,7 @@ async def issue_certificate(common_name: str, ttl: str = "720h",
     # Rôle d'émission manuelle (idempotent, sous lock pour éviter les races).
     async with _get_setup_lock():
         try:
-            _ensure_manual_role(client, allowed_domains, role_max_ttl)
+            await run_blocking(_ensure_manual_role, client, allowed_domains, role_max_ttl)
         except Exception as e:
             logger.error("issue_certificate : création rôle manual échouée : %s", type(e).__name__)
             return {"status": "error", "message": "Impossible de configurer le rôle d'émission"}
@@ -814,7 +815,7 @@ async def revoke_cert(serial_number: str) -> dict:
     # CRITIQUE : validation stricte du serial_number (format hex:xx:xx)
     if not _SERIAL_NUMBER_PATTERN.fullmatch(serial_number.strip()):
         return {"status": "error", "message": "serial_number invalide (format attendu : aa:bb:cc:...)"}
-    if not is_pki_initialized():
+    if not await run_blocking(is_pki_initialized):
         return {"status": "error", "message": "PKI non initialisée"}
 
     client = _get_hvac_client()
@@ -857,7 +858,7 @@ async def rotate_intermediate(keep_old_issuer: bool = True,
     L'ancien issuer reste actif si keep_old_issuer=True (certs existants valides).
     Sync S3 forcée après rotation.
     """
-    if not is_pki_initialized():
+    if not await run_blocking(is_pki_initialized):
         return {"status": "error", "message": "PKI non initialisée"}
 
     client = _get_hvac_client()

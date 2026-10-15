@@ -47,7 +47,6 @@ import json
 import logging
 import re
 import sys
-import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -989,21 +988,32 @@ def _wrap_secret_blocking(
     # ── Appeler OpenBao : API bas niveau (wrap_ttl passé en header) ──
     # KV v2 : le chemin de données est "{mount_point}/data/{path}"
     kv_data_path = f"{vault_id}/data/{secret_path}"
+    response = None
+    audit_result_unconfirmed = False
+    def receive_wrap():
+        # Local au worker : conserver l'accessor pour la compensation, jamais
+        # dans l'audit, une exception sérialisée ou une réponse publique.
+        nonlocal response
+        response = client.read(kv_data_path, wrap_ttl=f"{ttl_seconds}s")
+        return response
     try:
-        response = bao_step_sync(lambda: client.read(kv_data_path, wrap_ttl=f"{ttl_seconds}s"))
+        bao_step_sync(receive_wrap)
     except Exception as e:
         from ..storage.postgres import MetadataUnavailable
         if isinstance(e, MetadataUnavailable):
-            raise
-        logger.warning("wrap_secret error for vault=%s path_len=%d: %s",
-                       vault_id, len(secret_path), type(e).__name__)
-        # Marquer le pending comme failed (pas d'accessor à révoquer)
-        if registry:
-            registry.mark_failed(operation_id, mission_id)
-        err_type = "not_found" if any(k in str(e) for k in ("404", "Not Found", "No value")) \
-                   else "backend_error"
-        return {"status": "error", "error_type": err_type,
-                "message": "Impossible de créer le wrap token (voir logs serveur)"}
+            from ..storage.audit_pg import current_audit_effects
+            effects = current_audit_effects.get()
+            if response is None or not effects or not effects["audit_unknown"]:
+                raise
+            audit_result_unconfirmed = True
+        else:
+            logger.warning("wrap_secret error for vault=%s path_len=%d: %s",
+                           vault_id, len(secret_path), type(e).__name__)
+            if registry:
+                registry.mark_failed(operation_id, mission_id)
+            err_type = "not_found" if any(k in str(e) for k in ("404", "Not Found", "No value")) else "backend_error"
+            return {"status": "error", "error_type": err_type,
+                    "message": "Impossible de créer le wrap token (voir logs serveur)"}
 
     wrap_info = response.get("wrap_info") if isinstance(response, dict) else None
     if not wrap_info:
@@ -1026,7 +1036,9 @@ def _wrap_secret_blocking(
     from ..storage.postgres import MetadataUnavailable, MutationUnknown
     metadata_result = {}
     try:
-        active = registry.mark_active(operation_id, mission_id, accessor)
+        active = False if audit_result_unconfirmed else registry.mark_active(operation_id, mission_id, accessor)
+        if audit_result_unconfirmed:
+            metadata_result = {"audit_status": "unknown"}
     except MutationUnknown as exc:
         active = False
         metadata_result = {"metadata_outcome":"unknown","mutation_id":exc.mutation_id}
@@ -1046,7 +1058,7 @@ def _wrap_secret_blocking(
         # Deux codes DISTINCTS, jamais l'ancien `registry_unavailable` : celui-ci
         # promettait « rien n'a été créé », ce qui est faux sur ce chemin.
         try:
-            bao_step_sync(lambda: client.auth.token.revoke_accessor(accessor=accessor))
+            bao_step_sync(lambda: client.auth.token.revoke_accessor(accessor=accessor), compensation=True)
         except Exception as rev_e:
             from ..storage.postgres import MetadataUnavailable
             if isinstance(rev_e, MetadataUnavailable):
@@ -1313,7 +1325,7 @@ def _revoke_accessor_selected(registry, accessor: str, selection: list) -> dict:
         return r
 
     try:
-        bao_step_sync(lambda: client.auth.token.revoke_accessor(accessor=accessor))
+        bao_step_sync(lambda: client.auth.token.revoke_accessor(accessor=accessor), compensation=True)
         return _rendre("revoked")
     except Exception as e:
         from ..storage.postgres import MetadataUnavailable
