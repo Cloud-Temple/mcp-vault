@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     metadata_sql_statement_seconds: int = Field(default=5, ge=1, le=60)
     metadata_sql_lock_seconds: int = Field(default=2, ge=1, le=30)
     metadata_sql_cancel_seconds: int = Field(default=2, ge=1, le=10)
+
+    # Audit applicatif PG : budget de dispatch/étape, pas SLA de drainage.
+    audit_retention_days: int = Field(default=365, ge=1, le=36500)
+    audit_stage_seconds: int = Field(default=30, ge=10, le=300)
+    audit_maintenance_role: str = Field(default="vault_audit_maintenance", pattern=r"^[a-z][a-z0-9_]{0,62}$")
     metadata_readiness_ttl_seconds: float = Field(default=2, ge=0.1, le=30)
     metadata_batch_max_ids: int = Field(default=50, ge=1, le=100)
     metadata_initial_admin_hours: int = Field(default=24, ge=1, le=24)
