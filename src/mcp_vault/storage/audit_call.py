@@ -30,10 +30,12 @@ def audited_call(function):
                 # L'exception peut survenir après effet. Aucun terminal failed certain.
                 try:
                     await append(call, "public_terminal", "unknown")
-                except (MetadataUnavailable, MutationUnknown):
+                except BaseException:
+                    # append/offload a déjà drainé son worker avant de lever.
+                    # Même une annulation secondaire ne masque pas la cause initiale.
                     pass
                 raise
-            outcome = "completed" if isinstance(result, dict) and result.get("status") == "ok" else "unknown"
+            outcome = "completed" if isinstance(result, dict) and result.get("status") in {"ok", "created", "updated", "deleted"} else "unknown"
             try:
                 await append(call, "public_terminal", outcome)
             except (MetadataUnavailable, MutationUnknown):

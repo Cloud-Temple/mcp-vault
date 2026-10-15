@@ -100,3 +100,34 @@ def test_error_result_never_claims_confirmed_business_failure():
         assert result['error_type']=='backend'
         assert close.call_args.args[1:]==('public_terminal','unknown')
     asyncio.run(exercise())
+
+
+def test_business_exception_has_priority_over_cancelled_closure():
+    async def exercise():
+        drained=[]
+        async def secret_read():
+            raise ValueError('initial business exception')
+        async def close(*_):
+            await asyncio.sleep(0)
+            drained.append(True)
+            raise asyncio.CancelledError()
+        with patch.object(audit_call,'get_settings',return_value=SimpleNamespace(metadata_backend='postgres')), \
+             patch.object(audit_call,'make_call',return_value=SimpleNamespace(call_id='fixed')), \
+             patch.object(audit_call,'admit',AsyncMock()),patch.object(audit_call,'append',close):
+            with pytest.raises(ValueError,match='initial business exception'):
+                await audit_call.audited_call(secret_read)()
+        assert drained==[True] and current_audit_call.get() is None
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('status',['created','updated','deleted'])
+def test_existing_success_statuses_close_completed(status):
+    async def exercise():
+        close=AsyncMock()
+        async def secret_write(): return {'status':status}
+        with patch.object(audit_call,'get_settings',return_value=SimpleNamespace(metadata_backend='postgres')), \
+             patch.object(audit_call,'make_call',return_value=SimpleNamespace(call_id='fixed')), \
+             patch.object(audit_call,'admit',AsyncMock()),patch.object(audit_call,'append',close):
+            await audit_call.audited_call(secret_write)()
+        assert close.call_args.args[1:]==('public_terminal','completed')
+    asyncio.run(exercise())
