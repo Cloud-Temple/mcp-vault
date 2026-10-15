@@ -290,6 +290,8 @@ def _mutation(kind, target, operation, *, operator=False, mutation_id=None):
             if audit_call is not None:
                 record_step(conn, audit_call, "sql_step_committed", "confirmed",
                             step_id=mid, mutation_id=mid)
+            if notices:
+                raise MetadataUnavailable("transaction_notice")
             committing = True
             conn.execute("COMMIT")
             if notices:

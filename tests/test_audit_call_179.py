@@ -197,3 +197,29 @@ def test_bao_transport_failure_is_unknown_not_failed_and_compensation_distinct()
         finally:
             current_audit_call.reset(token)
     asyncio.run(exercise())
+
+
+def test_audit_sql_notice_rolls_back_before_business_commit():
+    from contextlib import contextmanager
+    from mcp_vault.storage import postgres, audit_pg
+    order=[]
+    class Conn:
+        def add_notice_handler(self,handler):self.notice=handler
+        def execute(self,query,*_):
+            order.append(query)
+            return SimpleNamespace(fetchone=lambda:None)
+    conn=Conn()
+    @contextmanager
+    def connection():yield conn
+    def step(observed,*_,**__):observed.notice(SimpleNamespace(sqlstate='01000'))
+    marker=current_audit_call.set(SimpleNamespace(call_id='fixed'))
+    try:
+        with patch.object(postgres,'connection',connection), \
+             patch.object(postgres,'get_settings',return_value=SimpleNamespace(metadata_instance_id='fixture')), \
+             patch.object(postgres,'validate_durability'),patch.object(audit_pg,'record_step',step):
+            with pytest.raises(MetadataUnavailable) as error:
+                postgres.mutation('write',{},lambda _:None,operator=True)
+        assert error.value.reason=='transaction_notice'
+        assert order[-1]=='ROLLBACK' and 'COMMIT' not in order
+    finally:
+        current_audit_call.reset(marker)
