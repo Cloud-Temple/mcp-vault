@@ -71,9 +71,6 @@ async def handle_admin_api(scope, receive, send, mcp):
 
 
 async def _handle_authenticated_admin(scope, receive, send, mcp):
-    path = scope.get("path", "")
-    method = scope.get("method", "GET")
-
     # --- Auth : token valide requis ---
     token = _extract_admin_token(scope)
     token_info = _get_token_info(token)
@@ -93,7 +90,9 @@ async def _handle_authenticated_admin(scope, receive, send, mcp):
     # Même pattern que AuthMiddleware._validate_token() → current_token_info.set()
     ctx_token = current_token_info.set(token_info)
     try:
-        return await _handle_admin_routes(scope, receive, send, mcp, token_info)
+        from ..storage.audit_http import audited_response
+        return await audited_response(scope, receive, send,
+            lambda sc, rc, sd: _handle_admin_routes(sc, rc, sd, mcp, token_info))
     finally:
         current_token_info.reset(ctx_token)
 

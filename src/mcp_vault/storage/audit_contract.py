@@ -18,6 +18,7 @@ TOOLS = MCP_TOOL_NAMES | {
     "token_create", "token_revoke", "token_purge", "policy_create", "policy_delete",
     "mission_binding_create", "mission_binding_delete", "mission_binding_purge",
     "bearer_auth", "mission_pep", "audit_expire",
+    "token_list", "mission_binding_list", "mission_binding_get", "pki_ca_status",
 }
 PHASES = frozenset({"admission", "sql_step_committed", "bao_step_outcome", "compensation_outcome", "public_terminal"})
 OUTCOMES = frozenset({"admitted", "denied", "confirmed", "failed", "unknown", "completed", "incomplete"})
