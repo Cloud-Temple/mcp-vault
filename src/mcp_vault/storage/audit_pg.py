@@ -113,7 +113,7 @@ def record_step(conn, call, phase, outcome, *, step_id=ZERO, mutation_id=None):
     except (ValueError, TypeError, AttributeError):
         raise MetadataUnavailable("audit_event_invalid") from None
     existing = conn.execute("""SELECT outcome,mutation_id FROM vault_metadata.audit_events
-        WHERE instance_id=%s AND call_id=%s AND phase=%s AND step_id=%s FOR SHARE""",
+        WHERE instance_id=%s AND call_id=%s AND phase=%s AND step_id=%s""",
         (call.instance, call.call_id, phase, step_id)).fetchone()
     if existing:
         if existing["outcome"] != outcome or (str(existing["mutation_id"]) if existing["mutation_id"] else None) != mutation_id:

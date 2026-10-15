@@ -119,3 +119,14 @@ def test_authorizing_admission_still_revalidates_before_any_insert():
             audit._admit(call(), "admitted", time.monotonic()+30)
     validate.assert_called_once()
     assert conn.statements == ["BEGIN", "ROLLBACK"]
+
+
+def test_immutable_event_observation_requires_no_update_privilege():
+    conn = Conn()
+    with patch.object(audit, "get_settings", return_value=SimpleNamespace(metadata_instance_id="test")):
+        assert audit.record_step(conn, call(), "admission", "admitted") is True
+    assert len(conn.statements) == 2
+    assert "SELECT outcome,mutation_id" in conn.statements[0]
+    assert "FOR SHARE" not in conn.statements[0]
+    assert "FOR UPDATE" not in conn.statements[0]
+    assert "INSERT INTO vault_metadata.audit_events" in conn.statements[1]
