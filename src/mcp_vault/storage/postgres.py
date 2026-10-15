@@ -207,6 +207,19 @@ def connection(*, provisioner=False, schema=True):
             admission_slots.release()
 
 
+def _revalidate_binding(conn, instance, facts, identity):
+    row = conn.execute("SELECT payload,revision FROM vault_metadata.mission_bindings WHERE instance_id=%s AND tenant_id=%s FOR SHARE",
+                       (instance,facts["actor_binding"])).fetchone()
+    if (not row or row["revision"]!=facts["binding_revision"] or not row["payload"].get("enabled")
+            or row["payload"].get("_deleted") or identity.get("tenant_id")!=facts["actor_binding"]):
+        raise MetadataUnavailable("binding_changed")
+    from datetime import datetime,timezone
+    expires = row["payload"].get("expires_at")
+    if expires and datetime.fromisoformat(expires)<=datetime.now(timezone.utc):
+        raise MetadataUnavailable("binding_expired")
+
+
+
 def revalidate_actor(conn):
     from ..auth.context import current_token_info
     from ..auth.token_store import TokenStore
@@ -222,17 +235,13 @@ def revalidate_actor(conn):
                 or row["payload"].get("revoked") or TokenStore._is_expired(row["payload"])):
             raise MetadataUnavailable("actor_changed")
     elif identity.get("auth_type")=="mission_jwt" and facts.get("actor_binding"):
-        row = conn.execute("SELECT payload,revision FROM vault_metadata.mission_bindings WHERE instance_id=%s AND tenant_id=%s FOR SHARE",
-                           (instance,facts["actor_binding"])).fetchone()
-        if (not row or row["revision"]!=facts["binding_revision"] or not row["payload"].get("enabled")
-                or row["payload"].get("_deleted") or identity.get("tenant_id")!=facts["actor_binding"]):
-            raise MetadataUnavailable("binding_changed")
-        from datetime import datetime,timezone
-        expires = row["payload"].get("expires_at")
-        if expires and datetime.fromisoformat(expires)<=datetime.now(timezone.utc):
-            raise MetadataUnavailable("binding_expired")
+        _revalidate_binding(conn, instance, facts, identity)
     else:
         raise MetadataUnavailable("actor_missing")
+    if identity.get("auth_type") == "hub_vault_read":
+        if not facts.get("hub_binding_required") or not facts.get("actor_binding"):
+            raise MetadataUnavailable("binding_missing")
+        _revalidate_binding(conn, instance, facts, identity)
     for policy_id,revision in facts.get("policy_revisions",{}).items():
         row = conn.execute("SELECT revision FROM vault_metadata.policies WHERE instance_id=%s AND policy_id=%s FOR SHARE",
                            (instance,policy_id)).fetchone()

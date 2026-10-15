@@ -92,6 +92,30 @@ class Settings(BaseSettings):
                 raise ValueError("CA PostgreSQL requise")
         return self
 
+    # Lecture hub842 optionnelle ; aucun droit ou dépendance Mission en standalone.
+    hub_vault_enabled: bool = False
+    hub_vault_issuer: str = ""
+    hub_vault_audience: str = ""
+    hub_vault_jwks_url: str = ""
+    hub_vault_check_url: str = ""
+    hub_vault_ca_file: str = ""
+    hub_vault_timeout_seconds: float = Field(default=5, gt=0, le=10)
+    hub_vault_total_seconds: float = Field(default=20, gt=0, le=30)
+    hub_vault_max_inflight: int = Field(default=1, ge=1, le=16)
+    hub_vault_max_pending: int = Field(default=4, ge=0, le=64)
+    hub_vault_max_response_bytes: int = Field(default=1048576, ge=1024, le=1048576)
+
+    @model_validator(mode="after")
+    def validate_hub_vault(self):
+        if self.hub_vault_enabled:
+            from .auth.hub_vault_activity import https_url
+            if (self.metadata_backend != "postgres" or self.mcp_auth_mode not in {"bearer", "dual-stack"}
+                    or not 10 <= self.mission_jwks_cache_ttl <= 60 or not self.hub_vault_audience
+                    or not self.hub_vault_ca_file or not all(https_url(v) for v in
+                        (self.hub_vault_issuer, self.hub_vault_jwks_url, self.hub_vault_check_url))):
+                raise ValueError("Configuration hub Vault incomplète")
+        return self
+
     # --- Accès SSH JIT opérateur ---
     # Objet JSON profile_id -> profil nominatif. Vide = fonctionnalité désactivée.
     # Les profils contiennent uniquement des données publiques/de policy : identité

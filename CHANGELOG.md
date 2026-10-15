@@ -1,5 +1,9 @@
 # Changelog — MCP Vault
 
+## Non publié — compagnon Mission #842
+
+- Lecture hub optionnelle des métadonnées et traces Mission conservées : opaque local et contexte Mission cumulés, scope PG filtré avant pagination, sans accès aux secrets ni changement du lecteur standalone.
+
 ## [Unreleased]
 
 ### ACME lié à un rôle

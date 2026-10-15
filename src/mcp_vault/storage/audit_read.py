@@ -27,6 +27,12 @@ def where_scope(scope: AuditScope):
             raise PermissionError("audit scope denied")
         clauses += ["c.vault_id=ANY(%s)", "c.actor_ref<>'anonymous'", "c.tenant_id IS NULL", "c.mission_id IS NULL"]
         values.append(sorted(scope.coffers))
+    from .hub_vault_activity import MissionAuditScope
+    if isinstance(scope, MissionAuditScope):
+        # Replace the opaque auditor's NULL-only clauses, never broaden its branch.
+        clauses = ["c.instance_id=%s", "c.vault_id=ANY(%s)", "left(c.actor_ref,8)='mission_'",
+                   "c.tenant_id=%s", "c.mission_id=%s"]
+        values = [scope.instance, sorted(scope.coffers), scope.tenant_id, scope.mission_id]
     return clauses, values
 
 

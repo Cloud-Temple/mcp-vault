@@ -2061,6 +2061,8 @@ def create_app():
     )
     _install_vault_lifespan(app)
     app = LoggingMiddleware(app)
+    from .hub_vault_activity import HubVaultActivityMiddleware
+    app = HubVaultActivityMiddleware(app, settings)
     app = AuthMiddleware(app, mcp)
     app = HealthCheckMiddleware(app)
     app = AdminMiddleware(app, mcp)
