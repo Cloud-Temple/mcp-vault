@@ -21,8 +21,9 @@ def test_bad_expiration_never_opens_connection(body):
     connect.assert_not_called()
 
 
-@pytest.mark.parametrize('dry_run,commit_fails', [(True, False), (False, False), (False, True)])
-def test_expiration_one_call_receipt_only_after_commit(dry_run, commit_fails):
+@pytest.mark.parametrize('dry_run,commit_fails,close_fails', [
+    (True, False, False), (False, False, False), (False, True, False), (False, False, True)])
+def test_expiration_one_call_receipt_only_after_commit(dry_run, commit_fails, close_fails):
     order = []
     result = {'calls': 2, 'events': 5, 'dry_run': dry_run, 'has_more': False,
               'receipt': None if dry_run else 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'}
@@ -46,13 +47,15 @@ def test_expiration_one_call_receipt_only_after_commit(dry_run, commit_fails):
     def maint_connection():
         order.append('distinct-maintenance-login')
         yield Conn()
+        if close_fails:
+            raise MetadataUnavailable('close_unconfirmed')
 
     with patch.object(maintenance, 'connection', app_connection), \
          patch.object(maintenance, 'maintenance_connection', maint_connection), \
          patch.object(maintenance, 'get_settings', return_value=SimpleNamespace(metadata_backend='postgres', metadata_instance_id='fixture')), \
          patch.object(maintenance, 'validate_durability', side_effect=lambda conn: order.append('remote_apply')):
         body = {'dry_run': dry_run, 'confirm': 'audit-expire'}
-        if commit_fails:
+        if commit_fails or close_fails:
             with pytest.raises(MutationUnknown):
                 maintenance.expire(body)
         else:

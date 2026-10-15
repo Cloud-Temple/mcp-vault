@@ -69,6 +69,8 @@ def maintenance_connection():
         try:
             if conn is not None:
                 conn.close()
+        except Exception as exc:
+            raise MetadataUnavailable('close_unconfirmed') from exc
         finally:
             limiter.release()
 
@@ -88,40 +90,47 @@ def expire(body):
         pass
     operation_id = str(uuid.uuid4())
     committing = False
-    with maintenance_connection() as conn:
-        notices = []
-        conn.add_notice_handler(lambda diagnostic: notices.append(diagnostic.sqlstate))
-        try:
-            conn.execute('BEGIN')
-            validate_durability(conn)
-            row = conn.execute('SELECT vault_metadata.audit_expire(%s,%s,%s) AS result',
-                (get_settings().metadata_instance_id, batch, dry_run)).fetchone()
-            if not row or not isinstance(row['result'], dict) or notices:
-                raise MetadataUnavailable('audit_expiration_not_confirmed')
-            result = row['result']
-            if (set(result) != {'calls', 'events', 'dry_run', 'has_more', 'receipt'}
-                    or any(isinstance(result[k], bool) or not isinstance(result[k], int)
-                           or result[k] < 0 for k in ('calls', 'events'))
-                    or result['calls'] > batch or result['dry_run'] is not dry_run
-                    or not isinstance(result['has_more'], bool)):
-                raise MetadataUnavailable('audit_expiration_result_invalid')
-            if not dry_run and result['calls']:
-                try:
-                    uuid.UUID(result['receipt'])
-                except (ValueError, TypeError, AttributeError):
-                    raise MetadataUnavailable('audit_expiration_receipt_invalid') from None
-            elif result['receipt'] is not None:
-                raise MetadataUnavailable('audit_expiration_receipt_invalid')
-            committing = True
-            conn.execute('COMMIT')
-            if notices:
-                raise MetadataUnavailable('audit_expiration_notice')
-        except BaseException as exc:
-            if committing:
-                raise MutationUnknown(operation_id) from exc
+    try:
+        with maintenance_connection() as conn:
+            notices = []
+            conn.add_notice_handler(lambda diagnostic: notices.append(diagnostic.sqlstate))
             try:
-                conn.execute('ROLLBACK')
-            except Exception:
-                pass
-            raise
+                conn.execute('BEGIN')
+                validate_durability(conn)
+                row = conn.execute('SELECT vault_metadata.audit_expire(%s,%s,%s) AS result',
+                    (get_settings().metadata_instance_id, batch, dry_run)).fetchone()
+                if not row or not isinstance(row['result'], dict) or notices:
+                    raise MetadataUnavailable('audit_expiration_not_confirmed')
+                result = row['result']
+                if (set(result) != {'calls', 'events', 'dry_run', 'has_more', 'receipt'}
+                        or any(isinstance(result[k], bool) or not isinstance(result[k], int)
+                               or result[k] < 0 for k in ('calls', 'events'))
+                        or result['calls'] > batch or result['dry_run'] is not dry_run
+                        or not isinstance(result['has_more'], bool)):
+                    raise MetadataUnavailable('audit_expiration_result_invalid')
+                if not dry_run and result['calls']:
+                    try:
+                        uuid.UUID(result['receipt'])
+                    except (ValueError, TypeError, AttributeError):
+                        raise MetadataUnavailable('audit_expiration_receipt_invalid') from None
+                elif result['receipt'] is not None:
+                    raise MetadataUnavailable('audit_expiration_receipt_invalid')
+                committing = True
+                conn.execute('COMMIT')
+                if notices:
+                    raise MetadataUnavailable('audit_expiration_notice')
+            except BaseException as exc:
+                if committing:
+                    raise MutationUnknown(operation_id) from exc
+                try:
+                    conn.execute('ROLLBACK')
+                except Exception:
+                    pass
+                raise
+    except MutationUnknown:
+        raise
+    except MetadataUnavailable as exc:
+        if exc.reason == 'close_unconfirmed':
+            raise MutationUnknown(operation_id) from exc
+        raise
     return {'status': 'ok', 'confirmed': True, **result}
