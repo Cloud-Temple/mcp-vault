@@ -11,6 +11,7 @@ Lifecycle :
 """
 
 from .storage.admission import request_target
+from .storage.audit_call import audited_call
 
 import logging
 import sys
@@ -131,6 +132,7 @@ mcp = MCPServer(
 # ═══════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
+@audited_call
 async def system_health() -> dict:
     """
     Vérifie l'état de santé du service MCP Vault.
@@ -180,6 +182,7 @@ async def system_health() -> dict:
 
 
 @mcp.tool()
+@audited_call
 async def system_about() -> dict:
     """
     Informations sur le service MCP Vault.
@@ -215,6 +218,7 @@ async def system_about() -> dict:
 # ═══════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
+@audited_call
 @request_target(ssh=False, creating=True)
 async def vault_create(vault_id: str, description: str = "") -> dict:
     """
@@ -241,6 +245,7 @@ async def vault_create(vault_id: str, description: str = "") -> dict:
 
 
 @mcp.tool()
+@audited_call
 async def vault_list() -> dict:
     """Liste tous les vaults (coffres de secrets) accessibles par le token courant."""
     from .auth.context import check_policy, get_listing_filter
@@ -265,6 +270,7 @@ async def vault_list() -> dict:
 
 
 @mcp.tool()
+@audited_call
 @request_target(ssh=False, creating=False)
 async def vault_info(vault_id: str) -> dict:
     """
@@ -292,6 +298,7 @@ async def vault_info(vault_id: str) -> dict:
 
 
 @mcp.tool()
+@audited_call
 @request_target(ssh=False, creating=False)
 async def vault_update(vault_id: str, description: str = "") -> dict:
     """
@@ -321,6 +328,7 @@ async def vault_update(vault_id: str, description: str = "") -> dict:
 
 
 @mcp.tool()
+@audited_call
 @request_target(ssh=True, creating=False)
 async def vault_delete(vault_id: str, confirm: bool = False) -> dict:
     """
@@ -361,6 +369,7 @@ async def vault_delete(vault_id: str, confirm: bool = False) -> dict:
 # ═══════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
+@audited_call
 @request_target(ssh=False, creating=False)
 async def secret_write(vault_id: str, path: str, data: dict,
                        secret_type: str = "custom", tags: str = "",
@@ -400,6 +409,7 @@ async def secret_write(vault_id: str, path: str, data: dict,
 
 
 @mcp.tool()
+@audited_call
 @request_target(ssh=False, creating=False)
 async def secret_read(vault_id: str, path: str, version: int = 0) -> dict:
     """
@@ -427,6 +437,7 @@ async def secret_read(vault_id: str, path: str, version: int = 0) -> dict:
 
 
 @mcp.tool()
+@audited_call
 @request_target(ssh=False, creating=False)
 async def secret_list(vault_id: str, path: str = "") -> dict:
     """
@@ -460,6 +471,7 @@ async def secret_list(vault_id: str, path: str = "") -> dict:
 
 
 @mcp.tool()
+@audited_call
 @request_target(ssh=False, creating=False)
 async def secret_delete(vault_id: str, path: str) -> dict:
     """
@@ -493,6 +505,7 @@ async def secret_delete(vault_id: str, path: str) -> dict:
 # ═══════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
+@audited_call
 @request_target(ssh=False, creating=False)
 async def secret_wrap(
     vault_id: str,
@@ -685,6 +698,7 @@ async def secret_wrap(
 
 
 @mcp.tool()
+@audited_call
 async def secret_revoke_wrap(lease_id: str) -> dict:
     """
     Révoque un wrap token de façon IDEMPOTENTE.
@@ -729,6 +743,7 @@ async def secret_revoke_wrap(lease_id: str) -> dict:
 
 
 @mcp.tool()
+@audited_call
 async def secret_wrap_lookup(operation_id: str, mission_id: str) -> dict:
     """
     ⚠️ RÉVOQUE les wraps du couple (operation_id, mission_id) — effet de bord destructif.
@@ -807,6 +822,7 @@ async def secret_wrap_lookup(operation_id: str, mission_id: str) -> dict:
 
 
 @mcp.tool()
+@audited_call
 async def secret_wrap_status(operation_id: str, mission_id: str) -> dict:
     """
     Consulte l'état d'un wrap par (operation_id, mission_id) — LECTURE SEULE.
@@ -881,6 +897,7 @@ async def secret_wrap_status(operation_id: str, mission_id: str) -> dict:
 # ═══════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
+@audited_call
 async def secret_consume(
     wrap_token: str,
     operation_id: str,
@@ -1123,6 +1140,7 @@ from .auth.mission_jwt import check_mission_active as _check_mission_active
 # ═══════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
+@audited_call
 async def secret_types() -> dict:
     """
     Liste tous les types de secrets disponibles (style 1Password).
@@ -1144,6 +1162,7 @@ async def secret_types() -> dict:
 
 
 @mcp.tool()
+@audited_call
 async def secret_generate_password(length: int = 24, uppercase: bool = True,
                                     lowercase: bool = True, digits: bool = True,
                                     symbols: bool = True, exclude: str = "") -> dict:
@@ -1186,6 +1205,7 @@ async def secret_generate_password(length: int = 24, uppercase: bool = True,
 # ═══════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
+@audited_call
 async def policy_create(policy_id: str, description: str = "",
                         allowed_tools: list = None, denied_tools: list = None,
                         path_rules: list = None) -> dict:
@@ -1233,6 +1253,7 @@ async def policy_create(policy_id: str, description: str = "",
 
 
 @mcp.tool()
+@audited_call
 async def policy_list() -> dict:
     """
     Liste toutes les policies MCP.
@@ -1260,6 +1281,7 @@ async def policy_list() -> dict:
 
 
 @mcp.tool()
+@audited_call
 async def policy_get(policy_id: str) -> dict:
     """
     Détails complets d'une policy MCP.
@@ -1293,6 +1315,7 @@ async def policy_get(policy_id: str) -> dict:
 
 
 @mcp.tool()
+@audited_call
 async def policy_delete(policy_id: str, confirm: bool = False) -> dict:
     """
     Supprime une policy MCP (irréversible).
@@ -1345,6 +1368,7 @@ async def policy_delete(policy_id: str, confirm: bool = False) -> dict:
 # ═══════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
+@audited_call
 @request_target(ssh=True, creating=False)
 async def ssh_ca_setup(vault_id: str, role_name: str, allowed_users: str = "*",
                        default_user: str = "ubuntu", ttl: str = "30m") -> dict:
@@ -1375,6 +1399,7 @@ async def ssh_ca_setup(vault_id: str, role_name: str, allowed_users: str = "*",
 
 
 @mcp.tool()
+@audited_call
 @request_target(ssh=True, creating=False)
 async def ssh_sign_key(vault_id: str, role_name: str, public_key: str,
                        ttl: str = "30m") -> dict:
@@ -1404,6 +1429,7 @@ async def ssh_sign_key(vault_id: str, role_name: str, public_key: str,
 
 
 @mcp.tool()
+@audited_call
 async def ssh_operator_access_profiles() -> dict:
     """Liste les profils JIT utilisables par le bearer opérateur courant.
 
@@ -1425,6 +1451,7 @@ async def ssh_operator_access_profiles() -> dict:
 
 
 @mcp.tool()
+@audited_call
 async def ssh_request_operator_access(profile_id: str, public_key: str,
                                       reason: str) -> dict:
     """Demande un certificat SSH JIT opérateur lié à une clé pré-enrôlée.
@@ -1450,6 +1477,7 @@ async def ssh_request_operator_access(profile_id: str, public_key: str,
 
 
 @mcp.tool()
+@audited_call
 @request_target(ssh=True, creating=False)
 async def ssh_ca_public_key(vault_id: str) -> dict:
     """
@@ -1472,6 +1500,7 @@ async def ssh_ca_public_key(vault_id: str) -> dict:
 
 
 @mcp.tool()
+@audited_call
 @request_target(ssh=True, creating=False)
 async def ssh_ca_list_roles(vault_id: str) -> dict:
     """
@@ -1496,6 +1525,7 @@ async def ssh_ca_list_roles(vault_id: str) -> dict:
 
 
 @mcp.tool()
+@audited_call
 @request_target(ssh=True, creating=False)
 async def ssh_ca_role_info(vault_id: str, role_name: str) -> dict:
     """
@@ -1523,6 +1553,7 @@ async def ssh_ca_role_info(vault_id: str, role_name: str) -> dict:
 # ═══════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
+@audited_call
 async def pki_ca_setup(lab_mode: bool,
                        allowed_domains: str,
                        leaf_ttl: str = "720h") -> dict:
@@ -1587,6 +1618,7 @@ async def pki_ca_setup(lab_mode: bool,
 
 
 @mcp.tool()
+@audited_call
 async def pki_ca_public_key() -> dict:
     """
     Retourne la CA racine PEM avec son empreinte SHA-256 et l'URL stable.
@@ -1604,6 +1636,7 @@ async def pki_ca_public_key() -> dict:
 
 
 @mcp.tool()
+@audited_call
 async def pki_ca_list_roles() -> dict:
     """Liste les rôles d'émission PKI configurés sur la CA intermédiaire."""
     from .auth.context import check_policy
@@ -1617,6 +1650,7 @@ async def pki_ca_list_roles() -> dict:
 
 
 @mcp.tool()
+@audited_call
 async def pki_ca_role_info(role_name: str) -> dict:
     """
     Détails d'un rôle d'émission PKI (domaines autorisés, TTL, flags TLS).
@@ -1635,6 +1669,7 @@ async def pki_ca_role_info(role_name: str) -> dict:
 
 
 @mcp.tool()
+@audited_call
 async def pki_list_certs(limit: int = 100, offset: int = 0) -> dict:
     """
     Inventaire paginé des certificats émis (serials, SANs, expiration, révocation).
@@ -1654,6 +1689,7 @@ async def pki_list_certs(limit: int = 100, offset: int = 0) -> dict:
 
 
 @mcp.tool()
+@audited_call
 async def pki_revoke_cert(serial_number: str) -> dict:
     """
     Révoque un certificat et force la mise à jour de la CRL.
@@ -1675,6 +1711,7 @@ async def pki_revoke_cert(serial_number: str) -> dict:
 
 
 @mcp.tool()
+@audited_call
 async def pki_issue_cert(common_name: str, ttl: str = "720h",
                          alt_names: str = "", ip_sans: str = "") -> dict:
     """
@@ -1707,6 +1744,7 @@ async def pki_issue_cert(common_name: str, ttl: str = "720h",
 
 
 @mcp.tool()
+@audited_call
 async def pki_ca_rotate_intermediate(keep_old_issuer: bool = True,
                                       overlap_ttl: str = "48h") -> dict:
     """
@@ -1737,6 +1775,7 @@ async def pki_ca_rotate_intermediate(keep_old_issuer: bool = True,
 # ═══════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
+@audited_call
 async def token_update(hash_prefix: str, policy_id: str = "",
                        permissions: str = "", vaults: str = "") -> dict:
     """
@@ -1819,11 +1858,13 @@ async def token_update(hash_prefix: str, policy_id: str = "",
 @mcp.tool()
 async def audit_log(limit: int = 50, client: str = "", vault_id: str = "",
                     tool: str = "", category: str = "", status: str = "",
-                    since: str = "") -> dict:
+                    since: str = "", cursor: str = "") -> dict:
     """
     Journal d'audit — toutes les opérations MCP avec filtres.
 
-    Requiert la permission admin.
+    Profil historique : admin. Profil PostgreSQL : admin ou auditeur read
+    avec policy audit_log explicite et coffres autorisés ; champs expurgés.
+    La pagination PG retourne total/complete/cursor ; un export invalidé reste incomplet.
 
     Retourne les événements les plus récents en premier. Chaque entrée
     contient : timestamp, client, outil, vault, statut, détail, durée.
@@ -1845,6 +1886,12 @@ async def audit_log(limit: int = 50, client: str = "", vault_id: str = "",
         status: Filtrer par statut
         since: Entrées après cette date
     """
+    if getattr(get_settings(), "metadata_backend", "s3") == "postgres":
+        from .storage.audit_service import query
+        return await query(limit=limit, cursor=cursor, filters={
+            "client": client, "vault_id": vault_id, "tool": tool,
+            "category": category, "status": status, "since": since})
+
     # SÉCURITÉ V2-03 : audit_log requiert admin (conformément à ARCHITECTURE.md §6.7)
     from .auth.context import check_admin_permission
     admin_err = check_admin_permission()
@@ -2123,6 +2170,7 @@ def main():
 
 
 @mcp.tool()
+@audited_call
 async def vault_metadata_batch(vault_ids: list[str], limit: int = 50, cursor: str | None = None) -> dict:
     """Lit un lot borné de metadata autorisées, sans contenu secret."""
     from .storage.admission import batch_metadata

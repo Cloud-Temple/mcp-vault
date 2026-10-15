@@ -160,7 +160,7 @@ def connection(*, provisioner=False, schema=True):
                 raise MetadataUnavailable("rights_invalid")
         if schema:
             row = conn.execute("SELECT version FROM vault_metadata.schema_version").fetchall()
-            if row != [{"version": 1}]:
+            if row != [{"version": 2}]:
                 raise MetadataUnavailable("schema_invalid")
             if not provisioner:
                 if conn.execute("SELECT has_schema_privilege(current_user,'vault_metadata','CREATE') AS ddl").fetchone()["ddl"]:
@@ -189,6 +189,9 @@ def connection(*, provisioner=False, schema=True):
                         or not ownership or ownership["owner"]!=s.metadata_pg_owner_role
                         or default_public["allowed"] or schema_public["allowed"]):
                     raise MetadataUnavailable("rights_invalid")
+        if schema and not provisioner:
+            from .audit_schema import verify
+            verify(conn, s)
         yield conn
     except (MetadataUnavailable, MutationUnknown):
         raise
@@ -267,6 +270,11 @@ def _mutation(kind, target, operation, *, operator=False, mutation_id=None):
             if conn.execute("SELECT 1 FROM vault_metadata.operation_receipts WHERE instance_id=%s AND mutation_id=%s",
                             (s.metadata_instance_id, mid)).fetchone():
                 raise MetadataUnavailable("mutation_already_recorded")
+            from .audit_pg import current_audit_effects
+            effects = current_audit_effects.get()
+            if effects is not None:
+                effects["dispatched"] = True
+                effects["steps"] += 1
             result = operation(conn)
             if notices:
                 raise MetadataUnavailable("transaction_notice")
@@ -280,6 +288,15 @@ def _mutation(kind, target, operation, *, operator=False, mutation_id=None):
                 (instance_id,mutation_id,kind,actor_hash,intent_hash,target,phase,database_result)
                 VALUES(%s,%s,%s,%s,%s,%s,%s,'committed')""",
                 (s.metadata_instance_id,mid,kind,actor,intent,Jsonb(target),kind))
+            # Le reçu et l'étape SQL sont atomiques. L'appel public possède seul
+            # son terminal ; un registre intermédiaire ne conclut jamais le métier.
+            from .audit_pg import current_audit_call, record_step
+            audit_call = current_audit_call.get()
+            if audit_call is not None:
+                record_step(conn, audit_call, "sql_step_committed", "confirmed",
+                            step_id=mid, mutation_id=mid)
+            if notices:
+                raise MetadataUnavailable("transaction_notice")
             committing = True
             conn.execute("COMMIT")
             if notices:

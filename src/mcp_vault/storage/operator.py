@@ -55,6 +55,12 @@ def validate_connection(value, provisioner=False):
 def action(name, body):
     s = get_settings()
     mount = s.metadata_pg_vault_id
+    if name == 'audit-maintenance-connection':
+        from .audit_maintenance import install_credential
+        return install_credential(body)
+    if name == 'audit-expire':
+        from .audit_maintenance import expire
+        return expire(body)
     if name == "vault":
         bao_request("POST","sys/mounts/"+mount,{"type":"kv","options":{"version":"2"}})
         return {"status":"ok","created":True}
@@ -95,55 +101,70 @@ def action(name, body):
         credentials()
         credentials(provisioner=True)
         return {"status":"ok","app_valid":True,"provisioner_valid":True}
-    if name == "schema-init":
+    if name in {"schema-init", "audit-upgrade"}:
         from psycopg import sql
         credentials()  # Valider aussi le chemin app avant le premier effet DDL.
         mid = str(uuid.uuid4())
         committing = False
         notices = []
-        with connection(provisioner=True,schema=False) as conn:
-            conn.add_notice_handler(lambda diagnostic:notices.append(diagnostic.sqlstate))
-            try:
-                conn.execute("BEGIN")
-                from .postgres import validate_durability
-                validate_durability(conn)
-                conn.execute(sql.SQL("SET LOCAL ROLE {}").format(sql.Identifier(s.metadata_pg_owner_role)))
-                owner = conn.execute("SELECT rolcanlogin,rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls FROM pg_roles WHERE rolname=current_user").fetchone()
-                if not owner or any(owner.values()):
-                    raise MetadataUnavailable("owner_invalid")
-                conn.execute(Path(__file__).with_name("schema").joinpath("001.sql").read_text(),prepare=False)
-                conn.execute(sql.SQL("GRANT USAGE ON SCHEMA vault_metadata TO {}").format(sql.Identifier(s.metadata_pg_app_role)))
-                conn.execute(sql.SQL("GRANT SELECT ON vault_metadata.schema_version TO {}").format(sql.Identifier(s.metadata_pg_app_role)))
-                for table in ("tokens","token_vaults","policies","mission_bindings","binding_vaults",
-                              "wrap_registry","operation_receipts","installation"):
-                    conn.execute(sql.SQL("GRANT SELECT,INSERT,UPDATE,DELETE ON vault_metadata.{} TO {}").format(
-                        sql.Identifier(table),sql.Identifier(s.metadata_pg_app_role)))
-                conn.execute(sql.SQL("REVOKE UPDATE,DELETE ON vault_metadata.operation_receipts,vault_metadata.installation FROM {}").format(sql.Identifier(s.metadata_pg_app_role)))
-                conn.execute("ALTER DEFAULT PRIVILEGES IN SCHEMA vault_metadata REVOKE ALL ON TABLES FROM PUBLIC")
-                conn.execute(sql.SQL("ALTER DEFAULT PRIVILEGES IN SCHEMA vault_metadata GRANT SELECT,INSERT,UPDATE,DELETE ON TABLES TO {}").format(sql.Identifier(s.metadata_pg_app_role)))
-                from psycopg.types.json import Jsonb
-                target = {"schema_version":1,"expected_revision":0,"result_revision":1}
-                intent = hashlib.sha256(json.dumps(target,sort_keys=True).encode()).hexdigest()
-                conn.execute("INSERT INTO vault_metadata.operation_receipts(instance_id,mutation_id,kind,intent_hash,target,phase,database_result) VALUES(%s,%s,'schema-init',%s,%s,'schema-init','committed')",
-                             (s.metadata_instance_id,mid,intent,Jsonb(target)))
-                if notices:
-                    raise MetadataUnavailable("schema_notice")
-                committing = True
-                conn.execute("COMMIT")
-                if notices:
-                    raise MutationUnknown(mid)
-            except Exception as exc:
-                if committing:
-                    raise MutationUnknown(mid) from exc
+        try:
+            with connection(provisioner=True,schema=False) as conn:
+                conn.add_notice_handler(lambda diagnostic:notices.append(diagnostic.sqlstate))
                 try:
-                    conn.execute("ROLLBACK")
-                except Exception:
-                    pass
-                raise MetadataUnavailable("schema_init_rejected") from exc
+                    conn.execute("BEGIN")
+                    from .postgres import validate_durability
+                    validate_durability(conn)
+                    conn.execute(sql.SQL("SET LOCAL ROLE {}").format(sql.Identifier(s.metadata_pg_owner_role)))
+                    owner = conn.execute("SELECT rolcanlogin,rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls FROM pg_roles WHERE rolname=current_user").fetchone()
+                    if not owner or any(owner.values()):
+                        raise MetadataUnavailable("owner_invalid")
+                    if name == "schema-init":
+                        conn.execute(Path(__file__).with_name("schema").joinpath("001.sql").read_text(),prepare=False)
+                        conn.execute(sql.SQL("GRANT USAGE ON SCHEMA vault_metadata TO {}").format(sql.Identifier(s.metadata_pg_app_role)))
+                        conn.execute(sql.SQL("GRANT SELECT ON vault_metadata.schema_version TO {}").format(sql.Identifier(s.metadata_pg_app_role)))
+                        for table in ("tokens","token_vaults","policies","mission_bindings","binding_vaults",
+                                      "wrap_registry","operation_receipts","installation"):
+                            conn.execute(sql.SQL("GRANT SELECT,INSERT,UPDATE,DELETE ON vault_metadata.{} TO {}").format(
+                                sql.Identifier(table),sql.Identifier(s.metadata_pg_app_role)))
+                        conn.execute(sql.SQL("REVOKE UPDATE,DELETE ON vault_metadata.operation_receipts,vault_metadata.installation FROM {}").format(sql.Identifier(s.metadata_pg_app_role)))
+                        conn.execute("ALTER DEFAULT PRIVILEGES IN SCHEMA vault_metadata REVOKE ALL ON TABLES FROM PUBLIC")
+                        conn.execute(sql.SQL("ALTER DEFAULT PRIVILEGES IN SCHEMA vault_metadata GRANT SELECT,INSERT,UPDATE,DELETE ON TABLES TO {}").format(sql.Identifier(s.metadata_pg_app_role)))
+                    from .audit_schema import install
+                    install(conn, s)
+                    from psycopg.types.json import Jsonb
+                    target = {"schema_version":2,"expected_revision":0 if name == "schema-init" else 1,"result_revision":2}
+                    intent = hashlib.sha256(json.dumps(target,sort_keys=True).encode()).hexdigest()
+                    conn.execute("INSERT INTO vault_metadata.operation_receipts(instance_id,mutation_id,kind,intent_hash,target,phase,database_result) VALUES(%s,%s,%s,%s,%s,%s,'committed')",
+                                 (s.metadata_instance_id,mid,name,intent,Jsonb(target),name))
+                    if notices:
+                        raise MetadataUnavailable("schema_notice")
+                    committing = True
+                    conn.execute("COMMIT")
+                    if notices:
+                        raise MutationUnknown(mid)
+                except Exception as exc:
+                    if committing:
+                        raise MutationUnknown(mid) from exc
+                    try:
+                        conn.execute("ROLLBACK")
+                    except Exception:
+                        pass
+                    raise MetadataUnavailable("schema_init_rejected") from exc
+        except MutationUnknown:
+            raise
+        except Exception as exc:
+            if committing:
+                raise MutationUnknown(mid) from exc
+            raise
         # Aucun DDL app : cette connexion ne fait que qualifier les droits.
-        with connection():
-            pass
-        return {"status":"ok","schema_version":1,"mutation_id":mid}
+        try:
+            with connection():
+                pass
+        except Exception:
+            return {"status":"error","error_type":"schema_verification_unconfirmed",
+                    "schema_version":2,"mutation_id":mid,"ddl_confirmed":True,
+                    "message":"DDL confirmé ; vérification finale non confirmée, ne pas rejouer"}
+        return {"status":"ok","schema_version":2,"mutation_id":mid}
     if name == "initial-admin":
         from psycopg.types.json import Jsonb
         if set(body)!={"token_hash","client_name","mutation_id"}:
@@ -198,7 +219,8 @@ async def handle_operator(scope, receive, send):
     expected = "GET" if name=="status" or name.startswith("installation-result/") else "POST"
     permitted = {"status","verify-connections"}
     if s.metadata_operator_mode == "install":
-        permitted |= {"vault","connections","schema-init","initial-admin"}
+        permitted |= {"vault","connections","schema-init","audit-upgrade","initial-admin",
+                      "audit-maintenance-connection", "audit-expire"}
     if (s.metadata_operator_mode=="disabled" or scope.get("method")!=expected
             or name not in permitted and not name.startswith("installation-result/")):
         return await _json_response(send,403,{"status":"error","message":"Action opérateur refusée"})
