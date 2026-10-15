@@ -23,6 +23,9 @@ def install(conn, settings):
         raise MetadataUnavailable("audit_maintenance_invalid")
     if conn.execute("SELECT version FROM vault_metadata.schema_version").fetchall() != [{"version": 1}]:
         raise MetadataUnavailable("audit_upgrade_source_invalid")
+    source_owner = conn.execute("SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname='vault_metadata'").fetchone()
+    if not source_owner or source_owner["owner"] != settings.metadata_pg_owner_role:
+        raise MetadataUnavailable("audit_upgrade_source_invalid")
     conn.execute(Path(__file__).with_name("schema").joinpath("002_audit.sql").read_text(), prepare=False)
     for table in TABLES:
         conn.execute(sql.SQL("REVOKE ALL ON vault_metadata.{} FROM {},{},PUBLIC").format(
