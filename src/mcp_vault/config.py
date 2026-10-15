@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     audit_retention_days: int = Field(default=365, ge=1, le=36500)
     audit_stage_seconds: int = Field(default=30, ge=10, le=300)
     audit_maintenance_role: str = Field(default="vault_audit_maintenance", pattern=r"^[a-z][a-z0-9_]{0,62}$")
+    audit_maintenance_secret_path: str = "sql/audit-maintenance"
     metadata_readiness_ttl_seconds: float = Field(default=2, ge=0.1, le=30)
     metadata_batch_max_ids: int = Field(default=50, ge=1, le=100)
     metadata_initial_admin_hours: int = Field(default=24, ge=1, le=24)
@@ -79,8 +80,8 @@ class Settings(BaseSettings):
             )):
                 raise ValueError("Identités PostgreSQL requises et canoniques")
             segment = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*")
-            paths = (self.metadata_pg_secret_path, self.metadata_pg_provisioner_secret_path)
-            if (paths[0] == paths[1] or any(
+            paths = (self.metadata_pg_secret_path, self.metadata_pg_provisioner_secret_path, self.audit_maintenance_secret_path)
+            if (len(set(paths)) != 3 or any(
                 not p or len(p) > 256 or p.startswith("_vault_meta")
                 or not all(segment.fullmatch(s) for s in p.split("/")) for p in paths
             )):

@@ -55,6 +55,12 @@ def validate_connection(value, provisioner=False):
 def action(name, body):
     s = get_settings()
     mount = s.metadata_pg_vault_id
+    if name == 'audit-maintenance-connection':
+        from .audit_maintenance import install_credential
+        return install_credential(body)
+    if name == 'audit-expire':
+        from .audit_maintenance import expire
+        return expire(body)
     if name == "vault":
         bao_request("POST","sys/mounts/"+mount,{"type":"kv","options":{"version":"2"}})
         return {"status":"ok","created":True}
@@ -213,7 +219,8 @@ async def handle_operator(scope, receive, send):
     expected = "GET" if name=="status" or name.startswith("installation-result/") else "POST"
     permitted = {"status","verify-connections"}
     if s.metadata_operator_mode == "install":
-        permitted |= {"vault","connections","schema-init","audit-upgrade","initial-admin"}
+        permitted |= {"vault","connections","schema-init","audit-upgrade","initial-admin",
+                      "audit-maintenance-connection", "audit-expire"}
     if (s.metadata_operator_mode=="disabled" or scope.get("method")!=expected
             or name not in permitted and not name.startswith("installation-result/")):
         return await _json_response(send,403,{"status":"error","message":"Action opérateur refusée"})
