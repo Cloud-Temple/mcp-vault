@@ -1,7 +1,7 @@
 # --- MCP Framework ---
 # v0.20.0 : migration explicite vers MCP SDK v2. Le majeur suivant reste exclu
 # jusqu'à une migration auditée ; le verrou fixe la version réellement livrée.
-mcp[cli]>=2,<3
+mcp[cli]>=2.2.0,<3
 
 # --- Configuration ---
 pydantic-settings>=2.0
