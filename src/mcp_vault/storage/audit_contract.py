@@ -36,7 +36,8 @@ class AuditScope:
         if self.coffers is None:
             return True
         # Un token opaque local n'authentifie aucun tenant Mission.
-        return row.get("vault_id") in self.coffers and row.get("tenant_id") is None and row.get("mission_id") is None
+        return (row.get("actor_ref") != "anonymous" and row.get("vault_id") in self.coffers
+                and row.get("tenant_id") is None and row.get("mission_id") is None)
 
 
 def audit_scope(instance, identity, policy):
@@ -48,7 +49,7 @@ def audit_scope(instance, identity, policy):
     permissions = identity.get("permissions")
     if not isinstance(permissions, list) or not all(isinstance(p, str) for p in permissions):
         raise PermissionError("audit scope denied")
-    if "wrap" in permissions:
+    if "wrap" in permissions and not set(permissions) & {"read", "write", "admin"}:
         raise PermissionError("audit scope denied")
     if "admin" in permissions:
         return AuditScope(instance, None)
@@ -83,11 +84,23 @@ def audit_scope(instance, identity, policy):
 
 
 def _utc(value):
-    if isinstance(value, str):
-        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if not isinstance(value, datetime) or value.utcoffset() != timezone.utc.utcoffset(value):
-        raise ValueError("audit timestamp invalid")
-    return value.isoformat()
+    try:
+        if isinstance(value, str):
+            if len(value) > 64:
+                raise ValueError()
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if not isinstance(value, datetime) or value.utcoffset() != timezone.utc.utcoffset(value):
+            raise ValueError()
+        return value.isoformat()
+    except (ValueError, TypeError, OverflowError):
+        raise ValueError("audit timestamp invalid") from None
+
+
+def _uuid(value, diagnostic="audit identifier invalid"):
+    try:
+        return str(UUID(str(value)))
+    except (ValueError, TypeError, AttributeError):
+        raise ValueError(diagnostic) from None
 
 
 def project_entry(row, scope):
@@ -107,7 +120,7 @@ def project_entry(row, scope):
     if not isinstance(coffer, str) or (coffer and not is_valid_vault_id(coffer)):
         raise ValueError("audit entry invalid")
     result = {
-        "call_id": str(UUID(str(row["call_id"]))),
+        "call_id": _uuid(row.get("call_id")),
         "ts": _utc(row["created_at"]), "expires_at": _utc(row["expires_at"]),
         "client": actor, "tool": tool, "phase": phase, "status": outcome,
         "category": tool.split("_", 1)[0], "vault_id": coffer,
@@ -120,4 +133,7 @@ def project_entry(row, scope):
             if not isinstance(value, str) or not IDENT.fullmatch(value):
                 raise ValueError("audit correlation invalid")
             result[key] = value
+    for key in ("step_id", "mutation_id"):
+        if row.get(key) is not None:
+            result[key] = _uuid(row[key], "audit step invalid")
     return result

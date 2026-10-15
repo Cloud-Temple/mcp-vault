@@ -61,7 +61,7 @@ def test_policy_corruption_missing_capability_and_deny_precedence(change):
 
 @pytest.mark.parametrize("identity", [
     {"permissions": "admin"}, {"permissions": ["read"], "allowed_resources": []},
-    {"permissions": ["wrap", "read"], "allowed_resources": ["coffer-a"]},
+    {"permissions": ["wrap"], "allowed_resources": ["coffer-a"]},
     {"permissions": ["admin"], "auth_type": "mission_jwt"},
 ])
 def test_no_identity_upgrade_or_mission_jwt_audit(identity):
@@ -97,3 +97,29 @@ def test_admin_keeps_existing_instance_scope_and_validated_correlations():
 def test_invalid_stored_data_is_not_published(change):
     with pytest.raises(ValueError):
         project_entry(event(**change), AuditScope("vault179", None))
+
+
+def test_anonymous_event_is_admin_only_even_on_authorized_coffer():
+    anonymous = event(actor_ref="anonymous")
+    assert project_entry(anonymous, audit_scope("vault179", reader(), policy())) is None
+    assert project_entry(anonymous, audit_scope("vault179", {"permissions": ["admin"]}, None))["client"] == "anonymous"
+
+
+@pytest.mark.parametrize("permissions", [["read", "wrap"], ["admin", "wrap"]])
+def test_wrap_flag_with_existing_read_or_admin_keeps_local_permission(permissions):
+    identity = {**reader(), "permissions": permissions}
+    assert audit_scope("vault179", identity, policy()).permits(event())
+
+
+def test_invalid_timestamp_exception_never_contains_input():
+    with pytest.raises(ValueError) as raised:
+        project_entry(event(created_at="SECRET-CANARY-invalid-date"), AuditScope("vault179", None))
+    assert str(raised.value) == "audit timestamp invalid"
+
+
+def test_internal_steps_keep_only_validated_uuid_correlations():
+    step = str(uuid4())
+    view = project_entry(event(phase="sql_step_committed", step_id=step, mutation_id=step), AuditScope("vault179", None))
+    assert view["step_id"] == view["mutation_id"] == step
+    with pytest.raises(ValueError, match="^audit step invalid$"):
+        project_entry(event(step_id="SECRET-CANARY"), AuditScope("vault179", None))
