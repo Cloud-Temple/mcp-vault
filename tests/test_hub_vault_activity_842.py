@@ -86,12 +86,16 @@ def hub(monkeypatch):
         policy=policy,
         binding=binding,
         revision=1,
+        policy_revision=1,
+        callbacks=0,
+        hold_second=False,
         fail=False,
         hold=False,
         revoke=False,
     )
     calls, statements = [], []
     entered, release = asyncio.Event(), asyncio.Event()
+    second_entered, second_release = asyncio.Event(), asyncio.Event()
     rows = [
         dict(
             instance_id="vault842",
@@ -142,7 +146,9 @@ def hub(monkeypatch):
             elif "vault_metadata.mission_bindings" in sql:
                 values = [dict(payload=state["binding"], revision=state["revision"])]
             elif "vault_metadata.policies" in sql:
-                values = [dict(payload=state["policy"], revision=1)]
+                values = [
+                    dict(payload=state["policy"], revision=state["policy_revision"])
+                ]
             elif "audit_revision" in sql:
                 values = [dict(revision=1)]
             elif "max(seq)" in sql:
@@ -207,6 +213,11 @@ def hub(monkeypatch):
     context.jwks._fetch = lambda *_: (200, None, json.dumps({"keys": [key]}).encode())
 
     async def check(request):
+        state["callbacks"] += 1
+        if state["callbacks"] == 2:
+            second_entered.set()
+            if state["hold_second"]:
+                await second_release.wait()
         entered.set()
         if state["hold"]:
             await release.wait()
@@ -383,3 +394,82 @@ async def test_disabled_optional_hub_never_attempts_jwks_or_metadata(hub):
     hub.cfg.hub_vault_enabled = False
     result = await hub.call()
     assert result.status_code == 404 and hub.calls == []
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["token", "binding", "policy", "token_expired", "binding_expired", "backend"],
+)
+async def test_second_callback_cannot_hide_changed_local_authority(hub, change):
+    hub.state["hold_second"] = True
+    work = asyncio.create_task(hub.call())
+    try:
+        await asyncio.wait_for(hub.second_entered.wait(), 2)
+        # The first callback and the entire metadata/audit page already succeeded.
+        assert hub.state["callbacks"] == 2 and hub.calls == ["coffer-a"]
+        assert any(
+            "JOIN vault_metadata.audit_events" in sql for sql, _ in hub.statements
+        )
+        if change == "token":
+            hub.state["token"]["revoked"] = True
+        elif change == "binding":
+            hub.state["binding"]["enabled"] = False
+            hub.state["revision"] += 1
+        elif change == "policy":
+            hub.state["policy"]["denied_tools"] = ["audit_*"]
+            hub.state["policy_revision"] += 1
+        elif change == "token_expired":
+            hub.state["token"]["expires_at"] = (
+                datetime.now(timezone.utc) - timedelta(seconds=1)
+            ).isoformat()
+        elif change == "binding_expired":
+            hub.state["binding"]["expires_at"] = (
+                datetime.now(timezone.utc) - timedelta(seconds=1)
+            ).isoformat()
+        else:
+            hub.state["fail"] = True
+        hub.second_release.set()  # Mission still answers active:true.
+        result = await work
+        assert result.status_code == (503 if change == "backend" else 403), result.text
+        assert not {"vaults", "entries", "next_cursor", "cursor", "total"} & set(
+            result.json()
+        )
+        assert "PRIVATE-CANARY" not in result.text
+        assert hub.route.pending == 0 and not hub.route.slots.locked()
+    finally:
+        hub.second_release.set()
+        work.cancel()
+        await asyncio.gather(work, return_exceptions=True)
+
+
+async def test_context_expiring_during_final_local_revalidation_is_not_published(
+    hub, monkeypatch
+):
+    # Hold only the second HTTP callback, then advance the service's final clock
+    # at the local read boundary; the HTTP validator itself still sees a live JWT.
+    hub.state["hold_second"] = True
+    real_revalidate = service.revalidate
+
+    def revalidate():
+        real_revalidate()
+        if hub.second_release.is_set():
+            monkeypatch.setattr(
+                service,
+                "time",
+                SimpleNamespace(time=lambda: time.time() + 60),
+                raising=False,
+            )
+
+    monkeypatch.setattr(service, "revalidate", revalidate)
+    work = asyncio.create_task(hub.call())
+    try:
+        await asyncio.wait_for(hub.second_entered.wait(), 2)
+        assert hub.calls == ["coffer-a"]
+        hub.second_release.set()
+        result = await work
+        assert result.status_code == 403, result.text
+        assert not {"vaults", "entries", "next_cursor", "cursor"} & set(result.json())
+    finally:
+        hub.second_release.set()
+        work.cancel()
+        await asyncio.gather(work, return_exceptions=True)

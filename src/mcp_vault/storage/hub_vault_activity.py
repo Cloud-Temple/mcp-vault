@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import time
 from dataclasses import dataclass
 
 from ..auth.context import current_token_info
@@ -153,8 +154,11 @@ async def query(raw_opaque, claims, body, validate):
         page = await offload(
             read_page, scope, limit=body["limit"], cursor=internal, filters={}
         )
-        await offload(revalidate)
         await validate()
+        # The HTTP callback can wait while local token/binding/policy authority changes.
+        await offload(revalidate)
+        if time.time() >= claims["exp"]:
+            raise PermissionError("delegation expired")
         cursor = cursors.put(context, page["cursor"]) if page["cursor"] else None
         from datetime import datetime, timezone
 
