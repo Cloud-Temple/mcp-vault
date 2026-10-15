@@ -2,7 +2,7 @@
 
 import uuid
 
-from .audit_pg import append, current_audit_call
+from .audit_pg import append, current_audit_call, current_audit_effects
 
 
 async def bao_step(operation, *, compensation=False):
@@ -11,6 +11,9 @@ async def bao_step(operation, *, compensation=False):
         return operation()  # Backend historique ou contrôle opérateur hors requête.
     step_id = str(uuid.uuid4())
     phase = "compensation_outcome" if compensation else "bao_step_outcome"
+    effects = current_audit_effects.get()
+    if effects is not None:
+        effects["dispatched"] = True
     try:
         result = operation()
     except BaseException:

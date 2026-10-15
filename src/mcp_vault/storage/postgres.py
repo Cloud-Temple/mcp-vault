@@ -270,6 +270,10 @@ def _mutation(kind, target, operation, *, operator=False, mutation_id=None):
             if conn.execute("SELECT 1 FROM vault_metadata.operation_receipts WHERE instance_id=%s AND mutation_id=%s",
                             (s.metadata_instance_id, mid)).fetchone():
                 raise MetadataUnavailable("mutation_already_recorded")
+            from .audit_pg import current_audit_effects
+            effects = current_audit_effects.get()
+            if effects is not None:
+                effects["dispatched"] = True
             result = operation(conn)
             if notices:
                 raise MetadataUnavailable("transaction_notice")

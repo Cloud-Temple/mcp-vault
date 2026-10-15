@@ -18,6 +18,7 @@ from .postgres import (
 
 ZERO = "00000000-0000-0000-0000-000000000000"
 current_audit_call = ContextVar("vault_audit_call", default=None)
+current_audit_effects = ContextVar("vault_audit_effects", default=None)
 
 
 @dataclass(frozen=True)

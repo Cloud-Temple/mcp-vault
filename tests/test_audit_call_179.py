@@ -223,3 +223,81 @@ def test_audit_sql_notice_rolls_back_before_business_commit():
         assert order[-1]=='ROLLBACK' and 'COMMIT' not in order
     finally:
         current_audit_call.reset(marker)
+
+
+@pytest.mark.parametrize('dispatched',[False,True])
+def test_denial_is_certain_only_before_any_backend_dispatch(dispatched):
+    from mcp_vault.storage.audit_pg import current_audit_effects
+    async def exercise():
+        close=AsyncMock()
+        async def secret_read():
+            current_audit_effects.get()['dispatched']=dispatched
+            return {'status':'error','error_type':'permission_denied'}
+        with patch.object(audit_call,'get_settings',return_value=SimpleNamespace(metadata_backend='postgres')), \
+             patch.object(audit_call,'make_call',return_value=SimpleNamespace(call_id='fixed')), \
+             patch.object(audit_call,'admit',AsyncMock()),patch.object(audit_call,'append',close):
+            await audit_call.audited_call(secret_read)()
+        assert close.call_args.args[1:]==('public_terminal','unknown' if dispatched else 'denied')
+        assert current_audit_effects.get() is None
+    asyncio.run(exercise())
+
+
+def test_mcp_secret_denial_is_audited_before_owner_lookup_and_no_bao():
+    from mcp_vault import server
+    from mcp_vault.storage import admission
+    from mcp_vault.auth.context import current_token_info
+    from mcp_vault.storage.postgres import request_facts
+    async def exercise():
+        order=[]
+        async def admitted(*_):order.append('admitted')
+        async def owners(*_):
+            order.append('owners')
+            raise PermissionError('not owner')
+        async def closed(*args,**_):order.append(args[2])
+        identity=current_token_info.set({'auth_type':'token','permissions':['read']})
+        facts=request_facts.set({'owners':{}})
+        try:
+            with patch.object(audit_call,'get_settings',return_value=SimpleNamespace(metadata_backend='postgres')), \
+                 patch.object(admission,'get_settings',return_value=SimpleNamespace(metadata_backend='postgres')), \
+                 patch.object(audit_call,'make_call',return_value=SimpleNamespace(call_id='fixed')), \
+                 patch.object(audit_call,'admit',admitted),patch.object(audit_call,'append',closed), \
+                 patch.object(admission,'preload_owners',owners):
+                result=await server.secret_read('coffer-a','path')
+            assert result['error_type']=='access_denied' and order==['admitted','owners','denied']
+        finally:
+            request_facts.reset(facts)
+            current_token_info.reset(identity)
+    asyncio.run(exercise())
+
+
+def test_mcp_secret_read_bao_observation_and_terminal_precede_secret_return():
+    from mcp_vault import server
+    from mcp_vault.storage import admission, audit_bao
+    from mcp_vault.vault import secrets
+    from mcp_vault.auth.context import current_token_info
+    from mcp_vault.storage.postgres import request_facts
+    from unittest.mock import MagicMock
+    async def exercise():
+        order=[]
+        async def admitted(*_):order.append('admitted')
+        async def closed(*args,**_):order.append(args[1]+':'+args[2])
+        def read(**_):
+            order.append('bao')
+            return {'data':{'data':{'private':'secret'},'metadata':{}}}
+        client=MagicMock()
+        client.secrets.kv.v2.read_secret_version.side_effect=read
+        identity=current_token_info.set({'auth_type':'token','permissions':['admin']})
+        facts=request_facts.set({'owners':{}})
+        try:
+            with patch.object(audit_call,'get_settings',return_value=SimpleNamespace(metadata_backend='postgres')), \
+                 patch.object(admission,'get_settings',return_value=SimpleNamespace(metadata_backend='postgres')), \
+                 patch.object(audit_call,'make_call',return_value=SimpleNamespace(call_id='fixed')), \
+                 patch.object(audit_call,'admit',admitted),patch.object(audit_call,'append',closed), \
+                 patch.object(audit_bao,'append',closed),patch.object(secrets,'get_hvac_client',return_value=client):
+                result=await server.secret_read('coffer-a','path')
+            assert result['data']=={'private':'secret'}
+            assert order==['admitted','bao','bao_step_outcome:confirmed','public_terminal:completed']
+        finally:
+            request_facts.reset(facts)
+            current_token_info.reset(identity)
+    asyncio.run(exercise())

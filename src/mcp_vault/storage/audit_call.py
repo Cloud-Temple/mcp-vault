@@ -4,7 +4,7 @@ from functools import wraps
 import inspect
 
 from ..config import get_settings
-from .audit_pg import admit, append, current_audit_call, make_call
+from .audit_pg import admit, append, current_audit_call, current_audit_effects, make_call
 from .postgres import MetadataUnavailable, MutationUnknown
 
 
@@ -23,6 +23,8 @@ def audited_call(function):
         except (MetadataUnavailable, MutationUnknown):
             return {"status": "error", "error_type": "audit_unavailable", "audit_status": "unknown"}
         marker = current_audit_call.set(call)
+        effects = {"dispatched": False}
+        effects_marker = current_audit_effects.set(effects)
         try:
             try:
                 result = await function(*args, **kwargs)
@@ -36,6 +38,9 @@ def audited_call(function):
                     pass
                 raise
             outcome = "completed" if isinstance(result, dict) and result.get("status") in {"ok", "created", "updated", "deleted"} else "unknown"
+            if (not effects["dispatched"] and isinstance(result, dict)
+                    and result.get("error_type") in {"access_denied", "permission_denied", "unauthenticated"}):
+                outcome = "denied"
             try:
                 await append(call, "public_terminal", outcome)
             except (MetadataUnavailable, MutationUnknown):
@@ -45,5 +50,6 @@ def audited_call(function):
                         "business_outcome": "confirmed" if outcome == "completed" else "unknown", "replay_allowed": False}
             return result
         finally:
+            current_audit_effects.reset(effects_marker)
             current_audit_call.reset(marker)
     return invoke

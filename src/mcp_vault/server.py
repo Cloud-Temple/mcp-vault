@@ -11,6 +11,7 @@ Lifecycle :
 """
 
 from .storage.admission import request_target
+from .storage.audit_call import audited_call
 
 import logging
 import sys
@@ -361,6 +362,7 @@ async def vault_delete(vault_id: str, confirm: bool = False) -> dict:
 # ═══════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
+@audited_call
 @request_target(ssh=False, creating=False)
 async def secret_write(vault_id: str, path: str, data: dict,
                        secret_type: str = "custom", tags: str = "",
@@ -400,6 +402,7 @@ async def secret_write(vault_id: str, path: str, data: dict,
 
 
 @mcp.tool()
+@audited_call
 @request_target(ssh=False, creating=False)
 async def secret_read(vault_id: str, path: str, version: int = 0) -> dict:
     """
@@ -427,6 +430,7 @@ async def secret_read(vault_id: str, path: str, version: int = 0) -> dict:
 
 
 @mcp.tool()
+@audited_call
 @request_target(ssh=False, creating=False)
 async def secret_list(vault_id: str, path: str = "") -> dict:
     """
@@ -460,6 +464,7 @@ async def secret_list(vault_id: str, path: str = "") -> dict:
 
 
 @mcp.tool()
+@audited_call
 @request_target(ssh=False, creating=False)
 async def secret_delete(vault_id: str, path: str) -> dict:
     """
