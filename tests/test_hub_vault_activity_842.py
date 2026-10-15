@@ -92,6 +92,8 @@ def hub(monkeypatch):
         fail=False,
         hold=False,
         revoke=False,
+        audit_revision=1,
+        after_commit=None,
     )
     calls, statements = [], []
     entered, release = asyncio.Event(), asyncio.Event()
@@ -150,10 +152,11 @@ def hub(monkeypatch):
                     dict(payload=state["policy"], revision=state["policy_revision"])
                 ]
             elif "audit_revision" in sql:
-                values = [dict(revision=1)]
+                values = [dict(revision=state["audit_revision"])]
             elif "max(seq)" in sql:
-                values = [dict(upper=5)]
+                values = [dict(upper=max((r["seq"] for r in rows), default=0))]
             elif "JOIN vault_metadata.audit_events" in sql:
+                self.audit_page = True
                 assert "c.tenant_id=%s" in sql and "c.mission_id=%s" in sql
                 assert (
                     "left(c.actor_ref,8)='mission_'" in sql
@@ -169,14 +172,42 @@ def hub(monkeypatch):
                         and r["actor_ref"].startswith("mission_")
                         and r["tenant_id"] == tenant
                         and r["mission_id"] == mid
+                        and r["seq"] <= params[4]
                     )
                 ]
                 if sql.startswith("SELECT count"):
                     values = [dict(total=len(matching))]
+                    if " AS snapshot_hi" in sql:
+                        # Emulate PostgreSQL's bounded numeric SUM over signed SHA256 lanes.
+                        digests = [
+                            hashlib.sha256(str(r["seq"]).encode()).digest()
+                            for r in matching
+                        ]
+                        values[0].update(
+                            snapshot_hi=sum(
+                                int.from_bytes(d[:8], "big", signed=True)
+                                for d in digests
+                            ),
+                            snapshot_lo=sum(
+                                int.from_bytes(d[8:16], "big", signed=True)
+                                for d in digests
+                            ),
+                        )
                 elif "GROUP BY" in sql:
                     values = []
                 else:
-                    values = matching[: params[-1]]
+                    values = sorted(
+                        (r for r in matching if r["seq"] < params[-2]),
+                        key=lambda r: r["seq"],
+                        reverse=True,
+                    )[: params[-1]]
+            elif (
+                sql == "COMMIT"
+                and getattr(self, "audit_page", False)
+                and state["after_commit"]
+            ):
+                action, state["after_commit"] = state["after_commit"], None
+                action()
             return SimpleNamespace(
                 fetchall=lambda: values, fetchone=lambda: values[0] if values else None
             )
@@ -246,7 +277,7 @@ def hub(monkeypatch):
             iat=now,
             nbf=now,
             exp=now + 30,
-            jti="b" * 32,
+            jti=uuid4().hex,
             purpose="hub-vault-activity-v1",
             permissions=["vault.activity.read"],
             resources=[body["mission_id"]],
@@ -301,6 +332,139 @@ async def test_asgi_intersects_local_coffer_binding_before_count_and_redacts(hub
     assert hub.route.pending == 0 and not hub.route.slots.locked()
     clauses, _ = audit_read.where_scope(AuditScope("vault842", frozenset({"coffer-a"})))
     assert "c.tenant_id IS NULL" in clauses and "c.mission_id IS NULL" in clauses
+
+
+def pagination_rows(hub):
+    # seq 7 can commit later below the already-visible upper 10.
+    hub.rows.append({**hub.rows[0], "seq": 10, "call_id": str(uuid4())})
+
+
+async def first_page(hub):
+    pagination_rows(hub)
+    result = await hub.call(
+        dict(mission_id="mis_00842001", tenant_id="tenant-a", limit=1)
+    )
+    assert result.status_code == 200, result.text
+    data = result.json()
+    assert data["total"] == 2 and data["count"] == 1 and data["next_cursor"]
+    return data["next_cursor"]
+
+
+async def continue_page(hub, cursor):
+    return await hub.call(
+        dict(mission_id="mis_00842001", tenant_id="tenant-a", limit=1, cursor=cursor)
+    )
+
+
+@pytest.mark.parametrize(
+    "change", ["credential_append", "foreign_delete", "own_append_after_upper"]
+)
+async def test_scoped_snapshot_continues_despite_changes_outside_frozen_membership(
+    hub, change
+):
+    cursor = await first_page(hub)
+    if change == "foreign_delete":
+        hub.rows.remove(hub.rows[4])
+    else:
+        template = hub.rows[4] if change == "credential_append" else hub.rows[0]
+        hub.rows.append({**template, "seq": 11, "call_id": str(uuid4())})
+    hub.state["audit_revision"] += 4
+    final = await continue_page(hub, cursor)
+    assert final.status_code == 200, final.text
+    data = final.json()
+    assert data["count"] == 1 and data["total"] == 2 and data["complete"] is True
+    assert data["next_cursor"] is None
+
+
+@pytest.mark.parametrize("change", ["delete", "late_commit", "same_count_replacement"])
+async def test_scoped_snapshot_rejects_lost_or_replaced_membership_even_with_same_count(
+    hub, change
+):
+    cursor = await first_page(hub)
+    original = hub.rows[0]
+    if change != "late_commit":
+        hub.rows.remove(original)
+    if change != "delete":
+        hub.rows.append({**original, "seq": 7, "call_id": str(uuid4())})
+    hub.state["audit_revision"] += 4
+    final = await continue_page(hub, cursor)
+    assert final.status_code == 409, final.text
+    assert not {"entries", "vaults", "next_cursor", "total"} & final.json().keys()
+
+
+@pytest.mark.parametrize(
+    "change", ["append_after_upper", "delete", "same_count_replacement"]
+)
+async def test_scoped_snapshot_is_checked_again_after_commit(hub, change):
+    pagination_rows(hub)
+
+    def alter():
+        original = hub.rows[0]
+        if change != "append_after_upper":
+            hub.rows.remove(original)
+        if change != "delete":
+            hub.rows.append(
+                {
+                    **original,
+                    "seq": 11 if change == "append_after_upper" else 7,
+                    "call_id": str(uuid4()),
+                }
+            )
+        hub.state["audit_revision"] += 4
+
+    hub.state["after_commit"] = alter
+    result = await hub.call(
+        dict(mission_id="mis_00842001", tenant_id="tenant-a", limit=1)
+    )
+    assert result.status_code == (200 if change == "append_after_upper" else 409), (
+        result.text
+    )
+    if result.status_code == 409:
+        assert not {"entries", "vaults", "next_cursor", "total"} & result.json().keys()
+
+
+@pytest.mark.parametrize("boundary", ["continuation", "after_commit"])
+def test_ordinary_179_scope_keeps_strict_global_revision(hub, monkeypatch, boundary):
+    from mcp_vault.storage.audit_read import ExportIncomplete
+
+    source = hub.rows[4]
+    state = dict(revision=1)
+
+    class Ordinary:
+        def execute(self, sql, params=None):
+            values = []
+            if "audit_revision" in sql:
+                values = [dict(revision=state["revision"])]
+            elif "max(seq)" in sql:
+                values = [dict(upper=10)]
+            elif "JOIN vault_metadata.audit_events" in sql:
+                assert "c.tenant_id IS NULL" in sql and "c.mission_id IS NULL" in sql
+                assert "snapshot_hi" not in sql
+                if sql.startswith("SELECT count"):
+                    values = [dict(total=2)]
+                elif "GROUP BY" not in sql:
+                    values = [{**source, "seq": 10}]
+            elif sql == "COMMIT" and boundary == "after_commit":
+                state["revision"] += 1
+            return SimpleNamespace(
+                fetchall=lambda: values, fetchone=lambda: values[0] if values else None
+            )
+
+    @contextmanager
+    def connected():
+        yield Ordinary()
+
+    monkeypatch.setattr(audit_read, "connection", connected)
+    monkeypatch.setattr(audit_read, "revalidate_actor", lambda conn: None)
+    scope = AuditScope("vault842", frozenset({"coffer-a"}))
+    if boundary == "after_commit":
+        with pytest.raises(ExportIncomplete, match="audit_export_changed"):
+            audit_read.read_page(scope, limit=1)
+    else:
+        page = audit_read.read_page(scope, limit=1)
+        state["revision"] += 1
+        with pytest.raises(ExportIncomplete, match="audit_export_changed"):
+            audit_read.read_page(scope, limit=1, cursor=page["cursor"])
 
 
 @pytest.mark.parametrize(

@@ -44,7 +44,16 @@ rattachement supposé d'anciennes traces à une Mission. Une liste de coffres
 accordés par binding ne prouve aucun usage par la Mission.
 
 Curseurs179 à usage unique, RAM120s, liés au sujet stable et aux révisions de
-token/policy/binding. Journal changé => 409 incomplete, sans snapshot durable.
+token/policy/binding. Pour ce raccord Mission seulement, la première page fige
+la borne `seq` ; les ajouts après cette borne et les événements hors scope ne
+modifient pas la lecture. Le total et une empreinte versionnée des `seq` du
+scope filtré sont vérifiés dans le snapshot puis après COMMIT. Une suppression,
+une expiration ou un changement de cet ensemble donne 409 incomplete, même
+si un remplacement conserve le même nombre de lignes. L'empreinte utilise deux
+sommes de 64 bits issues de SHA256, calculées en mémoire constante par SQL ; une
+collision théorique demeure possible. Aucun journal n'est mémorisé ni copié.
+Le lecteur standalone179 conserve sa révision globale stricte, y compris pour
+les insertions. Aucun snapshot durable n'est créé.
 403 signifie refus local/contexte perdu ; 503 signifie indisponible/indéterminé,
 jamais coffre vide. Métadonnées absentes/corrompues ferment toute la réponse.
 Aucun nouvel événement récursif n'est créé par le lecteur lui-même.
