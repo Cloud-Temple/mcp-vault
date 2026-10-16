@@ -91,7 +91,7 @@ def verify(conn, settings):
         raise MetadataUnavailable("retirement_receipt_schema_invalid")
     constraints = conn.execute("""SELECT count(*) AS n,bool_and(convalidated) AS valid
         FROM pg_constraint WHERE conrelid='vault_metadata.audit_mission_retirements'::regclass""").fetchone()
-    if constraints != {"n": 9, "valid": True}:
+    if constraints != {"n": 8, "valid": True}:
         raise MetadataUnavailable("retirement_receipt_constraints_invalid")
     # Exact stored bodies and role ACLs; no SELECT on payloads for maintenance.
     for signature, role in ROUTINES.items():

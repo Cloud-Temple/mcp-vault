@@ -25,7 +25,7 @@ from mcp_vault.storage.retention_proof import canonical_identity, fingerprint
 from mcp_vault.storage.retirement_maintenance import validate_envelope
 
 
-def run(socket):
+def run(socket, report):
     def connect(
         user="postgres", dbname="v846_retirement", application_name="v846r_fixture"
     ):
@@ -80,8 +80,26 @@ def run(socket):
         conn.execute("GRANT USAGE ON SCHEMA vault_metadata TO v846r_app")
         audit_schema.install(conn, cfg)
         audit_retirement_schema.install(conn, cfg)
+        # Read the REAL PG17 catalog before calling the product verifier. NOT
+        # NULL attributes are not pg_constraint rows on this pinned major.
+        catalog = conn.execute("""SELECT conname,contype,convalidated FROM pg_constraint
+            WHERE conrelid='vault_metadata.audit_mission_retirements'::regclass
+            ORDER BY contype,conname""").fetchall()
+        catalog_path = report.with_name(report.stem + ".constraints.private.json")
+        fd = os.open(catalog_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            json.dump({"major": 17, "constraints": catalog}, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        observed_types = {
+            kind: sum(row["contype"] == kind for row in catalog)
+            for kind in ("c", "p", "u", "f")
+        }
+        assert observed_types == {"c": 5, "p": 1, "u": 1, "f": 1}
+        assert all(row["convalidated"] for row in catalog)
+        # This invocation failed with the predecessor's expected count of nine.
         audit_schema.verify(conn, cfg)
-    checks.append("real_v3_to_v4_install_exact_verify_acl")
+    checks.append("pg17_catalog_five_checks_pk_unique_fk_then_real_product_verify")
     claim = str(uuid4())
     op = str(uuid4())
     now = datetime.now(timezone.utc)
@@ -352,7 +370,7 @@ if __name__ == "__main__":
     parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args()
     assert args.socket.is_dir() and args.socket.is_absolute()
-    result = run(args.socket)
+    result = run(args.socket, args.report)
     fd = os.open(args.report, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as stream:
         json.dump(result, stream)

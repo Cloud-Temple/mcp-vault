@@ -24,7 +24,11 @@ python tests/fixtures/retirement_846_pg.py --socket <socket privé PG17 neuf> --
 La fixture refuse un autre major PG ; noms de rôles/DB sont fermés et CREATE,
 jamais DROP ni IFNOTEXISTS sur un domaine préexistant. Elle installe v1→v3
 par audit_schema.install puis v3→v4 par audit_retirement_schema.install et
-verify exact. Les dates d'audit anciennes sont un seed synthétique propriétaire,
+verify exact. Avant ce verify, elle capture le vrai catalogue pg_constraint PG17
+dans le fichier privé adjacent `.constraints.private.json` : cinq CHECK, une
+PK, une UNIQUE et une FK, toutes validées. Puis elle appelle le vérificateur
+produit réel (l’ancienne attente9 le ferait échouer). Les attributs NOTNULL ne
+sont pas comptés comme contraintes PG17. Les dates d'audit anciennes sont un seed synthétique propriétaire,
 pas365jours observés. Le contrôle direct des lots SQL n'est pas attribué à un
 parcours HTTP/TLS. Capturer résultat/exception privés avant assertion runner,
 terminal réel, inspect exit/OOM puis retrait exactCID/absence. Premier écart ou
