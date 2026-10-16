@@ -95,11 +95,12 @@ def run(socket, report):
             kind: sum(row["contype"] == kind for row in catalog)
             for kind in ("c", "p", "u", "f")
         }
-        assert observed_types == {"c": 5, "p": 1, "u": 1, "f": 1}
+        assert observed_types == {"c": 6, "p": 1, "u": 1, "f": 1}
         assert all(row["convalidated"] for row in catalog)
-        # This invocation failed with the predecessor's expected count of nine.
+        # The real PG17 catalog proves nine constraints; the reviewed count of
+        # eight in predecessor156e33e was incorrect. Preserve that failed run.
         audit_schema.verify(conn, cfg)
-    checks.append("pg17_catalog_five_checks_pk_unique_fk_then_real_product_verify")
+    checks.append("pg17_catalog_six_checks_pk_unique_fk_then_real_product_verify")
     claim = str(uuid4())
     op = str(uuid4())
     now = datetime.now(timezone.utc)

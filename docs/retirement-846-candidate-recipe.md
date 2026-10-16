@@ -25,9 +25,9 @@ La fixture refuse un autre major PG ; noms de rôles/DB sont fermés et CREATE,
 jamais DROP ni IFNOTEXISTS sur un domaine préexistant. Elle installe v1→v3
 par audit_schema.install puis v3→v4 par audit_retirement_schema.install et
 verify exact. Avant ce verify, elle capture le vrai catalogue pg_constraint PG17
-dans le fichier privé adjacent `.constraints.private.json` : cinq CHECK, une
+dans le fichier privé adjacent `.constraints.private.json` : six CHECK, une
 PK, une UNIQUE et une FK, toutes validées. Puis elle appelle le vérificateur
-produit réel (l’ancienne attente9 le ferait échouer). Les attributs NOTNULL ne
+produit réel (l’attente8 du prédécesseur156e33e le ferait échouer). Les attributs NOTNULL ne
 sont pas comptés comme contraintes PG17. Les dates d'audit anciennes sont un seed synthétique propriétaire,
 pas365jours observés. Le contrôle direct des lots SQL n'est pas attribué à un
 parcours HTTP/TLS. Capturer résultat/exception privés avant assertion runner,
@@ -103,3 +103,14 @@ physique de sécurité ni réattribution de TTL. Mise hors service du flag ferme
 coordination sans supprimer holds/reçus. Cleanup scoped de ce banc neuf seulement,
 refus fresh des identités/LOGIN, jobs absents deux fois, rapport des limites. Une
 nouvelle recette flotte globale attend encore les autres propriétaires livrés.
+
+
+Erratum de revue, après première exécution61818 : le catalogue PG17 réel de
+`j0/pg846-v004-r1-0f441b1375b7/checks.confirmed.constraints.private.json` contient
+neuf contraintes validées : six CHECK (proof_sha256, inventory, state, lots,
+identité, étatfinal/annualité), PK, UNIQUE, FK. Le premier constat de revue
+attendait à tort cinq CHECK/huit contraintes ; le changement156e33e a donc
+introduit un faux refus. Le verdict original et ce premier résultat EXIT1 sont
+conservés, sans réattribution. Aucun inventaire/retrait/callback n'avait commencé.
+Le candidat DDL004 est inchangé ; attente9 rétablie et fixture6CHECK corrigée
+avant nouvelle revue. Aucune seconde exécution PG autorisée par ce document.
