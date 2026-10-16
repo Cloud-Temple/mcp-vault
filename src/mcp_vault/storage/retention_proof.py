@@ -170,7 +170,9 @@ def live(settings, token):
         raise MetadataUnavailable("retention_authority_unavailable") from None
 
 
+def canonical_identity(identity):
+    return json.dumps(identity, sort_keys=True, separators=(",", ":"))
+
+
 def fingerprint(identity):
-    return hashlib.sha256(
-        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return hashlib.sha256(canonical_identity(identity).encode()).hexdigest()

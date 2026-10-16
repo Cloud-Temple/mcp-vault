@@ -41,3 +41,51 @@ bornée de retrait des audits/références reste à implémenter et qualifier av
 reçu final importable dans Mission ; aucun critère n'est écarté par cette tranche.
 Le DDL reste octet identique àe701 déjà testé en SQL isolé ; ces raccords publics
 n'ont reçu que des tests logiciel/HTTP contrôlé, pas de qualification TLS/flotte.
+
+## Candidat v4 : reçu propriétaire de retrait
+
+La migration `004_retirement.sql` est un **nouveau candidat non qualifié en PG**.
+Depuis une installation v3 avec les protections activées, l'opérateur install
+peut demander `audit-retirement-upgrade` avec `{"confirm":"audit-retirement-upgrade"}`.
+Cette voie utilise le provisioner/owner déjà prévu ; aucune création de rôle,
+réparation runtime ou réutilisation d'un ancien banc. La désactivation du flag
+ne retire jamais les protections SQL installées.
+
+Après `audit-retention-close` confirmé, trois actions POST locales sont proposées :
+
+- `audit-retention-inventory` : `proof` et `operation_id` UUID canonique. Capture
+  durable et complète des références, maximum1000/256KiB ; ce succès ne vaut pas
+  retrait. Un scope absent, incomplet, un audit non terminal/UNKNOWN ou un wrap
+  sans état terminal et provenance confirmée reste protégé.
+- `audit-retention-retire` : mêmes paramètres, `batch`1..500 et `confirm` exact.
+  Les lots conservent les IDs réellement issus de DELETE RETURNING et leurs
+  reçus179 dans la même transaction. Un lot partiel n'est pas importable dans
+  Mission. Le reçu final ne sort qu'après COMMIT et fermeture confirmés.
+- `audit-retention-receipt` : mêmes paramètres, observation du reçu durable exact
+  après incident ; un compteur ou une absence ne recrée jamais un ACK perdu.
+  Une opération finale confirmée n'est pas redispatchée. UNKNOWN exige inspection.
+
+Les types de références sont `audit_call` (UUID, révision0), `audit_event`
+(`call_uuid:seq`, révision0), `binding_reference` (tenant, révision native positive)
+et `wrap_reference` (`operation_id:mission_id`, révision native positive).
+Ces objets n'ont pas de racine Agent native : root_agent_id est vide dans chaque
+référence, tandis que l'identité globale conserve la racine canonique du claim.
+Le reçu est indépendant du sweep audit179 et conservé au moins365jours après
+son COMMIT final ; aucun GC de reçus n'est ajouté ici. Le sweep179 v4 exclut les
+appels corrélés pour ne pas effacer leur inventaire avant le reçu coordonné ;
+les appels standalone gardent leur contrat.
+
+Bindings, coffres, versions OpenBao, policies et registre de wraps ne sont pas
+supprimés par cette maintenance. Libérer la référence historique de A ne retire
+pas le binding de son tenant partagé avec B. Les TTL et révocations de sécurité
+ne sont pas modifiés. Aucun payload, credential, accessor ou chemin de secret
+n'est copié dans le reçu Mission.
+
+Le callback canonique est relu après acquisition des verrous locaux, avant
+suppression. Cette préparation n'écrit pas audit_revision et ne modifie pas les
+policies/tokens ; la résolution opaque des credentials Mission peut donc écrire
+son propre audit non corrélé sans dépendre de ces lignes. Cette absence d'attente
+inverse est **à prouver par la recette PG puis TLS réelle**, pas déduite d'un mock.
+Callback indisponible ou échéance dépassée sous attente => rollback, jamais
+suppression d'un contrôle pour obtenir un succès. Les tests logiciels n'établissent
+ni ce parcours TLS ni une année écoulée.

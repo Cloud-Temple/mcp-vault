@@ -6,6 +6,11 @@
 
 ### Préparation Mission #846
 
+- Candidat opérateur v4 : inventaire corrélé borné, lots avec IDs réellement
+  retirés et reçu de référence annuel indépendant du sweep audit. Bindings
+  partagés et wraps inconnus restent protégés. Callback revalidé après attente ;
+  aucune qualification SQL/TLS de ce nouveau candidat encore annoncée.
+
 - Protection SQL locale des audits corrélés Mission, installée explicitement en
   v3 sur domaine neuf ; aucune prolongation de token ni GC de coffre OpenBao.
   Raccords opérateur signés et qualification PostgreSQL/flotte encore ouverts.

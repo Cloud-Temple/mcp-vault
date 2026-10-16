@@ -31,7 +31,7 @@ def install(conn, settings):
                 signature, sql.Identifier(settings.audit_maintenance_role)))
 
 
-def verify(conn, settings):
+def verify(conn, settings, *, retirement=False):
     table = conn.execute("""SELECT pg_get_userbyid(c.relowner) AS owner,c.relrowsecurity AS rls,
         EXISTS(SELECT 1 FROM aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a
           WHERE a.grantee<>c.relowner) AS foreign_acl,
@@ -55,6 +55,9 @@ def verify(conn, settings):
     if constraints != {"n": 4, "valid": True}:
         raise MetadataUnavailable("retention_hold_constraints_invalid")
     source = SOURCE.read_text()
+    if retirement:
+        from .audit_retirement_schema import SOURCE as RETIREMENT_SOURCE
+        source = RETIREMENT_SOURCE.read_text() + source
     for signature, maintenance in ROUTINES.items():
         name = signature.split("(")[0]
         body = re.search(r"CREATE (?:OR REPLACE )?FUNCTION vault_metadata\." + name

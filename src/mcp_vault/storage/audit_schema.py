@@ -53,8 +53,8 @@ def verify(conn, settings):
     app, maintenance, owner = (settings.metadata_pg_app_role, settings.audit_maintenance_role,
                                settings.metadata_pg_owner_role)
     version = conn.execute("SELECT version FROM vault_metadata.schema_version").fetchall()
-    if (version not in ([{"version": 2}], [{"version": 3}])
-            or getattr(settings, "audit_mission_retention_enabled", False) and version != [{"version": 3}]):
+    if (version not in ([{"version": 2}], [{"version": 3}], [{"version": 4}])
+            or getattr(settings, "audit_mission_retention_enabled", False) and version not in ([{"version": 3}], [{"version": 4}])):
         raise MetadataUnavailable("audit_schema_invalid")
     policy = conn.execute("SELECT retention_days FROM vault_metadata.audit_retention_policy WHERE instance_id=%s",
                           (settings.metadata_instance_id,)).fetchone()
@@ -136,7 +136,10 @@ def verify(conn, settings):
         WHERE n.nspname='vault_metadata' AND c.relname=ANY(%s)""", (owner, list(TABLES))).fetchone()
     if ownership != {"n": 4, "allowed": True}:
         raise MetadataUnavailable("audit_owner_invalid")
-    if version == [{"version": 3}]:
+    if version in ([{"version": 3}], [{"version": 4}]):
         # Disabling coordination never downgrades an installed protection.
         from .audit_retention_schema import verify as verify_retention
-        verify_retention(conn, settings)
+        verify_retention(conn, settings, retirement=version == [{"version": 4}])
+        if version == [{"version": 4}]:
+            from .audit_retirement_schema import verify as verify_retirement
+            verify_retirement(conn, settings)
