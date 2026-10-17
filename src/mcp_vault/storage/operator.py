@@ -58,6 +58,12 @@ def action(name, body):
     if name == 'audit-maintenance-connection':
         from .audit_maintenance import install_credential
         return install_credential(body)
+    if name in {'audit-retention-inventory', 'audit-retention-retire', 'audit-retention-receipt'}:
+        from .retirement_maintenance import action as retirement_action
+        return retirement_action(name, body)
+    if name in {'audit-retention-close', 'audit-retention-status'}:
+        from .retention_maintenance import action as retention_action
+        return retention_action(name, body)
     if name == 'audit-expire':
         from .audit_maintenance import expire
         return expire(body)
@@ -101,7 +107,9 @@ def action(name, body):
         credentials()
         credentials(provisioner=True)
         return {"status":"ok","app_valid":True,"provisioner_valid":True}
-    if name in {"schema-init", "audit-upgrade"}:
+    if name in {"schema-init", "audit-upgrade", "audit-retirement-upgrade"}:
+        if name == "audit-retirement-upgrade" and (not isinstance(body, dict) or body != {"confirm": name}):
+            raise ValueError("Explicit retirement upgrade required")
         from psycopg import sql
         credentials()  # Valider aussi le chemin app avant le premier effet DDL.
         mid = str(uuid.uuid4())
@@ -129,10 +137,17 @@ def action(name, body):
                         conn.execute(sql.SQL("REVOKE UPDATE,DELETE ON vault_metadata.operation_receipts,vault_metadata.installation FROM {}").format(sql.Identifier(s.metadata_pg_app_role)))
                         conn.execute("ALTER DEFAULT PRIVILEGES IN SCHEMA vault_metadata REVOKE ALL ON TABLES FROM PUBLIC")
                         conn.execute(sql.SQL("ALTER DEFAULT PRIVILEGES IN SCHEMA vault_metadata GRANT SELECT,INSERT,UPDATE,DELETE ON TABLES TO {}").format(sql.Identifier(s.metadata_pg_app_role)))
-                    from .audit_schema import install
+                    if name == "audit-retirement-upgrade":
+                        if not s.audit_mission_retention_enabled:
+                            raise MetadataUnavailable("retention_profile_disabled")
+                        from .audit_retirement_schema import install
+                    else:
+                        from .audit_schema import install
                     install(conn, s)
                     from psycopg.types.json import Jsonb
-                    target = {"schema_version":2,"expected_revision":0 if name == "schema-init" else 1,"result_revision":2}
+                    schema_version = (4 if name == "audit-retirement-upgrade" else
+                                      3 if getattr(s, "audit_mission_retention_enabled", False) else 2)
+                    target = {"schema_version":schema_version,"expected_revision":0 if name == "schema-init" else 3 if name == "audit-retirement-upgrade" else 1,"result_revision":schema_version}
                     intent = hashlib.sha256(json.dumps(target,sort_keys=True).encode()).hexdigest()
                     conn.execute("INSERT INTO vault_metadata.operation_receipts(instance_id,mutation_id,kind,intent_hash,target,phase,database_result) VALUES(%s,%s,%s,%s,%s,%s,'committed')",
                                  (s.metadata_instance_id,mid,name,intent,Jsonb(target),name))
@@ -162,9 +177,9 @@ def action(name, body):
                 pass
         except Exception:
             return {"status":"error","error_type":"schema_verification_unconfirmed",
-                    "schema_version":2,"mutation_id":mid,"ddl_confirmed":True,
+                    "schema_version":schema_version,"mutation_id":mid,"ddl_confirmed":True,
                     "message":"DDL confirmé ; vérification finale non confirmée, ne pas rejouer"}
-        return {"status":"ok","schema_version":2,"mutation_id":mid}
+        return {"status":"ok","schema_version":schema_version,"mutation_id":mid}
     if name == "initial-admin":
         from psycopg.types.json import Jsonb
         if set(body)!={"token_hash","client_name","mutation_id"}:
@@ -220,7 +235,8 @@ async def handle_operator(scope, receive, send):
     permitted = {"status","verify-connections"}
     if s.metadata_operator_mode == "install":
         permitted |= {"vault","connections","schema-init","audit-upgrade","initial-admin",
-                      "audit-maintenance-connection", "audit-expire"}
+                      "audit-maintenance-connection", "audit-expire", "audit-retention-close", "audit-retention-status",
+                      "audit-retirement-upgrade", "audit-retention-inventory", "audit-retention-retire", "audit-retention-receipt"}
     if (s.metadata_operator_mode=="disabled" or scope.get("method")!=expected
             or name not in permitted and not name.startswith("installation-result/")):
         return await _json_response(send,403,{"status":"error","message":"Action opérateur refusée"})

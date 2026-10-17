@@ -1,6 +1,5 @@
 """Connexions Vault-first et confirmation honnête, sans retry mutatif."""
 
-import asyncio
 import hashlib
 import json
 import threading
@@ -160,7 +159,7 @@ def connection(*, provisioner=False, schema=True):
                 raise MetadataUnavailable("rights_invalid")
         if schema:
             row = conn.execute("SELECT version FROM vault_metadata.schema_version").fetchall()
-            if row != [{"version": 2}]:
+            if row not in ([{"version": 2}], [{"version": 3}], [{"version": 4}]):
                 raise MetadataUnavailable("schema_invalid")
             if not provisioner:
                 if conn.execute("SELECT has_schema_privilege(current_user,'vault_metadata','CREATE') AS ddl").fetchone()["ddl"]:
