@@ -54,7 +54,8 @@ ne retire jamais les protections SQL installées.
 Après `audit-retention-close` confirmé, trois actions POST locales sont proposées :
 
 - `audit-retention-inventory` : `proof` et `operation_id` UUID canonique. Capture
-  durable et complète des références, maximum1000/256KiB ; ce succès ne vaut pas
+  durable et complète des références, maximum 100000 références et 16 Mio, puis
+  réponse sous la forme agrégée du reçu (voir plus bas) ; ce succès ne vaut pas
   retrait. Un scope absent, incomplet, un audit non terminal/UNKNOWN ou un wrap
   sans état terminal et provenance confirmée reste protégé.
 - `audit-retention-retire` : mêmes paramètres, `batch`1..500 et `confirm` exact.
@@ -65,11 +66,25 @@ Après `audit-retention-close` confirmé, trois actions POST locales sont propos
   après incident ; un compteur ou une absence ne recrée jamais un ACK perdu.
   Une opération finale confirmée n'est pas redispatchée. UNKNOWN exige inspection.
 
-Les types de références sont `audit_call` (UUID, révision0), `audit_event`
-(`call_uuid:seq`, révision0), `binding_reference` (tenant, révision native positive)
-et `wrap_reference` (`operation_id:mission_id`, révision native positive).
-Ces objets n'ont pas de racine Agent native : root_agent_id est vide dans chaque
-référence, tandis que l'identité globale conserve la racine canonique du claim.
+L'inventaire stocké dans `vault_metadata.audit_mission_retirements` garde une
+ligne par objet : `audit_call` (UUID, révision 0), `audit_event` (`call_uuid:seq`,
+révision 0), `binding_reference` (tenant, révision native positive) et
+`wrap_reference` (`operation_id:mission_id`, révision native positive). Le contrôle
+« inventory changed » de chaque lot compare toujours cette liste complète.
+
+Le reçu remis à Mission est agrégé, car Mission plafonne à 1000 la somme des
+références des quatre propriétaires distants. Il contient exactement quatre
+références, dans cet ordre : `vault_audit_calls`, `vault_audit_events`,
+`vault_binding_references`, `vault_wrap_references`. Pour chacune, `id` vaut
+`sha256:` suivi du SHA-256 hexadécimal du texte jsonb du tableau des éléments
+`id@revision` de l'inventaire, triés en `COLLATE "C"` ; `revision` est le nombre
+d'éléments. Une catégorie vide porte l'empreinte de `[]` et `revision` 0.
+`vault_audit_calls` vaut au moins 1, `vault_audit_events` au moins autant que les
+appels, `vault_binding_references` au plus 1. Ces objets n'ont pas de racine
+Agent native : root_agent_id est vide dans chaque référence, tandis que
+l'identité globale conserve la racine canonique du claim. Mission 9ded160c
+refuse encore ces kinds dans `_validate_vault_references` ; #914 doit les
+accepter (proposition dans `tests/test_retirement_receipt_846.py`).
 Le reçu est indépendant du sweep audit179 et conservé au moins365jours après
 son COMMIT final ; aucun GC de reçus n'est ajouté ici. Le sweep179 v4 exclut les
 appels corrélés pour ne pas effacer leur inventaire avant le reçu coordonné ;

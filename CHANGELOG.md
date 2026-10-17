@@ -6,6 +6,13 @@
 
 ### Préparation Mission #846
 
+- Reçu de retrait Vault agrégé : quatre références fixes (`vault_audit_calls`,
+  `vault_audit_events`, `vault_binding_references`, `vault_wrap_references`),
+  empreinte SHA-256 triée en `COLLATE "C"` et compte en `revision`. L'inventaire
+  stocké reste exhaustif, borné à 100000 références et 16 Mio. Une Mission à
+  plus de 1000 événements d'audit peut donc être finalisée. Mission #914 doit
+  accepter ces quatre kinds dans sa branche Vault.
+
 - Candidat opérateur v4 : inventaire corrélé borné, lots avec IDs réellement
   retirés et reçu de référence annuel indépendant du sweep audit. Bindings
   partagés et wraps inconnus restent protégés. Callback revalidé après attente ;

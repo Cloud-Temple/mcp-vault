@@ -6,8 +6,8 @@ ALTER TABLE vault_metadata.schema_version VALIDATE CONSTRAINT schema_version_ver
 CREATE TABLE vault_metadata.audit_mission_retirements (
  instance_id text NOT NULL, operation_id uuid NOT NULL, tenant_id text NOT NULL, mission_id text NOT NULL,
  identity jsonb NOT NULL, proof_sha256 text NOT NULL CHECK(proof_sha256 ~ '^[a-f0-9]{64}$'),
- inventory jsonb NOT NULL CHECK(jsonb_typeof(inventory)='array' AND jsonb_array_length(inventory)<=1000
-  AND octet_length(inventory::text)<=262144),
+ inventory jsonb NOT NULL CHECK(jsonb_typeof(inventory)='array' AND jsonb_array_length(inventory)<=100000
+  AND octet_length(inventory::text)<=16777216),
  state text NOT NULL CHECK(state IN ('prepared','committed')),
  lots jsonb NOT NULL DEFAULT '[]'::jsonb CHECK(jsonb_typeof(lots)='array'),
  result jsonb, committed_at timestamptz, receipt_retain_until timestamptz,
@@ -71,9 +71,32 @@ BEGIN
    FROM vault_metadata.mission_bindings WHERE instance_id=i AND tenant_id=t
   UNION ALL SELECT jsonb_build_object('kind','wrap_reference','id',operation_id||':'||mission_id,'revision',revision,'root_agent_id','')
    FROM vault_metadata.wrap_registry WHERE instance_id=i AND mission_id=m) x;
- IF jsonb_array_length(refs)>1000 OR octet_length(refs::text)>262144
+ IF jsonb_array_length(refs)>100000 OR octet_length(refs::text)>16777216
  OR EXISTS(SELECT 1 FROM jsonb_array_elements(refs) v WHERE octet_length(v->>'id')>256) THEN
   RAISE EXCEPTION 'retirement inventory incomplete'; END IF;
+ RETURN refs;
+END $$;
+
+-- The stored inventory stays exhaustive. Mission budgets 1000 references for
+-- all owners, so its receipt carries one fixed reference per source kind:
+-- id = sha256 of the jsonb text of the sorted (COLLATE "C") "id@revision"
+-- items, revision = item count. An unknown kind is refused, never dropped.
+CREATE FUNCTION vault_metadata.audit_retirement_references(inventory jsonb)
+RETURNS jsonb LANGUAGE plpgsql IMMUTABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE refs jsonb;
+BEGIN
+ IF jsonb_typeof(inventory) IS DISTINCT FROM 'array' OR EXISTS(SELECT 1 FROM jsonb_array_elements(inventory) v
+  WHERE v->>'kind' IS NULL OR v->>'kind' NOT IN ('audit_call','audit_event','binding_reference','wrap_reference')
+  OR v->>'id' IS NULL OR jsonb_typeof(v->'revision') IS DISTINCT FROM 'number') THEN
+  RAISE EXCEPTION 'retirement inventory incomplete'; END IF;
+ SELECT jsonb_agg(jsonb_build_object('kind',g.kind,
+   'id','sha256:'||encode(sha256(convert_to(coalesce((SELECT jsonb_agg(x.item ORDER BY x.item COLLATE "C")
+    FROM (SELECT (v->>'id')||'@'||(v->>'revision') AS item FROM jsonb_array_elements(inventory) v
+    WHERE v->>'kind'=g.source) x),'[]'::jsonb)::text,'UTF8')),'hex'),
+   'revision',(SELECT count(*) FROM jsonb_array_elements(inventory) v WHERE v->>'kind'=g.source),
+   'root_agent_id','') ORDER BY g.kind COLLATE "C") INTO refs
+ FROM (VALUES('vault_audit_calls','audit_call'),('vault_audit_events','audit_event'),
+  ('vault_binding_references','binding_reference'),('vault_wrap_references','wrap_reference')) g(kind,source);
  RETURN refs;
 END $$;
 
@@ -101,7 +124,7 @@ BEGIN
  IF FOUND THEN
   IF r.identity IS DISTINCT FROM ident OR r.proof_sha256 IS DISTINCT FROM fingerprint THEN
    RAISE EXCEPTION 'retirement operation mismatch'; END IF;
-  RETURN jsonb_build_object('state',r.state,'inventory',r.inventory,'lots',r.lots);
+  RETURN jsonb_build_object('state',r.state,'inventory',vault_metadata.audit_retirement_references(r.inventory),'lots',r.lots);
  END IF;
  refs:=vault_metadata.audit_retirement_inventory(i,t,m);
  -- An empty observation alone cannot prove non-applicability.
@@ -109,7 +132,7 @@ BEGIN
   RAISE EXCEPTION 'retirement correlation absent'; END IF;
  INSERT INTO vault_metadata.audit_mission_retirements(instance_id,operation_id,tenant_id,mission_id,identity,proof_sha256,inventory,state)
  VALUES(i,op,t,m,ident,fingerprint,refs,'prepared');
- RETURN jsonb_build_object('state','prepared','inventory',refs,'lots','[]'::jsonb);
+ RETURN jsonb_build_object('state','prepared','inventory',vault_metadata.audit_retirement_references(refs),'lots','[]'::jsonb);
 END $$;
 
 CREATE FUNCTION vault_metadata.audit_retirement_batch(i text,ident jsonb,op uuid,canonical text,expires timestamptz,batch integer)
@@ -123,11 +146,14 @@ BEGIN
  SELECT * INTO STRICT r FROM vault_metadata.audit_mission_retirements WHERE instance_id=i AND operation_id=op FOR UPDATE;
  IF r.state='committed' THEN RAISE EXCEPTION 'retirement already committed; inspect only'; END IF;
  refs:=vault_metadata.audit_retirement_inventory(i,t,m);
+ -- Same set difference as per-lot containment, as one anti-join: linear in
+ -- the inventory, so a large Mission still fits the 30 second proof window.
  SELECT coalesce(jsonb_agg(v ORDER BY v->>'kind',v->>'id'),'[]'::jsonb) INTO expected
  FROM jsonb_array_elements(r.inventory) v WHERE NOT EXISTS(
-  SELECT 1 FROM jsonb_array_elements(r.lots) lot WHERE
-  (v->>'kind'='audit_call' AND lot->'calls' @> jsonb_build_array(v->>'id')) OR
-  (v->>'kind'='audit_event' AND lot->'events' @> jsonb_build_array(v->>'id')));
+  SELECT 1 FROM jsonb_array_elements(r.lots) lot CROSS JOIN LATERAL (
+   SELECT 'audit_call' AS kind,c AS id FROM jsonb_array_elements_text(lot->'calls') c
+   UNION ALL SELECT 'audit_event',e FROM jsonb_array_elements_text(lot->'events') e) gone
+  WHERE gone.kind=v->>'kind' AND gone.id=v->>'id');
  IF refs IS DISTINCT FROM expected THEN RAISE EXCEPTION 'retirement inventory changed'; END IF;
  IF EXISTS(SELECT 1 FROM vault_metadata.audit_calls WHERE (instance_id,tenant_id,mission_id)=(i,t,m)
  AND expires_at>clock_timestamp()) THEN RAISE EXCEPTION 'audit retention not elapsed'; END IF;
@@ -150,7 +176,7 @@ BEGIN
  IF expires<=stamp THEN RAISE EXCEPTION 'retention authority expired'; END IF;
  IF NOT more THEN
   envelope:=ident||jsonb_build_object('state','retired_confirmed','inventory_complete',true,'operation_id',op,
-   'references',r.inventory,'contracts',jsonb_build_object('audit179','v1','holds846','v1'));
+   'references',vault_metadata.audit_retirement_references(r.inventory),'contracts',jsonb_build_object('audit179','v1','holds846','v1'));
   envelope:=envelope||jsonb_build_object('receipt_sha256',encode(sha256(convert_to(envelope::text,'UTF8')),'hex'));
  END IF;
  UPDATE vault_metadata.audit_mission_retirements SET lots=r.lots,

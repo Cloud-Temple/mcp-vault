@@ -13,7 +13,14 @@ from .postgres import (
 )
 from .retention_proof import canonical_identity, live
 
-KINDS = frozenset({"audit_call", "audit_event", "binding_reference", "wrap_reference"})
+# One aggregated reference per source kind, in SQL order (COLLATE "C"). The
+# exhaustive inventory stays in vault_metadata.audit_mission_retirements.
+KINDS = (
+    "vault_audit_calls",
+    "vault_audit_events",
+    "vault_binding_references",
+    "vault_wrap_references",
+)
 
 
 def validate_envelope(value, identity, operation):
@@ -43,29 +50,32 @@ def validate_envelope(value, identity, operation):
     ):
         raise MetadataUnavailable("retirement_result_invalid")
     refs = value["references"]
-    if not isinstance(refs, list) or len(refs) > 1000:
+    if not isinstance(refs, list) or len(refs) != len(KINDS):
         raise MetadataUnavailable("retirement_inventory_incomplete")
-    seen = set()
-    for ref in refs:
+    counts = {}
+    for kind, ref in zip(KINDS, refs):
         if (
             not isinstance(ref, dict)
             or set(ref) != {"kind", "id", "revision", "root_agent_id"}
-            or ref["kind"] not in KINDS
+            or ref["kind"] != kind
             or not isinstance(ref["id"], str)
-            or not 1 <= len(ref["id"].encode()) <= 256
+            or len(ref["id"]) != 71
+            or not ref["id"].startswith("sha256:")
+            or any(c not in "0123456789abcdef" for c in ref["id"][7:])
             or type(ref["revision"]) is not int
-            or (
-                ref["revision"] != 0
-                if ref["kind"].startswith("audit_")
-                else ref["revision"] < 1
-            )
+            or ref["revision"] < 0
             or ref["root_agent_id"] != ""
         ):
             raise MetadataUnavailable("retirement_reference_invalid")
-        key = (ref["kind"], ref["id"], ref["revision"])
-        if key in seen:
-            raise MetadataUnavailable("retirement_duplicate_reference")
-        seen.add(key)
+        counts[kind] = ref["revision"]
+    # prepare refuses an uncorrelated scope and every call has a terminal
+    # event; the tenant binding key is unique.
+    if (
+        counts["vault_audit_calls"] < 1
+        or counts["vault_audit_events"] < counts["vault_audit_calls"]
+        or counts["vault_binding_references"] > 1
+    ):
+        raise MetadataUnavailable("retirement_inventory_incomplete")
     import json
 
     if len(json.dumps(value, sort_keys=True).encode()) > 262144:

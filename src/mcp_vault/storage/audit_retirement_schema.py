@@ -10,6 +10,7 @@ ROUTINES = {
     "audit_retirement_identity_hash(text)": None,
     "audit_retirement_lock(text,text,text,uuid)": "maintenance",
     "audit_retirement_inventory(text,text,text)": None,
+    "audit_retirement_references(jsonb)": None,
     "audit_retirement_prepare(text,jsonb,uuid,text,timestamp with time zone)": "maintenance",
     "audit_retirement_batch(text,jsonb,uuid,text,timestamp with time zone,integer)": "maintenance",
     "audit_retirement_receipt(text,text,text,uuid)": "maintenance",

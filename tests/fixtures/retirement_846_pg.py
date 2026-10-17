@@ -20,9 +20,11 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from mcp_vault.storage import audit_schema, audit_retirement_schema
 from mcp_vault.storage.retention_proof import canonical_identity, fingerprint
 from mcp_vault.storage.retirement_maintenance import validate_envelope
+from tests.fixtures.vault_receipt_846 import aggregate
 
 
 def run(socket, report):
@@ -171,7 +173,17 @@ def run(socket, report):
             "SELECT vault_metadata.audit_retirement_prepare(%s,%s,%s,%s,%s) AS result",
             params,
         ).fetchone()["result"]
-        assert value["state"] == "prepared" and len(value["inventory"]) == 5
+        assert value["state"] == "prepared"
+    with connect() as conn:
+        stored = conn.execute(
+            "SELECT inventory FROM vault_metadata.audit_mission_retirements WHERE operation_id=%s",
+            (op,),
+        ).fetchone()["inventory"]
+    # Exhaustive stored inventory, aggregated reply equal to the Python twin.
+    assert len(stored) == 5
+    assert value["inventory"] == aggregate(stored)
+    assert [r["revision"] for r in value["inventory"]] == [2, 2, 1, 0]
+    checks.append("stored_inventory_exhaustive_reply_aggregated_sql_equals_python")
     with connect("v846r_maint") as conn, conn.transaction():
         first = conn.execute(
             "SELECT vault_metadata.audit_retirement_batch(%s,%s,%s,%s,%s,1) AS result",
@@ -189,6 +201,7 @@ def run(socket, report):
         ).fetchone()["result"]
         assert not final["has_more"]
         validate_envelope(final["result"], ident, op)
+        assert final["result"]["references"] == aggregate(stored)
     with connect() as conn:
         row = conn.execute(
             "SELECT * FROM vault_metadata.audit_mission_retirements WHERE operation_id=%s",
@@ -351,6 +364,70 @@ def run(socket, report):
     checks.append(
         "uncorrelated_opaque_credential_audit_can_commit_while_scope_locks_held"
     )
+    # 846 P2: above the former 1000-reference cap, a Mission still retires to
+    # one four-reference receipt. 2500 calls x 2 events = 5000 events.
+    claim3 = str(uuid4())
+    ident3 = ident | {"mission_id": "mission-large", "claim_id": claim3}
+    large = [str(uuid4()) for _ in range(2500)]
+    with connect("v846r_app") as conn, conn.transaction(), conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO vault_metadata.audit_calls(instance_id,call_id,actor_ref,tool,tenant_id,mission_id) VALUES('v846r',%s,'anonymous','secret_read','a','mission-large')",
+            [(cid,) for cid in large],
+        )
+        for phase, outcome in [("admission", "admitted"), ("public_terminal", "completed")]:
+            cur.executemany(
+                "INSERT INTO vault_metadata.audit_events(instance_id,call_id,phase,step_id,outcome) VALUES('v846r',%s,%s,'00000000-0000-0000-0000-000000000000',%s)",
+                [(cid, phase, outcome) for cid in large],
+            )
+    with connect() as conn:
+        conn.execute(
+            "UPDATE vault_metadata.audit_calls SET created_at=clock_timestamp()-interval '500 days',expires_at=clock_timestamp()-interval '135 days' WHERE mission_id='mission-large'"
+        )
+    with connect("v846r_maint") as conn, conn.transaction():
+        conn.execute(
+            "SELECT vault_metadata.audit_close_mission('v846r','a','mission-large',%s,1,%s,%s,%s,clock_timestamp()+interval '20 seconds')",
+            (claim3, ident3["terminal_at"], ident3["retain_until"], fingerprint(ident3)),
+        )
+    op3 = str(uuid4())
+
+    def large_params():
+        return ("v846r", Jsonb(ident3), op3, canonical_identity(ident3),
+                datetime.now(timezone.utc) + timedelta(seconds=25))
+
+    with connect("v846r_maint") as conn, conn.transaction():
+        value = conn.execute(
+            "SELECT vault_metadata.audit_retirement_prepare(%s,%s,%s,%s,%s) AS result",
+            large_params(),
+        ).fetchone()["result"]
+    assert [r["revision"] for r in value["inventory"]] == [2500, 5000, 1, 0]
+    durations = []
+    result = None
+    for _ in range(6):
+        started = time.monotonic()
+        with connect("v846r_maint") as conn, conn.transaction():
+            step = conn.execute(
+                "SELECT vault_metadata.audit_retirement_batch(%s,%s,%s,%s,%s,500) AS result",
+                large_params(),
+            ).fetchone()["result"]
+        durations.append(round(time.monotonic() - started, 3))
+        if not step["has_more"]:
+            result = step["result"]
+            break
+    assert result is not None and len(durations) == 5, durations
+    validate_envelope(result, ident3, op3)
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT state,inventory,lots FROM vault_metadata.audit_mission_retirements WHERE operation_id=%s",
+            (op3,),
+        ).fetchone()
+        assert row["state"] == "committed" and len(row["inventory"]) == 7501
+        assert result["references"] == aggregate(row["inventory"])
+        assert sorted(c for lot in row["lots"] for c in lot["calls"]) == sorted(large)
+        assert sum(len(lot["events"]) for lot in row["lots"]) == 5000
+        assert conn.execute(
+            "SELECT count(*) AS n FROM vault_metadata.audit_calls WHERE mission_id='mission-large'"
+        ).fetchone()["n"] == 0
+    checks.append("mission_5000_events_five_batches_four_reference_receipt")
     # Recheck owner verification as observer, exact structure and restricted roles.
     with connect() as conn:
         audit_schema.verify(conn, cfg)
@@ -362,6 +439,7 @@ def run(socket, report):
         "synthetic_dates": True,
         "not_tls_or_mcp": True,
         "no_native_claim_callback_qualification": True,
+        "large_batch_seconds": durations,
     }
 
 

@@ -9,6 +9,7 @@ import pytest
 
 from mcp_vault.storage import retirement_maintenance as owner
 from mcp_vault.storage.postgres import MetadataUnavailable, MutationUnknown
+from tests.fixtures.vault_receipt_846 import aggregate, inventory
 from tests.test_retention_owner_846 import settings
 
 
@@ -32,20 +33,7 @@ def envelope(ident, op):
         "inventory_complete": True,
         "operation_id": op,
         "receipt_sha256": "a" * 64,
-        "references": [
-            {
-                "kind": "audit_call",
-                "id": str(uuid4()),
-                "revision": 0,
-                "root_agent_id": "",
-            },
-            {
-                "kind": "binding_reference",
-                "id": "tenant-a",
-                "revision": 3,
-                "root_agent_id": "",
-            },
-        ],
+        "references": aggregate(inventory(calls=1)),
         "contracts": {"audit179": "v1", "holds846": "v1"},
     }
 
@@ -61,6 +49,16 @@ def envelope(ident, op):
         "payload",
         "duplicate",
         "short_digest",
+        "order",
+        "id_format",
+        "no_calls",
+        "events_below_calls",
+        "per_id_legacy",
+        "missing_kind",
+        "short_id",
+        "wrong_prefix",
+        "negative_revision",
+        "bool_revision",
     ],
 )
 def test_no_partial_or_forged_reference_envelope(mutation):
@@ -72,7 +70,7 @@ def test_no_partial_or_forged_reference_envelope(mutation):
     if mutation == "incomplete":
         value["inventory_complete"] = False
     if mutation == "revision":
-        value["references"][1]["revision"] = 0
+        value["references"][2]["revision"] = 2
     if mutation == "kind":
         value["references"][0]["kind"] = "coffer_deleted"
     if mutation == "root":
@@ -83,6 +81,30 @@ def test_no_partial_or_forged_reference_envelope(mutation):
         value["references"].append(dict(value["references"][0]))
     if mutation == "short_digest":
         value["receipt_sha256"] = "bad"
+    if mutation == "order":
+        value["references"][0], value["references"][1] = (
+            value["references"][1],
+            value["references"][0],
+        )
+    if mutation == "id_format":
+        value["references"][0]["id"] = "sha256:" + "A" * 64
+    if mutation == "no_calls":
+        value["references"][0]["revision"] = 0
+        value["references"][1]["revision"] = 0
+    if mutation == "events_below_calls":
+        value["references"][0]["revision"] = 2
+    if mutation == "per_id_legacy":
+        value["references"] = inventory(calls=1)
+    if mutation == "missing_kind":
+        value["references"].pop()
+    if mutation == "short_id":
+        value["references"][0]["id"] = value["references"][0]["id"][:-1]
+    if mutation == "wrong_prefix":
+        value["references"][0]["id"] = "sha512:" + value["references"][0]["id"][7:]
+    if mutation == "negative_revision":
+        value["references"][3]["revision"] = -1
+    if mutation == "bool_revision":
+        value["references"][3]["revision"] = True
     with pytest.raises(MetadataUnavailable):
         owner.validate_envelope(value, ident, op)
 

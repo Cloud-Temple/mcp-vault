@@ -92,8 +92,9 @@ Après SQL/ACL et absence d'attente inverse démontrées seulement :
 close confirmé → inventory UUID neuf → retire(batch choisi) une commande à la
 fois après ACK → receipt exact UUID → import owner par CLI Mission de son
 propriétaire. Le dernier retourne l'enveloppe fermée audit179:v1/holds846:v1,
-kinds audit_call(UUID)/audit_event(callUUID:seq) révision0,
-binding_reference(tenant)/wrap_reference(op:MID) révision native positive.
+quatre références agrégées vault_audit_calls, vault_audit_events,
+vault_binding_references, vault_wrap_references (id sha256:<hex>, revision = compte),
+calculées sur l'inventaire exhaustif stocké (voir docs/retention-846.md).
 Identité globale du claim exacte, refs sans racine native rootvide, pas payload.
 Tester avec le vrai validateur Mission après le delta consommateur de son auteur.
 Un lot partiel, un état préparé ou une observation vide n'est pas un ACK final.
