@@ -2068,7 +2068,8 @@ def create_app():
     app = AdminMiddleware(app, mcp)
     app = PkiMiddleware(app)  # couche la plus externe — /acme/* et /pki/ca/* sans auth
 
-    return app
+    from .technical_logs import TechnicalLogsMiddleware
+    return TechnicalLogsMiddleware(app, settings)
 
 
 def main():

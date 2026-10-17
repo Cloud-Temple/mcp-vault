@@ -178,6 +178,12 @@ def execute(kind, method, args=(), kwargs=None, *, mutating=False, scope=None, e
     if kind=="wrap" and scope and scope[0]=="operation":
         target.update(business_operation_id=scope[1],mission_id=scope[2])
     def operation(conn):
+        if mutating and kind == "wrap" and method == "register_pending":
+            tenant = kwargs.get("tenant_id", args[5] if len(args) > 5 else "")
+            mission = kwargs.get("mission_id", args[1] if len(args) > 1 else None)
+            if tenant and conn.execute("SELECT version FROM vault_metadata.schema_version").fetchall() == [{"version": 4}]:
+                conn.execute("SELECT vault_metadata.audit_wrap_admit(%s,%s,%s)",
+                             (get_settings().metadata_instance_id, tenant, mission))
         if mutating and kind != "wrap":
             from ..auth.context import current_token_info
             if "admin" not in (current_token_info.get() or {}).get("permissions",[]):

@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     mcp_server_host: str = "0.0.0.0"
     mcp_server_port: int = 8030
     mcp_server_debug: bool = False
+    technical_log_directory: str = ""
 
     # --- WAF ---
     # Port externe du WAF Caddy (variable partagée avec docker-compose). Déclaré ici
@@ -57,6 +58,10 @@ class Settings(BaseSettings):
     audit_stage_seconds: int = Field(default=30, ge=10, le=300)
     audit_maintenance_role: str = Field(default="vault_audit_maintenance", pattern=r"^[a-z][a-z0-9_]{0,62}$")
     audit_maintenance_secret_path: str = "sql/audit-maintenance"
+    audit_mission_retention_enabled: bool = False
+    mission_retention_issuer: str = ""
+    mission_retention_audience: str = ""
+    mission_retention_callback_seconds: float = Field(default=5, ge=1, le=10)
     metadata_readiness_ttl_seconds: float = Field(default=2, ge=0.1, le=30)
     metadata_batch_max_ids: int = Field(default=50, ge=1, le=100)
     metadata_initial_admin_hours: int = Field(default=24, ge=1, le=24)
@@ -72,6 +77,8 @@ class Settings(BaseSettings):
             raise ValueError("METADATA_OPERATOR_MODE invalide")
         if self.metadata_pg_durability not in {"standalone", "ha"}:
             raise ValueError("METADATA_PG_DURABILITY invalide")
+        if self.audit_mission_retention_enabled and (self.metadata_backend != "postgres" or self.audit_retention_days < 365):
+            raise ValueError("Mission retention requires annual PostgreSQL audit")
         if self.metadata_backend == "postgres":
             if not all(is_valid_vault_id(v) for v in (
                 self.metadata_instance_id, self.metadata_pg_vault_id,
