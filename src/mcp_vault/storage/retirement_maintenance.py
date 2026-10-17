@@ -73,8 +73,8 @@ def validate_envelope(value, identity, operation):
             raise MetadataUnavailable("retirement_reference_invalid")
         counts[kind] = ref["revision"]
     # Every call has a terminal event, every event belongs to a call of the
-    # scope, the tenant binding key is unique. Zero calls is a closed scope
-    # that never called Vault: the closure, not this count, proves it.
+    # scope, the tenant binding key is unique. Zero calls means no Vault audit
+    # retained for this scope at closure: the closure, not this count, proves it.
     if (
         counts["vault_audit_events"] < counts["vault_audit_calls"]
         or counts["vault_audit_calls"] == 0

@@ -87,14 +87,20 @@ Agent native : root_agent_id est vide dans chaque référence, tandis que
 l'identité globale conserve la racine canonique du claim. Mission #914 applique
 les mêmes règles (copie figée dans `tests/fixtures/mission_owner_receipt_914.py`).
 
-Mission attend un reçu Vault pour toute claim, y compris pour une Mission qui
-n'a jamais appelé Vault. En v4, `audit_close_mission` crée la ligne
-`audit_mission_holds` si elle manque, sous le verrou de scope partagé avec
-l'admission. Ensuite `audit_fill_call` et `audit_wrap_admit` refusent toute
-corrélation de ce scope (42501). C'est cette clôture, et non une observation
-vide, qui prouve l'absence d'activité. prepare accepte donc un scope clos sans
-appel ; le lot final ne supprime rien, n'ajoute ni lot ni reçu audit179 et rend
-`lot` nul avec le reçu à comptes nuls. Un scope jamais clos reste protégé.
+Mission attend un reçu Vault pour toute claim, y compris quand aucun audit
+Vault n'est conservé pour ce scope à la clôture. En v4, `audit_close_mission`
+crée la ligne `audit_mission_holds` si elle manque, sous le verrou de scope
+partagé avec l'admission. Ensuite `audit_fill_call` et `audit_wrap_admit`
+refusent toute corrélation de ce scope (42501). C'est cette clôture, et non une
+observation vide, qui prouve qu'aucun audit Vault n'est conservé pour ce scope.
+Le groupe PG17 `race_two_connections_pg_locks_call_first_counted_close_first_42501`
+de `tests/fixtures/retirement_846_pg.py` vise les deux ordres concurrents : un
+appel corrélé encore ouvert fait attendre la clôture, qui le compte ensuite ;
+une clôture encore ouverte fait attendre l'appel, refusé ensuite en 42501.
+L'attente est lue dans `pg_locks`. prepare accepte donc un
+scope clos sans appel ; le lot final ne supprime rien, n'ajoute ni lot ni reçu
+audit179 et rend `lot` nul avec le reçu à comptes nuls. Un scope jamais clos
+reste protégé.
 Le reçu est indépendant du sweep audit179 et conservé au moins365jours après
 son COMMIT final ; aucun GC de reçus n'est ajouté ici. Le sweep179 v4 exclut les
 appels corrélés pour ne pas effacer leur inventaire avant le reçu coordonné ;

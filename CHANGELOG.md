@@ -13,7 +13,7 @@
   plus de 1000 événements d'audit peut donc être finalisée. Mission #914 accepte
   ces quatre kinds dans sa branche Vault.
 
-- Mission sans activité Vault : `audit_close_mission` (redéfinie en v4) crée la
+- Aucun audit Vault conservé pour le scope à la clôture : `audit_close_mission` (redéfinie en v4) crée la
   protection du scope si elle manque, puis refuse toute nouvelle corrélation.
   prepare accepte alors un scope clos sans appel, et le dernier lot ne supprime
   rien et ne produit ni lot ni reçu audit179. Le reçu porte des comptes nuls,

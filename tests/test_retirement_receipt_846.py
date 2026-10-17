@@ -2,9 +2,10 @@
 
 Mission bounds the SUM of the four remote owner receipts to 1000 references
 and waits for a Vault receipt for EVERY claim. The receipt carries four
-aggregated references; the exhaustive inventory stays in Vault. A Mission that
-never called Vault (the common case) gets four zero counts, each bound to the
-digest of the empty list: its closure refuses any later correlation.
+aggregated references; the exhaustive inventory stays in Vault. When no Vault
+audit is retained for the scope at closure (the common case), the receipt has
+four zero counts, each bound to the digest of the empty list: the closure
+refuses any later correlation.
 
 The Mission side is a verbatim frozen copy of #914 (mission_owner_receipt_914).
 The SQL aggregate itself is checked against PG17 by tests/fixtures/retirement_846_pg.py.

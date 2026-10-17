@@ -432,7 +432,7 @@ def run(socket, report):
             "SELECT count(*) AS n FROM vault_metadata.audit_calls WHERE mission_id='mission-large'"
         ).fetchone()["n"] == 0
     checks.append("mission_5000_events_five_batches_four_reference_receipt")
-    # 846 P2: a Mission that never called Vault, the common case. Mission waits
+    # 846 P2: no Vault audit retained for the scope at closure, the common case. Mission waits
     # for a Vault receipt for every claim. No hold exists before closure; the
     # closure creates it, then refuses any correlated call or wrap, and the
     # receipt carries four zero counts bound to the digest of the empty list.
@@ -530,6 +530,148 @@ def run(socket, report):
             (op5,),
         ).fetchone()["n"] == 0
     checks.append("mission_without_vault_activity_closure_creates_hold_empty_receipt_no_lot")
+    # 846 P3-1: the zero receipt is safe only because audit_fill_call and
+    # audit_close_mission serialise on the same advisory 846 scope lock. Two
+    # real connections, the wait proven in pg_locks (not by sleeping).
+    def scope_wait(observer, waiter_pid, holder_pid, mission):
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            row = observer.execute(
+                """SELECT count(*) AS n, pg_blocking_pids(%s) AS blockers
+                FROM pg_locks l, (SELECT hashtextextended(
+                  jsonb_build_array('v846r','a',%s::text)::text,846) AS k) x
+                WHERE l.pid=%s AND l.locktype='advisory' AND NOT l.granted
+                AND l.objsubid=1 AND l.classid::bigint=((x.k>>32)&4294967295)
+                AND l.objid::bigint=(x.k&4294967295)""",
+                (waiter_pid, mission, waiter_pid),
+            ).fetchone()
+            if row["n"] == 1:
+                assert row["blockers"] == [holder_pid], row["blockers"]
+                held = observer.execute(
+                    """SELECT count(*) AS n FROM pg_locks l, (SELECT hashtextextended(
+                      jsonb_build_array('v846r','a',%s::text)::text,846) AS k) x
+                    WHERE l.pid=%s AND l.locktype='advisory' AND l.granted
+                    AND l.objsubid=1 AND l.classid::bigint=((x.k>>32)&4294967295)
+                    AND l.objid::bigint=(x.k&4294967295)""",
+                    (mission, holder_pid),
+                ).fetchone()["n"]
+                assert held == 1
+                return
+            time.sleep(0.01)
+        raise AssertionError("advisory 846 scope wait not observed in pg_locks")
+
+    def close_args(identity):
+        return (
+            identity["mission_id"],
+            identity["claim_id"],
+            identity["terminal_at"],
+            identity["retain_until"],
+            fingerprint(identity),
+        )
+
+    close_sql = (
+        "SELECT vault_metadata.audit_close_mission('v846r','a',%s,%s,1,%s,%s,%s,"
+        "clock_timestamp()+interval '20 seconds') AS ok"
+    )
+    call_sql = (
+        "INSERT INTO vault_metadata.audit_calls(instance_id,call_id,actor_ref,tool,tenant_id,mission_id)"
+        " VALUES('v846r',%s,'anonymous','secret_read','a',%s)"
+    )
+    event_sql = (
+        "INSERT INTO vault_metadata.audit_events(instance_id,call_id,phase,step_id,outcome)"
+        " VALUES('v846r',%s,'public_terminal','00000000-0000-0000-0000-000000000000','completed')"
+    )
+
+    def run_waiter(target, started, outcome, sql_text, args, role):
+        try:
+            with connect(role, application_name="v846r_race") as conn:
+                target["pid"] = conn.info.backend_pid
+                started.set()
+                with conn.transaction():
+                    conn.execute(sql_text, args)
+        except psycopg.Error as exc:
+            outcome.append(("refused", exc.sqlstate, str(exc)))
+        else:  # any other failure leaves outcome empty: the main thread asserts
+            outcome.append(("accepted", None, ""))
+
+    # (a) Correlated call first: closure waits, then sees the call; no zero.
+    ident6 = ident | {"mission_id": "mission-race-call", "claim_id": str(uuid4())}
+    race_call = str(uuid4())
+    waiter, started, outcome = {}, threading.Event(), []
+    with connect("v846r_app") as holder, connect() as observer:
+        holder.execute("BEGIN")
+        holder.execute(call_sql, (race_call, "mission-race-call"))
+        holder.execute(event_sql, (race_call,))
+        worker = threading.Thread(
+            target=run_waiter,
+            args=(waiter, started, outcome, close_sql, close_args(ident6), "v846r_maint"),
+        )
+        worker.start()
+        assert started.wait(2)
+        scope_wait(observer, waiter["pid"], holder.info.backend_pid, "mission-race-call")
+        assert worker.is_alive() and outcome == []
+        holder.execute("COMMIT")
+        worker.join(6)
+        assert not worker.is_alive()
+    assert outcome == [("accepted", None, "")], outcome
+    op6 = str(uuid4())
+
+    def race_params():
+        return ("v846r", Jsonb(ident6), op6, canonical_identity(ident6),
+                datetime.now(timezone.utc) + timedelta(seconds=25))
+
+    with connect("v846r_maint") as conn, conn.transaction():
+        value = conn.execute(
+            "SELECT vault_metadata.audit_retirement_prepare(%s,%s,%s,%s,%s) AS result",
+            race_params(),
+        ).fetchone()["result"]
+    assert value["state"] == "prepared"
+    assert [r["revision"] for r in value["inventory"]] == [1, 1, 1, 0]
+    with connect() as conn:
+        conn.execute(
+            "UPDATE vault_metadata.audit_calls SET created_at=clock_timestamp()-interval '500 days',expires_at=clock_timestamp()-interval '135 days' WHERE mission_id='mission-race-call'"
+        )
+    with connect("v846r_maint") as conn, conn.transaction():
+        step = conn.execute(
+            "SELECT vault_metadata.audit_retirement_batch(%s,%s,%s,%s,%s,500) AS result",
+            race_params(),
+        ).fetchone()["result"]
+    assert step["has_more"] is False and step["lot"]["calls"] == [race_call]
+    assert validate_result("audit-retention-retire", step, ident6, op6) == step["result"]
+    calls_ref = [r for r in step["result"]["references"] if r["kind"] == "vault_audit_calls"]
+    assert len(calls_ref) == 1 and calls_ref[0]["revision"] == 1
+    assert calls_ref[0]["id"] != EMPTY_AGGREGATE
+    # (b) Closure first: the correlated call waits, then is refused 42501.
+    ident7 = ident | {"mission_id": "mission-race-close", "claim_id": str(uuid4())}
+    waiter, started, outcome = {}, threading.Event(), []
+    with connect("v846r_maint") as holder, connect() as observer:
+        holder.execute("BEGIN")
+        assert holder.execute(close_sql, close_args(ident7)).fetchone()["ok"]
+        worker = threading.Thread(
+            target=run_waiter,
+            args=(waiter, started, outcome, call_sql, (str(uuid4()), "mission-race-close"), "v846r_app"),
+        )
+        worker.start()
+        assert started.wait(2)
+        scope_wait(observer, waiter["pid"], holder.info.backend_pid, "mission-race-close")
+        assert worker.is_alive() and outcome == []
+        holder.execute("COMMIT")
+        worker.join(6)
+        assert not worker.is_alive()
+    assert len(outcome) == 1 and outcome[0][:2] == ("refused", "42501"), outcome
+    assert "closed mission audit correlation" in outcome[0][2]
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) AS n FROM vault_metadata.audit_calls WHERE mission_id='mission-race-close'"
+        ).fetchone()["n"] == 0
+    with connect("v846r_maint") as conn, conn.transaction():
+        value = conn.execute(
+            "SELECT vault_metadata.audit_retirement_prepare(%s,%s,%s,%s,%s) AS result",
+            ("v846r", Jsonb(ident7), str(uuid4()), canonical_identity(ident7),
+             datetime.now(timezone.utc) + timedelta(seconds=25)),
+        ).fetchone()["result"]
+    assert [r["revision"] for r in value["inventory"]] == [0, 0, 1, 0]
+    checks.append("race_two_connections_pg_locks_call_first_counted_close_first_42501")
     # Recheck owner verification as observer, exact structure and restricted roles.
     with connect() as conn:
         audit_schema.verify(conn, cfg)

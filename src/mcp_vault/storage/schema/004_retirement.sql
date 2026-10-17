@@ -91,9 +91,10 @@ BEGIN
   RAISE EXCEPTION 'invalid mission retention closure';
  END IF;
  PERFORM pg_advisory_xact_lock(hashtextextended(jsonb_build_array(wanted_instance,wanted_tenant,wanted_mission)::text,846));
- -- A Mission that never called Vault has no hold yet. Closing creates it under
- -- the admission lock, so audit_fill_call/audit_wrap_admit refuse any later
- -- correlation: that closure, not an empty observation, proves zero activity.
+ -- With no Vault audit retained for this scope at closure, no hold may exist
+ -- yet. Closing creates it under the admission lock, so audit_fill_call and
+ -- audit_wrap_admit refuse any later correlation. That closure, not an empty
+ -- observation, proves the zero.
  INSERT INTO vault_metadata.audit_mission_holds(instance_id,tenant_id,mission_id)
   VALUES(wanted_instance,wanted_tenant,wanted_mission) ON CONFLICT DO NOTHING;
  SELECT * INTO STRICT held FROM vault_metadata.audit_mission_holds
@@ -163,7 +164,8 @@ BEGIN
  END IF;
  refs:=vault_metadata.audit_retirement_inventory(i,t,m);
  -- The closed hold checked above is the proof: no correlated call or wrap can
- -- be admitted after closure, so an empty inventory here is a real zero.
+ -- be admitted after closure, so an empty inventory here means no Vault audit
+ -- retained for this scope at closure.
  INSERT INTO vault_metadata.audit_mission_retirements(instance_id,operation_id,tenant_id,mission_id,identity,proof_sha256,inventory,state)
  VALUES(i,op,t,m,ident,fingerprint,refs,'prepared');
  RETURN jsonb_build_object('state','prepared','inventory',vault_metadata.audit_retirement_references(refs),'lots','[]'::jsonb);

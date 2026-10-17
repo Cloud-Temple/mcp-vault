@@ -1,8 +1,8 @@
 """Frozen copy of the Mission owner receipt contract, mcp-mission #914.
 
 Copied verbatim (no edit, extracted by AST) from the Cloud-Temple/mcp-mission
-#914 branch at d51d230e (base 3afd31a1 plus the zero-activity Vault receipt),
-committed 17/10/2026.
+#914 branch at 76828661
+(d51d230e plus the 846 P3 wording), extracted 17/10/2026.
 src/mcp_mission/storage/retention_policy.py (instant),
 src/mcp_mission/auth/retention_proof.py (OWNERS, RetentionClaim),
 src/mcp_mission/storage/retention_coordination.py (REMOTE_OWNERS, _canonical,
@@ -114,8 +114,9 @@ EMPTY_AGGREGATE = "sha256:" + hashlib.sha256(b"[]").hexdigest()
 def _validate_vault_references(refs, claim):
     # Vault #846 (004_retirement.sql) has no native Agent root: root stays empty,
     # the claim identity above binds it. Same invariants as Vault validate_envelope.
-    # A Mission without Vault activity gets four zero counts: its closure blocks
-    # any later correlation, so zero is proven, and each carries the digest of [].
+    # No Vault audit retained for this scope at closure gives four zero counts:
+    # the closure blocks any later correlation, so zero is proven, and each zero
+    # carries the digest of [].
     calls, events, bindings, _ = _validate_aggregates(refs, VAULT_AGGREGATES, "", "Vault")
     if any((ref["revision"] == 0) != (ref["id"] == EMPTY_AGGREGATE) for ref in refs):
         raise ValueError("Vault retirement reference refused")
