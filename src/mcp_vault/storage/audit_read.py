@@ -27,12 +27,36 @@ def where_scope(scope: AuditScope):
             raise PermissionError("audit scope denied")
         clauses += ["c.vault_id=ANY(%s)", "c.actor_ref<>'anonymous'", "c.tenant_id IS NULL", "c.mission_id IS NULL"]
         values.append(sorted(scope.coffers))
+    from .hub_vault_activity import MissionAuditScope
+    if isinstance(scope, MissionAuditScope):
+        # Replace the opaque auditor's NULL-only clauses, never broaden its branch.
+        clauses = ["c.instance_id=%s", "c.vault_id=ANY(%s)", "left(c.actor_ref,8)='mission_'",
+                   "c.tenant_id=%s", "c.mission_id=%s"]
+        values = [scope.instance, sorted(scope.coffers), scope.tenant_id, scope.mission_id]
     return clauses, values
 
 
 def _revision(conn, instance):
     row = conn.execute("SELECT revision FROM vault_metadata.audit_revision WHERE instance_id=%s", (instance,)).fetchone()
     return row["revision"] if row else 0
+
+
+def _membership(conn, joined, condition, values):
+    """Empreinte v1 du snapshot842 : mémoire SQL/Python constante, sans extension.
+
+    Les seq sont immuables et uniques. Deux sommes de lanes SHA256, modulo
+    2**64, détectent les remplacements même à cardinalité égale ; une collision
+    théorique reste possible. Le nombre total est également vérifié séparément.
+    """
+    digest = "encode(sha256(convert_to(e.seq::text,'UTF8')),'hex')"
+    row = conn.execute("SELECT count(*) AS total,"
+        "COALESCE(sum(('x'||substr("+digest+",1,16))::bit(64)::bigint),0) AS snapshot_hi,"
+        "COALESCE(sum(('x'||substr("+digest+",17,16))::bit(64)::bigint),0) AS snapshot_lo"
+        +joined+condition, values).fetchone()
+    mask = (1 << 64)-1
+    # The leading version binds every internal cursor to this fingerprint format.
+    stamp = (1 << 128) | ((int(row["snapshot_hi"]) & mask) << 64) | (int(row["snapshot_lo"]) & mask)
+    return row["total"], stamp
 
 
 def normalize_filters(filters):
@@ -97,6 +121,8 @@ def read_page(scope, *, limit=100, cursor=None, filters=None):
             or cursor.position > cursor.upper or cursor.delivered > cursor.total):
         raise ValueError("audit cursor invalid")
     filters = normalize_filters(filters)
+    from .hub_vault_activity import MissionAuditScope
+    mission_snapshot = isinstance(scope, MissionAuditScope)
     clauses, values = where_scope(scope)
     more_clauses, more_values = where_filters(filters)
     clauses.extend(more_clauses)
@@ -109,8 +135,8 @@ def read_page(scope, *, limit=100, cursor=None, filters=None):
         try:
             conn.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
             begun = True
-            revision = _revision(conn, scope.instance)
-            if cursor is not None and revision != cursor.revision:
+            revision = None if mission_snapshot else _revision(conn, scope.instance)
+            if not mission_snapshot and cursor is not None and revision != cursor.revision:
                 raise ExportIncomplete("audit_export_changed")
             upper = cursor.upper if cursor else conn.execute(
                 "SELECT COALESCE(max(seq),0) AS upper FROM vault_metadata.audit_events WHERE instance_id=%s",
@@ -119,7 +145,12 @@ def read_page(scope, *, limit=100, cursor=None, filters=None):
             values.append(upper)
             joined = " FROM vault_metadata.audit_calls c JOIN vault_metadata.audit_events e USING(instance_id,call_id) WHERE "
             condition = " AND ".join(clauses)
-            total = conn.execute("SELECT count(*) AS total"+joined+condition, values).fetchone()["total"]
+            if mission_snapshot:
+                total, revision = _membership(conn, joined, condition, values)
+                if cursor is not None and revision != cursor.revision:
+                    raise ExportIncomplete("audit_export_changed")
+            else:
+                total = conn.execute("SELECT count(*) AS total"+joined+condition, values).fetchone()["total"]
             if cursor is not None and total != cursor.total:
                 raise ExportIncomplete("audit_export_changed")
             position = cursor.position if cursor else upper+1
@@ -152,7 +183,9 @@ def read_page(scope, *, limit=100, cursor=None, filters=None):
                     pass
             raise
         # Un commit tardif/purge ou une révocation interdit la restitution finale.
-        if _revision(conn, scope.instance) != revision:
+        changed = (_membership(conn, joined, condition, values) != (total, revision)
+                   if mission_snapshot else _revision(conn, scope.instance) != revision)
+        if changed:
             raise ExportIncomplete("audit_export_changed")
         revalidate_actor(conn)
         complete = delivered == total

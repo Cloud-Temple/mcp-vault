@@ -45,7 +45,7 @@ def audit_scope(instance, identity, policy):
     """Projection conservative de la policy existante, sans modifier ses gardes."""
     if not isinstance(instance, str) or not IDENT.fullmatch(instance):
         raise PermissionError("audit scope invalid")
-    if not isinstance(identity, dict) or identity.get("auth_type") == "mission_jwt":
+    if not isinstance(identity, dict) or identity.get("auth_type") in {"mission_jwt", "hub_vault_read"}:
         raise PermissionError("audit scope denied")
     permissions = identity.get("permissions")
     if not isinstance(permissions, list) or not all(isinstance(p, str) for p in permissions):
