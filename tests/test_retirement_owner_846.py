@@ -59,6 +59,9 @@ def envelope(ident, op):
         "wrong_prefix",
         "negative_revision",
         "bool_revision",
+        "events_without_calls",
+        "zero_count_with_list_digest",
+        "count_with_empty_digest",
     ],
 )
 def test_no_partial_or_forged_reference_envelope(mutation):
@@ -105,6 +108,13 @@ def test_no_partial_or_forged_reference_envelope(mutation):
         value["references"][3]["revision"] = -1
     if mutation == "bool_revision":
         value["references"][3]["revision"] = True
+    if mutation == "events_without_calls":
+        value["references"][0]["revision"] = 0
+        value["references"][0]["id"] = owner.EMPTY_AGGREGATE
+    if mutation == "zero_count_with_list_digest":
+        value["references"][3]["id"] = value["references"][0]["id"]
+    if mutation == "count_with_empty_digest":
+        value["references"][3]["revision"] = 1
     with pytest.raises(MetadataUnavailable):
         owner.validate_envelope(value, ident, op)
 
@@ -225,6 +235,38 @@ def test_public_retire_rechecks_after_lock_and_ack_only_after_commit_close(
     }:
         assert trace[-1] == "ROLLBACK"
         assert not any("retirement_batch" in item for item in trace)
+
+
+@pytest.mark.parametrize("binding", [1, 0])
+def test_closed_scope_without_calls_has_a_valid_empty_envelope(binding):
+    ident = identity()
+    op = str(uuid4())
+    value = envelope(ident, op)
+    value["references"] = aggregate(inventory(calls=0, binding=binding))
+    assert owner.validate_envelope(value, ident, op) is value
+    # The final batch of such a scope deletes nothing: no lot, no 179 receipt.
+    final = {"has_more": False, "lot": None, "result": value}
+    assert owner.validate_result("audit-retention-retire", final, ident, op) is value
+
+
+@pytest.mark.parametrize("change", ["has_more", "no_result", "calls_in_envelope"])
+def test_a_missing_lot_is_only_the_final_zero_call_batch(change):
+    ident = identity()
+    op = str(uuid4())
+    value = envelope(ident, op)
+    value["references"] = aggregate(inventory(calls=0))
+    result = {"has_more": False, "lot": None, "result": value}
+    if change == "has_more":
+        # Consistent with has_more on its own: only the missing lot is wrong.
+        result["has_more"] = True
+        result["result"] = None
+    if change == "no_result":
+        result["result"] = None
+    if change == "calls_in_envelope":
+        result["result"] = envelope(ident, op)  # one call, valid on its own
+        owner.validate_envelope(result["result"], ident, op)
+    with pytest.raises(MetadataUnavailable, match="retirement_batch_invalid"):
+        owner.validate_result("audit-retention-retire", result, ident, op)
 
 
 def test_partial_batch_is_never_an_owner_ack():

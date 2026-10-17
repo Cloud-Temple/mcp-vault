@@ -1,10 +1,12 @@
-"""Frozen copy of the Mission owner receipt contract, mcp-mission 9ded160c.
+"""Frozen copy of the Mission owner receipt contract, mcp-mission #914.
 
-Copied verbatim (no edit) from Cloud-Temple/mcp-mission 9ded160cd9f638714dd894a46e516a1664516299:
+Copied verbatim (no edit, extracted by AST) from the Cloud-Temple/mcp-mission
+#914 branch at d51d230e (base 3afd31a1 plus the zero-activity Vault receipt),
+committed 17/10/2026.
 src/mcp_mission/storage/retention_policy.py (instant),
 src/mcp_mission/auth/retention_proof.py (OWNERS, RetentionClaim),
 src/mcp_mission/storage/retention_coordination.py (REMOTE_OWNERS, _canonical,
-_digest, _validate_vault_references, validate_owner_receipt, owners_ready).
+_digest, aggregate validators, validate_owner_receipt, owners_ready).
 Refresh it from the merged #914 revision; never adapt it to make Vault pass.
 """
 from __future__ import annotations
@@ -85,38 +87,45 @@ def _digest(value):
     return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
 
 
+VAULT_AGGREGATES = ("vault_audit_calls", "vault_audit_events", "vault_binding_references",
+                    "vault_wrap_references")
+
+
+TOOLS_AGGREGATES = ("tools_activity_calls", "tools_activity_events", "tools_file_dependencies")
+
+
+def _aggregate_id(value):
+    # sha256 of the owner's sorted (COLLATE "C") inventory; the owner keeps the list.
+    return value.startswith("sha256:") and _digest(value[7:])
+
+
+def _validate_aggregates(refs, kinds, root, label):
+    # The shared budget is 1000 for all owners: one fixed reference per kind,
+    # in the producer's order, revision = count (int >= 0, checked by the caller).
+    if ([ref["kind"] for ref in refs] != list(kinds)
+            or any(not _aggregate_id(ref["id"]) or ref["root_agent_id"] != root for ref in refs)):
+        raise ValueError(label + " retirement reference refused")
+    return [ref["revision"] for ref in refs]
+
+
+EMPTY_AGGREGATE = "sha256:" + hashlib.sha256(b"[]").hexdigest()
+
+
 def _validate_vault_references(refs, claim):
-    # Frozen Vault SQL004 emits four types. References have no native Agent
-    # root; the global claim identity above still binds its canonical root.
-    calls = {ref['id'] for ref in refs if ref['kind'] == 'audit_call'}
-    for ref in refs:
-        kind, identifier, revision = ref['kind'], ref['id'], ref['revision']
-        if ref['root_agent_id'] != '' or kind not in {
-            'audit_call', 'audit_event', 'binding_reference', 'wrap_reference'
-        }:
-            raise ValueError('Vault retirement reference refused')
-        if kind in {'audit_call', 'audit_event'}:
-            if revision != 0:
-                raise ValueError('Vault immutable audit revision refused')
-            call_id, separator, seq = identifier.rpartition(':') if kind == 'audit_event' else (identifier, '', '')
-            try:
-                if str(UUID(call_id)) != call_id:
-                    raise ValueError()
-            except (ValueError, AttributeError):
-                raise ValueError('Vault audit identity refused') from None
-            if kind == 'audit_event' and (
-                not separator or not seq.isascii() or not seq.isdecimal()
-                or not 1 <= int(seq) <= 9223372036854775807 or str(int(seq)) != seq or call_id not in calls
-            ):
-                raise ValueError('Vault audit event reference incomplete')
-        elif revision < 1:
-            raise ValueError('Vault mutable reference revision refused')
-        elif kind == 'binding_reference' and identifier != claim.tenant_id:
-            raise ValueError('Vault binding scope refused')
-        elif kind == 'wrap_reference':
-            suffix = ':' + claim.mission_id
-            if not identifier.endswith(suffix) or not identifier[:-len(suffix)]:
-                raise ValueError('Vault wrap scope refused')
+    # Vault #846 (004_retirement.sql) has no native Agent root: root stays empty,
+    # the claim identity above binds it. Same invariants as Vault validate_envelope.
+    # A Mission without Vault activity gets four zero counts: its closure blocks
+    # any later correlation, so zero is proven, and each carries the digest of [].
+    calls, events, bindings, _ = _validate_aggregates(refs, VAULT_AGGREGATES, "", "Vault")
+    if any((ref["revision"] == 0) != (ref["id"] == EMPTY_AGGREGATE) for ref in refs):
+        raise ValueError("Vault retirement reference refused")
+    if events < calls or calls == 0 and events != 0 or bindings > 1:
+        raise ValueError("Vault audit inventory incomplete")
+
+
+def _validate_tools_references(refs, claim):
+    # Tools #846 binds every retired call to the claim root (empty root: zero calls).
+    _validate_aggregates(refs, TOOLS_AGGREGATES, claim.root_agent_id, "Tools")
 
 
 def validate_owner_receipt(value, claim):
@@ -156,6 +165,8 @@ def validate_owner_receipt(value, claim):
         seen.add(identity)
     if claim.owner == "vault":
         _validate_vault_references(refs, claim)
+    if claim.owner == "tools":
+        _validate_tools_references(refs, claim)
     if claim.owner == "teleport":
         allowed = {"teleport_task", "teleport_observation", "teleport_mission_tombstone",
                    "teleport_intent_anchor", "teleport_segment_anchor"}
@@ -190,4 +201,3 @@ def owners_ready(receipts, claims):
         return count <= 1000
     except (ValueError, KeyError, TypeError, AttributeError):
         return False
-

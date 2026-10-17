@@ -23,7 +23,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from mcp_vault.storage import audit_schema, audit_retirement_schema
 from mcp_vault.storage.retention_proof import canonical_identity, fingerprint
-from mcp_vault.storage.retirement_maintenance import validate_envelope
+from mcp_vault.storage.retirement_maintenance import (
+    EMPTY_AGGREGATE,
+    validate_envelope,
+    validate_result,
+)
 from tests.fixtures.vault_receipt_846 import aggregate
 
 
@@ -428,6 +432,104 @@ def run(socket, report):
             "SELECT count(*) AS n FROM vault_metadata.audit_calls WHERE mission_id='mission-large'"
         ).fetchone()["n"] == 0
     checks.append("mission_5000_events_five_batches_four_reference_receipt")
+    # 846 P2: a Mission that never called Vault, the common case. Mission waits
+    # for a Vault receipt for every claim. No hold exists before closure; the
+    # closure creates it, then refuses any correlated call or wrap, and the
+    # receipt carries four zero counts bound to the digest of the empty list.
+    claim4 = str(uuid4())
+    ident4 = ident | {"mission_id": "mission-silent", "claim_id": claim4}
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) AS n FROM vault_metadata.audit_mission_holds WHERE mission_id='mission-silent'"
+        ).fetchone()["n"] == 0
+    with connect("v846r_maint") as conn, conn.transaction():
+        assert conn.execute(
+            "SELECT vault_metadata.audit_close_mission('v846r','a','mission-silent',%s,1,%s,%s,%s,clock_timestamp()+interval '20 seconds') AS ok",
+            (claim4, ident4["terminal_at"], ident4["retain_until"], fingerprint(ident4)),
+        ).fetchone()["ok"]
+    for statement, args in [
+        (
+            "INSERT INTO vault_metadata.audit_calls(instance_id,call_id,actor_ref,tool,tenant_id,mission_id) VALUES('v846r',%s,'anonymous','secret_read','a','mission-silent')",
+            (str(uuid4()),),
+        ),
+        ("SELECT vault_metadata.audit_wrap_admit('v846r','a','mission-silent')", ()),
+    ]:
+        with connect("v846r_app") as conn:
+            try:
+                conn.execute(statement, args)
+            except psycopg.errors.InsufficientPrivilege as exc:
+                assert "closed mission" in str(exc)
+            else:
+                raise AssertionError("closed silent Mission admitted a correlation")
+    with connect() as conn:
+        expire_receipts = conn.execute(
+            "SELECT count(*) AS n FROM vault_metadata.audit_calls WHERE tool='audit_expire'"
+        ).fetchone()["n"]
+    op4 = str(uuid4())
+
+    def silent_params():
+        return ("v846r", Jsonb(ident4), op4, canonical_identity(ident4),
+                datetime.now(timezone.utc) + timedelta(seconds=25))
+
+    with connect("v846r_maint") as conn, conn.transaction():
+        value = conn.execute(
+            "SELECT vault_metadata.audit_retirement_prepare(%s,%s,%s,%s,%s) AS result",
+            silent_params(),
+        ).fetchone()["result"]
+    assert value["state"] == "prepared"
+    assert [r["revision"] for r in value["inventory"]] == [0, 0, 1, 0]
+    with connect("v846r_maint") as conn, conn.transaction():
+        step = conn.execute(
+            "SELECT vault_metadata.audit_retirement_batch(%s,%s,%s,%s,%s,1) AS result",
+            silent_params(),
+        ).fetchone()["result"]
+    assert step["has_more"] is False and step["lot"] is None
+    assert validate_result("audit-retention-retire", step, ident4, op4) == step["result"]
+    empty = [ref for ref in step["result"]["references"] if ref["revision"] == 0]
+    assert len(empty) == 3 and {ref["id"] for ref in empty} == {EMPTY_AGGREGATE}
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT state,inventory,lots,committed_at,receipt_retain_until FROM vault_metadata.audit_mission_retirements WHERE operation_id=%s",
+            (op4,),
+        ).fetchone()
+        assert row["state"] == "committed" and row["lots"] == []
+        assert step["result"]["references"] == aggregate(row["inventory"])
+        assert row["receipt_retain_until"] >= row["committed_at"] + timedelta(days=365)
+        assert conn.execute(
+            "SELECT count(*) AS n FROM vault_metadata.audit_calls WHERE tool='audit_expire'"
+        ).fetchone()["n"] == expire_receipts
+    with connect("v846r_maint") as conn:
+        try:
+            with conn.transaction():
+                conn.execute(
+                    "SELECT vault_metadata.audit_retirement_batch(%s,%s,%s,%s,%s,1)",
+                    silent_params(),
+                )
+        except psycopg.Error as exc:
+            assert "already committed" in str(exc)
+        else:
+            raise AssertionError("repeat silent operation accepted")
+    # Without closure, the same empty scope stays protected: no hold, no row.
+    ident5 = ident | {"mission_id": "mission-never-closed", "claim_id": str(uuid4())}
+    op5 = str(uuid4())
+    with connect("v846r_maint") as conn:
+        try:
+            with conn.transaction():
+                conn.execute(
+                    "SELECT vault_metadata.audit_retirement_prepare(%s,%s,%s,%s,%s)",
+                    ("v846r", Jsonb(ident5), op5, canonical_identity(ident5),
+                     datetime.now(timezone.utc) + timedelta(seconds=25)),
+                )
+        except psycopg.Error:
+            pass
+        else:
+            raise AssertionError("unclosed empty scope prepared")
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) AS n FROM vault_metadata.audit_mission_retirements WHERE operation_id=%s",
+            (op5,),
+        ).fetchone()["n"] == 0
+    checks.append("mission_without_vault_activity_closure_creates_hold_empty_receipt_no_lot")
     # Recheck owner verification as observer, exact structure and restricted roles.
     with connect() as conn:
         audit_schema.verify(conn, cfg)

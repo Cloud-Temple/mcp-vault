@@ -56,7 +56,7 @@ Après `audit-retention-close` confirmé, trois actions POST locales sont propos
 - `audit-retention-inventory` : `proof` et `operation_id` UUID canonique. Capture
   durable et complète des références, maximum 100000 références et 16 Mio, puis
   réponse sous la forme agrégée du reçu (voir plus bas) ; ce succès ne vaut pas
-  retrait. Un scope absent, incomplet, un audit non terminal/UNKNOWN ou un wrap
+  retrait. Un scope non clos, incomplet, un audit non terminal/UNKNOWN ou un wrap
   sans état terminal et provenance confirmée reste protégé.
 - `audit-retention-retire` : mêmes paramètres, `batch`1..500 et `confirm` exact.
   Les lots conservent les IDs réellement issus de DELETE RETURNING et leurs
@@ -78,13 +78,23 @@ références, dans cet ordre : `vault_audit_calls`, `vault_audit_events`,
 `vault_binding_references`, `vault_wrap_references`. Pour chacune, `id` vaut
 `sha256:` suivi du SHA-256 hexadécimal du texte jsonb du tableau des éléments
 `id@revision` de l'inventaire, triés en `COLLATE "C"` ; `revision` est le nombre
-d'éléments. Une catégorie vide porte l'empreinte de `[]` et `revision` 0.
-`vault_audit_calls` vaut au moins 1, `vault_audit_events` au moins autant que les
-appels, `vault_binding_references` au plus 1. Ces objets n'ont pas de racine
+d'éléments. Une catégorie vide porte l'empreinte de `[]`
+(`sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945`) et
+`revision` 0 ; cette empreinte n'est valide pour aucun compte positif.
+`vault_audit_events` vaut au moins autant que les appels et reste à 0 sans appel,
+`vault_binding_references` au plus 1. Ces objets n'ont pas de racine
 Agent native : root_agent_id est vide dans chaque référence, tandis que
-l'identité globale conserve la racine canonique du claim. Mission 9ded160c
-refuse encore ces kinds dans `_validate_vault_references` ; #914 doit les
-accepter (proposition dans `tests/test_retirement_receipt_846.py`).
+l'identité globale conserve la racine canonique du claim. Mission #914 applique
+les mêmes règles (copie figée dans `tests/fixtures/mission_owner_receipt_914.py`).
+
+Mission attend un reçu Vault pour toute claim, y compris pour une Mission qui
+n'a jamais appelé Vault. En v4, `audit_close_mission` crée la ligne
+`audit_mission_holds` si elle manque, sous le verrou de scope partagé avec
+l'admission. Ensuite `audit_fill_call` et `audit_wrap_admit` refusent toute
+corrélation de ce scope (42501). C'est cette clôture, et non une observation
+vide, qui prouve l'absence d'activité. prepare accepte donc un scope clos sans
+appel ; le lot final ne supprime rien, n'ajoute ni lot ni reçu audit179 et rend
+`lot` nul avec le reçu à comptes nuls. Un scope jamais clos reste protégé.
 Le reçu est indépendant du sweep audit179 et conservé au moins365jours après
 son COMMIT final ; aucun GC de reçus n'est ajouté ici. Le sweep179 v4 exclut les
 appels corrélés pour ne pas effacer leur inventaire avant le reçu coordonné ;

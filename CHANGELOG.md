@@ -10,8 +10,14 @@
   `vault_audit_events`, `vault_binding_references`, `vault_wrap_references`),
   empreinte SHA-256 triée en `COLLATE "C"` et compte en `revision`. L'inventaire
   stocké reste exhaustif, borné à 100000 références et 16 Mio. Une Mission à
-  plus de 1000 événements d'audit peut donc être finalisée. Mission #914 doit
-  accepter ces quatre kinds dans sa branche Vault.
+  plus de 1000 événements d'audit peut donc être finalisée. Mission #914 accepte
+  ces quatre kinds dans sa branche Vault.
+
+- Mission sans activité Vault : `audit_close_mission` (redéfinie en v4) crée la
+  protection du scope si elle manque, puis refuse toute nouvelle corrélation.
+  prepare accepte alors un scope clos sans appel, et le dernier lot ne supprime
+  rien et ne produit ni lot ni reçu audit179. Le reçu porte des comptes nuls,
+  chacun lié à l'empreinte de la liste vide. Sans clôture, le scope reste protégé.
 
 - Candidat opérateur v4 : inventaire corrélé borné, lots avec IDs réellement
   retirés et reçu de référence annuel indépendant du sweep audit. Bindings

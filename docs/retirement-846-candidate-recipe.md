@@ -38,7 +38,9 @@ Groupes contenus : installation+verify/ACL, sweep global ne retire pas les
 corrélations, préparation d'inventaire, deux vrais COMMIT de lots/IDs RETURNING/
 receiptUUID179 et reçu annuel, préservation B et binding partagé, doublon final
 refusé, attente advisory réelle→expiry→rollback, audit credential opaque
-uncorrelated capable de COMMIT pendant verrous de scope, verify final.
+uncorrelated capable de COMMIT pendant verrous de scope, Mission sans activité
+Vault (clôture qui crée le hold puis refuse appel et wrap, reçu à comptes nuls
+sans lot ni reçu179, scope non clos refusé), verify final.
 
 Avant adoption, compléter les cas SQL ci-dessous dans une fixture fraîche ou un
 delta relu de celle-ci ; aucun booléen logiciel ne les remplace :

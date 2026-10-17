@@ -77,6 +77,41 @@ BEGIN
  RETURN refs;
 END $$;
 
+-- v3 closure plus hold creation; same signature, owner and ACL (v3 verify
+-- reads this body first once v4 is installed).
+CREATE OR REPLACE FUNCTION vault_metadata.audit_close_mission(wanted_instance text, wanted_tenant text, wanted_mission text,
+ wanted_claim uuid, wanted_revision bigint, wanted_terminal timestamptz, wanted_until timestamptz, wanted_proof text,
+ authority_expires timestamptz)
+RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE held vault_metadata.audit_mission_holds; stamp timestamptz;
+BEGIN
+ IF wanted_claim IS NULL OR wanted_revision IS NULL OR wanted_revision<1
+  OR wanted_terminal IS NULL OR wanted_until IS NULL OR wanted_proof IS NULL OR authority_expires IS NULL
+  OR wanted_proof !~ '^[a-f0-9]{64}$' OR wanted_until<wanted_terminal+interval '365 days' THEN
+  RAISE EXCEPTION 'invalid mission retention closure';
+ END IF;
+ PERFORM pg_advisory_xact_lock(hashtextextended(jsonb_build_array(wanted_instance,wanted_tenant,wanted_mission)::text,846));
+ -- A Mission that never called Vault has no hold yet. Closing creates it under
+ -- the admission lock, so audit_fill_call/audit_wrap_admit refuse any later
+ -- correlation: that closure, not an empty observation, proves zero activity.
+ INSERT INTO vault_metadata.audit_mission_holds(instance_id,tenant_id,mission_id)
+  VALUES(wanted_instance,wanted_tenant,wanted_mission) ON CONFLICT DO NOTHING;
+ SELECT * INTO STRICT held FROM vault_metadata.audit_mission_holds
+  WHERE (instance_id,tenant_id,mission_id)=(wanted_instance,wanted_tenant,wanted_mission) FOR UPDATE;
+ -- Fresh PG clock after the potentially blocking scope/row locks.
+ stamp:=clock_timestamp();
+ IF authority_expires<=stamp OR authority_expires>stamp+interval '30 seconds'
+  OR wanted_terminal>stamp OR (held.claim_id IS NOT NULL AND
+  (held.claim_id,held.closure_revision,held.terminal_at,held.retain_until,held.proof_sha256)
+   IS DISTINCT FROM (wanted_claim,wanted_revision,wanted_terminal,wanted_until,wanted_proof)) THEN
+  RAISE EXCEPTION 'conflicting mission retention closure';
+ END IF;
+ UPDATE vault_metadata.audit_mission_holds SET claim_id=wanted_claim,closure_revision=wanted_revision,
+  terminal_at=wanted_terminal,retain_until=wanted_until,proof_sha256=wanted_proof
+  WHERE (instance_id,tenant_id,mission_id)=(wanted_instance,wanted_tenant,wanted_mission);
+ RETURN true;
+END $$;
+
 -- The stored inventory stays exhaustive. Mission budgets 1000 references for
 -- all owners, so its receipt carries one fixed reference per source kind:
 -- id = sha256 of the jsonb text of the sorted (COLLATE "C") "id@revision"
@@ -127,9 +162,8 @@ BEGIN
   RETURN jsonb_build_object('state',r.state,'inventory',vault_metadata.audit_retirement_references(r.inventory),'lots',r.lots);
  END IF;
  refs:=vault_metadata.audit_retirement_inventory(i,t,m);
- -- An empty observation alone cannot prove non-applicability.
- IF NOT EXISTS(SELECT 1 FROM vault_metadata.audit_calls WHERE (instance_id,tenant_id,mission_id)=(i,t,m)) THEN
-  RAISE EXCEPTION 'retirement correlation absent'; END IF;
+ -- The closed hold checked above is the proof: no correlated call or wrap can
+ -- be admitted after closure, so an empty inventory here is a real zero.
  INSERT INTO vault_metadata.audit_mission_retirements(instance_id,operation_id,tenant_id,mission_id,identity,proof_sha256,inventory,state)
  VALUES(i,op,t,m,ident,fingerprint,refs,'prepared');
  RETURN jsonb_build_object('state','prepared','inventory',vault_metadata.audit_retirement_references(refs),'lots','[]'::jsonb);
@@ -160,6 +194,13 @@ BEGIN
  SELECT coalesce(array_agg(call_id ORDER BY call_id),ARRAY[]::uuid[]) INTO ids FROM (
  SELECT call_id FROM vault_metadata.audit_calls WHERE (instance_id,tenant_id,mission_id)=(i,t,m)
  ORDER BY call_id LIMIT batch FOR UPDATE) c;
+ IF cardinality(ids)=0 THEN
+  -- Closed scope that never had a correlated call: nothing to DELETE, so no
+  -- lot and no audit179 receipt. Any other path to zero ids is refused.
+  IF jsonb_array_length(r.lots)>0 OR EXISTS(SELECT 1 FROM jsonb_array_elements(r.inventory) v
+   WHERE v->>'kind' IN ('audit_call','audit_event')) THEN
+   RAISE EXCEPTION 'retirement ids mismatch'; END IF;
+ ELSE
  WITH deleted AS (DELETE FROM vault_metadata.audit_events WHERE instance_id=i AND call_id=ANY(ids) RETURNING call_id::text||':'||seq::text AS event_id)
  SELECT coalesce(array_agg(event_id ORDER BY event_id),ARRAY[]::text[]) INTO events FROM deleted;
  WITH deleted AS (DELETE FROM vault_metadata.audit_calls WHERE instance_id=i AND call_id=ANY(ids) RETURNING call_id)
@@ -171,6 +212,7 @@ BEGIN
  INSERT INTO vault_metadata.audit_events(instance_id,call_id,phase,step_id,outcome)
  VALUES(i,receipt,'public_terminal','00000000-0000-0000-0000-000000000000','completed');
  r.lots:=r.lots||jsonb_build_array(jsonb_build_object('calls',to_jsonb(removed),'events',to_jsonb(events),'receipt',receipt));
+ END IF;
  SELECT EXISTS(SELECT 1 FROM vault_metadata.audit_calls WHERE (instance_id,tenant_id,mission_id)=(i,t,m)) INTO more;
  stamp:=clock_timestamp();
  IF expires<=stamp THEN RAISE EXCEPTION 'retention authority expired'; END IF;

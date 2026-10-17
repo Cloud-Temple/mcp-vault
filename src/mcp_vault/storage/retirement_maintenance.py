@@ -1,6 +1,7 @@
 """Finite refs-only owner retirement; UNKNOWN never permits a mutation replay."""
 
 from datetime import datetime, timezone
+import hashlib
 from uuid import UUID
 
 from ..config import get_settings
@@ -21,6 +22,8 @@ KINDS = (
     "vault_binding_references",
     "vault_wrap_references",
 )
+# jsonb '[]'::text is "[]": the id of every empty category, and of no other.
+EMPTY_AGGREGATE = "sha256:" + hashlib.sha256(b"[]").hexdigest()
 
 
 def validate_envelope(value, identity, operation):
@@ -65,14 +68,17 @@ def validate_envelope(value, identity, operation):
             or type(ref["revision"]) is not int
             or ref["revision"] < 0
             or ref["root_agent_id"] != ""
+            or (ref["revision"] == 0) != (ref["id"] == EMPTY_AGGREGATE)
         ):
             raise MetadataUnavailable("retirement_reference_invalid")
         counts[kind] = ref["revision"]
-    # prepare refuses an uncorrelated scope and every call has a terminal
-    # event; the tenant binding key is unique.
+    # Every call has a terminal event, every event belongs to a call of the
+    # scope, the tenant binding key is unique. Zero calls is a closed scope
+    # that never called Vault: the closure, not this count, proves it.
     if (
-        counts["vault_audit_calls"] < 1
-        or counts["vault_audit_events"] < counts["vault_audit_calls"]
+        counts["vault_audit_events"] < counts["vault_audit_calls"]
+        or counts["vault_audit_calls"] == 0
+        and counts["vault_audit_events"] != 0
         or counts["vault_binding_references"] > 1
     ):
         raise MetadataUnavailable("retirement_inventory_incomplete")
@@ -115,7 +121,12 @@ def validate_result(name, result, identity, operation):
         ):
             raise MetadataUnavailable("retirement_batch_invalid")
         lot = result["lot"]
-        if (
+        if lot is None:
+            # Only the final batch of a closed scope without any call has no
+            # lot; its envelope must then carry zero calls (checked below).
+            if result["has_more"]:
+                raise MetadataUnavailable("retirement_batch_invalid")
+        elif (
             not isinstance(lot, dict)
             or set(lot) != {"calls", "events", "receipt"}
             or not isinstance(lot["calls"], list)
@@ -124,11 +135,11 @@ def validate_result(name, result, identity, operation):
         ):
             raise MetadataUnavailable("retirement_batch_invalid")
         try:
-            if str(UUID(lot["receipt"])) != lot["receipt"]:
-                raise ValueError()
-            if any(str(UUID(cid)) != cid for cid in lot["calls"]) or len(
-                set(lot["calls"])
-            ) != len(lot["calls"]):
+            if lot is not None and (
+                str(UUID(lot["receipt"])) != lot["receipt"]
+                or any(str(UUID(cid)) != cid for cid in lot["calls"])
+                or len(set(lot["calls"])) != len(lot["calls"])
+            ):
                 raise ValueError()
         except (ValueError, TypeError, AttributeError):
             raise MetadataUnavailable("retirement_batch_invalid") from None
@@ -141,11 +152,16 @@ def validate_result(name, result, identity, operation):
     ):
         raise MetadataUnavailable("retirement_receipt_invalid")
     envelope = result["result"]
-    return (
-        validate_envelope(envelope, identity, operation)
-        if envelope is not None
-        else None
-    )
+    if envelope is None:
+        return None
+    validate_envelope(envelope, identity, operation)
+    if (
+        name.endswith("retire")
+        and result["lot"] is None
+        and envelope["references"][0]["revision"] != 0
+    ):
+        raise MetadataUnavailable("retirement_batch_invalid")
+    return envelope
 
 
 def action(name, body):
