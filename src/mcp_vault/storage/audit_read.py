@@ -33,6 +33,10 @@ def where_scope(scope: AuditScope):
         clauses = ["c.instance_id=%s", "c.vault_id=ANY(%s)", "left(c.actor_ref,8)='mission_'",
                    "c.tenant_id=%s", "c.mission_id=%s"]
         values = [scope.instance, sorted(scope.coffers), scope.tenant_id, scope.mission_id]
+    from .fixture831_preparation import SNAPSHOT_SCOPES
+    if isinstance(scope, SNAPSHOT_SCOPES):
+        # Préparation831 seule ou union Hub : clauses propres, branche Mission intacte.
+        clauses, values = scope.where()
     return clauses, values
 
 
@@ -121,8 +125,10 @@ def read_page(scope, *, limit=100, cursor=None, filters=None):
             or cursor.position > cursor.upper or cursor.delivered > cursor.total):
         raise ValueError("audit cursor invalid")
     filters = normalize_filters(filters)
+    from .fixture831_preparation import SNAPSHOT_SCOPES
     from .hub_vault_activity import MissionAuditScope
-    mission_snapshot = isinstance(scope, MissionAuditScope)
+    # Union831 et préparation831 gardent l'empreinte de membres, jamais la révision globale.
+    mission_snapshot = isinstance(scope, (MissionAuditScope, *SNAPSHOT_SCOPES))
     clauses, values = where_scope(scope)
     more_clauses, more_values = where_filters(filters)
     clauses.extend(more_clauses)

@@ -19,6 +19,8 @@ TOOLS = MCP_TOOL_NAMES | {
     "mission_binding_create", "mission_binding_delete", "mission_binding_purge",
     "bearer_auth", "mission_pep", "audit_expire",
     "token_list", "mission_binding_list", "mission_binding_get", "pki_ca_status",
+    # Identifiant interne fermé de la préparation831, hors catalogue MCP.
+    "fixture831_prepare_read",
 }
 PHASES = frozenset({"admission", "sql_step_committed", "bao_step_outcome", "compensation_outcome", "public_terminal"})
 OUTCOMES = frozenset({"admitted", "denied", "confirmed", "failed", "unknown", "completed", "incomplete"})

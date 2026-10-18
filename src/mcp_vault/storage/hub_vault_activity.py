@@ -94,7 +94,11 @@ def local_scope(claims, facts):
         or "read" not in binding["permissions"]
     ):
         raise PermissionError("local coffer scope refused")
-    return MissionAuditScope(
+    from .fixture831_preparation import MissionHubAuditScope
+
+    # Plan831 R2 §2.2 : la lecture Hub lit l'union Mission + préparation831,
+    # mêmes instance, coffres, tenant et MID ; MissionAuditScope reste inchangé.
+    return MissionHubAuditScope(
         cfg.metadata_instance_id,
         frozenset(coffers),
         claims["tenant_id"],
