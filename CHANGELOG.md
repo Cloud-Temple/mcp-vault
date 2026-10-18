@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+- #831 : producteurs privés de préparation Vault (`prepare_read`, writer d'audit et job OpenBao), avec trace opérateur filtrée par scope ; exige le lecteur Mission de préparation associé avant campagne.
+
 - #846 : segments techniques UTC privés et nettoyage propriétaire borné à30jours minimum.
 
 ### Préparation Mission #846
