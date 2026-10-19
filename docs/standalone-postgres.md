@@ -248,6 +248,15 @@ SET TRUE. Le contrôle exige les capacités SET effectives d'infra, interdit SET
 owner pour app/maintenance et refuse tout grant/member/grantor étranger. Ces
 vérifications logicielles ne sont pas encore une mesure de catalogue PG réel.
 
+Pour un PG externe (C-E ou P-E), l'infra doit être préparée sans membership
+entrant provenant d'un créateur CREATEROLE tiers non superuser. PG16 ajoute dans
+ce cas une ligne vers infra, grantor bootstrap ; la garde la refuse comme
+étrangère. Faire préparer une identité compatible par l'opérateur externe,
+sans supprimer ni tolérer cette ligne automatiquement. Le paramètre de session
+`createrole_self_grant` doit rester à sa valeur canonique vide avant création
+des rôles A. Une autre valeur ou un graphe différent impose STOP et diagnostic,
+sans assouplissement de la garde ni adaptation automatique du SQL.
+
 ```sh
 python scripts/standalone_pg.py provision-fresh --config /srv/vault/operator.json
 python scripts/standalone_pg.py verify --config /srv/vault/operator.json

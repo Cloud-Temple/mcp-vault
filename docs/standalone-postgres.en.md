@@ -176,6 +176,14 @@ self-grant ADMIN FALSE/INHERIT FALSE/SET TRUE row. Effective infra SET is requir
 app/maintenance SET owner and foreign edges/grantors are rejected. Native catalog
 qualification remains outstanding.
 
+For external PG (C-E or P-E), infra must have no incoming membership from a
+third-party non-superuser CREATEROLE creator. PG16 adds an edge to infra with
+the bootstrap grantor in that case; the guard rejects it as foreign. Have the
+external operator prepare a compatible identity; never delete or tolerate that
+edge automatically. The session setting `createrole_self_grant` must retain its
+canonical empty value before creating A roles. A different value or graph means
+STOP and diagnosis, without relaxing guards or automatically adapting SQL.
+
 Stop Source Vault and its Bao together. Resume the same current Bao volume with
 one private Copy process, same M/instance/owner and new Copy paths. Credentials
 keep host/user/password; dbname changes. Copy INSTALL dispatches only connections
