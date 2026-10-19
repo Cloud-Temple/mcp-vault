@@ -150,6 +150,15 @@ def mode(config, expected):
 @contextmanager
 def control(config, values):
     with connection(values["infra"], config["pg_ca_file"]) as conn:
+        identity = conn.execute(
+            "SELECT current_database(),session_user,current_user"
+        ).fetchone()
+        if identity != (
+            values["infra"]["dbname"],
+            values["infra"]["user"],
+            values["infra"]["user"],
+        ):
+            raise ValueError("Base de contrôle/identité infra différente")
         preflight(conn)
         yield conn
 
@@ -166,16 +175,35 @@ def fingerprint(config, values, database, *, empty=False):
                     raise ValueError("Copie non vierge")
                 result = []
                 for name, kind in tables:
-                    rows = conn.execute(
-                        sql.SQL(
-                            "SELECT to_jsonb(t)::text FROM vault_metadata.{} t ORDER BY to_jsonb(t)::text"
-                        ).format(sql.Identifier(name))
-                    ).fetchall()
+                    if kind == "S":
+                        # setval restaure l'état logique, pas le cache/WAL log_cnt.
+                        rows = conn.execute(
+                            sql.SQL(
+                                "SELECT last_value,is_called FROM vault_metadata.{}"
+                            ).format(sql.Identifier(name))
+                        ).fetchall()
+                        if (
+                            len(rows) != 1
+                            or len(rows[0]) != 2
+                            or type(rows[0][0]) is not int
+                            or type(rows[0][1]) is not bool
+                        ):
+                            raise ValueError("État logique de séquence non confirmé")
+                        payload = [list(rows[0])]
+                    elif kind == "r":
+                        rows = conn.execute(
+                            sql.SQL(
+                                "SELECT to_jsonb(t)::text FROM vault_metadata.{} t ORDER BY to_jsonb(t)::text"
+                            ).format(sql.Identifier(name))
+                        ).fetchall()
+                        payload = [r[0] for r in rows]
+                    else:
+                        raise ValueError("Type de relation inattendu")
                     result.append(
                         [
                             name,
                             kind,
-                            hashlib.sha256(canonical([r[0] for r in rows])).hexdigest(),
+                            hashlib.sha256(canonical(payload)).hexdigest(),
                         ]
                     )
                 version = (

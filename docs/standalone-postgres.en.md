@@ -107,6 +107,75 @@ denial and /health 200. An intent without ACK stops, without retrying seed/DDL.
 
 ## Copy and safe return
 
+### Concrete operating prerequisites
+
+The generated ca.crt is operator-owned 0600; generation alone does not prove the
+application UID can read it. Measure app/operator/PG UID/GID and host mappings.
+Install a separate public CA reader copy with suitable ownership (for example
+0400 owned by the app UID), mount it read-only, and verify access for operator,
+backup and restore identities separately. Keep the PG server key 0600 for PG.
+Move ca.key to offline PKI storage, directory 0700/file 0600, outside operator,
+app and PG mounts. Never expose the whole private TLS directory to make the CA
+readable. Host ownership preparation is an explicit operator task.
+
+Set OPERATOR_DIRECTORY to a dedicated 0700 directory owned by the actual tool
+UID and adapt JSON/container paths and the same .env. The ./certs repository
+default is an unqualified placeholder, not prepared secret storage. The file
+guards refuse unsuitable ownership/modes.
+
+The local HBA's `local all all trust` lets any process admitted to the engine
+container impersonate PG roles, including bootstrap. Reserve engine access for
+the trusted PG operator; no Unix socket is shared with the app. The generated
+init.sql contains the infra password in plaintext, mode 0600 owned by PG, as do
+the engine password/HBA files. Keep their host directory private and mount only
+the required engine files read-only into PG, never the application. Do not print,
+trace or attach their contents. No superuser fallback is added to the SQL tool.
+
+Both generated CA and server certificate expire at T0 + 365 days. Record UTC
+notAfter dates and a named operational calendar before production. A short TLS
+qualification does not establish year-long availability. There is no automated
+warning or renewal. Schedule this manual rotation:
+
+1. By day 300, inventory trust readers, SAN and keys; prepare an offline new CA
+   and server certificate for the same host. Reissuing only the server under the
+   original generated CA cannot extend the chain beyond that CA's day-365 expiry.
+2. Before day 330, rehearse on an admitted disposable target. Prepare a public
+   old+new CA bundle and private server files with measured UID access.
+3. Before day 335, in a reserved window, update reader trust and restart PG to
+   load the new server key/certificate. Recreate file-bind readers: an atomic host
+   rename does not guarantee that an already mounted inode changes. Stop Vault
+   and Bao together and resume the current volume with only one process.
+4. Authenticate native Bao before SQL probes, then verify TLS/readiness and A/B
+   contracts for every required identity. Remove old trust only after all readers
+   are confirmed and their real mounts/processes reloaded. If unconfirmed, stop
+   the change and preserve evidence; never wait for expiry or invent data return.
+
+This is a manual PKI procedure for a future native window, not a new framework or
+API. A longer-lived external CA may allow same-CA server renewal, but its actual
+expiry remains the boundary; the generated default CA is not longer-lived.
+
+Fingerprint connections enforce 5 seconds per SQL statement, not an overall
+read budget. Dump and restore each have a fixed 120-second process bound. Before
+freezing real Source, measure complete audit/data/ACL/sequence reads and logical
+dump/restore on representative volumes in the admitted native window, with margin
+under those limits. No row/GB ceiling is qualified, and the tool has no volume
+preflight. Timeout after REVOKE but before freeze ACK leaves UNKNOWN: preserve
+bases/carriers and stop without replay or automatic reopening. Missing files
+never establish zero-mutation rollback.
+
+Keep Source traffic and SQL health probes quiescent during reopen-source-zero.
+A connection between re-GRANT and verification may conservatively yield UNKNOWN;
+do not reinterpret it as success or permission to retry. The historical helper
+validates some role names after parsing; this does not grant extra SQL authority.
+
+Membership validation reads real OIDs/names and grantors. PG16's bootstrap system
+identity (OID 10, including a renamed role) is reread from pg_roles and must be a
+superuser; no bootstrap name/ID is supplied in config. Each A role requires both
+the bootstrap ADMIN TRUE/INHERIT FALSE/SET FALSE row and the independent infra
+self-grant ADMIN FALSE/INHERIT FALSE/SET TRUE row. Effective infra SET is required;
+app/maintenance SET owner and foreign edges/grantors are rejected. Native catalog
+qualification remains outstanding.
+
 Stop Source Vault and its Bao together. Resume the same current Bao volume with
 one private Copy process, same M/instance/owner and new Copy paths. Credentials
 keep host/user/password; dbname changes. Copy INSTALL dispatches only connections

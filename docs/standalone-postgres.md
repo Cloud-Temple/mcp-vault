@@ -162,6 +162,92 @@ action à la fois ; les carriers ne fournissent pas de service de verrouillage.
 
 ## Schéma, readiness et maintenance
 
+### Prérequis opérateur concrets avant une exploitation réelle
+
+`prepare-files` laisse `ca.crt` en 0600 au nom de l'opérateur : sa seule
+génération ne démontre pas que l'UID `mcp` peut le lire. Mesurer séparément les
+UID/GID de l'app, de l'outil et de PG, y compris leur mapping sur l'hôte. Installer
+une **copie de la CA publique** dans un répertoire de confiance distinct, avec
+un propriétaire/mode permettant la lecture par l'app (par exemple fichier 0400
+appartenant à son UID), puis la monter RO à `/run/pg-ca.crt`. Vérifier aussi la
+lecture par les clients opérateur/backup/restore avec leur mapping propre. La
+clé serveur reste 0600 pour PG. Déplacer la clé privée `ca.key` dans un répertoire
+PKI hors ligne 0700, fichier 0600, **hors** `OPERATOR_DIRECTORY`, des montages app
+et des montages PG. Ne jamais rendre toute l'arborescence TLS lisible à l'app
+pour résoudre un défaut d'accès à la CA. Les installations/chown nécessaires
+relèvent de l'opérateur hôte autorisé, pas d'une élévation implicite du script.
+
+Pour Compose, définir explicitement `OPERATOR_DIRECTORY` vers un répertoire
+privé 0700, détenu par l'UID effectif de l'outil, et adapter tous les chemins
+conteneur du JSON et du même `.env`. Le défaut `./certs` est un emplacement de
+substitution du dépôt, **non qualifié** ; il n'est pas un répertoire de secrets
+prêt à l'emploi et les gardes le refusent si ses droits ne conviennent pas.
+
+Le HBA local contient exactement `local all all trust` pour le socket Unix du
+conteneur moteur : tout processus admis dans ce conteneur peut donc usurper une
+identité PG, y compris bootstrap. Cet accès moteur est réservé à l'opérateur PG
+de confiance ; aucun socket n'est partagé avec l'app. `init.sql` contient le mot
+de passe infra **en clair**, en fichier 0600 appartenant à l'UID PG, comme
+`engine.password` et le HBA généré. Le répertoire hôte est privé ; seuls les
+fichiers moteur nécessaires sont montés RO dans PG, jamais dans l'app. Ne pas
+afficher, tracer, joindre ou copier leur contenu dans des logs/rapports. Cette
+préparation du moteur ne crée aucun fallback superuser pour l'outil SQL.
+
+Les certificats générés, CA **et** serveur, expirent à T0 + 365 jours. Enregistrer
+leurs dates UTC `notAfter` et le responsable du calendrier avant production.
+Une preuve TLS sur quelques jours ne démontre pas leur maintien pendant un an.
+Le script n'alerte ni ne renouvelle. Plan manuel à dater et réserver :
+
+1. À T0 + 300 jours au plus, inventorier CA, SAN, clés et tous les lecteurs ;
+   préparer hors ligne une nouvelle CA et un certificat serveur pour le même
+   host. Avec la CA générée elle aussi à 365 jours, réémettre seulement le serveur
+   sous l'ancienne CA ne prolonge pas la chaîne après cette échéance.
+2. Avant T0 + 330 jours, répéter la rotation sur une cible jetable admise. Préparer
+   un bundle public ancienne + nouvelle CA, lisible aux UID réels, et un nouveau
+   jeu serveur privé. Conserver les anciennes clés seulement sous contrôle PKI.
+3. Avant T0 + 335 jours, pendant une fenêtre réservée, remplacer le trust bundle
+   des lecteurs et charger le nouveau certificat/clé PG par redémarrage contrôlé.
+   Recréer les lecteurs qui montent un fichier bind : un renommage atomique sur
+   l'hôte ne garantit pas la mise à jour de l'inode déjà monté. Arrêter Vault/Bao
+   ensemble et reprendre leur volume courant avec un seul processus.
+4. Reconfirmer auth native avant toute sonde SQL ; constater TLS/readiness, droits
+   et contrats A/B avec chaque identité prévue. Retirer l'ancienne CA des lecteurs
+   seulement après confirmation de tous les clients, en rechargeant réellement
+   les montages/processus. En cas d'échec, conserver les preuves et arrêter la
+   bascule ; ne pas attendre l'expiration ni inventer un retour de données.
+
+Cette procédure PKI reste manuelle, à qualifier dans la fenêtre native future ;
+elle n'ajoute ni framework ni API. Une CA externe de plus longue durée peut
+permettre une réémission serveur sous la même CA, mais sa date d'expiration
+reste la borne ; ce n'est pas la situation du jeu généré par défaut.
+
+Les connexions de fingerprint ont `statement_timeout=5000` : **5 s par
+instruction**, pas un budget global de lecture. Dump et restore ont chacun une
+borne de processus de **120 s**. Avant de geler une Source réelle, mesurer dans
+la fenêtre native admise les lectures complètes, incluant audit/ACL/séquences,
+et dump/restore sur un volume représentatif, avec marge sous ces bornes. Aucune
+taille maximale en lignes/Go n'est qualifiée ici, et l'outil ne prévalide pas la
+volumétrie. Une expiration peut survenir après REVOKE mais avant l'ACK du gel :
+l'état reste UNKNOWN. Préserver les bases et carriers, arrêter sans rejeu ni
+réouverture automatique ; un fichier manquant ne donne aucun rollback zéro.
+
+Enfin, garder les sondes et le trafic Source quiescents pendant
+`reopen-source-zero`, y compris les healthchecks SQL. Une connexion entre le
+re-GRANT et sa lecture de contrôle peut produire un UNKNOWN conservateur. Ne
+pas le transformer en succès ni en autorisation de rejouer. Le helper historique
+valide certains rôles seulement en aval de son parser ; fournir les identités
+canoniques du nouveau CLI, sans confondre cette limite ergonomique avec un droit
+SQL supplémentaire.
+
+Le contrôle de memberships lit les OID/noms réels et chaque grantor. L'identité
+système bootstrap PG16 (OID 10, même si renommée) est relue dans `pg_roles` avec
+son attribut superuser ; aucun nom/ID bootstrap n'est fourni par configuration.
+Pour chacun des six rôles A, la ligne bootstrap ADMIN TRUE / INHERIT FALSE /
+SET FALSE doit coexister avec le self-grant infra ADMIN FALSE / INHERIT FALSE /
+SET TRUE. Le contrôle exige les capacités SET effectives d'infra, interdit SET
+owner pour app/maintenance et refuse tout grant/member/grantor étranger. Ces
+vérifications logicielles ne sont pas encore une mesure de catalogue PG réel.
+
 ```sh
 python scripts/standalone_pg.py provision-fresh --config /srv/vault/operator.json
 python scripts/standalone_pg.py verify --config /srv/vault/operator.json

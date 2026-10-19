@@ -185,10 +185,23 @@ def db_observation(conn, database):
 
 
 def role_oids(conn, roles):
+    roles = list(roles)
     rows = conn.execute(
         "SELECT rolname,oid FROM pg_roles WHERE rolname=ANY(%s)", (list(roles),)
     ).fetchall()
-    if len(rows) != len(roles):
+    if (
+        len(rows) != len(roles)
+        or len(set(roles)) != len(roles)
+        or any(
+            len(row) != 2
+            or type(row[0]) is not str
+            or type(row[1]) is not int
+            or row[1] <= 0
+            for row in rows
+        )
+        or {row[0] for row in rows} != set(roles)
+        or len({row[1] for row in rows}) != len(roles)
+    ):
         raise ValueError("Rôles manquants")
     return dict(rows)
 
@@ -197,34 +210,103 @@ def domain_roles(conn, roles, infra):
     """Refuser les privilèges/memberships voisins avant toute action sur une base."""
     names = [*roles.values(), infra]
     oids = role_oids(conn, names)
+    if conn.execute("SELECT session_user,current_user").fetchone() != (infra, infra):
+        raise ValueError("Identité infra de session non confirmée")
+    # PG16 BOOTSTRAP_SUPERUSERID est une identité système, jamais un nom/ID fourni
+    # par operator.json. Relire son nom réel et son attribut superuser au catalogue.
+    bootstrap = conn.execute(
+        "SELECT oid,rolname,rolsuper FROM pg_roles WHERE oid=10 /* standalone:bootstrap-grantor */"
+    ).fetchall()
+    if (
+        len(bootstrap) != 1
+        or len(bootstrap[0]) != 3
+        or type(bootstrap[0][0]) is not int
+        or bootstrap[0][0] != 10
+        or type(bootstrap[0][1]) is not str
+        or not bootstrap[0][1]
+        or bootstrap[0][2] is not True
+        or 10 in oids.values()
+        or bootstrap[0][1] in names
+    ):
+        raise ValueError("Grantor bootstrap PG16 non confirmé")
+    bootstrap_oid, bootstrap_name, _ = bootstrap[0]
     rows = conn.execute(
         """SELECT rolname,rolcanlogin,rolinherit,rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls
         FROM pg_roles WHERE rolname=ANY(%s)""",
-        (list(roles.values()),),
+        (names,),
     ).fetchall()
-    if len(rows) != 6:
+    if (
+        len(rows) != 7
+        or any(
+            len(row) != 8
+            or type(row[0]) is not str
+            or any(type(flag) is not bool for flag in row[1:])
+            for row in rows
+        )
+        or {row[0] for row in rows} != set(names)
+    ):
         raise ValueError("Rôles incomplets")
     for name, login, inherit, *dangerous in rows:
+        if name == infra:
+            if not login or dangerous != [False, True, True, False, False]:
+                raise ValueError(
+                    "Infra trop privilégiée ou sans autorité de préparation"
+                )
+            continue
         if any(dangerous) or login != (name != roles["owner"]) or (login and inherit):
             raise ValueError("Rôle domaine trop privilégié")
     memberships = conn.execute(
-        """SELECT pg_get_userbyid(member),pg_get_userbyid(roleid),admin_option,inherit_option,set_option
-        FROM pg_auth_members WHERE member=ANY(%s) ORDER BY 1,2""",
-        (list(oids.values()),),
+        """SELECT m.member,mr.rolname,m.roleid,pr.rolname,m.grantor,gr.rolname,
+            m.admin_option,m.inherit_option,m.set_option
+        FROM pg_auth_members m
+        LEFT JOIN pg_roles mr ON mr.oid=m.member
+        LEFT JOIN pg_roles pr ON pr.oid=m.roleid
+        LEFT JOIN pg_roles gr ON gr.oid=m.grantor
+        WHERE m.member=ANY(%s) OR m.roleid=ANY(%s)
+        ORDER BY m.member,m.roleid,m.grantor""",
+        (list(oids.values()), list(oids.values())),
     ).fetchall()
     expected = {
-        (roles[kind], roles["owner"], False, False, True)
+        (oids[roles[kind]], oids[roles["owner"]], oids[infra], False, False, True)
         for kind in ("provisioner", "backup", "restore")
     }
+    for role in roles.values():
+        expected |= {
+            (oids[infra], oids[role], bootstrap_oid, True, False, False),
+            (oids[infra], oids[role], oids[infra], False, False, True),
+        }
+    identities = {oid: name for name, oid in oids.items()}
+    identities[bootstrap_oid] = bootstrap_name
     actual = set()
-    for member, parent, admin, inherit, can_set in memberships:
-        if member == infra:
-            if parent not in roles.values() or inherit or not can_set:
-                raise ValueError("Infra membre hors domaine ou héritage interdit")
-        else:
-            actual.add((member, parent, admin, inherit, can_set))
-    if actual != expected:
-        raise ValueError("Memberships domaine non conformes")
+    for row in memberships:
+        if (
+            len(row) != 9
+            or any(type(row[i]) is not int or row[i] <= 0 for i in (0, 2, 4))
+            or any(type(row[i]) is not bool for i in (6, 7, 8))
+            or any(
+                type(row[i + 1]) is not str or identities.get(row[i]) != row[i + 1]
+                for i in (0, 2, 4)
+            )
+        ):
+            raise ValueError("Identité/type de membership ou grantor non confirmé")
+        member, _, parent, _, grantor, _, admin, inherit, can_set = row
+        actual.add((member, parent, grantor, admin, inherit, can_set))
+    if actual != expected or len(memberships) != len(expected):
+        raise ValueError("Memberships/grantors domaine non conformes")
+    # L'ADMIN bootstrap et le SET du self-grant sont deux lignes indépendantes.
+    # Vérifier aussi la capacité effective avant owner/CREATE DATABASE ou drain.
+    for role in roles.values():
+        effective = conn.execute(
+            "SELECT pg_has_role(session_user,%s,'SET')", (role,)
+        ).fetchone()
+        if not effective or len(effective) != 1 or effective[0] is not True:
+            raise ValueError("Capacité SET infra non confirmée")
+    for kind in ("app", "maintenance"):
+        effective = conn.execute(
+            "SELECT pg_has_role(%s,%s,'SET')", (roles[kind], roles["owner"])
+        ).fetchone()
+        if not effective or len(effective) != 1 or effective[0] is not False:
+            raise ValueError("SET owner interdit pour app/maintenance")
     return oids
 
 

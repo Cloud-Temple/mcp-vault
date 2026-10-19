@@ -32,13 +32,67 @@ class Catalog:
             )
         }
         self.oids = {
-            name: i + 10 for i, name in enumerate([*self.roles.values(), "infra_a"])
+            name: i + 16384 for i, name in enumerate([*self.roles.values(), "infra_a"])
         }
         self.owner = self.oids["a_owner"]
         self.user, self.version = "infra_a", 160000
         self.allow, self.sessions, self.effects, self.rows = True, [], [], []
         self.acl = {(self.owner, oid, "CONNECT", False) for oid in self.oids.values()}
         self.neighbor = {"owner": "b_owner", "acl": ["untouched"], "allow": True}
+        # PG16 initdb bootstrap identity, distinct from all freshly created roles.
+        self.bootstrap = (10, "renamed_engine_bootstrap", True)
+        self.memberships = None
+        self.attributes = None
+        self.effective_set = set(self.roles.values())
+        self.login_user = "infra_a"
+        self.application_set = False
+
+    def membership_rows(self):
+        if self.memberships is not None:
+            return self.memberships
+        infra = self.oids["infra_a"]
+        bootstrap, bootstrap_name, _ = self.bootstrap
+        rows = [
+            (
+                self.oids[self.roles[k]],
+                self.roles[k],
+                self.oids[self.roles["owner"]],
+                self.roles["owner"],
+                infra,
+                "infra_a",
+                False,
+                False,
+                True,
+            )
+            for k in ("provisioner", "backup", "restore")
+        ]
+        for name in self.roles.values():
+            # Two independent pg_auth_members rows, never a merged grant.
+            rows += [
+                (
+                    infra,
+                    "infra_a",
+                    self.oids[name],
+                    name,
+                    bootstrap,
+                    bootstrap_name,
+                    True,
+                    False,
+                    False,
+                ),
+                (
+                    infra,
+                    "infra_a",
+                    self.oids[name],
+                    name,
+                    infra,
+                    "infra_a",
+                    False,
+                    False,
+                    True,
+                ),
+            ]
+        return rows
 
     def execute(self, statement, params=None):
         text = statement if isinstance(statement, str) else statement.as_string()
@@ -51,19 +105,39 @@ class Catalog:
             self.rows = [
                 (name, oid) for name, oid in self.oids.items() if name in params[0]
             ]
+        elif text.startswith("SELECT session_user,current_user"):
+            self.rows = [(self.login_user, self.user)]
+        elif "standalone:bootstrap-grantor" in text:
+            self.rows = [self.bootstrap]
+        elif text.startswith("SELECT pg_has_role(session_user"):
+            self.rows = [(params[0] in self.effective_set,)]
+        elif text.startswith("SELECT pg_has_role(%s,%s,'SET')"):
+            self.rows = [(self.application_set,)]
         elif text.startswith("SELECT rolname,rolcanlogin"):
-            self.rows = [
-                (name, name != "a_owner", False, False, False, False, False, False)
-                for name in self.roles.values()
-            ]
-        elif "FROM pg_auth_members WHERE member=ANY" in text:
-            self.rows = [
-                (self.roles[k], "a_owner", False, False, True)
-                for k in ("provisioner", "backup", "restore")
-            ]
-            self.rows += [
-                ("infra_a", name, True, False, True) for name in self.roles.values()
-            ]
+            rows = (
+                self.attributes
+                if self.attributes is not None
+                else [
+                    (
+                        name,
+                        name != self.roles["owner"],
+                        False,
+                        False,
+                        False,
+                        False,
+                        False,
+                        False,
+                    )
+                    for name in self.roles.values()
+                ]
+                + [("infra_a", True, False, False, True, True, False, False)]
+            )
+            self.rows = [row for row in rows if row[0] in params[0]]
+        elif "pg_auth_members" in text:
+            rows = self.membership_rows()
+            self.rows = (
+                rows if "m.grantor" in text else [(r[1], r[3], *r[6:]) for r in rows]
+            )
         elif text.startswith("SELECT oid,datdba"):
             assert params == ("source_a",)
             self.rows = [(100, self.owner, self.allow)]
@@ -138,6 +212,128 @@ def test_freeze_retains_backup_then_seal_removes_it_same_grantor(pg):
         if statement.startswith("REVOKE")
     )
     assert conn.neighbor == {"owner": "b_owner", "acl": ["untouched"], "allow": True}
+
+
+def test_pg16_dual_grantors_are_accepted(pg):
+    conn = Catalog()
+    assert pg.domain_roles(conn, conn.roles, "infra_a") == conn.oids
+    assert len(conn.membership_rows()) == 15
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "missing-bootstrap",
+        "missing-self",
+        "foreign-grantor",
+        "fake-grantor-name",
+        "foreign-parent",
+        "foreign-member",
+        "app-owner",
+        "self-inherit",
+        "self-admin",
+        "self-no-set",
+        "invalid-flag",
+        "invalid-oid",
+        "duplicate",
+        "missing-effective-set",
+        "app-effective-set",
+        "wrong-login",
+        "wrong-current-role",
+        "privileged-app",
+        "invalid-role-flag",
+        "fake-bootstrap-oid",
+        "not-super-bootstrap",
+        "invalid-bootstrap-flag",
+    ],
+)
+def test_pg16_graph_rejects_noncanonical_or_ineffective_authority(pg, change):
+    conn = Catalog()
+    rows = conn.membership_rows()
+    row = list(rows[-1])  # infra self-grant to the last role A
+    if change == "missing-bootstrap":
+        rows.pop(-2)
+    elif change == "missing-self":
+        rows.pop()
+    elif change == "foreign-grantor":
+        row[4:6] = [54321, "foreign_superuser"]
+        rows[-1] = tuple(row)
+    elif change == "fake-grantor-name":
+        row[5] = "not_the_catalog_infra"
+        rows[-1] = tuple(row)
+    elif change == "foreign-parent":
+        row[2:4] = [54321, "neighbor_b_owner"]
+        rows[-1] = tuple(row)
+    elif change == "foreign-member":
+        row[0:2] = [54321, "neighbor_b_app"]
+        rows.append(tuple(row))
+    elif change == "app-owner":
+        rows.append(
+            (
+                conn.oids[conn.roles["app"]],
+                conn.roles["app"],
+                conn.owner,
+                conn.roles["owner"],
+                conn.oids["infra_a"],
+                "infra_a",
+                False,
+                False,
+                True,
+            )
+        )
+    elif change in {
+        "self-inherit",
+        "self-admin",
+        "self-no-set",
+        "invalid-flag",
+        "invalid-oid",
+    }:
+        index, value = {
+            "self-inherit": (7, True),
+            "self-admin": (6, True),
+            "self-no-set": (8, False),
+            "invalid-flag": (8, 1),
+            "invalid-oid": (0, True),
+        }[change]
+        row[index] = value
+        rows[-1] = tuple(row)
+    elif change == "duplicate":
+        rows.append(rows[-1])
+    elif change == "missing-effective-set":
+        conn.effective_set.remove(conn.roles["maintenance"])
+    elif change == "app-effective-set":
+        conn.application_set = True
+    elif change == "wrong-login":
+        conn.login_user = "other_infra"
+    elif change == "wrong-current-role":
+        conn.user = conn.roles["owner"]
+    elif change in {"privileged-app", "invalid-role-flag"}:
+        conn.attributes = [
+            (
+                name,
+                name != conn.roles["owner"],
+                False,
+                name == conn.roles["app"] if change == "privileged-app" else 0,
+                False,
+                False,
+                False,
+                False,
+            )
+            for name in conn.roles.values()
+        ]
+        conn.attributes.append(
+            ("infra_a", True, False, False, True, True, False, False)
+        )
+    elif change == "fake-bootstrap-oid":
+        conn.bootstrap = (42, conn.bootstrap[1], True)
+    elif change == "not-super-bootstrap":
+        conn.bootstrap = (10, conn.bootstrap[1], False)
+    else:
+        conn.bootstrap = (10, conn.bootstrap[1], 1)
+    conn.memberships = rows
+    with pytest.raises(ValueError):
+        pg.domain_roles(conn, conn.roles, "infra_a")
+    assert conn.effects == []
 
 
 def test_other_grantor_cannot_silently_survive_revoke(pg):

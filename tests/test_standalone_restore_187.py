@@ -19,7 +19,7 @@ class Cluster:
         source = Catalog()
         source.roles = roles
         source.oids = {
-            name: i + 10 for i, name in enumerate([*roles.values(), "infra_a"])
+            name: i + 16384 for i, name in enumerate([*roles.values(), "infra_a"])
         }
         source.owner = source.oids[roles["owner"]]
         source.acl = {
@@ -31,10 +31,20 @@ class Cluster:
             "source_a": {
                 "schema_version": ['{"version":2}'],
                 "tokens": ["revoked-current"],
+                "audit_events": ['{"seq":1,"outcome":"confirmed"}'],
             }
         }
         self.schema_acl = {"source_a": "owner-private/app-usage"}
-        self.current_user = "infra_a"
+        self.sequences = {
+            "source_a": {
+                "audit_events_seq_seq": {
+                    "last_value": 1,
+                    "log_cnt": 32,
+                    "is_called": True,
+                }
+            }
+        }
+        self.identity_database = None
         self.trace = []
         self.neighbor = {"database": "neighbor_b", "contents": "untouched"}
 
@@ -42,12 +52,13 @@ class Cluster:
         assert kw["sslmode"] == "verify-full" and kw["connect_timeout"] == 3
         assert kw["user"] in self.oids
         self.trace.append(("connect", kw["dbname"], kw["user"]))
-        return Connection(self, kw["dbname"])
+        return Connection(self, kw["dbname"], kw["user"])
 
 
 class Connection:
-    def __init__(self, cluster, database):
+    def __init__(self, cluster, database, user="infra_a"):
         self.cluster, self.database, self.rows = cluster, database, []
+        self.login_user = self.current_user = user
 
     def __enter__(self):
         return self
@@ -76,12 +87,21 @@ class Connection:
             model.sessions, model.allow = [], True
             cluster.databases[name], cluster.data[name] = model, {}
             cluster.schema_acl[name] = None
+            cluster.sequences[name] = {}
         elif text.startswith("SELECT 1 FROM pg_database"):
             self.rows = [(1,)] if params[0] in cluster.databases else []
         elif text.startswith("SET ROLE"):
-            cluster.current_user = re.findall('"([^"]+)"', text)[0]
+            self.current_user = re.findall('"([^"]+)"', text)[0]
         elif text == "RESET ROLE":
-            cluster.current_user = "infra_a"
+            self.current_user = self.login_user
+        elif text.startswith("SELECT current_database(),session_user,current_user"):
+            self.rows = [
+                (
+                    cluster.identity_database or self.database,
+                    self.login_user,
+                    self.current_user,
+                )
+            ]
         elif text.startswith(
             ("REVOKE ALL ON SCHEMA", "ALTER DEFAULT PRIVILEGES", "SET TRANSACTION")
         ):
@@ -100,14 +120,38 @@ class Connection:
                 self.rows = [
                     (name, "r", cluster.roles["owner"], "app-select")
                     for name in sorted(cluster.data[self.database])
+                ] + [
+                    (name, "S", cluster.roles["owner"], "owner-only")
+                    for name in sorted(cluster.sequences[self.database])
                 ]
         elif text.startswith("SELECT c.relname,c.relkind"):
-            self.rows = [(name, "r") for name in sorted(cluster.data[self.database])]
+            self.rows = sorted(
+                [(name, "r") for name in cluster.data[self.database]]
+                + [(name, "S") for name in cluster.sequences[self.database]]
+            )
         elif text.startswith("SELECT to_jsonb"):
             name = re.findall('"([^"]+)"', text)[0]
-            self.rows = [(row,) for row in sorted(cluster.data[self.database][name])]
+            if name in cluster.sequences[self.database]:
+                self.rows = [
+                    (
+                        json.dumps(
+                            cluster.sequences[self.database][name], sort_keys=True
+                        ),
+                    )
+                ]
+            else:
+                self.rows = [
+                    (row,) for row in sorted(cluster.data[self.database][name])
+                ]
+        elif text.startswith("SELECT last_value,is_called"):
+            name = re.findall('"([^"]+)"', text)[0]
+            sequence = cluster.sequences[self.database][name]
+            self.rows = [(sequence["last_value"], sequence["is_called"])]
         elif text == "SELECT version FROM vault_metadata.schema_version":
-            self.rows = [(2,)]
+            self.rows = [
+                (json.loads(row)["version"],)
+                for row in cluster.data[self.database]["schema_version"]
+            ]
         else:
             target = next(
                 (
@@ -121,15 +165,16 @@ class Connection:
             if quoted and quoted[0] in cluster.databases:
                 target = quoted[0]
             model = cluster.databases.get(target, cluster.databases["source_a"])
-            model.user = cluster.current_user
+            model.user = self.current_user
+            model.login_user = self.login_user
             if text.startswith("GRANT CONNECT"):
-                assert cluster.current_user == cluster.roles["owner"]
+                assert self.current_user == cluster.roles["owner"]
                 model.acl.add((model.owner, cluster.oids[quoted[1]], "CONNECT", False))
             elif text.startswith("REVOKE ALL ON DATABASE"):
-                assert cluster.current_user == cluster.roles["owner"]
+                assert self.current_user == cluster.roles["owner"]
                 model.acl = {a for a in model.acl if a[1] != 0}
             elif text.endswith("ALLOW_CONNECTIONS true"):
-                assert cluster.current_user == cluster.roles["owner"]
+                assert self.current_user == cluster.roles["owner"]
                 model.allow = True
             else:
                 # Catalog handles the exact ACL/role queries and refuses unknown SQL.
@@ -159,6 +204,90 @@ class Connection:
 
 
 @pytest.mark.parametrize(
+    "difference",
+    [
+        "cache-only",
+        "last-value",
+        "called",
+        "audit-data",
+        "schema-acl",
+        "version",
+        "invalid-called-type",
+    ],
+)
+def test_sequence_restore_setval_compares_logical_state(
+    tmp_path, monkeypatch, difference
+):
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "scripts"))
+    import psycopg
+    import standalone_pg as operator
+
+    config = synthetic_config(tmp_path)
+    cluster = Cluster(config["roles"])
+    cluster.databases["copy_a"] = copy.deepcopy(cluster.databases["source_a"])
+    cluster.data["copy_a"] = copy.deepcopy(cluster.data["source_a"])
+    cluster.schema_acl["copy_a"] = cluster.schema_acl["source_a"]
+    cluster.sequences["copy_a"] = copy.deepcopy(cluster.sequences["source_a"])
+    cluster.sequences["copy_a"]["audit_events_seq_seq"]["log_cnt"] = 0
+    if difference == "last-value":
+        cluster.sequences["copy_a"]["audit_events_seq_seq"]["last_value"] = 2
+    elif difference in {"called", "invalid-called-type"}:
+        cluster.sequences["copy_a"]["audit_events_seq_seq"]["is_called"] = (
+            False if difference == "called" else 1
+        )
+    elif difference == "audit-data":
+        cluster.data["copy_a"]["audit_events"] = ['{"seq":1,"outcome":"unknown"}']
+    elif difference == "schema-acl":
+        cluster.schema_acl["copy_a"] = "PUBLIC=USAGE"
+    elif difference == "version":
+        cluster.data["copy_a"]["schema_version"] = ['{"version":3}']
+    monkeypatch.setattr(psycopg, "connect", cluster.connect)
+    values = {
+        "backup": {
+            "host": "pg.example",
+            "port": "5432",
+            "dbname": "source_a",
+            "user": config["roles"]["backup"],
+            "password": "synthetic",
+        }
+    }
+    source = operator.fingerprint(config, values, "source_a")
+    if difference == "invalid-called-type":
+        with pytest.raises(ValueError, match="séquence"):
+            operator.fingerprint(config, values, "copy_a")
+    else:
+        restored = operator.fingerprint(config, values, "copy_a")
+        assert (source == restored) == (difference == "cache-only")
+    assert any("audit_events_seq_seq" in str(row) for row in cluster.trace)
+
+
+def test_control_rejects_another_database_scope_before_mutations(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "scripts"))
+    import psycopg
+    import standalone_pg as operator
+
+    config = synthetic_config(tmp_path)
+    cluster = Cluster(config["roles"])
+    cluster.identity_database = "neighbor_b"
+    monkeypatch.setattr(psycopg, "connect", cluster.connect)
+    values = {
+        "infra": {
+            "host": "pg.example",
+            "port": "5432",
+            "dbname": "postgres",
+            "user": "infra_a",
+            "password": "synthetic",
+        }
+    }
+    with pytest.raises(ValueError, match="contrôle"), operator.control(config, values):
+        pytest.fail("Wrong control scope accepted")
+    assert not any(
+        str(row[0]).startswith(("CREATE", "ALTER", "REVOKE", "GRANT"))
+        for row in cluster.trace
+    )
+
+
+@pytest.mark.parametrize(
     "execution,topology",
     [
         ("compose", "local"),
@@ -167,7 +296,7 @@ class Connection:
         ("python", "external"),
     ],
 )
-@pytest.mark.parametrize("branch", ["zero", "dirty", "failed-zero"])
+@pytest.mark.parametrize("branch", ["zero", "dirty", "failed-zero", "failed-partial"])
 def test_freeze_dump_seal_restore_zero_and_dirty_guard(
     tmp_path, monkeypatch, execution, topology, branch
 ):
@@ -279,9 +408,14 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
                     {
                         "data": cluster.data[database],
                         "schema_acl": cluster.schema_acl[database],
+                        "sequences": cluster.sequences[database],
                     }
                 ).encode()
             )
+            # Model a cache/checkpoint change between the before/after stable reads.
+            # No last_value/is_called, audit row, version or ACL changes.
+            for sequence in cluster.sequences[database].values():
+                sequence["log_cnt"] = 0
         else:
             assert not cluster.databases[origin].allow
             assert "--single-transaction" in argv and "--exit-on-error" in argv
@@ -294,6 +428,16 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
                 restored["data"],
                 restored["schema_acl"],
             )
+            cluster.sequences[database] = {
+                name: {**value, "log_cnt": 0}
+                for name, value in restored["sequences"].items()
+            }
+            if branch == "failed-partial":
+                cluster.sequences[database]["audit_events_seq_seq"]["last_value"] += 1
+                cluster.data[database]["audit_events"] += [
+                    '{"seq":2,"outcome":"unknown"}'
+                ]
+                raise TimeoutError("Unknown restore with actual divergence")
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(operator.subprocess, "run", process)
@@ -319,7 +463,10 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
     run("freeze-source")
     run("dump-frozen")
     run("seal-source")
-    if branch == "failed-zero":
+    # Absence de fichier restore : jamais une preuve permettant rollback-zero.
+    with pytest.raises(ValueError, match="Restore non entrepris"):
+        operator.copy_action(config, journal, native, "verify-copy", str(archive))
+    if branch.startswith("failed-"):
         with pytest.raises(TimeoutError):
             run("restore-frozen")
     else:
@@ -329,11 +476,27 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
         with pytest.raises(ValueError, match="non prouvé"):
             operator.copy_action(config, journal, native, "verify-copy", str(archive))
         cluster.schema_acl["copy_a"] = original_acl
+    if branch == "failed-partial":
+        with pytest.raises(ValueError, match="non prouvé"):
+            run("verify-copy")
+        with pytest.raises(ValueError, match="non prouvé"):
+            operator.copy_action(
+                config, journal, native, "decide-copy", str(archive), "rollback-zero"
+            )
+        assert journal.exists("restore-frozen.intent") and not journal.exists(
+            "restore-frozen.ack"
+        )
+        assert not cluster.databases["source_a"].allow
+        from mcp_vault.config import get_settings
+
+        get_settings.cache_clear()
+        return
     baseline = run("verify-copy")
     assert baseline["zero_business_mutation"]
     if branch != "failed-zero":
         assert cluster.data["copy_a"] == cluster.data["source_a"]
         assert cluster.data["copy_a"]["tokens"] == ["revoked-current"]
+        assert cluster.sequences["copy_a"]["audit_events_seq_seq"]["log_cnt"] == 0
     assert cluster.neighbor == {"database": "neighbor_b", "contents": "untouched"}
     assert (
         next(row[0] for row in cluster.trace if row[0] in {"connect", "native-auth"})
@@ -368,6 +531,10 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
             "positive-copy-mutation",
             "current-revocation",
         ]
+        cluster.data["copy_a"]["audit_events"] += ['{"seq":2,"outcome":"confirmed"}']
+        cluster.sequences["copy_a"]["audit_events_seq_seq"].update(
+            last_value=2, log_cnt=27
+        )
         config.update(context="return", carrier_dir=str(tmp_path / "carriers_return"))
         settings.update(
             METADATA_PG_DATABASE="return_a",
@@ -396,6 +563,15 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
             "positive-copy-mutation",
             "current-revocation",
         ]
+        assert (
+            cluster.data["return_a"]["audit_events"]
+            == cluster.data["copy_a"]["audit_events"]
+        )
+        assert cluster.sequences["return_a"]["audit_events_seq_seq"] == {
+            "last_value": 2,
+            "log_cnt": 0,
+            "is_called": True,
+        }
         assert (
             not cluster.databases["source_a"].allow
             and not cluster.databases["copy_a"].allow
