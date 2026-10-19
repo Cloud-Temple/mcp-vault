@@ -14,6 +14,9 @@ import time
 from pathlib import Path
 from urllib.parse import quote
 
+# L'import par chemin est également utilisé par les tests publics #178.
+sys.path.insert(0,str(Path(__file__).resolve().parent))
+
 
 def native_connection(args,mount,path):
     import httpx
@@ -44,34 +47,17 @@ def native_connection(args,mount,path):
 
 def operation(args):
     import psycopg
-    from psycopg import sql
+    if args.action=="provision" and args.infra_mount!=args.domain_mount:
+        raise ValueError("Un seul mount technique réservé requis")
     # Aucune lecture du fournisseur après connexion qui pourrait être un fallback.
     credential = native_connection(args,args.infra_mount,args.infra_path)
     if args.action=="provision":
-        app = native_connection(args,args.domain_mount,args.app_path)
-        provisioner = native_connection(args,args.domain_mount,args.provisioner_path)
-        if app["dbname"]!=args.database or app["user"]!=args.app_role or provisioner["dbname"]!=args.database or provisioner["user"]!=args.provisioner_role:
-            raise ValueError()
-        with psycopg.connect(**credential,sslmode="verify-full",sslrootcert=args.pg_ca_file,
-                connect_timeout=3,autocommit=True,options="-c statement_timeout=5000 -c lock_timeout=2000") as conn:
-            # Pas de traitement d'une collision comme une installation neuve.
-            roles = (args.owner_role,args.app_role,args.provisioner_role)
-            if conn.execute("SELECT 1 FROM pg_roles WHERE rolname=ANY(%s)",(list(roles),)).fetchone() or conn.execute("SELECT 1 FROM pg_database WHERE datname=%s",(args.database,)).fetchone():
-                raise ValueError()
-            with conn.transaction():
-                conn.execute(sql.SQL("CREATE ROLE {} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS").format(sql.Identifier(args.owner_role)))
-                for name,password in ((args.app_role,app["password"]),(args.provisioner_role,provisioner["password"])):
-                    conn.execute(sql.SQL("CREATE ROLE {} LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD {}").format(sql.Identifier(name),sql.Literal(password)))
-                conn.execute(sql.SQL("GRANT {} TO {}").format(sql.Identifier(args.owner_role),sql.Identifier(args.provisioner_role)))
-            # CREATE DATABASE n'est pas transactionnel ; aucune relance automatique.
-            conn.execute(sql.SQL("CREATE DATABASE {} OWNER {}").format(sql.Identifier(args.database),sql.Identifier(args.owner_role)))
-            conn.execute(sql.SQL("REVOKE ALL ON DATABASE {} FROM PUBLIC").format(sql.Identifier(args.database)))
-            conn.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO {},{}").format(sql.Identifier(args.database),sql.Identifier(args.app_role),sql.Identifier(args.provisioner_role)))
-        credential["dbname"] = args.database
-        with psycopg.connect(**credential,sslmode="verify-full",sslrootcert=args.pg_ca_file,connect_timeout=3,autocommit=True) as conn:
-            conn.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
-            conn.execute(sql.SQL("ALTER DEFAULT PRIVILEGES FOR ROLE {} REVOKE ALL ON TABLES FROM PUBLIC").format(sql.Identifier(args.owner_role)))
-        return {"status":"ok","action":"provision","domain":args.database}
+        # Toutes les intentions, dont maintenance, AVANT le premier connect.
+        from standalone_pg_sql import KINDS, provision
+        values = {"infra":credential}
+        for kind in KINDS:
+            values[kind] = native_connection(args,args.domain_mount,getattr(args,kind+"_path"))
+        return provision(args,values)
     credential["dbname"] = args.database
     environment = os.environ.copy()
     for name in list(environment):
@@ -84,13 +70,13 @@ def operation(args):
         # O_EXCL : ne jamais écraser une archive/preuve existante.
         descriptor = os.open(args.archive,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
         with os.fdopen(descriptor,"wb") as output:
-            process = subprocess.run(["pg_dump","--format=custom","--no-password"],env=environment,stdout=output,stderr=subprocess.DEVNULL,timeout=120)
+            process = subprocess.run(["pg_dump","--format=custom","--no-password"],env=environment,stdout=output,stderr=subprocess.DEVNULL,timeout=120,check=False)
     elif args.action=="restore":
         # L'opérateur a créé la base neuve ET restauré les rôles/grants séparément.
         with psycopg.connect(**credential,sslmode="verify-full",sslrootcert=args.pg_ca_file,connect_timeout=3) as conn:
             if conn.execute("SELECT 1 FROM pg_namespace WHERE nspname='vault_metadata'").fetchone():
                 raise ValueError()
-        process = subprocess.run(["pg_restore","--dbname",args.database,"--single-transaction","--exit-on-error","--no-password",args.archive],env=environment,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=120)
+        process = subprocess.run(["pg_restore","--dbname",args.database,"--single-transaction","--exit-on-error","--no-password",args.archive],env=environment,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=120,check=False)
     else:
         raise ValueError()
     if process.returncode:
@@ -103,19 +89,23 @@ def main():
     parser.add_argument("action",choices=("provision","dump","restore"))
     for name in ("vault-url","vault-token-file","vault-ca-file","infra-mount","infra-path","pg-ca-file","database"):
         parser.add_argument("--"+name,required=True)
-    for name in ("owner-role","app-role","provisioner-role","domain-mount","app-path","provisioner-path","archive"):
+    for name in ("owner-role","app-role","provisioner-role","maintenance-role","backup-role","restore-role","domain-mount","app-path","provisioner-path","maintenance-path","backup-path","restore-path","archive"):
         parser.add_argument("--"+name)
     args = parser.parse_args()
     identifiers = [args.database]+([args.owner_role,args.app_role,args.provisioner_role,args.domain_mount] if args.action=="provision" else [])
     if not all(isinstance(v,str) and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}",v) for v in identifiers):
         parser.error("Identités explicites canoniques requises")
-    if args.action=="provision" and (len({args.owner_role,args.app_role,args.provisioner_role})!=3 or not args.app_path or not args.provisioner_path):
-        parser.error("Trois rôles et deux chemins distincts requis")
+    if args.action=="provision":
+        kinds = ("owner","app","provisioner","maintenance","backup","restore")
+        roles = [getattr(args,k+"_role") for k in kinds]
+        paths = [getattr(args,k+"_path") for k in kinds[1:]]
+        if len(set(roles))!=6 or any(not role for role in roles) or len(set(paths))!=5 or any(not p for p in paths):
+            parser.error("Six rôles et cinq chemins distincts requis")
     if args.action in {"dump","restore"} and not args.archive:
         parser.error("Archive privée requise")
     try:
         print(json.dumps(operation(args)))
-    except Exception:
+    except Exception:  # noqa: BLE001 - boundary deliberately redacts credentials
         # Ne jamais afficher SQL, credential, DSN, backend exception ou subprocess stderr.
         print(json.dumps({"status":"error","message":"Action non confirmée ; arrêt, constater sans rejouer"}))
         return 1

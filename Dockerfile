@@ -81,6 +81,15 @@ EXPOSE 8030
 # Start the MCP server
 CMD ["python", "-m", "mcp_vault"]
 
+# Outil ponctuel séparé ; ni scripts ni client PG ajoutés à production.
+FROM production AS pg-operator
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends postgresql-client && rm -rf /var/lib/apt/lists/*
+COPY scripts/ ./scripts/
+USER mcp
+HEALTHCHECK NONE
+ENTRYPOINT ["python", "/app/scripts/standalone_pg.py"]
+
 # ============================================================================
 # Stage 3 : Image de test (P2-8 — tests hors image prod)
 # Usage : docker compose run --rm test
@@ -126,6 +135,7 @@ COPY README.md README.en.md ./
 # `open()` manquant — bruyamment, mais invisible tant qu'aucune CI n'y exécutait
 # la suite (#113).
 COPY docker-compose.yml ./
+COPY docker-compose.postgres.yml ./
 
 RUN useradd -r -s /bin/false mcp && chown -R mcp:mcp /app /openbao
 USER mcp

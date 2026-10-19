@@ -4,6 +4,8 @@
 
 > 🇫🇷 [Version française](README.md)
 
+Standalone PostgreSQL: [installation, four deployment paths and safe return](docs/standalone-postgres.en.md).
+
 MCP Vault centralizes the secrets, access policies, and temporary credentials required by AI agents. It embeds [OpenBao](https://openbao.org/) for encryption and storage, adds an authenticated and policy-controlled MCP API, and provides an administration console and CLI.
 
 **Version**: 0.20.1 · **License**: [Apache-2.0](LICENSE)
