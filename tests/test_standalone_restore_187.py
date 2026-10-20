@@ -3,6 +3,7 @@
 import copy
 import json
 import re
+import subprocess
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -349,6 +350,25 @@ def test_control_rejects_another_database_scope_before_mutations(tmp_path, monke
         "unreadable-archive",
         "foreign-producer",
         "missing-producer",
+        "diag-sessions",
+        "diag-sql",
+        "diag-transport",
+        "diag-pgtransport",
+        "diag-http",
+        "diag-json",
+        "diag-rc",
+        "diag-signal",
+        "diag-timeout",
+        "diag-spawn",
+        "diag-post-io",
+        "diag-fingerprint",
+        "diag-ack",
+        "diag-receipt-io",
+        "diag-collision",
+        "diag-base-exception",
+        "diag-bool-rc",
+        "diag-large-rc",
+        "diag-dump",
     ],
 )
 def test_freeze_dump_seal_restore_zero_and_dirty_guard(
@@ -435,6 +455,13 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
                 },
             )
         assert request.url.path == "/admin/api/metadata-operator/status"
+        if current_action[0] == "restore-frozen":
+            if branch == "diag-transport":
+                raise httpx.ConnectError("SENTINEL-private-transport")
+            if branch == "diag-json":
+                return httpx.Response(200, content="SENTINEL-not-json")
+            if branch == "diag-http":
+                return httpx.Response(503, json={"status": "unavailable"})
         return httpx.Response(
             200, json={"status": "ok", "mode": "restore", "openbao_ready": True}
         )
@@ -446,6 +473,46 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
     )
 
     current_action = [None]
+    original_write = Journal.write
+    original_error = []
+
+    def write(self, name, value):
+        if branch == "diag-ack" and name == "restore-frozen.ack":
+            exc = OSError("SENTINEL-private-ack")
+            original_error.append(exc)
+            raise exc
+        if branch == "diag-receipt-io" and name == "restore-frozen.failure":
+            # Model partial exclusive file creation, not an atomic success.
+            private(Path(config["carrier_dir"]) / (name + ".json"), "{")
+            raise OSError("SENTINEL-private-receipt")
+        return original_write(self, name, value)
+
+    monkeypatch.setattr(Journal, "write", write)
+    original_execute = Connection.execute
+    target_snapshots = [0]
+
+    def sql_execute(self, statement, params=None):
+        text = statement if isinstance(statement, str) else statement.as_string()
+        in_restore = (
+            current_action[0] == "restore-frozen"
+            and (Path(config["carrier_dir"]) / "restore-frozen.intent.json").exists()
+        )
+        if (
+            in_restore
+            and text.startswith("SELECT current_database()")
+            and branch in {"diag-sql", "diag-pgtransport"}
+        ):
+            if branch == "diag-pgtransport":
+                raise psycopg.OperationalError("SENTINEL-private-pgtransport")
+            raise psycopg.errors.InsufficientPrivilege("SENTINEL-private-sql")
+        result = original_execute(self, statement, params)
+        if in_restore and text.startswith("SELECT pid,") and params == ("copy_a",):
+            target_snapshots[0] += 1
+            if branch == "diag-sessions" and target_snapshots[0] == 2:
+                self.rows = [(12345, cluster.oids["a_backup"], "a_backup")]
+        return result
+
+    monkeypatch.setattr(Connection, "execute", sql_execute)
     monkeypatch.setattr(
         "shutil.which",
         lambda name, **kw: (
@@ -462,8 +529,6 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
             assert set(kw["env"]) <= {"PATH", "LC_ALL"}
             assert Path(argv[0]).is_absolute()
             if branch == "version-timeout":
-                import subprocess
-
                 raise subprocess.TimeoutExpired(argv, 5)
             major = (
                 17
@@ -488,6 +553,8 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
         database = kw["env"]["PGDATABASE"]
         origin = config["domains"][operator.source_context(config)]["database"]
         if tool == "pg_dump":
+            if branch == "diag-dump":
+                raise OSError("SENTINEL-private-dump")
             assert cluster.databases[origin].allow
             assert not any(
                 a[1] == cluster.oids["a_app"] for a in cluster.databases[origin].acl
@@ -508,6 +575,24 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
         else:
             assert not cluster.databases[origin].allow
             assert "--single-transaction" in argv and "--exit-on-error" in argv
+            exceptions = {
+                "diag-timeout": subprocess.TimeoutExpired(argv, 120),
+                "diag-spawn": OSError("SENTINEL-private-spawn"),
+                "diag-receipt-io": RuntimeError("SENTINEL-original"),
+                "diag-base-exception": KeyboardInterrupt("SENTINEL-interrupt"),
+            }
+            if branch in exceptions:
+                original_error.append(exceptions[branch])
+                raise exceptions[branch]
+            if branch in {"diag-rc", "diag-signal", "diag-large-rc", "diag-bool-rc"}:
+                return SimpleNamespace(
+                    returncode={
+                        "diag-rc": 1,
+                        "diag-signal": -9,
+                        "diag-large-rc": 1000,
+                        "diag-bool-rc": True,
+                    }[branch]
+                )
             if branch == "failed-zero":
                 raise TimeoutError(
                     "No ACK; strict actual-empty predicates must still be observed"
@@ -521,6 +606,10 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
                 name: {**value, "log_cnt": 0}
                 for name, value in restored["sequences"].items()
             }
+            if branch == "diag-post-io":
+                Path(argv[-1]).unlink()  # rc0 followed by archive_hash IO failure.
+            if branch == "diag-fingerprint":
+                cluster.data[database]["audit_events"].append("different-audit-row")
             if branch == "failed-partial":
                 cluster.sequences[database]["audit_events_seq_seq"]["last_value"] += 1
                 cluster.data[database]["audit_events"] += [
@@ -554,6 +643,7 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
         with pytest.raises(ValueError):
             run(action)
         assert not journal.exists(action + ".intent")
+        assert not journal.exists("restore-frozen.failure")
         assert state == (cluster.data, cluster.schema_acl, cluster.sequences)
         assert databases == {
             name: (db.allow, set(db.acl)) for name, db in cluster.databases.items()
@@ -589,6 +679,11 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
         rejected_before_intent("dump-frozen")
         assert not archive.exists()
         return
+    if branch == "diag-dump":
+        with pytest.raises(OSError):
+            run("dump-frozen")
+        assert not journal.exists("restore-frozen.failure")
+        return
     run("dump-frozen")
     dumped = journal.confirmed("dump-frozen")
     assert set(dumped["archive"]) == {"sha256", "size"}
@@ -616,11 +711,95 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
     # Absence de fichier restore : jamais une preuve permettant rollback-zero.
     with pytest.raises(ValueError, match="Restore non entrepris"):
         operator.copy_action(config, journal, native, "verify-copy", str(archive))
+    if branch.startswith("diag-"):
+        if branch == "diag-collision":
+            journal.write("restore-frozen.intent", {"binding": journal.binding})
+            before = {
+                p.name: p.read_bytes() for p in Path(config["carrier_dir"]).iterdir()
+            }
+        with pytest.raises(BaseException) as caught:
+            run("restore-frozen")
+        if original_error:
+            assert caught.value is original_error[-1]
+        assert journal.exists("restore-frozen.intent")
+        assert not journal.exists("restore-frozen.ack")
+        if branch in {"diag-collision", "diag-base-exception"}:
+            assert not journal.exists("restore-frozen.failure")
+            if branch == "diag-collision":
+                assert before == {
+                    p.name: p.read_bytes()
+                    for p in Path(config["carrier_dir"]).iterdir()
+                }
+            return
+        path = Path(config["carrier_dir"]) / "restore-frozen.failure.json"
+        assert path.stat().st_mode & 0o777 == 0o600
+        if branch == "diag-receipt-io":
+            assert path.read_bytes() == b"{"
+            with pytest.raises(FileNotFoundError):
+                run("record-copy-mutation")  # A partial failure is never an ACK.
+            partial = path.read_bytes()
+            path.unlink()
+            for action in ("verify-copy", "decide-copy"):
+                without = operator.copy_action(
+                    config, journal, native, action, str(archive), "rollback-zero"
+                )
+                private(path, partial.decode())
+                assert (
+                    operator.copy_action(
+                        config, journal, native, action, str(archive), "rollback-zero"
+                    )
+                    == without
+                )
+                path.unlink()
+            private(path, partial.decode())
+            return
+        receipt = journal.read("restore-frozen.failure")
+        expected = {
+            "diag-sessions": ("target_catalogue", "check_rejected"),
+            "diag-sql": ("authority_receipts", "sql_error"),
+            "diag-transport": ("mode_native_kv", "transport_error"),
+            "diag-pgtransport": ("authority_receipts", "transport_error"),
+            "diag-http": ("mode_native_kv", "check_rejected"),
+            "diag-json": ("mode_native_kv", "unexpected"),
+            "diag-rc": ("restore_returned", "nonzero_exit"),
+            "diag-signal": ("restore_returned", "nonzero_exit"),
+            "diag-bool-rc": ("restore_returned", "check_rejected"),
+            "diag-large-rc": ("restore_returned", "check_rejected"),
+            "diag-timeout": ("restore_call", "timeout"),
+            "diag-spawn": ("restore_call", "spawn_error"),
+            "diag-post-io": ("restore_returned", "unexpected"),
+            "diag-fingerprint": ("restored_fingerprint", "check_rejected"),
+            "diag-ack": ("ack_pending", "ack_write_error"),
+        }[branch]
+        assert (receipt["phase"], receipt["code"]) == expected
+        assert receipt["binding"] == journal.binding
+        assert set(receipt) <= {"binding", "phase", "code", "rc", "diff_keys"}
+        assert "SENTINEL" not in path.read_text()
+        if branch == "diag-sessions":
+            assert receipt["diff_keys"] == ["sessions"]
+        if branch in {
+            "diag-rc",
+            "diag-signal",
+            "diag-post-io",
+            "diag-fingerprint",
+            "diag-ack",
+        }:
+            assert type(receipt["rc"]) is int
+            assert receipt["rc"] == {"diag-rc": 1, "diag-signal": -9}.get(branch, 0)
+        else:
+            assert "rc" not in receipt
+        assert not cluster.databases["source_a"].allow
+        assert cluster.neighbor == {"database": "neighbor_b", "contents": "untouched"}
+        from mcp_vault.config import get_settings
+
+        get_settings.cache_clear()
+        return
     if branch.startswith("failed-"):
         with pytest.raises(TimeoutError):
             run("restore-frozen")
     else:
         run("restore-frozen")
+        assert not journal.exists("restore-frozen.failure")
         original_acl = cluster.schema_acl["copy_a"]
         cluster.schema_acl["copy_a"] = "PUBLIC=USAGE"
         with pytest.raises(ValueError, match="non prouvé"):
@@ -649,6 +828,31 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
             ),
         )
     baseline = run("verify-copy")
+    if branch in {"zero", "failed-zero"}:
+        decision = operator.copy_action(
+            config, journal, native, "decide-copy", str(archive), "rollback-zero"
+        )
+        failure_path = Path(config["carrier_dir"]) / "restore-frozen.failure.json"
+        # Even a partial or fabricated receipt is not consulted as authority.
+        for payload in ("{", '{"phase":"ack_pending","rc":0}'):
+            private(failure_path, payload)
+            assert (
+                operator.copy_action(
+                    config, journal, native, "verify-copy", str(archive)
+                )
+                == baseline
+            )
+            assert (
+                operator.copy_action(
+                    config,
+                    journal,
+                    native,
+                    "decide-copy",
+                    str(archive),
+                    "rollback-zero",
+                )
+                == decision
+            )
     assert baseline["zero_business_mutation"]
     if branch != "failed-zero":
         assert cluster.data["copy_a"] == cluster.data["source_a"]

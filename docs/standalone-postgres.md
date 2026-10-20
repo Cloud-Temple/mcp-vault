@@ -401,3 +401,34 @@ Limite préexistante : un GRANT délégué peut conduire pg_dump à émettre
 `SET SESSION AUTHORIZATION` pour son grantor. Le restore non superuser peut
 alors refuser avant la comparaison d'empreintes. La comparaison directe des
 grantors ne prouve donc pas que ce parcours de restauration est supporté.
+
+
+### Diagnostic fermé d'un restore UNKNOWN
+
+Après création exclusive de l'intention `restore-frozen`, un échec peut laisser
+un reçu privé `restore-frozen.failure.json`, écrit sans écrasement par le journal
+existant. Il contient uniquement le binding existant, une phase et un code fermés,
+éventuellement le rc numérique retourné (-64 à 255, booléens exclus) et les noms
+triés des clés de catalogue différentes (`oid`, `owner`, `allow_connections`,
+`acl`, `sessions`), jamais leurs valeurs. Aucun texte d'exception, commande,
+environnement, secret ou sortie de processus n'y figure.
+
+Les phases distinguent mode/KV, autorités/reçus, Source scellée, hash archive,
+cible vide, catalogue cible, frontière appel restore, retour du processus,
+empreinte restaurée et attente ACK. Les codes distinguent garde refusée
+(ValueError exacte), transport HTTP/PG, erreur SQL, timeout ou lancement à la
+frontière appel, rc non nul observé, écriture ACK et erreur inattendue. Un statut
+HTTP non-200 avec réponse JSON exploitable est une garde refusée ; JSON invalide
+est inattendu. Une erreur IO après rc0 n'est pas un échec de lancement.
+
+Ce reçu ne prouve ni démarrage effectif du processus, ni commit, ni absence
+d'effets. Il n'est jamais lu comme ACK ou autorité par verify/decide et ne modifie
+aucune condition de rollback-zero. Un refus pré-intention ou une collision avec
+une ancienne intention ne crée aucun reçu. Une interruption BaseException peut
+laisser UNKNOWN sans reçu ; une erreur d'écriture diagnostique peut laisser un
+fichier partiel ou absent, sans remplacer l'exception initiale ni autoriser un
+rejeu. L'ACK et son protocole restent inchangés.
+
+Un futur cas neuf P-E dirty v4 réussi qualifie ce scénario neuf ; il ne requalifie
+pas l'ancien R17 UNKNOWN et n'en démontre pas rétrospectivement la cause. Un nouvel
+échec documenté demande une correction ciblée, sans rejeu de l'ancien cas.

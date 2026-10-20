@@ -275,3 +275,33 @@ Existing limitation: delegated grants can make pg_dump emit
 `SET SESSION AUTHORIZATION` for their grantor. Non-superuser restore may fail
 before fingerprint comparison. A direct grantor comparison therefore does not
 qualify restoration of delegated grants.
+
+
+### Closed diagnostics for an UNKNOWN restore
+
+After exclusive creation of the `restore-frozen` intent, a failure may leave a
+private `restore-frozen.failure.json` receipt, written without overwrite by the
+existing journal. It contains only the existing binding, a closed phase and code,
+optionally the returned numeric rc (-64 through 255, excluding booleans) and
+sorted names of differing catalogue keys (`oid`, `owner`, `allow_connections`,
+`acl`, `sessions`), never their values. Exception text, commands, environment,
+secrets and process output are excluded.
+
+Phases distinguish mode/KV, authorities/receipts, sealed Source, archive hash,
+empty target, target catalogue, restore call boundary, process return, restored
+fingerprint and pending ACK. Codes distinguish rejected guards (exact ValueError),
+HTTP/PG transport, SQL errors, timeout or launch errors at the call boundary,
+observed nonzero rc, ACK writing and unexpected errors. A non-200 HTTP status with
+usable JSON is a rejected guard; invalid JSON is unexpected. An IO error after
+rc0 is not a launch failure.
+
+This receipt proves neither actual process start, commit nor absence of effects.
+Verify/decide never read it as an ACK or authority, and rollback-zero predicates
+remain unchanged. Pre-intent refusal or an existing-intent collision produces no
+receipt. A BaseException interruption may leave UNKNOWN without a receipt;
+diagnostic writing may leave a partial or absent file without replacing the
+original exception or authorizing replay. The ACK protocol is unchanged.
+
+A future successful fresh P-E dirty v4 case qualifies that new scenario; it does
+not reclassify historical R17 UNKNOWN or establish its cause retroactively. A new
+diagnosed failure requires a targeted correction without replaying the old case.

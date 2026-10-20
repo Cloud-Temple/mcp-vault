@@ -22,6 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
+import psycopg
 from psycopg import sql
 from standalone_pg_files import (
     Journal,
@@ -406,7 +407,7 @@ def check_restore_archive(journal, archive, tools):
         raise ValueError("Archive illisible par le client contrôlé")
 
 
-def pg_tool(config, values, database, action, archive, tools):
+def pg_tool(config, values, database, action, archive, tools, on_return=None):
     kind = "backup" if action == "dump" else "restore"
     value = values[kind]
     # Aucun héritage PGSERVICE/PGOPTIONS/PGPASSFILE/DSN ou secrets S3.
@@ -459,6 +460,8 @@ def pg_tool(config, values, database, action, archive, tools):
             timeout=120,
             check=False,
         )
+    if on_return is not None:
+        on_return(result.returncode)
     if result.returncode:
         raise ValueError("Commande PG non confirmée")
     return archive_hash(archive)
@@ -548,8 +551,20 @@ def provision_fresh(config, journal, native):
 
 
 def copy_action(
-    config, journal, native, action, archive=None, decision=None, tools=None
+    config,
+    journal,
+    native,
+    action,
+    archive=None,
+    decision=None,
+    tools=None,
+    diagnostic=None,
 ):
+    def phase(name):
+        if diagnostic is not None:
+            diagnostic["phase"] = name
+
+    phase("mode_native_kv")
     if config["context"] == "source_fresh":
         raise ValueError("Contexte Copy/Return requis")
     mode(config, "restore")
@@ -567,6 +582,7 @@ def copy_action(
             k: v for k, v in source[kind].items() if k != "dbname"
         }:
             raise ValueError("Identités de restauration modifiées")
+    phase("authority_receipts")
     with control(config, values) as conn:
         if action == "create-copy":
             if conn.execute(
@@ -629,17 +645,50 @@ def copy_action(
             _, closed = freeze(conn, source_db, roles, infra, sealed=True)
             return {"sealed": closed}
         sealed = journal.confirmed("seal-source")
+        phase("sealed_source")
         observed = assert_closed(conn, source_db, roles, infra, sealed=True)
         if observed != sealed["sealed"]:
             raise ValueError("Source scellée modifiée")
         if action == "restore-frozen":
+            phase("archive_hash")
             if archive_hash(archive) != dumped["archive"]:
                 raise ValueError("Archive altérée/non admissible")
+            phase("target_empty")
             if fingerprint(config, values, target_db, empty=True) != created["empty"]:
                 raise ValueError("Copy non vierge")
-            if db_observation(conn, target_db) != created["copy"]:
+            phase("target_catalogue")
+            current = db_observation(conn, target_db)
+            if current != created["copy"]:
+                if diagnostic is not None:
+                    diagnostic["diff_keys"] = sorted(
+                        key
+                        for key in (
+                            "oid",
+                            "owner",
+                            "allow_connections",
+                            "acl",
+                            "sessions",
+                        )
+                        if current[key] != created["copy"][key]
+                    )
                 raise ValueError("ACL/sessions Copy changées")
-            pg_tool(config, values, target_db, "restore", archive, tools)
+
+            def returned(rc):
+                phase("restore_returned")
+                if diagnostic is not None and type(rc) is int and -64 <= rc <= 255:
+                    diagnostic["rc"] = rc
+
+            phase("restore_call")
+            pg_tool(
+                config,
+                values,
+                target_db,
+                "restore",
+                archive,
+                tools,
+                on_return=returned if diagnostic is not None else None,
+            )
+            phase("restored_fingerprint")
             content = fingerprint(config, values, target_db)
             if content != dumped["content"]:
                 raise ValueError("Restore différent de Source")
@@ -902,6 +951,28 @@ def verify_disabled(config):
     return {"status": "ok", "next": "qualify public contracts before exposure"}
 
 
+def restore_failure(diagnostic, exc):
+    """Closed diagnostic only; never evidence of commit or absence of effects."""
+    phase = diagnostic["phase"]
+    if phase == "ack_pending":
+        code = "ack_write_error"
+    elif phase == "restore_returned" and diagnostic.get("rc", 0) != 0:
+        code = "nonzero_exit"
+    elif isinstance(exc, (httpx.TransportError, psycopg.OperationalError)):
+        code = "transport_error"
+    elif isinstance(exc, psycopg.Error):
+        code = "sql_error"
+    elif phase == "restore_call" and isinstance(exc, subprocess.TimeoutExpired):
+        code = "timeout"
+    elif phase == "restore_call" and isinstance(exc, OSError):
+        code = "spawn_error"
+    elif type(exc) is ValueError:
+        code = "check_rejected"
+    else:
+        code = "unexpected"
+    return {**diagnostic, "code": code}
+
+
 def execute(options):
     config = load_config(options.config)
     if options.action == "prepare-files":
@@ -960,6 +1031,36 @@ def execute(options):
             tools = pg_tools(config, read_values(native, config))
             if options.action == "restore-frozen":
                 check_restore_archive(journal, options.archive, tools)
+        if options.action == "restore-frozen":
+            diagnostic = {"phase": None}
+
+            def restore():
+                # First callback instruction: the exclusive intent now exists.
+                diagnostic["phase"] = "mode_native_kv"
+                result = copy_action(
+                    config,
+                    journal,
+                    native,
+                    options.action,
+                    options.archive,
+                    options.decision,
+                    tools,
+                    diagnostic=diagnostic,
+                )
+                diagnostic["phase"] = "ack_pending"
+                return result
+
+            try:
+                return journal.run(options.action, restore)
+            except Exception as exc:
+                if diagnostic["phase"] is not None:
+                    failure = restore_failure(diagnostic, exc)
+                    failure["binding"] = journal.binding
+                    try:
+                        journal.write("restore-frozen.failure", failure)
+                    except Exception:  # noqa: BLE001, S110 - never mask UNKNOWN or log exception secrets
+                        pass  # Preserve the original UNKNOWN, even on receipt IO failure.
+                raise
         return journal.run(
             options.action,
             lambda: copy_action(
