@@ -13,6 +13,8 @@ images, restart and logical restore remain unqualified. The previously qualified
 server version is UNKNOWN. The recipe tag `postgres:16`, client tools and loaded
 libpq are distinct from the actual server. Measure each; never infer server
 compatibility from libpq. Role operations require an observed PG16+ server.
+The default `pg-operator` image provides **pg_dump16 and pg_restore16** for PG16.
+Other server majors require a matching operator tool pair and separate qualification.
 
 | Application | PG | Preparation |
 | --- | --- | --- |
@@ -234,3 +236,24 @@ application JSONL journal; journal restore remains UNKNOWN until measured.
 Preserve volumes, archives and receipts; stop only owned resources after confirmed
 revocation, without down -v. Independent plan and final diff/result reviews with
 real project-memory reading remain required. This guide claims no native PASS.
+
+### Dump and restore clients
+
+The operator target installs client16 from the signed official PGDG repository
+and selects `/usr/lib/postgresql/16/bin` first on PATH. For Python, use the same
+PATH in the clean launch environment; no additional Settings field is needed.
+OS libpq5 may change when apt resolves PGDG dependencies: record it separately
+from the bundled Python libpq. Python dependency locks remain unchanged.
+
+Before create-copy, freeze-source, dump-frozen and restore-frozen, the CLI performs
+native Bao authentication, KV reads, server measurement and tool-version checks
+before writing the mutative intent. Both tool majors must match the server;
+minor versions may differ. The resolved absolute executables are then used.
+`verify*`, `decide-copy` and `reopen-source-zero` do not require these tools.
+
+Producer versions are siblings of `archive` in the dump ACK, preserving exact
+hash/size equality. Restore checks the recorded majors and archive readability
+with `pg_restore --list`, without a DB connection. No old carrier is backfilled,
+no SQL/GUC filtering or ignored error is permitted, and installing a different
+client never makes an existing UNKNOWN replayable. The default16 pair does not
+promise support for other server majors without separate qualification.

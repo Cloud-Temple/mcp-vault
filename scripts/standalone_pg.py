@@ -10,7 +10,9 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import secrets
+import shutil
 import subprocess
 import sys
 import uuid
@@ -293,7 +295,82 @@ def archive_hash(path):
     return {"sha256": checksum.hexdigest(), "size": size}
 
 
-def pg_tool(config, values, database, action, archive):
+def pg_tools(config, values):
+    """Même majeure pour ce transfert même-instance ; auth/KV déjà établies."""
+    with control(config, values) as conn:
+        server_major = (
+            int(conn.execute("SHOW server_version_num").fetchone()[0]) // 10000
+        )
+    paths = {}
+    versions: dict[str, int | str] = {"server_major": server_major}
+    environment = {"PATH": os.environ.get("PATH", os.defpath), "LC_ALL": "C"}
+    for kind, executable in (("dump", "pg_dump"), ("restore", "pg_restore")):
+        path = shutil.which(executable, path=environment["PATH"])
+        if path is None:
+            raise ValueError("Clients PostgreSQL requis avant opération")
+        path = os.path.abspath(path)
+        try:
+            result = subprocess.run(
+                [path, "--version"],
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise ValueError("Version client PostgreSQL non confirmée") from None
+        match = re.fullmatch(
+            re.escape(executable) + r" \(PostgreSQL\) ([0-9]+\.[0-9]+)(?: [^\n]*)?\n?",
+            result.stdout,
+        )
+        if result.returncode or not match:
+            raise ValueError("Version client PostgreSQL non confirmée")
+        major = int(match[1].split(".")[0])
+        if major != server_major:
+            raise ValueError("Clients PostgreSQL incompatibles avec le serveur")
+        paths[kind] = path
+        versions[kind + "_major"] = major
+        versions[kind + "_version"] = match[1]
+    return {**paths, "versions": versions}
+
+
+def check_restore_archive(journal, archive, tools):
+    dumped = journal.confirmed("dump-frozen")
+    if archive_hash(archive) != dumped["archive"]:
+        raise ValueError("Archive altérée/non admissible")
+    versions = dumped.get("tool_versions")
+    if not isinstance(versions, dict) or set(versions) != set(tools["versions"]):
+        raise ValueError("Versions productrices de l'archive absentes")
+    major = tools["versions"]["server_major"]
+    if any(
+        type(versions[k]) is not int or versions[k] != major
+        for k in ("server_major", "dump_major", "restore_major")
+    ):
+        raise ValueError("Majeure productrice de l'archive incompatible")
+    for kind in ("dump", "restore"):
+        version = versions[kind + "_version"]
+        if not isinstance(version, str) or not re.fullmatch(
+            str(major) + r"\.[0-9]+", version
+        ):
+            raise ValueError("Version productrice de l'archive invalide")
+    try:
+        result = subprocess.run(
+            [tools["restore"], "--list", str(archive)],
+            env={"PATH": os.environ.get("PATH", os.defpath), "LC_ALL": "C"},
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise ValueError("Lisibilité de l'archive non confirmée") from None
+    if result.returncode:
+        raise ValueError("Archive illisible par le client contrôlé")
+
+
+def pg_tool(config, values, database, action, archive, tools):
     kind = "backup" if action == "dump" else "restore"
     value = values[kind]
     # Aucun héritage PGSERVICE/PGOPTIONS/PGPASSFILE/DSN ou secrets S3.
@@ -316,7 +393,7 @@ def pg_tool(config, values, database, action, archive):
         with os.fdopen(descriptor, "wb") as output:
             result = subprocess.run(
                 [
-                    "pg_dump",
+                    tools["dump"],
                     "--format=custom",
                     "--no-password",
                     "--role=" + config["roles"]["owner"],
@@ -332,7 +409,7 @@ def pg_tool(config, values, database, action, archive):
     else:
         result = subprocess.run(
             [
-                "pg_restore",
+                tools["restore"],
                 "--dbname=" + database,
                 "--single-transaction",
                 "--exit-on-error",
@@ -434,7 +511,9 @@ def provision_fresh(config, journal, native):
     return {"status": "ok", "next": "verify then restart disabled"}
 
 
-def copy_action(config, journal, native, action, archive=None, decision=None):
+def copy_action(
+    config, journal, native, action, archive=None, decision=None, tools=None
+):
     if config["context"] == "source_fresh":
         raise ValueError("Contexte Copy/Return requis")
     mode(config, "restore")
@@ -496,12 +575,14 @@ def copy_action(config, journal, native, action, archive=None, decision=None):
             before = fingerprint(config, source, source_db)
             if before != frozen["content"]:
                 raise ValueError("Source a changé depuis le gel")
-            result = pg_tool(config, source, source_db, "dump", archive)
+            result = pg_tool(config, source, source_db, "dump", archive, tools)
             if fingerprint(config, source, source_db) != before:
                 raise ValueError("Source a changé pendant le dump")
             assert_closed(conn, source_db, roles, infra, sealed=False)
             return {
                 "archive": result,
+                # Sibling: archive_hash equality must remain exact.
+                "tool_versions": tools["versions"],
                 "source_oid": frozen["frozen"]["oid"],
                 "content": before,
             }
@@ -522,7 +603,7 @@ def copy_action(config, journal, native, action, archive=None, decision=None):
                 raise ValueError("Copy non vierge")
             if db_observation(conn, target_db) != created["copy"]:
                 raise ValueError("ACL/sessions Copy changées")
-            pg_tool(config, values, target_db, "restore", archive)
+            pg_tool(config, values, target_db, "restore", archive, tools)
             content = fingerprint(config, values, target_db)
             if content != dumped["content"]:
                 raise ValueError("Restore différent de Source")
@@ -831,6 +912,18 @@ def execute(options):
             raise ValueError("Archive explicite requise")
         if options.action == "decide-copy" and options.decision != "rollback-zero":
             raise ValueError("Seule décision sans mutation : rollback-zero")
+        tools = None
+        if options.action in {
+            "create-copy",
+            "freeze-source",
+            "dump-frozen",
+            "restore-frozen",
+        }:
+            if config["context"] == "source_fresh":
+                raise ValueError("Contexte Copy/Return requis")
+            tools = pg_tools(config, read_values(native, config))
+            if options.action == "restore-frozen":
+                check_restore_archive(journal, options.archive, tools)
         return journal.run(
             options.action,
             lambda: copy_action(
@@ -840,6 +933,7 @@ def execute(options):
                 options.action,
                 options.archive,
                 options.decision,
+                tools,
             ),
         )
     finally:

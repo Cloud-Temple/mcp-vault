@@ -2,6 +2,8 @@
 
 ## Non publié — compagnon Mission #842
 
+- PostgreSQL standalone : clients opérateur16 explicites et contrôle serveur/archive avant gel ou restauration (#187).
+
 - Lecture hub optionnelle des métadonnées et traces Mission conservées : opaque local et contexte Mission cumulés, scope PG filtré avant pagination, sans accès aux secrets ni changement du lecteur standalone.
 - Les continuations Mission gardent leur borne et leur empreinte de périmètre malgré les nouvelles lectures de credentials hors scope ; une suppression ou un remplacement dans ce périmètre refuse la continuation.
 

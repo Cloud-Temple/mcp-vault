@@ -296,7 +296,27 @@ def test_control_rejects_another_database_scope_before_mutations(tmp_path, monke
         ("python", "external"),
     ],
 )
-@pytest.mark.parametrize("branch", ["zero", "dirty", "failed-zero", "failed-partial"])
+@pytest.mark.parametrize(
+    "branch",
+    [
+        "zero",
+        "dirty",
+        "failed-zero",
+        "failed-partial",
+        "bad-create-copy",
+        "bad-freeze-source",
+        "bad-dump-frozen",
+        "bad-restore-frozen",
+        "missing-tool",
+        "version-timeout",
+        "mixed-tools",
+        "invalid-version",
+        "corrupt-archive",
+        "unreadable-archive",
+        "foreign-producer",
+        "missing-producer",
+    ],
+)
 def test_freeze_dump_seal_restore_zero_and_dirty_guard(
     tmp_path, monkeypatch, execution, topology, branch
 ):
@@ -391,14 +411,49 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
         lambda **kw: original_http(transport=httpx.MockTransport(status), **kw),
     )
 
+    current_action = [None]
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda name, **kw: (
+            None
+            if branch == "missing-tool" and name == "pg_restore"
+            else "/tools/" + name
+        ),
+    )
+
     def process(argv, **kw):
+        tool = Path(argv[0]).name
+        assert argv[0] == "/tools/" + tool
+        if "--version" in argv:
+            assert set(kw["env"]) <= {"PATH", "LC_ALL"}
+            assert Path(argv[0]).is_absolute()
+            if branch == "version-timeout":
+                import subprocess
+
+                raise subprocess.TimeoutExpired(argv, 5)
+            major = (
+                17
+                if branch == "bad-" + str(current_action[0])
+                or (branch == "mixed-tools" and tool == "pg_restore")
+                else 16
+            )
+            output = (
+                "unparseable"
+                if branch == "invalid-version"
+                else f"{tool} (PostgreSQL) {major}.{'15' if tool == 'pg_dump' else '14'} (Debian)\n"
+            )
+            return SimpleNamespace(returncode=0, stdout=output)
+        if "--list" in argv:
+            assert set(kw["env"]) <= {"PATH", "LC_ALL"}
+            assert "--dbname" not in " ".join(argv)
+            return SimpleNamespace(returncode=int(branch == "unreadable-archive"))
         assert kw["env"]["PGPASSWORD"] == "synthetic"
         assert kw["env"]["PGSSLMODE"] == "verify-full"
         assert "--role=a_owner" in argv
         assert "AWS_SECRET_ACCESS_KEY" not in kw["env"]
         database = kw["env"]["PGDATABASE"]
         origin = config["domains"][operator.source_context(config)]["database"]
-        if argv[0] == "pg_dump":
+        if tool == "pg_dump":
             assert cluster.databases[origin].allow
             assert not any(
                 a[1] == cluster.oids["a_app"] for a in cluster.databases[origin].acl
@@ -445,6 +500,7 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
     archive = tmp_path / "archive.dump"
 
     def run(action, decision=None):
+        current_action[0] = action
         return operator.execute(
             SimpleNamespace(
                 config=str(tmp_path / "operator.json"),
@@ -456,13 +512,73 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
             )
         )
 
+    def rejected_before_intent(action):
+        state = copy.deepcopy((cluster.data, cluster.schema_acl, cluster.sequences))
+        databases = {
+            name: (db.allow, set(db.acl)) for name, db in cluster.databases.items()
+        }
+        with pytest.raises(ValueError):
+            run(action)
+        assert not journal.exists(action + ".intent")
+        assert state == (cluster.data, cluster.schema_acl, cluster.sequences)
+        assert databases == {
+            name: (db.allow, set(db.acl)) for name, db in cluster.databases.items()
+        }
+        assert (
+            next(
+                row[0] for row in cluster.trace if row[0] in {"connect", "native-auth"}
+            )
+            == "native-auth"
+        )
+        from mcp_vault.config import get_settings
+
+        get_settings.cache_clear()
+
+    if branch in {
+        "bad-create-copy",
+        "missing-tool",
+        "version-timeout",
+        "mixed-tools",
+        "invalid-version",
+    }:
+        rejected_before_intent("create-copy")
+        return
     run("create-copy")
     # Impossible to dump before confirmed SourceFrozen.
     with pytest.raises(FileNotFoundError):
         operator.copy_action(config, journal, native, "dump-frozen", str(archive))
+    if branch == "bad-freeze-source":
+        rejected_before_intent("freeze-source")
+        return
     run("freeze-source")
+    if branch == "bad-dump-frozen":
+        rejected_before_intent("dump-frozen")
+        assert not archive.exists()
+        return
     run("dump-frozen")
+    dumped = journal.confirmed("dump-frozen")
+    assert set(dumped["archive"]) == {"sha256", "size"}
     run("seal-source")
+    if branch == "corrupt-archive":
+        archive.write_bytes(b"corrupt")
+    if branch in {"foreign-producer", "missing-producer"}:
+        if branch == "foreign-producer":
+            dumped["tool_versions"]["dump_major"] = 17
+        else:
+            dumped.pop("tool_versions", None)
+        private(
+            Path(config["carrier_dir"]) / "dump-frozen.ack.json", json.dumps(dumped)
+        )
+    if branch in {
+        "bad-restore-frozen",
+        "corrupt-archive",
+        "unreadable-archive",
+        "foreign-producer",
+        "missing-producer",
+    }:
+        rejected_before_intent("restore-frozen")
+        assert not cluster.databases["source_a"].allow
+        return
     # Absence de fichier restore : jamais une preuve permettant rollback-zero.
     with pytest.raises(ValueError, match="Restore non entrepris"):
         operator.copy_action(config, journal, native, "verify-copy", str(archive))
@@ -491,6 +607,13 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
 
         get_settings.cache_clear()
         return
+    if branch in {"zero", "failed-zero"}:
+        monkeypatch.setattr(
+            "shutil.which",
+            lambda *a, **kw: pytest.fail(
+                "Zero proof/reopen must not require dump tools"
+            ),
+        )
     baseline = run("verify-copy")
     assert baseline["zero_business_mutation"]
     if branch != "failed-zero":

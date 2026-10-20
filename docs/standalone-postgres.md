@@ -15,6 +15,9 @@ Le serveur historiquement qualifié reste **INCONNU**. Le tag de recette
 par psycopg sont trois informations différentes. Ne pas déduire la version du
 serveur de libpq. L'opérateur mesure `server_version_num` avant toute DDL ; la
 syntaxe de membership employée exige PG16 ou ultérieur réellement observé.
+L’image `pg-operator` fournit par défaut **pg_dump16 et pg_restore16** pour la
+cible PG16. Un autre majeur exige une paire de son majeur fournie par le contexte
+opérateur et une qualification distincte ; la connexion libpq seule ne la prouve pas.
 
 ## Quatre parcours, un produit
 
@@ -152,7 +155,7 @@ nettoyé pour qu'aucune ancienne variable Settings ne supplante ce fichier :
 
 ```sh
 cd /srv/vault
-env -i PATH=/srv/vault/venv/bin:/usr/local/bin:/usr/bin PYTHONPATH=/opt/mcp-vault/src /srv/vault/venv/bin/python -m mcp_vault
+env -i PATH=/srv/vault/venv/bin:/usr/lib/postgresql/16/bin:/usr/local/bin:/usr/bin PYTHONPATH=/opt/mcp-vault/src /srv/vault/venv/bin/python -m mcp_vault
 ```
 
 Ces chemins sont des exemples publics à adapter. Inclure le répertoire du
@@ -315,6 +318,23 @@ refuse de signaler une session étrangère et conserve backup jusqu'à la fin du
 dump. Seule une archive exclusive 0600 créée **après gel confirmé**, avec Source
 stable avant/après, code 0 et hash vérifié, est admissible. SourceSealed retire
 ensuite CONNECT backup/infra et passe ALLOW_CONNECTIONS false, sessions zéro.
+Avant create-copy, gel, dump et restore, le CLI authentifie Bao, relit KV puis
+mesure le serveur et les deux outils résolus sur PATH, **avant l’intention
+mutative**. Leurs majeures doivent correspondre au serveur ; des correctifs
+mineurs différents sont admis. Les mêmes chemins absolus sont exécutés. Python
+utilise le PATH16 ci-dessus, pas une nouvelle variable `.env` ; le target
+opérateur prépare ses clients16 via PGDG signé. apt peut résoudre une **libpq5
+système différente** : relever sa version séparément de la libpq embarquée par
+psycopg-binary, dont le verrou Python ne change pas.
+
+Les versions productrices sont dans une clé sœur de `archive` de l’ACK dump,
+sans modifier son hash/taille. Avant restore, le CLI vérifie cette provenance,
+l’égalité stricte du hash et `pg_restore --list` sans connexion DB. Aucune ancienne
+preuve n’est complétée automatiquement. `verify*`, `decide-copy` et
+`reopen-source-zero` ne requièrent pas les outils dump ; leurs autres prédicats
+restent inchangés. Un UNKNOWN existant ne devient pas rejouable après installation
+d’un nouveau client. Ne pas filtrer l’archive ou ignorer une erreur GUC/ACL.
+
 Le restore est mono-transaction, exit-on-error, rôle owner, sans changement de
 roles ni remapping. OID, chemins, M, configuration, ACL, archive et états sont
 liés par les carriers ; ceux-ci ne remplacent jamais les observations réelles.
