@@ -264,18 +264,29 @@ def test_preflight_io_error_is_closed(tls_files, monkeypatch):
     assert settings_for_files(tls_files).check_openbao_operator_tls()[0] is False
 
 
-@pytest.mark.parametrize("entrypoint", ["main", "create_app"])
-def test_server_refuses_before_lifecycle(entrypoint, monkeypatch, tls_files):
-    from mcp_vault import lifecycle, server
+def test_main_refuses_before_create_app(monkeypatch, tls_files):
+    from mcp_vault import server
 
     cfg = settings_for_files(tls_files, admin_bootstrap_key="Valid-Test-Key-For-Operator-831-2026!!")
     tls_files[1].unlink()
     monkeypatch.setattr(server, "settings", cfg)
-    startup = AsyncMock()
-    monkeypatch.setattr(lifecycle, "vault_startup", startup)
-    with pytest.raises((SystemExit, RuntimeError)):
-        getattr(server, entrypoint)()
-    startup.assert_not_called()
+    create = MagicMock(side_effect=AssertionError("create_app reached before preflight"))
+    monkeypatch.setattr(server, "create_app", create)
+    with pytest.raises(SystemExit) as error:
+        server.main()
+    assert error.value.code == 1
+    create.assert_not_called()
+
+
+def test_create_app_refuses_with_closed_tls_message(monkeypatch, tls_files):
+    from mcp_vault import server
+
+    cfg = settings_for_files(tls_files, admin_bootstrap_key="Valid-Test-Key-For-Operator-831-2026!!")
+    tls_files[1].unlink()
+    monkeypatch.setattr(server, "settings", cfg)
+    with pytest.raises(RuntimeError, match="^TLS opérateur invalide — démarrage refusé : "
+                       "Fichiers TLS opérateur OpenBao invalides ou indisponibles$"):
+        server.create_app()
 
 
 def test_manager_passes_real_tls_hcl_and_owns_child(tmp_path, monkeypatch, tls_files):

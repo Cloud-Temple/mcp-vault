@@ -8,41 +8,6 @@
 
 ## 1. Vision
 
-### Listener TLS opérateur optionnel
-
-Le triplet `OPENBAO_OPERATOR_TLS_ADDRESS`, `OPENBAO_OPERATOR_TLS_CERT_FILE`,
-`OPENBAO_OPERATOR_TLS_KEY_FILE` active explicitement un second listener natif
-Bao, sans outil MCP ni nouvelle autorité de secrets. Settings valide seulement
-syntaxe/groupe ; `check_openbao_operator_tls()` vérifie fichiers privés et paire
-PEM aux portes serveur main/create_app avant toute activité de startup. Une clé
-chiffrée est refusée par callback, sans prompt. Les scripts partageant les
-Settings sans mounts ne lisent pas les fichiers.
-
-Le générateur conserve à l'octet son défaut historique. Activé, il garde HTTP
-loopback8200 et api_addr canonique, ajoute TLS12 sur IPv4 privée explicite et
-borne le socket cluster dérivé au loopback (port TLS+1). Aucun cluster_addr
-global ni contrat HA du backend fichier n'est ajouté. Le réseau/IP opérateur
-doit exister avant le start ; aucun port hôte, WAF ou application/tenant n'y
-est attaché par ce produit. Le certificat neuf doit couvrir le nom et l'IP
-effectivement contrôlés par le déploiement ; les clients vérifient CA/SAN.
-
-L'ordre S3 restore → génération HCL → Popen → init/unseal et l'arrêt propriétaire
-restent inchangés. Aucun Bao pré-démarré pour adoption et aucune restauration
-sous backend vivant. La branche historique de réutilisation d'un Bao déjà
-joignable reste : elle ne régénère pas le HCL, donc ne garantit pas TLS ; un
-client natif refuse sans fallback. Les fichiers TLS restent sous contrôle du
-même UID privé pendant leur contrôle et leur lecture par Bao ; ce préflight
-ne protège pas d'une modification malveillante par ce même UID après contrôle.
-
-Ce listener expose l'API native, avec ses policies propres : ce n'est pas le PEP
-MCP. Sur Source neuve, sys/init est momentanément non authentifié. Soit le coffre
-est initialisé avant l'activation, soit tous les membres du réseau opérateur
-avant init sont de confiance et explicitement contrôlés. Aucun acteur métier
-ou tenant n'est autorisé sur cette interface. Les images anciennes ignorent
-éventuellement ces variables d'environnement : la health HTTPS réelle demeure
-obligatoire, ainsi que cluster_id/auth/capabilities/TTL/revocation côté recette.
-Ces contrôles de recette ne sont pas déduits du seul HCL produit.
-
 **MCP Vault** est un serveur MCP qui fournit une **gestion sécurisée de secrets** pour les agents IA et les missions. Il embarque **OpenBao** (fork open-source de HashiCorp Vault, Linux Foundation) comme moteur de chiffrement et de gestion des secrets.
 
 ### Principes
@@ -2970,3 +2935,38 @@ result = await vault_client.call("ssh_sign_key", {
 ---
 
 *Document mis à jour le 16 août 2026 — MCP Vault v0.15.0. Depuis la v0.12.0 : clé de provisionnement à usage unique SANS CONDITION et cinq codes de refus nommés d'après ce que l'appelant peut faire (v0.13.0/v0.14.0), révocation confirmée mais non inscrite désormais annoncée à l'appelant (v0.14.1), limite de durabilité ARBITRÉE et publiée plutôt que laissée en attente (#123), et magasins d'autorisation sortis de la boucle d'événements — le point de décision lit la mémoire, jamais le réseau (#110 lot 3). État antérieur conservé ci-dessous pour mémoire — v0.12.0 (contrat de consommation d'un wrap honnête : un secret sans contenu exploitable ne sort plus en `status: ok`, états terminaux `unusable`/`consume_outcome_unknown` non réessayables, binding de mission exigé aux DEUX bouts en mode durci (#78) ; cloisonnement inter-missions du registre : la compensation et la lecture d'état portent sur le couple `(operation_id, mission_id)`, la compensation d'un orphelin d'une mission ne révoque plus la provision vivante d'une autre ; 39 outils MCP, sondes de santé honnêtes : liveness `/healthz` toujours verte, disponibilité `/health`/`/ready` en 503 avec énumération fermée healthy|sealed|unavailable, sonde OpenBao offloadée, bornée et single-flight (#103), mode `bearer` exigeant un jeton valide (#116), appels S3 du cycle de vie hors boucle d'événements (#122), suppression du shell interactif au profit d'une seule analyse d'arguments côté CLI et sûreté d'état des purges (#128), reproductibilité de l'image : verrou consommé par le Dockerfile et garde d'import à la construction (#125), CI d'exécution des tests, avec démarrage du conteneur et sonde de santé (#113), bornes réseau S3 et chemin d'arrêt porté par le lifespan ASGI (#110 lot 1), échec bruyant sur clés d'unseal inexploitables (#121), permission dédiée `wrap` non-admin pour le broker JIT (verrou wrap-only, policy stricte obligatoire, registre scopé vault+chemins, #115), WAF Coraza v3.7.0 avec parsing JSON borné sur /mcp (profondeur, taille, refus des corps non analysables) et exclusions de cibles anti-évasion, accès SSH JIT opérateur (bearer nominatif + policy dédiée, clé publique pré-enrôlée), pile ASGI 6 couches avec PkiMiddleware, PEP mission JWT à la porte /mcp + MissionBindingStore (PDP local, deny-by-default par tenant), PKI interne CA + ACME, JIT Wrap Broker + consommation médiée C18, audit du cycle de vie des accès, purge des tokens révoqués, console admin web, WAF docker-compose, ContextVar, token cache TTL, ring buffer, écriture create-only atomique (CAS), sync S3 conditionnelle, contrat de configuration `.env.example` déterministe et testé)*
+
+### Listener TLS opérateur optionnel
+
+Le triplet `OPENBAO_OPERATOR_TLS_ADDRESS`, `OPENBAO_OPERATOR_TLS_CERT_FILE`,
+`OPENBAO_OPERATOR_TLS_KEY_FILE` active explicitement un second listener natif
+Bao, sans outil MCP ni nouvelle autorité de secrets. Settings valide seulement
+syntaxe/groupe ; `check_openbao_operator_tls()` vérifie fichiers privés et paire
+PEM aux portes serveur main/create_app avant toute activité de startup. Une clé
+chiffrée est refusée par callback, sans prompt. Les scripts partageant les
+Settings sans mounts ne lisent pas les fichiers.
+
+Le générateur conserve à l'octet son défaut historique. Activé, il garde HTTP
+loopback8200 et api_addr canonique, ajoute TLS12 sur IPv4 privée explicite et
+borne le socket cluster dérivé au loopback (port TLS+1). Aucun cluster_addr
+global ni contrat HA du backend fichier n'est ajouté. Le réseau/IP opérateur
+doit exister avant le start ; aucun port hôte, WAF ou application/tenant n'y
+est attaché par ce produit. Le certificat neuf doit couvrir le nom et l'IP
+effectivement contrôlés par le déploiement ; les clients vérifient CA/SAN.
+
+L'ordre S3 restore → génération HCL → Popen → init/unseal et l'arrêt propriétaire
+restent inchangés. Aucun Bao pré-démarré pour adoption et aucune restauration
+sous backend vivant. La branche historique de réutilisation d'un Bao déjà
+joignable reste : elle ne régénère pas le HCL, donc ne garantit pas TLS ; un
+client natif refuse sans fallback. Les fichiers TLS restent sous contrôle du
+même UID privé pendant leur contrôle et leur lecture par Bao ; ce préflight
+ne protège pas d'une modification malveillante par ce même UID après contrôle.
+
+Ce listener expose l'API native, avec ses policies propres : ce n'est pas le PEP
+MCP. Sur Source neuve, sys/init est momentanément non authentifié. Soit le coffre
+est initialisé avant l'activation, soit tous les membres du réseau opérateur
+avant init sont de confiance et explicitement contrôlés. Aucun acteur métier
+ou tenant n'est autorisé sur cette interface. Les images anciennes ignorent
+éventuellement ces variables d'environnement : la health HTTPS réelle demeure
+obligatoire, ainsi que cluster_id/auth/capabilities/TTL/revocation côté recette.
+Ces contrôles de recette ne sont pas déduits du seul HCL produit.
