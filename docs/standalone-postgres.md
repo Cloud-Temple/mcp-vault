@@ -382,3 +382,22 @@ logique PG avec Bao courant ne constitue ni une restauration historique du
 coffre S3 ni du PITR. Les revues indépendantes du plan puis du diff/résultat et
 la lecture réelle de la mémoire projet par le relecteur restent requises dans
 le cycle de livraison ; aucun succès natif ne découle de ce guide.
+
+### Empreintes de droits et anciens journaux
+
+L'empreinte compare les ACL déjà couvertes (schéma, relations, fonctions et
+privilèges par défaut de l'owner). Une ACL NULL est développée avec le défaut
+PostgreSQL de son type ; un tableau vide reste vide. Les tuples triés conservent
+le grantor, le bénéficiaire distingué de PUBLIC, le privilège et l'option de
+délégation. Les propriétaires restent comparés séparément ; un rôle non résolu
+est refusé. Les ACL de colonnes et les vérificateurs v3/v4 ne changent pas.
+
+Les empreintes d'anciens journaux (`created.empty`, `dumped.content` et
+`seal-source`) ne sont ni converties ni acquittées : une comparaison avec
+l'ancien format peut refuser la reprise, y compris pour une Copy vierge.
+Un restore UNKNOWN reste UNKNOWN ; ce changement n'autorise aucun rejeu.
+
+Limite préexistante : un GRANT délégué peut conduire pg_dump à émettre
+`SET SESSION AUTHORIZATION` pour son grantor. Le restore non superuser peut
+alors refuser avant la comparaison d'empreintes. La comparaison directe des
+grantors ne prouve donc pas que ce parcours de restauration est supporté.

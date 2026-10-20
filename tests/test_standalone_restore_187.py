@@ -113,15 +113,49 @@ class Connection:
                     (
                         "vault_metadata",
                         cluster.roles["owner"],
-                        cluster.schema_acl[self.database],
+                        [
+                            [
+                                cluster.roles["owner"],
+                                "ROLE",
+                                cluster.roles["app"],
+                                cluster.schema_acl[self.database],
+                                False,
+                            ]
+                        ],
                     )
                 ]
             elif kind == "relations":
                 self.rows = [
-                    (name, "r", cluster.roles["owner"], "app-select")
+                    (
+                        name,
+                        "r",
+                        cluster.roles["owner"],
+                        [
+                            [
+                                cluster.roles["owner"],
+                                "ROLE",
+                                cluster.roles["app"],
+                                "SELECT",
+                                False,
+                            ]
+                        ],
+                    )
                     for name in sorted(cluster.data[self.database])
                 ] + [
-                    (name, "S", cluster.roles["owner"], "owner-only")
+                    (
+                        name,
+                        "S",
+                        cluster.roles["owner"],
+                        [
+                            [
+                                cluster.roles["owner"],
+                                "ROLE",
+                                cluster.roles["owner"],
+                                "USAGE",
+                                False,
+                            ]
+                        ],
+                    )
                     for name in sorted(cluster.sequences[self.database])
                 ]
         elif text.startswith("SELECT c.relname,c.relkind"):

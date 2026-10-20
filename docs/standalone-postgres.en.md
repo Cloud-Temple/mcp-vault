@@ -257,3 +257,21 @@ with `pg_restore --list`, without a DB connection. No old carrier is backfilled,
 no SQL/GUC filtering or ignored error is permitted, and installing a different
 client never makes an existing UNKNOWN replayable. The default16 pair does not
 promise support for other server majors without separate qualification.
+
+### ACL fingerprints and older journals
+
+The fingerprint covers existing schema, relation, function and owner default
+ACLs. NULL expands to PostgreSQL's default for that object type; an empty array
+stays empty. Sorted tuples preserve grantor, grantee distinguished from PUBLIC,
+privilege and grant option. Owners remain separate; unresolved roles are
+rejected. Column ACL coverage and the v3/v4 verifiers are unchanged.
+
+Older journal fingerprints (`created.empty`, `dumped.content`, `seal-source`)
+are neither converted nor acknowledged. Comparing the old format may refuse
+resumption, including an empty Copy. An UNKNOWN restore remains UNKNOWN and
+must not be replayed because of this change.
+
+Existing limitation: delegated grants can make pg_dump emit
+`SET SESSION AUTHORIZATION` for their grantor. Non-superuser restore may fail
+before fingerprint comparison. A direct grantor comparison therefore does not
+qualify restoration of delegated grants.

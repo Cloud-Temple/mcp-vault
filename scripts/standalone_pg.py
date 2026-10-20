@@ -226,15 +226,29 @@ def fingerprint(config, values, database, *, empty=False):
 
 def structure_signature(conn, owner):
     """Comparer les ACL et définitions logiques, sans comparer les OID physiques."""
+
+    def acl(expression):
+        # A scalar subquery preserves the object even when its ACL is empty.
+        # LEFT JOIN preserves unresolved roles so validation refuses them.
+        return f"""(SELECT COALESCE(jsonb_agg(jsonb_build_array(
+            g.rolname, CASE WHEN a.grantee=0 THEN 'PUBLIC' ELSE 'ROLE' END,
+            CASE WHEN a.grantee=0 THEN '' ELSE r.rolname END,
+            a.privilege_type,a.is_grantable)
+            ORDER BY g.rolname COLLATE "C",a.grantee=0,r.rolname COLLATE "C",
+                     a.privilege_type COLLATE "C",a.is_grantable),'[]'::jsonb)
+            FROM aclexplode({expression}) a
+            LEFT JOIN pg_roles g ON g.oid=a.grantor
+            LEFT JOIN pg_roles r ON r.oid=a.grantee)"""
+
     queries = (
         (
             "schema",
-            "SELECT nspname,pg_get_userbyid(nspowner),COALESCE(nspacl::text,'') FROM pg_namespace WHERE nspname='vault_metadata' ORDER BY 1",
+            f"""SELECT nspname,(SELECT rolname FROM pg_roles WHERE oid=nspowner),{acl("COALESCE(nspacl,acldefault('n',nspowner))")} FROM pg_namespace WHERE nspname='vault_metadata' ORDER BY 1""",
             None,
         ),
         (
             "relations",
-            "SELECT c.relname,c.relkind,pg_get_userbyid(c.relowner),COALESCE(c.relacl::text,'') FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='vault_metadata' AND c.relkind IN ('r','S','v','m','f') ORDER BY 1,2",
+            f"""SELECT c.relname,c.relkind,(SELECT rolname FROM pg_roles WHERE oid=c.relowner),{acl("COALESCE(c.relacl,CASE WHEN c.relkind='S' THEN acldefault('s',c.relowner) ELSE acldefault('r',c.relowner) END)")} FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='vault_metadata' AND c.relkind IN ('r','S','v','m','f') ORDER BY 1,2""",
             None,
         ),
         (
@@ -249,7 +263,7 @@ def structure_signature(conn, owner):
         ),
         (
             "functions",
-            "SELECT p.proname,pg_get_function_identity_arguments(p.oid),pg_get_userbyid(p.proowner),COALESCE(p.proacl::text,''),pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='vault_metadata' ORDER BY 1,2",
+            f"""SELECT p.proname,pg_get_function_identity_arguments(p.oid),(SELECT rolname FROM pg_roles WHERE oid=p.proowner),{acl("COALESCE(p.proacl,acldefault('f',p.proowner))")},pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='vault_metadata' ORDER BY 1,2""",
             None,
         ),
         (
@@ -259,7 +273,7 @@ def structure_signature(conn, owner):
         ),
         (
             "defaults",
-            "SELECT pg_get_userbyid(d.defaclrole),COALESCE(n.nspname,''),d.defaclobjtype,d.defaclacl::text FROM pg_default_acl d LEFT JOIN pg_namespace n ON n.oid=d.defaclnamespace WHERE d.defaclrole=(SELECT oid FROM pg_roles WHERE rolname=%s) AND (d.defaclnamespace=0 OR n.nspname='vault_metadata') ORDER BY 1,2,3",
+            f"""SELECT (SELECT rolname FROM pg_roles WHERE oid=d.defaclrole),COALESCE(n.nspname,''),d.defaclobjtype,{acl("d.defaclacl")} FROM pg_default_acl d LEFT JOIN pg_namespace n ON n.oid=d.defaclnamespace WHERE d.defaclrole=(SELECT oid FROM pg_roles WHERE rolname=%s) AND (d.defaclnamespace=0 OR n.nspname='vault_metadata') ORDER BY 1,2,3""",
             (owner,),
         ),
     )
@@ -268,6 +282,28 @@ def structure_signature(conn, owner):
         rows = conn.execute(
             "/* standalone:structure:" + kind + " */ " + query, parameters
         ).fetchall()
+        acl_index = {"schema": 2, "relations": 3, "functions": 3, "defaults": 3}.get(
+            kind
+        )
+        if acl_index is not None:
+            for row in rows:
+                owner_index = 1 if kind == "schema" else 0 if kind == "defaults" else 2
+                if not isinstance(row[owner_index], str) or not row[owner_index]:
+                    raise ValueError("Owner PostgreSQL non résolu")
+                for grant in row[acl_index]:
+                    if (
+                        len(grant) != 5
+                        or not isinstance(grant[0], str)
+                        or not grant[0]
+                        or grant[1] not in ("PUBLIC", "ROLE")
+                        or not isinstance(grant[2], str)
+                        or (grant[1] == "ROLE" and not grant[2])
+                        or (grant[1] == "PUBLIC" and grant[2] != "")
+                        or not isinstance(grant[3], str)
+                        or not grant[3]
+                        or type(grant[4]) is not bool
+                    ):
+                        raise ValueError("Identité ou ACL PostgreSQL non résolue")
         observed.append([kind, [list(row) for row in rows]])
     return hashlib.sha256(canonical(observed)).hexdigest()
 
