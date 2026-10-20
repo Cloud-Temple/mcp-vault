@@ -155,6 +155,28 @@ The ACME proxy also supports native role-scoped client endpoints. Network
 publication, EAB admission and role restrictions remain operator configuration:
 see the [PKI contract](DESIGN/mcp-vault/TECHNICAL.md#311b-vaultpki_capy--pki-certificate-authority-v051).
 
+### Optional native operator TLS listener
+
+The canonical HTTP listener `127.0.0.1:8200` remains unchanged. Set all three
+`OPENBAO_OPERATOR_TLS_ADDRESS`, `OPENBAO_OPERATOR_TLS_CERT_FILE` and
+`OPENBAO_OPERATOR_TLS_KEY_FILE` to enable an additional native OpenBao listener;
+all default to empty. Use an explicit RFC1918 IPv4 address and port, keep
+`OPENBAO_ADDR` at `http://127.0.0.1:8200`, and attach that interface before Bao
+starts. TLS 1.2 minimum is fixed. Do not publish a host port or WAF route.
+
+Place a matching PEM certificate and unencrypted key outside the backend in a
+private 0700 directory owned by the server UID. Files must have the same owner,
+the key must be 0400/0600, and the certificate must not be group/other writable;
+symlinks are rejected. Server startup checks these files; loading Settings alone
+does not. Native Bao policies are distinct from MCP permissions. Only authorized
+operator actors may join this network; clients verify CA and hostname.
+
+Use an initialized vault or trust every operator network member before Source
+initialization: `sys/init` is unauthenticated during bootstrap. Older images may
+silently ignore the new environment variables. Reusing an already reachable Bao
+does not regenerate its configuration, so TLS may be absent: clients must fail
+closed without an HTTP fallback. No MCP tool enables the listener.
+
 ## Development and tests
 
 ```bash

@@ -1,0 +1,328 @@
+"""Listener opérateur opt-in : vrais Settings, PEM et fichier HCL produit."""
+
+import asyncio
+import os
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
+
+from mcp_vault.config import Settings, get_settings
+from mcp_vault.openbao import config as hcl
+
+TRIPLET = {
+    "openbao_operator_tls_address": "172.16.80.9:8420",
+    "openbao_operator_tls_cert_file": "/private/bao/server.pem",
+    "openbao_operator_tls_key_file": "/private/bao/server-key.pem",
+}
+
+
+@pytest.fixture(autouse=True)
+def isolated_settings(monkeypatch):
+    for name in TRIPLET:
+        monkeypatch.delenv(name.upper(), raising=False)
+    for name in ("OPENBAO_ADDR", "OPENBAO_DATA_DIR", "OPENBAO_CONFIG_DIR", "MCP_SERVER_PORT"):
+        monkeypatch.delenv(name, raising=False)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def tls_files(tmp_path):
+    directory = tmp_path / "tls"
+    directory.mkdir(mode=0o700)
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "bao-ops.test")])
+    now = datetime.now(UTC)
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+            .public_key(key.public_key()).serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=1))
+            .not_valid_after(now + timedelta(hours=1)).sign(key, hashes.SHA256()))
+    cert_path = directory / "server.pem"
+    key_path = directory / "server-key.pem"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    cert_path.chmod(0o644)
+    key_path.write_bytes(key.private_bytes(serialization.Encoding.PEM,
+                                         serialization.PrivateFormat.PKCS8,
+                                         serialization.NoEncryption()))
+    key_path.chmod(0o600)
+    return cert_path, key_path, key
+
+
+def settings_for_files(tls_files, **overrides):
+    cert, key, _ = tls_files
+    values = dict(TRIPLET, openbao_operator_tls_cert_file=str(cert),
+                  openbao_operator_tls_key_file=str(key))
+    values.update(overrides)
+    return Settings(_env_file=None, **values)
+
+
+def test_settings_accept_explicit_tls_triplet_without_reading_files():
+    cfg = Settings(
+        _env_file=None,
+        openbao_operator_tls_address="172.16.80.9:8420",
+        openbao_operator_tls_cert_file="/private/bao/server.pem",
+        openbao_operator_tls_key_file="/private/bao/server-key.pem",
+    )
+    assert cfg.openbao_operator_tls_address == "172.16.80.9:8420"
+
+
+def test_actual_generator_renders_additional_tls_listener(tmp_path, monkeypatch):
+    cfg = SimpleNamespace(
+        openbao_config_dir=str(tmp_path / "config"),
+        openbao_data_dir=str(tmp_path / "data"),
+        openbao_addr="http://127.0.0.1:8200",
+        openbao_operator_tls_address="172.16.80.9:8420",
+        openbao_operator_tls_cert_file="/private/bao/server.pem",
+        openbao_operator_tls_key_file="/private/bao/server-key.pem",
+    )
+    monkeypatch.setattr(hcl, "get_settings", lambda: cfg)
+    rendered = Path(hcl.generate_hcl_config()).read_text()
+    assert rendered.count('listener "tcp"') == 2
+    assert 'tls_min_version = "tls12"' in rendered
+    assert 'cluster_address = "127.0.0.1:8421"' in rendered
+
+
+def test_real_environment_enables_listener(tmp_path, monkeypatch, tls_files):
+    cfg = settings_for_files(tls_files)
+    for name in TRIPLET:
+        monkeypatch.setenv(name.upper(), getattr(cfg, name))
+    monkeypatch.setenv("OPENBAO_CONFIG_DIR", str(tmp_path / "config"))
+    loaded = Settings(_env_file=None)
+    assert loaded.check_openbao_operator_tls() == (True, "")
+    monkeypatch.setattr(hcl, "get_settings", lambda: loaded)
+    text = Path(hcl.generate_hcl_config()).read_text()
+    assert text.count('listener "tcp"') == 2
+    canonical, tls = text.split('listener "tcp"')[1:]
+    assert 'address     = "127.0.0.1:8200"' in canonical
+    assert "tls_disable = true" in canonical
+    assert "tls_disable = false" in tls and "tls_disable = true" not in tls
+    assert 'api_addr = "http://127.0.0.1:8200"' in tls
+    assert 'cluster_addr =' not in text
+
+
+def test_disabled_preflight_never_touches_files(monkeypatch):
+    cfg = Settings(_env_file=None)
+    monkeypatch.setattr(Path, "lstat", lambda *_: pytest.fail("filesystem touch"))
+    assert cfg.check_openbao_operator_tls() == (True, "")
+
+
+def test_disabled_hcl_matches_parent_bytes(tmp_path, monkeypatch):
+    cfg = Settings(_env_file=None, openbao_config_dir=str(tmp_path),
+                   openbao_data_dir="/openbao/file")
+    monkeypatch.setattr(hcl, "get_settings", lambda: cfg)
+    expected = '''# OpenBao Server Configuration — Auto-generated by MCP Vault
+# ⚠️ Ne pas modifier manuellement — ce fichier est régénéré au démarrage
+
+storage "file" {
+  path = "/openbao/file"
+}
+
+listener "tcp" {
+  address     = "127.0.0.1:8200"
+  tls_disable = true
+}
+
+api_addr = "http://127.0.0.1:8200"
+
+# Pas besoin de l'UI OpenBao — on a notre propre console admin
+ui = false'''
+    assert Path(hcl.generate_hcl_config()).read_bytes() == expected.encode()
+
+
+@pytest.mark.parametrize("present", [1, 2, 3, 4, 5, 6])
+def test_partial_group_refused(present):
+    values = {k: v for i, (k, v) in enumerate(TRIPLET.items()) if present & (1 << i)}
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, **values)
+
+
+@pytest.mark.parametrize("value", [
+    "0.0.0.0:8420", "127.0.0.1:8420", "8.8.8.8:8420", "169.254.0.1:8420",
+    "172.32.0.1:8420", "bao:8420", "http://172.16.80.9:8420", "[::1]:8420",
+    "172.16.80.9:08240", "172.16.80.9:1023", "172.16.80.9:65535",
+    "172.16.80.9:8199", "172.16.80.9:8200", "172.16.80.9:8201",
+    "172.16.80.9:8029", "172.16.80.9:8030", "172.016.80.9:8420",
+    "172.16.80.9:8420\n", " ", False, 8420,
+])
+def test_invalid_address_refused(value):
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, **dict(TRIPLET, openbao_operator_tls_address=value))
+
+
+@pytest.mark.parametrize("value", [
+    "relative/key", "/private/../key", "/private//key", "/private/./key",
+    '/private/"key', "/private/${KEY}", "/private/%{KEY}", "/private/key\n",
+    "/private/key\\evil", "/openbao/file/key", "/openbao/config/server.hcl", "/",
+])
+def test_invalid_paths_refused(value):
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, **dict(TRIPLET, openbao_operator_tls_key_file=value))
+
+
+def test_noncanonical_http_and_duplicate_files_refused():
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, **TRIPLET, openbao_addr="http://localhost:8200")
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, **dict(TRIPLET, openbao_operator_tls_key_file=TRIPLET[
+            "openbao_operator_tls_cert_file"]))
+
+
+@pytest.mark.parametrize("mode", [0o400, 0o600])
+def test_real_pem_pair_valid(tls_files, mode):
+    tls_files[1].chmod(mode)
+    assert settings_for_files(tls_files).check_openbao_operator_tls() == (True, "")
+
+
+@pytest.mark.parametrize("damage", [
+    "absent", "directory", "key_mode", "cert_mode", "parent_mode", "owner",
+    "parent_owner", "symlink", "parent_symlink", "bad_pem", "wrong_key", "encrypted",
+])
+def test_files_fail_closed(tls_files, damage, monkeypatch):
+    cert, key, private = tls_files
+    cfg = settings_for_files(tls_files)
+    if damage == "absent":
+        key.unlink()
+    elif damage == "directory":
+        key.unlink()
+        key.mkdir(mode=0o700)
+    elif damage == "key_mode":
+        key.chmod(0o644)
+    elif damage == "cert_mode":
+        cert.chmod(0o666)
+    elif damage == "parent_mode":
+        key.parent.chmod(0o755)
+    elif damage in ("owner", "parent_owner"):
+        original = Path.stat
+        foreign = key if damage == "owner" else key.parent
+
+        def altered(path, *args, **kwargs):
+            value = original(path, *args, **kwargs)
+            if path == foreign:
+                parts = list(value)
+                parts[4] = os.geteuid() + 1
+                return os.stat_result(parts)
+            return value
+
+        monkeypatch.setattr(Path, "stat", altered)
+    elif damage == "symlink":
+        actual = key.with_suffix(".actual")
+        key.rename(actual)
+        key.symlink_to(actual)
+    elif damage == "parent_symlink":
+        parent = key.parent
+        real = parent.with_name("real")
+        parent.rename(real)
+        parent.symlink_to(real, target_is_directory=True)
+    elif damage == "bad_pem":
+        cert.write_text("PRIVATE TEST INVALID PEM")
+    elif damage == "wrong_key":
+        other = ec.generate_private_key(ec.SECP256R1())
+        key.write_bytes(other.private_bytes(serialization.Encoding.PEM,
+                        serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    elif damage == "encrypted":
+        key.write_bytes(private.private_bytes(serialization.Encoding.PEM,
+                        serialization.PrivateFormat.PKCS8,
+                        serialization.BestAvailableEncryption(b"private-test-password")))
+    ok, message = cfg.check_openbao_operator_tls()
+    assert ok is False
+    assert message == "Fichiers TLS opérateur OpenBao invalides ou indisponibles"
+
+
+def test_password_callback_rejects_without_prompt(tls_files, monkeypatch):
+    import ssl
+
+    observed = []
+
+    def load(_context, _cert, _key, *, password):
+        with pytest.raises(ValueError, match="Clé TLS chiffrée non acceptée"):
+            password()
+        observed.append(True)
+        raise ValueError("provider diagnostic not publishable")
+
+    monkeypatch.setattr(ssl.SSLContext, "load_cert_chain", load)
+    assert settings_for_files(tls_files).check_openbao_operator_tls()[0] is False
+    assert observed == [True]
+
+
+def test_backend_symlink_cannot_alias_tls_directory(tls_files, tmp_path):
+    backend = tmp_path / "backend-alias"
+    backend.symlink_to(tls_files[0].parent, target_is_directory=True)
+    cfg = settings_for_files(tls_files, openbao_data_dir=str(backend))
+    assert cfg.check_openbao_operator_tls()[0] is False
+
+
+def test_preflight_io_error_is_closed(tls_files, monkeypatch):
+    monkeypatch.setattr(Path, "lstat", lambda *_: (_ for _ in ()).throw(OSError("private")))
+    assert settings_for_files(tls_files).check_openbao_operator_tls()[0] is False
+
+
+def test_main_refuses_before_create_app(monkeypatch, tls_files):
+    from mcp_vault import server
+
+    cfg = settings_for_files(tls_files, admin_bootstrap_key="Valid-Test-Key-For-Operator-831-2026!!")
+    tls_files[1].unlink()
+    monkeypatch.setattr(server, "settings", cfg)
+    create = MagicMock(side_effect=AssertionError("create_app reached before preflight"))
+    monkeypatch.setattr(server, "create_app", create)
+    with pytest.raises(SystemExit) as error:
+        server.main()
+    assert error.value.code == 1
+    create.assert_not_called()
+
+
+def test_create_app_refuses_with_closed_tls_message(monkeypatch, tls_files):
+    from mcp_vault import server
+
+    cfg = settings_for_files(tls_files, admin_bootstrap_key="Valid-Test-Key-For-Operator-831-2026!!")
+    tls_files[1].unlink()
+    monkeypatch.setattr(server, "settings", cfg)
+    with pytest.raises(RuntimeError, match="^TLS opérateur invalide — démarrage refusé : "
+                       "Fichiers TLS opérateur OpenBao invalides ou indisponibles$"):
+        server.create_app()
+
+
+def test_manager_passes_real_tls_hcl_and_owns_child(tmp_path, monkeypatch, tls_files):
+    import httpx
+
+    from mcp_vault.openbao import manager
+
+    cfg = settings_for_files(tls_files, openbao_config_dir=str(tmp_path / "config"),
+                             openbao_data_dir=str(tmp_path / "data"))
+    monkeypatch.setattr(hcl, "get_settings", lambda: cfg)
+    monkeypatch.setattr(manager, "get_settings", lambda: cfg)
+    monkeypatch.setattr(manager, "_is_openbao_reachable", AsyncMock(return_value=False))
+    monkeypatch.setattr(manager.hvac, "Client", MagicMock())
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    proc = MagicMock()
+    proc.poll.return_value = None
+    handles = []
+
+    def popen(argv, stdout, stderr):
+        path = Path(argv[2].removeprefix("-config="))
+        assert path.read_text().count('listener "tcp"') == 2
+        handles.extend([stdout, stderr])
+        return proc
+
+    monkeypatch.setattr(manager.subprocess, "Popen", popen)
+    monkeypatch.setattr(httpx.AsyncClient, "get", AsyncMock(return_value=MagicMock(status_code=501)))
+    monkeypatch.setattr(manager, "_process", None)
+    monkeypatch.setattr(manager, "_client", None)
+    try:
+        assert asyncio.run(manager.start_openbao()) is True
+        assert manager.is_running() is True
+        assert manager._process is proc
+        asyncio.run(manager.stop_openbao())
+        proc.terminate.assert_called_once()
+        proc.wait.assert_called_once_with(timeout=10)
+        assert manager.is_running() is False
+    finally:
+        for handle in handles:
+            handle.close()

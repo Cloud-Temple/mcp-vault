@@ -9,6 +9,11 @@
 
 ## [Unreleased]
 
+- Listener natif OpenBao TLS opérateur optionnel, désactivé par défaut : triplet
+  adresse privée/certificat/clé, TLS 1.2 minimum, préflight fichiers avant startup.
+  Le listener HTTP loopback, le backend et le cycle restauration/arrêt restent
+  inchangés. Accès opérateur isolé, sans nouvel outil MCP ni droit métier.
+
 - #831 : producteurs privés de préparation Vault (`prepare_read`, writer d'audit et job OpenBao), avec trace opérateur filtrée par scope ; exige le lecteur Mission de préparation associé avant campagne.
 
 - #846 : segments techniques UTC privés et nettoyage propriétaire borné à30jours minimum.
