@@ -4,6 +4,8 @@
 
 > 🇬🇧 [English version](README.en.md)
 
+Profil PostgreSQL standalone : [installation, quatre parcours et retour contrôlé](docs/standalone-postgres.md).
+
 MCP Vault centralise les secrets, les politiques d’accès et les accès temporaires dont ont besoin des agents IA. Il embarque [OpenBao](https://openbao.org/) pour le chiffrement et le stockage, ajoute une API MCP protégée par authentification et politiques, puis fournit une console d’administration et une CLI.
 
 **Version** : 0.20.1 · **Licence** : [Apache-2.0](LICENSE)

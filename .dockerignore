@@ -50,6 +50,7 @@
 !README.md
 !README.en.md
 !docker-compose.yml
+!docker-compose.postgres.yml
 
 # --- 4. Bruit à l'intérieur des répertoires ré-inclus ---
 # Les règles ci-dessus ré-incluent des arborescences entières ; on retire ensuite

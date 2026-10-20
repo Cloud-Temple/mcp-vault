@@ -1,0 +1,39 @@
+{
+  "context": "source_fresh",
+  "execution": "python",
+  "topology": "external",
+  "instance": "instance_a",
+  "mount": "technical_a",
+  "roles": {
+    "owner": "a_owner", "app": "a_app", "provisioner": "a_provisioner",
+    "maintenance": "a_maintenance", "backup": "a_backup", "restore": "a_restore"
+  },
+  "domains": {
+    "source_fresh": {
+      "database": "a_source",
+      "paths": {"app": "source/app", "provisioner": "source/provisioner", "maintenance": "source/maintenance", "backup": "source/backup", "restore": "source/restore"}
+    },
+    "copy": {
+      "database": "a_copy",
+      "paths": {"app": "copy/app", "provisioner": "copy/provisioner", "maintenance": "copy/maintenance", "backup": "copy/backup", "restore": "copy/restore"}
+    },
+    "return": {
+      "database": "a_return",
+      "paths": {"app": "return/app", "provisioner": "return/provisioner", "maintenance": "return/maintenance", "backup": "return/backup", "restore": "return/restore"}
+    }
+  },
+  "infra_path": "ops/infra",
+  "settings_file": "/srv/vault/.env",
+  "compose_env_file": "/srv/vault/compose.env",
+  "carrier_dir": "/srv/vault/carriers_source",
+  "vault_url": "http://127.0.0.1:8200",
+  "vault_ca_file": "",
+  "auth": {"mode": "existing_bootstrap", "token_file": ""},
+  "product_url": "http://127.0.0.1:8030",
+  "product_ca_file": "",
+  "pg_ca_file": "/srv/vault/tls/ca.crt",
+  "bootstrap_file": "/srv/vault/bootstrap.token",
+  "initial_admin_file": "/srv/vault/admin.token",
+  "client_name": "operator_a",
+  "tls": {"directory": "/srv/vault/tls", "host": "pg.example", "pg_uid": 1001, "pg_gid": 1001}
+}

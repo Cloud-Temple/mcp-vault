@@ -68,13 +68,16 @@ services:
     # (5 s connexion + 30 s lecture)) + seal et arrêt d'OpenBao.
     # À revoir si les bornes S3 changent.
     stop_grace_period: 120s
-    env_file: .env
+    env_file: ${VAULT_ENV_FILE:-.env}
     volumes:
       # Persistance locale du file backend OpenBao (cache crash recovery)
       - openbao-data:/openbao/file
       # Logs OpenBao ET `audit-mcp.jsonl` — seul support persistant du journal
       # d'audit applicatif, non couvert par l'archive S3. PAS optionnel.
       - openbao-logs:/openbao/logs
+      # CA lecteur PG (base externe). Le fichier par défaut est inutilisé en S3.
+      # En mode postgres, PG_CA_FILE doit désigner la vraie CA préparée hors dépôt.
+      - ${PG_CA_FILE:-./certs/README.md}:/run/pg-ca.crt:ro
     cap_add:
       - IPC_LOCK  # Permet à OpenBao de verrouiller la mémoire (mlock)
     restart: unless-stopped
@@ -87,6 +90,22 @@ services:
       - /tmp:size=50m
     networks:
       - mcp-net
+
+  # One-shot privé : même réseau loopback que Bao, aucun listener Bao publié.
+  pg-operator:
+    build:
+      context: .
+      target: pg-operator
+    profiles: ["operator"]
+    network_mode: service:mcp-vault
+    restart: "no"
+    environment:
+      - PYTHONPATH=/app/src
+    volumes:
+      - ${OPERATOR_DIRECTORY:-./certs}:/operator
+      - ${PG_CA_FILE:-./certs/README.md}:/run/pg-ca.crt:ro
+    working_dir: /operator
+    entrypoint: ["python", "/app/scripts/standalone_pg.py"]
 
   # ─────────────────────────────────────────────────────────────
   # Tests — Lance les tests d'intégration (usage ponctuel)

@@ -81,6 +81,28 @@ EXPOSE 8030
 # Start the MCP server
 CMD ["python", "-m", "mcp_vault"]
 
+# Outil ponctuel séparé ; ni scripts ni client PG ajoutés à production.
+FROM production AS pg-operator
+USER root
+# Le métapaquet trixie sélectionne 17, dont le restore ne cible pas PG16.
+RUN install -d /usr/share/postgresql-common/pgdg && \
+    curl --fail --silent --show-error https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+      -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc && \
+    . /etc/os-release && \
+    printf 'Types: deb\nURIs: https://apt.postgresql.org/pub/repos/apt\nSuites: %s-pgdg\nArchitectures: %s\nComponents: main\nSigned-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc\n' \
+      "$VERSION_CODENAME" "$(dpkg --print-architecture)" > /etc/apt/sources.list.d/pgdg.sources && \
+    apt-get update && apt-get install -y --no-install-recommends postgresql-client-16 && \
+    dpkg-query -W postgresql-client-16 libpq5 && \
+    /usr/lib/postgresql/16/bin/pg_dump --version && \
+    /usr/lib/postgresql/16/bin/pg_restore --version && \
+    python -c "from psycopg import pq; print('Python libpq:', pq.version())" && \
+    rm -rf /var/lib/apt/lists/*
+ENV PATH="/usr/lib/postgresql/16/bin:${PATH}"
+COPY scripts/ ./scripts/
+USER mcp
+HEALTHCHECK NONE
+ENTRYPOINT ["python", "/app/scripts/standalone_pg.py"]
+
 # ============================================================================
 # Stage 3 : Image de test (P2-8 — tests hors image prod)
 # Usage : docker compose run --rm test
@@ -126,6 +148,7 @@ COPY README.md README.en.md ./
 # `open()` manquant — bruyamment, mais invisible tant qu'aucune CI n'y exécutait
 # la suite (#113).
 COPY docker-compose.yml ./
+COPY docker-compose.postgres.yml ./
 
 RUN useradd -r -s /bin/false mcp && chown -R mcp:mcp /app /openbao
 USER mcp

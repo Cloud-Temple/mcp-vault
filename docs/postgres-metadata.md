@@ -1,5 +1,8 @@
 # Métadonnées PostgreSQL de MCP Vault
 
+Le [guide standalone](standalone-postgres.md) décrit la préparation opérateur,
+les quatre topologies d'exécution et les limites de qualification de #187.
+
 Profil opt-in : tokens hashés, policies, bindings de délégation et registre de
 wrapping ont une seule autorité PostgreSQL. Les secrets, clés, unseal et backups
 OpenBao gardent leur mécanisme existant. `METADATA_BACKEND=s3` conserve le driver
