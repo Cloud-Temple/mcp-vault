@@ -15,6 +15,18 @@ from tests.test_standalone_acl_187 import Catalog
 from tests.test_standalone_operator_187 import private, synthetic_config
 
 
+@pytest.fixture
+def isolated_operator_settings(monkeypatch):  # teardown avant restauration de l'env
+    """Libère les Settings synthétiques même lors d'un retour ou d'une exception."""
+    from mcp_vault.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        yield
+    finally:
+        get_settings.cache_clear()
+
+
 class Cluster:
     def __init__(self, roles):
         source = Catalog()
@@ -322,6 +334,7 @@ def test_control_rejects_another_database_scope_before_mutations(tmp_path, monke
     )
 
 
+@pytest.mark.usefixtures("isolated_operator_settings")
 @pytest.mark.parametrize(
     "execution,topology",
     [
@@ -654,9 +667,6 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
             )
             == "native-auth"
         )
-        from mcp_vault.config import get_settings
-
-        get_settings.cache_clear()
 
     if branch in {
         "bad-create-copy",
@@ -790,9 +800,6 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
             assert "rc" not in receipt
         assert not cluster.databases["source_a"].allow
         assert cluster.neighbor == {"database": "neighbor_b", "contents": "untouched"}
-        from mcp_vault.config import get_settings
-
-        get_settings.cache_clear()
         return
     if branch.startswith("failed-"):
         with pytest.raises(TimeoutError):
@@ -816,9 +823,6 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
             "restore-frozen.ack"
         )
         assert not cluster.databases["source_a"].allow
-        from mcp_vault.config import get_settings
-
-        get_settings.cache_clear()
         return
     if branch in {"zero", "failed-zero"}:
         monkeypatch.setattr(
@@ -937,6 +941,3 @@ def test_freeze_dump_seal_restore_zero_and_dirty_guard(
             not cluster.databases["source_a"].allow
             and not cluster.databases["copy_a"].allow
         )
-    from mcp_vault.config import get_settings
-
-    get_settings.cache_clear()
