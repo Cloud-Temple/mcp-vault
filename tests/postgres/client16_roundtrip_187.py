@@ -9,6 +9,7 @@ import json
 import os
 import secrets
 import subprocess
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -111,8 +112,14 @@ def main():
             ).fetchone()
     assert before_sequence[:2] == after_sequence[:2]
     assert before_sequence[2] > 0 and after_sequence[2] == 0
-    broken = directory / "truncated.dump"
-    broken.write_bytes(archive.read_bytes()[:-20])
+    # Corrupt an actual compressed data block, leaving the TOC readable.
+    # Truncating a trailing TOC suffix may still leave a fully restorable dump.
+    payload = bytearray(archive.read_bytes())
+    compressed = payload.index(b"\x78\x9c")
+    assert b'"revoked"' in zlib.decompress(payload[compressed:])
+    payload[compressed + 2] ^= 0xFF
+    broken = directory / "corrupt-data.dump"
+    broken.write_bytes(payload)
     broken.chmod(0o600)
     assert (
         subprocess.run(
@@ -135,7 +142,7 @@ def main():
     except ValueError:
         pass
     else:
-        raise AssertionError("Truncated data must fail the actual restore")
+        raise AssertionError("Corrupt compressed data must fail the actual restore")
     assert failed_journal.exists("restore-frozen.intent") and not failed_journal.exists(
         "restore-frozen.ack"
     )
