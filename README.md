@@ -188,3 +188,31 @@ les deux topologies autonomes, les credentials/rôles séparés, les lectures
 metadata bornées et la reprise logique. En ce profil, la clé bootstrap est
 réservée à la voie opérateur finie ; elle ne donne aucun accès admin métier.
 Les secrets et backups OpenBao conservent leur mécanisme existant.
+
+### Listener TLS natif pour un opérateur
+
+Le listener HTTP `127.0.0.1:8200` reste inchangé. Un deuxième listener natif
+OpenBao peut être activé explicitement avec les trois variables
+`OPENBAO_OPERATOR_TLS_ADDRESS`, `OPENBAO_OPERATOR_TLS_CERT_FILE` et
+`OPENBAO_OPERATOR_TLS_KEY_FILE` (toutes vides par défaut). L'adresse est une IPv4
+RFC1918 littérale avec port explicite, par exemple `172.16.80.9:8420` ; cet exemple
+n'alloue aucun réseau. L'interface doit exister dès la création du conteneur,
+avant le démarrage Bao. Garder `OPENBAO_ADDR` à `http://127.0.0.1:8200`.
+
+Déposer certificat PEM et clé non chiffrée hors du backend, dans un répertoire
+0700 appartenant à l'UID serveur ; même propriétaire pour les fichiers, clé
+0400/0600, certificat non inscriptible par groupe/autres, aucun lien symbolique.
+Le serveur vérifie les fichiers et la paire avant son startup ; les scripts
+peuvent charger les Settings sans ces mounts. TLS minimum 1.2 est imposé.
+Ne publier aucun port hôte ni route WAF : ce listener donne accès à l'API native,
+dont les policies sont distinctes des permissions MCP. Réserver son réseau aux
+acteurs opérateur explicitement autorisés, avec CA et nom de serveur vérifiés.
+
+Activer sur un coffre déjà initialisé, ou n'attacher avant init que des acteurs
+opérateur de confiance : `sys/init` est non authentifié pendant le bootstrap
+Source. Aucun outil MCP n'active ce listener. Une ancienne image peut ignorer
+ces nouvelles variables d'environnement ; vérifier la révision et la health
+HTTPS réelle. Si le manager réutilise un Bao déjà joignable, sa configuration
+n'est pas régénérée : TLS peut manquer, le client doit refuser sans repli HTTP.
+Les [limites d'architecture](DESIGN/mcp-vault/ARCHITECTURE.md#listener-tls-opérateur-optionnel)
+précisent les responsabilités ; aucun déploiement automatique n'est ajouté.

@@ -2050,6 +2050,10 @@ def create_app():
             f"Borne de sonde de santé invalide — démarrage refusé : {health_msg}"
         )
 
+    tls_ok, tls_msg = settings.check_openbao_operator_tls()
+    if not tls_ok:
+        raise RuntimeError(f"TLS opérateur invalide — démarrage refusé : {tls_msg}")
+
     from .auth.middleware import AuthMiddleware, LoggingMiddleware, HealthCheckMiddleware
     from .admin.middleware import AdminMiddleware
     from .pki_middleware import PkiMiddleware
@@ -2126,6 +2130,10 @@ def main():
     if not health_ok:
         logger.error(f"❌ Borne de sonde de santé invalide : {health_msg}")
         logger.error("   Démarrage refusé (fail-fast sécurité).")
+        sys.exit(1)
+    tls_ok, tls_msg = settings.check_openbao_operator_tls()
+    if not tls_ok:
+        logger.error("TLS opérateur invalide — démarrage refusé : %s", tls_msg)
         sys.exit(1)
     if settings.mission_pep_active:
         logger.info(f"🛡️  PEP mission JWT actif (mode={settings.mcp_auth_mode}, "

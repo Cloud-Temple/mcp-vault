@@ -173,6 +173,90 @@ class Settings(BaseSettings):
     openbao_threshold: int = 1
     openbao_data_dir: str = "/openbao/file"
     openbao_config_dir: str = "/openbao/config"
+    # Listener natif opérateur optionnel ; aucun accès aux fichiers à la lecture
+    # des Settings (scripts partageant le .env sans les mounts du serveur).
+    openbao_operator_tls_address: str = ""
+    openbao_operator_tls_cert_file: str = ""
+    openbao_operator_tls_key_file: str = ""
+
+    @model_validator(mode="after")
+    def validate_openbao_operator_tls(self):
+        import ipaddress
+        import re
+        from pathlib import PurePosixPath
+
+        values = (self.openbao_operator_tls_address,
+                  self.openbao_operator_tls_cert_file,
+                  self.openbao_operator_tls_key_file)
+        if values == ("", "", ""):
+            return self
+        if not all(values) or self.openbao_addr != "http://127.0.0.1:8200":
+            raise ValueError("Configuration TLS opérateur OpenBao incomplète ou incohérente")
+        match = re.fullmatch(r"([0-9.]+):([1-9][0-9]{3,4})", values[0])
+        if not match:
+            raise ValueError("Adresse TLS opérateur OpenBao invalide")
+        try:
+            ip = ipaddress.IPv4Address(match[1])
+        except ipaddress.AddressValueError:
+            raise ValueError("Adresse TLS opérateur OpenBao invalide") from None
+        networks = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+        port = int(match[2])
+        if (not any(ip in ipaddress.IPv4Network(n) for n in networks)
+                or not 1024 <= port <= 65534
+                or {port, port + 1} & {8200, 8201, self.mcp_server_port}):
+            raise ValueError("Adresse TLS opérateur OpenBao invalide")
+        for value in values[1:]:
+            path = PurePosixPath(value)
+            if (not re.fullmatch(r"/[A-Za-z0-9_./-]+", value)
+                    or str(path) != value or ".." in path.parts
+                    or path == PurePosixPath("/")
+                    or path.is_relative_to(PurePosixPath(self.openbao_data_dir))
+                    or path == PurePosixPath(self.openbao_config_dir) / "server.hcl"):
+                raise ValueError("Chemin TLS opérateur OpenBao invalide")
+        if values[1] == values[2]:
+            raise ValueError("Certificat et clé TLS opérateur doivent être distincts")
+        return self
+
+    def check_openbao_operator_tls(self) -> tuple[bool, str]:
+        """Préflight serveur uniquement, avant S3/startup ; aucun correctif de droits."""
+        if not self.openbao_operator_tls_address:
+            return True, ""
+        import os
+        import ssl
+        import stat
+        from pathlib import Path
+
+        def refuse_password():
+            # Sans ce callback OpenSSL peut ouvrir un prompt interactif.
+            raise ValueError("Clé TLS chiffrée non acceptée")
+
+        try:
+            for value, is_key in ((self.openbao_operator_tls_cert_file, False),
+                                  (self.openbao_operator_tls_key_file, True)):
+                path = Path(value)
+                if (path.is_relative_to(Path(self.openbao_data_dir).resolve())
+                        or path == (Path(self.openbao_config_dir) / "server.hcl").resolve()):
+                    raise ValueError("Fichier TLS dans le backend ou la configuration")
+                for component in (*reversed(path.parents), path):
+                    if stat.S_ISLNK(component.lstat().st_mode):
+                        raise ValueError("Lien TLS interdit")
+                info = path.stat()
+                parent = path.parent.stat()
+                mode = stat.S_IMODE(info.st_mode)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                        or parent.st_uid != os.geteuid()
+                        or stat.S_IMODE(parent.st_mode) != 0o700
+                        or (is_key and mode not in (0o400, 0o600))
+                        or (not is_key and mode & 0o022)):
+                    raise ValueError("Droits TLS invalides")
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(self.openbao_operator_tls_cert_file,
+                                    self.openbao_operator_tls_key_file,
+                                    password=refuse_password)
+        except (OSError, ValueError):
+            return False, "Fichiers TLS opérateur OpenBao invalides ou indisponibles"
+        return True, ""
+
     # Borne de la sonde de santé OpenBao (issue #103). `/health` est PUBLIC et
     # non authentifié : sans borne, un OpenBao qui accepte la connexion sans
     # répondre immobiliserait un thread de l'exécuteur par sonde. Cette valeur

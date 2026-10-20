@@ -8,6 +8,41 @@
 
 ## 1. Vision
 
+### Listener TLS opérateur optionnel
+
+Le triplet `OPENBAO_OPERATOR_TLS_ADDRESS`, `OPENBAO_OPERATOR_TLS_CERT_FILE`,
+`OPENBAO_OPERATOR_TLS_KEY_FILE` active explicitement un second listener natif
+Bao, sans outil MCP ni nouvelle autorité de secrets. Settings valide seulement
+syntaxe/groupe ; `check_openbao_operator_tls()` vérifie fichiers privés et paire
+PEM aux portes serveur main/create_app avant toute activité de startup. Une clé
+chiffrée est refusée par callback, sans prompt. Les scripts partageant les
+Settings sans mounts ne lisent pas les fichiers.
+
+Le générateur conserve à l'octet son défaut historique. Activé, il garde HTTP
+loopback8200 et api_addr canonique, ajoute TLS12 sur IPv4 privée explicite et
+borne le socket cluster dérivé au loopback (port TLS+1). Aucun cluster_addr
+global ni contrat HA du backend fichier n'est ajouté. Le réseau/IP opérateur
+doit exister avant le start ; aucun port hôte, WAF ou application/tenant n'y
+est attaché par ce produit. Le certificat neuf doit couvrir le nom et l'IP
+effectivement contrôlés par le déploiement ; les clients vérifient CA/SAN.
+
+L'ordre S3 restore → génération HCL → Popen → init/unseal et l'arrêt propriétaire
+restent inchangés. Aucun Bao pré-démarré pour adoption et aucune restauration
+sous backend vivant. La branche historique de réutilisation d'un Bao déjà
+joignable reste : elle ne régénère pas le HCL, donc ne garantit pas TLS ; un
+client natif refuse sans fallback. Les fichiers TLS restent sous contrôle du
+même UID privé pendant leur contrôle et leur lecture par Bao ; ce préflight
+ne protège pas d'une modification malveillante par ce même UID après contrôle.
+
+Ce listener expose l'API native, avec ses policies propres : ce n'est pas le PEP
+MCP. Sur Source neuve, sys/init est momentanément non authentifié. Soit le coffre
+est initialisé avant l'activation, soit tous les membres du réseau opérateur
+avant init sont de confiance et explicitement contrôlés. Aucun acteur métier
+ou tenant n'est autorisé sur cette interface. Les images anciennes ignorent
+éventuellement ces variables d'environnement : la health HTTPS réelle demeure
+obligatoire, ainsi que cluster_id/auth/capabilities/TTL/revocation côté recette.
+Ces contrôles de recette ne sont pas déduits du seul HCL produit.
+
 **MCP Vault** est un serveur MCP qui fournit une **gestion sécurisée de secrets** pour les agents IA et les missions. Il embarque **OpenBao** (fork open-source de HashiCorp Vault, Linux Foundation) comme moteur de chiffrement et de gestion des secrets.
 
 ### Principes
