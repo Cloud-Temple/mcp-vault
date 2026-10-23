@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from ..auth.context import current_token_info
 from ..auth.token_store import TokenStore
 from ..config import get_settings
+from ..vault_ids import is_valid_vault_id
 from .admission import load_facts, preload_owners
 from .audit_contract import AuditScope, _utc, audit_scope
 from .audit_cursor import context_fingerprint, cursors
@@ -55,38 +56,65 @@ def local_scope(claims, facts):
         raise PermissionError("local access refused")
     opaque = dict(token, auth_type="token")
     policy_id = token.get("policy_id", "")
-    policy = facts["policy"].get(policy_id) if policy_id else None
+    if not isinstance(policy_id, str) or not policy_id:
+        raise PermissionError("local metadata refused")
+    policy = facts["policy"].get(policy_id)
+    policy_revisions = facts.get("policy_revisions")
+    if (
+        not isinstance(policy_revisions, dict)
+        or not isinstance(policy_revisions.get(policy_id), int)
+        or isinstance(policy_revisions.get(policy_id), bool)
+        or policy_revisions[policy_id] < 1
+    ):
+        raise PermissionError("local metadata refused")
     granted = audit_scope(cfg.metadata_instance_id, opaque, policy).coffers
     # metadata tool must be allowed by the same local token policy, not by context JWT.
     if (
         not policy
         or set(policy.get("allowed_tools", [])) != {"audit_log", "vault_metadata_batch"}
         or any(
-            fnmatch.fnmatchcase("vault_metadata_batch", p)
-            for p in policy.get("denied_tools", [])
+            fnmatch.fnmatch(tool_name, pattern)
+            for tool_name in ("audit_log", "vault_metadata_batch")
+            for pattern in policy.get("denied_tools", [])
         )
     ):
         raise PermissionError("local metadata refused")
     binding_policy_id = binding.get("policy_id", "")
-    if binding_policy_id:
-        bpolicy = facts["policy"].get(binding_policy_id)
-        bound = dict(
-            token,
-            policy_id=binding_policy_id,
-            allowed_resources=binding["allowed_resources"],
+    if (
+        not isinstance(binding_policy_id, str)
+        or not binding_policy_id
+        or binding_policy_id == policy_id
+    ):
+        raise PermissionError("binding metadata refused")
+    bpolicy = facts["policy"].get(binding_policy_id)
+    binding_revision = policy_revisions.get(binding_policy_id)
+    if (
+        not isinstance(bpolicy, dict)
+        or bpolicy.get("policy_id") != binding_policy_id
+        or not isinstance(binding_revision, int)
+        or isinstance(binding_revision, bool)
+        or binding_revision < 1
+    ):
+        raise PermissionError("binding metadata refused")
+    binding_denied = bpolicy.get("denied_tools", [])
+    if (
+        not isinstance(binding_denied, list)
+        or not all(isinstance(pattern, str) for pattern in binding_denied)
+        or any(
+            fnmatch.fnmatch(tool_name, pattern)
+            for tool_name in ("audit_log", "vault_metadata_batch")
+            for pattern in binding_denied
         )
-        binding_granted = audit_scope(cfg.metadata_instance_id, bound, bpolicy).coffers
-        if (
-            not bpolicy
-            or "vault_metadata_batch" not in bpolicy.get("allowed_tools", [])
-            or any(
-                fnmatch.fnmatchcase("vault_metadata_batch", p)
-                for p in bpolicy.get("denied_tools", [])
-            )
-        ):
-            raise PermissionError("binding metadata refused")
-    else:
-        binding_granted = frozenset(binding["allowed_resources"])
+    ):
+        raise PermissionError("binding metadata refused")
+    binding_resources = binding.get("allowed_resources")
+    if (
+        not isinstance(binding_resources, list)
+        or not binding_resources
+        or not all(is_valid_vault_id(resource) for resource in binding_resources)
+    ):
+        raise PermissionError("binding metadata refused")
+    binding_granted = frozenset(binding_resources)
     coffers = granted & binding_granted
     if (
         not coffers

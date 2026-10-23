@@ -70,13 +70,25 @@ def hub(monkeypatch):
             dict(vault_pattern="coffer-*", permissions=["read"], allowed_paths=[])
         ],
     )
+    binding_policy = dict(
+        policy_id="tenant-c18",
+        allowed_tools=["secret_read"],
+        denied_tools=[],
+        path_rules=[
+            dict(
+                vault_pattern="coffer-a",
+                permissions=["read"],
+                allowed_paths=["tenant-a/canary"],
+            )
+        ],
+    )
     binding = dict(
         tenant_id="tenant-a",
         instance_id="vault842",
         allowed_resources=["coffer-a"],
         permissions=["read"],
         enabled=True,
-        policy_id="auditor",
+        policy_id="tenant-c18",
         expires_at=None,
         created_at=datetime.now(timezone.utc).isoformat(),
         updated_at=datetime.now(timezone.utc).isoformat(),
@@ -84,6 +96,7 @@ def hub(monkeypatch):
     state = dict(
         token=token,
         policy=policy,
+        binding_policy=binding_policy,
         binding=binding,
         revision=1,
         policy_revision=1,
@@ -94,6 +107,8 @@ def hub(monkeypatch):
         revoke=False,
         audit_revision=1,
         after_commit=None,
+        omit_binding_policy=False,
+        binding_policy_revision=1,
     )
     calls, statements = [], []
     entered, release = asyncio.Event(), asyncio.Event()
@@ -148,9 +163,23 @@ def hub(monkeypatch):
             elif "vault_metadata.mission_bindings" in sql:
                 values = [dict(payload=state["binding"], revision=state["revision"])]
             elif "vault_metadata.policies" in sql:
-                values = [
-                    dict(payload=state["policy"], revision=state["policy_revision"])
-                ]
+                values = []
+                policy_ids = params[1] if isinstance(params[1], list) else [params[1]]
+                if state["policy"].get("policy_id") in policy_ids:
+                    values.append(
+                        dict(payload=state["policy"], revision=state["policy_revision"])
+                    )
+                if (
+                    state["binding_policy"].get("policy_id") in policy_ids
+                    and state["binding_policy"] is not state["policy"]
+                    and not state["omit_binding_policy"]
+                ):
+                    values.append(
+                        dict(
+                            payload=state["binding_policy"],
+                            revision=state["binding_policy_revision"],
+                        )
+                    )
             elif "audit_revision" in sql:
                 values = [dict(revision=state["audit_revision"])]
             elif "max(seq)" in sql:
@@ -332,6 +361,102 @@ async def test_asgi_intersects_local_coffer_binding_before_count_and_redacts(hub
     assert hub.route.pending == 0 and not hub.route.slots.locked()
     clauses, _ = audit_read.where_scope(AuditScope("vault842", frozenset({"coffer-a"})))
     assert "c.tenant_id IS NULL" in clauses and "c.mission_id IS NULL" in clauses
+
+
+def use_split_hub_and_binding_policies(hub, denied_tools=None):
+    # The Hub token supplies the metadata allow-list. C18 remains the Mission
+    # data-plane policy and contributes no positive Hub metadata permission.
+    hub.state["policy"]["policy_id"] = "hub-metadata"
+    hub.state["token"]["policy_id"] = "hub-metadata"
+    hub.state["binding"]["policy_id"] = "tenant-c18"
+    hub.state["binding_policy"] = dict(
+        policy_id="tenant-c18",
+        allowed_tools=["secret_read"],
+        denied_tools=list(denied_tools or []),
+        path_rules=[
+            dict(
+                vault_pattern="coffer-a",
+                permissions=["read"],
+                allowed_paths=["tenant-a/canary"],
+            )
+        ],
+    )
+
+
+async def test_hub_positive_policy_works_with_secret_read_only_binding_policy(hub):
+    use_split_hub_and_binding_policies(hub)
+
+    result = await hub.call()
+
+    assert result.status_code == 200, result.text
+    assert result.json()["vaults"][0]["vault_id"] == "coffer-a"
+    assert hub.calls == ["coffer-a"]
+
+
+@pytest.mark.parametrize(
+    "denied_tool",
+    [
+        "audit_log",
+        "vault_metadata_batch",
+        "audit_*",
+        "vault_metadata_*",
+    ],
+)
+async def test_binding_policy_denial_vetoes_hub_metadata_with_canonical_matcher(
+    hub, denied_tool
+):
+    use_split_hub_and_binding_policies(hub, [denied_tool])
+
+    result = await hub.call()
+
+    assert result.status_code == 403, result.text
+    assert hub.calls == []
+    assert not any("JOIN vault_metadata.audit_events" in sql for sql, _ in hub.statements)
+
+
+@pytest.mark.parametrize(
+    "invalid_binding_policy",
+    [
+        "empty_id",
+        "unknown_id",
+        "missing_policy",
+        "missing_revision",
+        "same_as_hub_policy",
+    ],
+)
+async def test_binding_policy_reference_and_revision_are_required_before_read(
+    hub, invalid_binding_policy
+):
+    use_split_hub_and_binding_policies(hub)
+    if invalid_binding_policy == "empty_id":
+        hub.state["binding"]["policy_id"] = ""
+    elif invalid_binding_policy == "unknown_id":
+        hub.state["binding"]["policy_id"] = "missing-c18"
+    elif invalid_binding_policy == "missing_policy":
+        hub.state["omit_binding_policy"] = True
+    elif invalid_binding_policy == "same_as_hub_policy":
+        hub.state["binding"]["policy_id"] = hub.state["policy"]["policy_id"]
+        hub.state["binding_policy"] = hub.state["policy"]
+    else:
+        hub.state["binding_policy_revision"] = None
+
+    result = await hub.call()
+
+    assert result.status_code == 403, result.text
+    assert hub.state["callbacks"] == 0
+    assert hub.calls == []
+    assert not any("JOIN vault_metadata.audit_events" in sql for sql, _ in hub.statements)
+
+
+async def test_binding_policy_revision_is_bound_into_cursor_fingerprint(hub):
+    use_split_hub_and_binding_policies(hub)
+    cursor = await first_page(hub)
+    hub.state["binding_policy_revision"] += 1
+
+    result = await continue_page(hub, cursor)
+
+    assert result.status_code == 409, result.text
+    assert not {"entries", "vaults", "next_cursor", "total"} & result.json().keys()
 
 
 def pagination_rows(hub):
@@ -562,9 +687,19 @@ async def test_disabled_optional_hub_never_attempts_jwks_or_metadata(hub):
 
 @pytest.mark.parametrize(
     "change",
-    ["token", "binding", "policy", "token_expired", "binding_expired", "backend"],
+    [
+        "token",
+        "binding",
+        "policy",
+        "binding_policy",
+        "token_expired",
+        "binding_expired",
+        "backend",
+    ],
 )
 async def test_second_callback_cannot_hide_changed_local_authority(hub, change):
+    if change == "binding_policy":
+        use_split_hub_and_binding_policies(hub)
     hub.state["hold_second"] = True
     work = asyncio.create_task(hub.call())
     try:
@@ -582,6 +717,9 @@ async def test_second_callback_cannot_hide_changed_local_authority(hub, change):
         elif change == "policy":
             hub.state["policy"]["denied_tools"] = ["audit_*"]
             hub.state["policy_revision"] += 1
+        elif change == "binding_policy":
+            hub.state["binding_policy"]["denied_tools"] = ["audit_*"]
+            hub.state["binding_policy_revision"] += 1
         elif change == "token_expired":
             hub.state["token"]["expires_at"] = (
                 datetime.now(timezone.utc) - timedelta(seconds=1)
