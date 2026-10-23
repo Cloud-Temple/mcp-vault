@@ -110,3 +110,37 @@ class AdminMiddleware:
             ],
         })
         await send({"type": "http.response.body", "body": body})
+
+
+class RetentionOnlyMiddleware:
+    """Close all HTTP surfaces except the fixed retention POSTs when enabled."""
+
+    def __init__(self, app, settings):
+        self.app = app
+        self.settings = settings
+
+    async def __call__(self, scope, receive, send):
+        if (
+            scope.get("type") != "http"
+            or self.settings.metadata_operator_mode != "retention-only"
+        ):
+            return await self.app(scope, receive, send)
+
+        from ..storage.operator import retention_only_scope_allowed
+
+        if not retention_only_scope_allowed(scope):
+            body = json.dumps(
+                {"status": "error", "message": "Action opérateur refusée"}
+            ).encode()
+            await send({
+                "type": "http.response.start",
+                "status": 403,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                ],
+            })
+            await send({"type": "http.response.body", "body": body})
+            return
+
+        return await self.app(scope, receive, send)

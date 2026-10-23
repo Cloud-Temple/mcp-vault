@@ -132,8 +132,9 @@ def test_no_partial_or_forged_reference_envelope(mutation):
         "notice",
     ],
 )
+@pytest.mark.parametrize("mode", ["install", "retention-only"])
 def test_public_retire_rechecks_after_lock_and_ack_only_after_commit_close(
-    monkeypatch, failure
+    monkeypatch, failure, mode
 ):
     ident = identity()
     op = str(uuid4())
@@ -198,7 +199,7 @@ def test_public_retire_rechecks_after_lock_and_ack_only_after_commit_close(
                 )
         return ident, expiry
 
-    monkeypatch.setattr(owner, "get_settings", settings)
+    monkeypatch.setattr(owner, "get_settings", lambda: settings(mode))
     monkeypatch.setattr(owner, "connection", app)
     monkeypatch.setattr(owner, "maintenance_connection", maintenance)
     monkeypatch.setattr(owner, "validate_durability", lambda *args: None)

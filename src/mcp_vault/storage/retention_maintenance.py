@@ -18,7 +18,7 @@ def action(name, body):
     if (
         not settings.audit_mission_retention_enabled
         or settings.metadata_backend != "postgres"
-        or settings.metadata_operator_mode != "install"
+        or settings.metadata_operator_mode not in {"install", "retention-only"}
     ):
         raise MetadataUnavailable("retention_profile_disabled")
     if (

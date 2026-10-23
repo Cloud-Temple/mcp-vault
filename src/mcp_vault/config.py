@@ -73,7 +73,12 @@ class Settings(BaseSettings):
         import re
         if self.metadata_backend not in {"s3", "postgres"}:
             raise ValueError("METADATA_BACKEND invalide")
-        if self.metadata_operator_mode not in {"disabled", "install", "restore"}:
+        if self.metadata_operator_mode not in {
+            "disabled",
+            "install",
+            "restore",
+            "retention-only",
+        }:
             raise ValueError("METADATA_OPERATOR_MODE invalide")
         if self.metadata_pg_durability not in {"standalone", "ha"}:
             raise ValueError("METADATA_PG_DURABILITY invalide")

@@ -325,6 +325,18 @@ validation JWT + mission active, appelle `MissionBindingStore.resolve(tenant_id)
 status code, durée. Ce buffer alimente la vue "Activité" de la console admin
 (auto-refresh 5s).
 
+**Mode opérateur PostgreSQL `retention-only` (#846)** — Le processus opérateur
+peut démarrer avec `METADATA_OPERATOR_MODE=retention-only`. Une garde ASGI
+placée à l'extérieur de Pki, Admin, health, auth et MCP n'accepte alors que les
+cinq POST canoniques `audit-retention-close`, `audit-retention-status`,
+`audit-retention-inventory`, `audit-retention-retire` et
+`audit-retention-receipt` sous `/admin/api/metadata-operator/`. Elle refuse
+avant lecture du corps ou dispatch, y compris pour un accès direct au port
+opérateur. La méthode, le chemin brut et l'absence de query doivent être
+canoniques. Les scopes lifespan passent sans changement. Les guards Mission,
+bearer, confirmations et reçus des handlers restent applicables. Les modes
+`disabled`, `install` et `restore` gardent leurs règles existantes.
+
 ### 2.4 Console d'administration Web (`/admin`)
 
 MCP Vault inclut une **interface web d'administration** accessible sur `/admin`,
