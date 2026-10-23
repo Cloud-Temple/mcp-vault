@@ -20,7 +20,7 @@ from tests.test_mission_jwt import _make_es256_keypair, _make_jwks
 NOW = datetime(2026, 10, 16, tzinfo=timezone.utc)
 
 
-def settings():
+def settings(mode="install"):
     return SimpleNamespace(
         mission_retention_issuer="https://mission.example",
         mission_retention_audience="retention-vault",
@@ -29,8 +29,9 @@ def settings():
         mission_retention_callback_seconds=5,
         audit_mission_retention_enabled=True,
         metadata_backend="postgres",
-        metadata_operator_mode="install",
+        metadata_operator_mode=mode,
         metadata_instance_id="vault846",
+        metadata_pg_vault_id="vault846",
     )
 
 
@@ -115,8 +116,9 @@ def test_expired_proof_or_foreign_jwks_origin_refused():
 @pytest.mark.parametrize(
     "commit_fails,close_fails", [(False, False), (True, False), (False, True)]
 )
+@pytest.mark.parametrize("mode", ["install", "retention-only"])
 def test_public_closure_uses_distinct_maintenance_and_only_confirms_after_commit(
-    monkeypatch, commit_fails, close_fails
+    monkeypatch, commit_fails, close_fails, mode
 ):
     token, cache = signed()
     identity, _ = proof.decode(settings(), cache, token, now=NOW)
@@ -145,7 +147,7 @@ def test_public_closure_uses_distinct_maintenance_and_only_confirms_after_commit
         if close_fails:
             raise MetadataUnavailable("close_unconfirmed")
 
-    monkeypatch.setattr(maintenance, "get_settings", settings)
+    monkeypatch.setattr(maintenance, "get_settings", lambda: settings(mode))
     monkeypatch.setattr(maintenance, "connection", app)
     monkeypatch.setattr(maintenance, "maintenance_connection", local)
     monkeypatch.setattr(maintenance, "validate_durability", lambda _: None)

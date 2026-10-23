@@ -2055,10 +2055,10 @@ def create_app():
         raise RuntimeError(f"TLS opérateur invalide — démarrage refusé : {tls_msg}")
 
     from .auth.middleware import AuthMiddleware, LoggingMiddleware, HealthCheckMiddleware
-    from .admin.middleware import AdminMiddleware
+    from .admin.middleware import AdminMiddleware, RetentionOnlyMiddleware
     from .pki_middleware import PkiMiddleware
 
-    # Stack ASGI (ordre d'application : Pki → Admin → Health → Auth → Logging → MCP)
+    # Pki reste devant Admin; retention-only enveloppe ensuite toute la pile HTTP.
     app = mcp.streamable_http_app(
         stateless_http=True,
         transport_security=_build_transport_security(),
@@ -2071,6 +2071,7 @@ def create_app():
     app = HealthCheckMiddleware(app)
     app = AdminMiddleware(app, mcp)
     app = PkiMiddleware(app)  # couche la plus externe — /acme/* et /pki/ca/* sans auth
+    app = RetentionOnlyMiddleware(app, settings)
 
     from .technical_logs import TechnicalLogsMiddleware
     return TechnicalLogsMiddleware(app, settings)

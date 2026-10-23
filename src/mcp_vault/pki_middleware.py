@@ -64,7 +64,8 @@ _ROLE_ACME_PATH = re.compile(
 
 class PkiMiddleware:
     """
-    Middleware ASGI outermost — proxy transparent ACME + distribution CA.
+    Couche extérieure de la pile standard — proxy ACME + distribution CA.
+    En mode metadata operator retention-only, une garde HTTP dédiée l'enveloppe.
 
     Monté après AdminMiddleware dans create_app() (couche la plus externe).
     Les requêtes /acme/* et /pki/ca/* ne traversent JAMAIS AuthMiddleware.

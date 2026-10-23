@@ -12,6 +12,35 @@ from ..config import get_settings
 from .postgres import (MetadataUnavailable, MutationUnknown, connection, credentials,
                        mutation, offload)
 
+RETENTION_ONLY_OPERATOR_ACTIONS = frozenset({
+    "audit-retention-close",
+    "audit-retention-status",
+    "audit-retention-inventory",
+    "audit-retention-retire",
+    "audit-retention-receipt",
+})
+_OPERATOR_PREFIX = "/admin/api/metadata-operator/"
+_RETENTION_ONLY_OPERATOR_PATHS = frozenset(
+    _OPERATOR_PREFIX + action for action in RETENTION_ONLY_OPERATOR_ACTIONS
+)
+
+
+def retention_only_scope_allowed(scope):
+    """Match only canonical POST scopes for the fixed retention action set."""
+    path = scope.get("path")
+    if scope.get("method") != "POST" or not isinstance(path, str):
+        return False
+    if path not in _RETENTION_ONLY_OPERATOR_PATHS:
+        return False
+    raw_path = scope.get("raw_path")
+    try:
+        canonical = path.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    if raw_path is not None and (not isinstance(raw_path, bytes) or raw_path != canonical):
+        return False
+    return scope.get("query_string", b"") == b""
+
 
 def bao_request(method, suffix, data=None):
     import httpx
@@ -226,19 +255,31 @@ def action(name, body):
 async def handle_operator(scope, receive, send):
     from ..admin.api import _json_response
     s = get_settings()
+    if (
+        s.metadata_operator_mode == "retention-only"
+        and not retention_only_scope_allowed(scope)
+    ):
+        return await _json_response(
+            send, 403, {"status": "error", "message": "Action opérateur refusée"}
+        )
     raw = dict(scope.get("headers",[])).get(b"authorization",b"").decode("latin-1")
     key = raw[7:] if raw.startswith("Bearer ") else ""
     if not key or not hmac.compare_digest(key,s.admin_bootstrap_key):
         return await _json_response(send,401,{"status":"error","message":"Authentification requise"})
-    name = scope.get("path","").removeprefix("/admin/api/metadata-operator/")
+    name = scope.get("path","").removeprefix(_OPERATOR_PREFIX)
     expected = "GET" if name=="status" or name.startswith("installation-result/") else "POST"
     permitted = {"status","verify-connections"}
     if s.metadata_operator_mode == "install":
         permitted |= {"vault","connections","schema-init","audit-upgrade","initial-admin",
                       "audit-maintenance-connection", "audit-expire", "audit-retention-close", "audit-retention-status",
                       "audit-retirement-upgrade", "audit-retention-inventory", "audit-retention-retire", "audit-retention-receipt"}
+    elif s.metadata_operator_mode == "retention-only":
+        permitted = RETENTION_ONLY_OPERATOR_ACTIONS
+    installation_result_allowed = (
+        s.metadata_operator_mode != "retention-only" and name.startswith("installation-result/")
+    )
     if (s.metadata_operator_mode=="disabled" or scope.get("method")!=expected
-            or name not in permitted and not name.startswith("installation-result/")):
+            or name not in permitted and not installation_result_allowed):
         return await _json_response(send,403,{"status":"error","message":"Action opérateur refusée"})
     if name=="status":
         from ..openbao.manager import probe_openbao

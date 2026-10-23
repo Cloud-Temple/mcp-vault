@@ -10,6 +10,11 @@
 
 ## [Unreleased]
 
+- #846 : mode opérateur `retention-only` fermé aux cinq POST de rétention sur
+  toute la pile ASGI, avec refus avant lecture du corps ou dispatch pour les
+  autres routes. Les modes `disabled`, `install` et `restore` gardent leur
+  contrat.
+
 - Listener natif OpenBao TLS opérateur optionnel, désactivé par défaut : triplet
   adresse privée/certificat/clé, TLS 1.2 minimum, préflight fichiers avant startup.
   Le listener HTTP loopback, le backend et le cycle restauration/arrêt restent
