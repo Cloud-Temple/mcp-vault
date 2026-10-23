@@ -697,6 +697,26 @@ lève `MissionBindingStoreUnavailable` (→ `503` au PEP), les mutations sont re
 (route `/purge` déclarée avant le segment variable). Audit des mutations avec `decision_id` en tête.
 CLI Click : groupe `mission-binding` (create/list/get/delete/purge).
 
+### 3.12c Lecture Hub des métadonnées Mission (#831)
+
+La lecture Hub locale de métadonnées n'hérite pas de l'autorisation positive
+du binding Mission. La policy du token Hub doit exister et autoriser exactement
+`audit_log` et `vault_metadata_batch`; elle fournit seule les règles positives
+de lecture metadata. Le binding du tenant reste obligatoire, actif, `read`, lié
+à l'instance et à une policy C18 distincte, existante, cohérente avec son ID et
+dont la révision a été chargée. Les
+`denied_tools` de cette policy C18 restent un veto : un motif correspondant à
+`audit_log` ou `vault_metadata_batch` refuse toute la requête, selon le matcher
+`fnmatch.fnmatch` du `PolicyStore`. Ses `allowed_tools` et `path_rules` ne
+donnent aucun droit positif metadata.
+
+Les ressources du binding restent un plafond intersecté avec celles du token
+Hub. Les révisions du token, du binding et des deux policies restent dans le
+fingerprint de continuation et sont revalidées avant et après la page. Ce
+contrat sépare explicitement l'autorité positive metadata du Hub de l'autorité
+de veto C18 et de l'autorité data-plane C18 pour les lectures `secret_read` de
+Mission; il ne modifie ni le lecteur Mission ni les policies C18/job.
+
 ### 3.13 `openbao/` — OpenBao Process Manager
 
 | Module         | Rôle                                                                         |

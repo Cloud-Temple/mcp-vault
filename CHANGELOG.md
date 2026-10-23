@@ -5,6 +5,7 @@
 - PostgreSQL standalone : clients opérateur16 explicites et contrôle serveur/archive avant gel ou restauration (#187).
 
 - Lecture hub optionnelle des métadonnées et traces Mission conservées : opaque local et contexte Mission cumulés, scope PG filtré avant pagination, sans accès aux secrets ni changement du lecteur standalone.
+- #831 — La policy exacte du token Hub est l'unique autorité positive de lecture metadata. La policy C18 distincte du binding doit exister avec sa révision chargée; ses refus `denied_tools` sur `audit_log` ou `vault_metadata_batch` restent un veto canonique `fnmatch`, tandis que ses allow-lists et chemins ne donnent aucun droit metadata. Le contrat d'autorité est explicitement séparé; le binding reste le plafond de ressources et C18 conserve son rôle data-plane Mission.
 - Les continuations Mission gardent leur borne et leur empreinte de périmètre malgré les nouvelles lectures de credentials hors scope ; une suppression ou un remplacement dans ce périmètre refuse la continuation.
 
 ## [Unreleased]
