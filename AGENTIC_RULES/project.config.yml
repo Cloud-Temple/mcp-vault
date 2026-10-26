@@ -32,7 +32,7 @@ project:
 memory:
   live:
     # Nom du serveur MCP Live Memory tel qu'il est déclaré côté client.
-    server: my-live-memory
+    server: hivemind-ct
     # Espace mémoire du projet, casse exacte.
     space_id: mcp-vault
   graph:
