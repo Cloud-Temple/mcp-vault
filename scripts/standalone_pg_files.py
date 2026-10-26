@@ -21,9 +21,22 @@ def private_directory(path):
         raise ValueError("Répertoire privé 0700 du propriétaire courant requis")
 
 
-def private_read(path):
+def private_read(path, *, nonblocking=False):
+    """Lit un fichier privé ; nonblocking refuse tout non-régulier sans l'attendre.
+
+    Un FIFO sans écrivain bloque os.open en lecture seule. Avec nonblocking, un
+    type non régulier est refusé par lstat avant l'ouverture, et O_NONBLOCK borne
+    le cas où le chemin change entre lstat et open (le fstat refuse ensuite).
+    """
     private_directory(Path(path).parent)
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    if nonblocking:
+        if not stat.S_ISREG(Path(path).lstat().st_mode):
+            raise ValueError(
+                "Fichier privé régulier, propriétaire courant, <=64KiB requis"
+            )
+        flags |= os.O_NONBLOCK
+    descriptor = os.open(path, flags)
     with os.fdopen(descriptor, "rb") as stream:
         info = os.fstat(stream.fileno())
         if (
@@ -73,12 +86,16 @@ def exact(value, fields, optional=""):
 def s3_ca_bundle(path):
     """CA S3 explicite : mêmes invariants que private_read, PEM réellement chargeable.
 
+    Lecture non bloquante : un FIFO sans écrivain est refusé, jamais attendu.
+
     Le chemin n'est pas un secret ; il est relayé tel quel en AWS_CA_BUNDLE.
     """
     if type(path) is not str or not Path(path).is_absolute() or "\0" in path:
         raise ValueError("Chemin absolu de CA S3 requis")
     try:
-        context = ssl.create_default_context(cadata=private_read(path).decode("ascii"))
+        context = ssl.create_default_context(
+            cadata=private_read(path, nonblocking=True).decode("ascii")
+        )
     except (UnicodeDecodeError, ssl.SSLError):
         raise ValueError("CA S3 : bundle PEM illisible") from None
     if not context.cert_store_stats()["x509_ca"]:

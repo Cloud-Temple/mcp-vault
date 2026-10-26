@@ -68,7 +68,8 @@ An HTTPS S3 signed by a private CA is declared in `auth.s3_ca_file` (optional,
 rules (0700 directory, 0600 file, current owner, regular, no symlink, at most
 64 KiB) and must hold a loadable PEM CA, otherwise the operator refuses before
 starting the loader. It is relayed to that loader alone as `AWS_CA_BUNDLE`.
-Without the option the environment stays closed as before. No other server
+The file is read without blocking: a FIFO, socket or device is refused
+before any read. Without the option the environment stays closed as before. No other server
 variable is passed.
 
 Bao remains HTTP loopback with TLS

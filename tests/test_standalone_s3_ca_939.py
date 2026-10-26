@@ -329,3 +329,104 @@ def test_real_settings_accept_external_ca_and_real_s3_client_uses_it(
         get_settings.cache_clear()
         s3_client.reset_clients()
     assert observed == [(str(ca_file), str(ca_file))]
+
+
+# --- FIFO sans écrivain : la CA ne doit jamais bloquer le chargement -----------
+
+FIFO_CHILD = r"""
+import json, os, sys
+sys.path.insert(0, sys.argv[2])
+import standalone_pg_files as files
+mode, fifo = sys.argv[1], sys.argv[3]
+opened, readers = [], []
+real_open, real_fdopen = os.open, os.fdopen
+def spy_open(path, flags, *a, **kw):
+    opened.append(str(path))
+    return real_open(path, flags, *a, **kw)
+def spy_fdopen(*a, **kw):
+    readers.append(1)
+    return real_fdopen(*a, **kw)
+os.open, os.fdopen = spy_open, spy_fdopen
+if mode == "race":
+    # lstat annonce un fichier régulier : seul le fstat du descripteur ouvert
+    # peut encore refuser le FIFO.
+    regular = os.stat(sys.argv[4])
+    real_lstat = files.Path.lstat
+    files.Path.lstat = lambda self: regular if str(self) == fifo else real_lstat(self)
+try:
+    files.s3_ca_bundle(fifo)
+    outcome = "ACCEPTED"
+except ValueError as error:
+    outcome = "REFUSED:" + str(error)
+print(json.dumps({"outcome": outcome, "opened": opened, "fdopen": len(readers)}))
+"""
+
+
+def run_fifo_child(mode, fifo, extra=()):
+    """Enfant Python court, borné par le superviseur : un blocage échoue, il ne gèle pas."""
+    import subprocess
+
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            FIFO_CHILD,
+            mode,
+            str(ROOT / "scripts"),
+            str(fifo),
+            *extra,
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={"PATH": os.defpath, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    try:
+        out, err = child.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.communicate(timeout=5)
+        pytest.fail("s3_ca_bundle bloque sur un FIFO sans écrivain")
+    assert child.returncode == 0, err.decode()
+    return json.loads(out)
+
+
+@pytest.fixture
+def fifo(tmp_path):
+    tmp_path.chmod(0o700)
+    path = tmp_path / "ca-no-writer.fifo"
+    os.mkfifo(path, 0o600)
+    return path
+
+
+def test_fifo_without_writer_is_refused_before_any_open(fifo):
+    result = run_fifo_child("plain", fifo)
+    assert result["outcome"].startswith("REFUSED:Fichier privé régulier")
+    assert str(fifo) not in result["opened"]
+    assert result["fdopen"] == 0
+
+
+def test_fifo_swapped_after_lstat_is_refused_by_the_descriptor_check(fifo, tmp_path):
+    regular = tmp_path / "regular.pem"
+    private(regular, make_ca_pem()[0].decode())
+    result = run_fifo_child("race", fifo, extra=(str(regular),))
+    assert result["outcome"].startswith("REFUSED:Fichier privé régulier")
+    assert str(fifo) in result["opened"]
+
+
+def test_private_read_nonblocking_is_keyword_only_and_reads_regular_files(
+    scripts, tmp_path
+):
+    files, _native = scripts
+    tmp_path.chmod(0o700)
+    path = tmp_path / "private.bin"
+    private(path, "synthetic")
+    assert files.private_read(path) == b"synthetic"
+    assert files.private_read(path, nonblocking=True) == b"synthetic"
+    with pytest.raises(TypeError):
+        files.private_read(path, True)
+    path.chmod(0o644)
+    with pytest.raises(ValueError):
+        files.private_read(path, nonblocking=True)

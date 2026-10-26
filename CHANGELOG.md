@@ -2,7 +2,7 @@
 
 ## Non publié — compagnon Mission #842
 
-- PostgreSQL standalone : `auth.s3_ca_file` facultatif relaie une CA S3 privée validée au seul chargeur de bootstrap (`AWS_CA_BUNDLE`) ; absent, l'environnement reste fermé.
+- PostgreSQL standalone : `auth.s3_ca_file` facultatif relaie une CA S3 privée validée au seul chargeur de bootstrap (`AWS_CA_BUNDLE`) ; absent, l'environnement reste fermé. Un FIFO sans écrivain à cet emplacement est refusé sans blocage (`private_read(nonblocking=True)`, réservé à ce contrôle).
 
 - PostgreSQL standalone : clients opérateur16 explicites et contrôle serveur/archive avant gel ou restauration (#187).
 
