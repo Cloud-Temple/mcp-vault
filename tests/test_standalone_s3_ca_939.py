@@ -6,6 +6,7 @@ import os
 import sys
 from pathlib import Path
 
+import boto3
 import pytest
 
 from .test_standalone_operator_187 import private, synthetic_config
@@ -321,11 +322,15 @@ def test_real_settings_accept_external_ca_and_real_s3_client_uses_it(
         s3_client.reset_clients()
         return {"root_token": "native-root", "keys": ["gone"]}
 
-    monkeypatch.setattr(
-        os,
-        "environ",
-        {"PATH": os.defpath, "AWS_CA_BUNDLE": str(ca_file)},
-    )
+    # Une session boto3 globale existe déjà, comme après les autres tests de la
+    # suite. Elle garde la référence de l'objet os.environ d'origine : remplacer
+    # os.environ par un dict la rendrait aveugle à AWS_CA_BUNDLE. On modifie donc
+    # l'environnement en place.
+    boto3.setup_default_session()
+    for name in list(os.environ):
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("PATH", os.defpath)
+    monkeypatch.setenv("AWS_CA_BUNDLE", str(ca_file))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(lifecycle, "_download_encrypted_keys_from_s3", download)
     try:
