@@ -61,7 +61,17 @@ Use the actual application Settings file and loader, not a parallel S3 config.
 The bootstrap subprocess uses an explicit cwd and clean environment. It retains
 root_token only and immediately discards keys/keys_base64, without init, unseal,
 legacy migration or set_hvac_client. Token-file refusal never falls back to S3.
-Prepare Bao/unseal/auth **before all SQL**. Bao remains HTTP loopback with TLS
+Prepare Bao/unseal/auth **before all SQL**.
+
+An HTTPS S3 signed by a private CA is declared in `auth.s3_ca_file` (optional,
+`existing_bootstrap` only, absolute path). The file follows the private-file
+rules (0700 directory, 0600 file, current owner, regular, no symlink, at most
+64 KiB) and must hold a loadable PEM CA, otherwise the operator refuses before
+starting the loader. It is relayed to that loader alone as `AWS_CA_BUNDLE`.
+Without the option the environment stays closed as before. No other server
+variable is passed.
+
+Bao remains HTTP loopback with TLS
 disabled: vault_ca_file offers no TLS protection there. Application HTTPS CA and
 PG verify-full CA are distinct.
 

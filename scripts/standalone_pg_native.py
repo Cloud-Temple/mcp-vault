@@ -9,12 +9,14 @@ from pathlib import Path
 from urllib.parse import quote
 
 import httpx
-from standalone_pg_files import endpoint, private_read
+from standalone_pg_files import endpoint, private_read, s3_ca_bundle
 
 
 def native_token(config):
     auth = config["auth"]
     if auth["mode"] == "token_file":
+        if "s3_ca_file" in auth:
+            raise ValueError("CA S3 sans objet en mode token_file")
         token = private_read(auth["token_file"]).decode().strip()
     else:
         scripts = Path(__file__).resolve().parent
@@ -24,6 +26,10 @@ def native_token(config):
             "PYTHONNOUSERSITE": "1",
             "PYTHONDONTWRITEBYTECODE": "1",
         }
+        if "s3_ca_file" in auth:
+            # Seule variable relayée, validée AVANT tout lancement. Rien d'autre
+            # de l'environnement du serveur (proxy, credentials, SSL_*) ne passe.
+            environment["AWS_CA_BUNDLE"] = s3_ca_bundle(auth["s3_ca_file"])
         process = subprocess.run(
             [
                 sys.executable,
