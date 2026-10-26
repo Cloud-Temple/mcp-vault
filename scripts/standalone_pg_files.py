@@ -93,9 +93,13 @@ def s3_ca_bundle(path):
     if type(path) is not str or not Path(path).is_absolute() or "\0" in path:
         raise ValueError("Chemin absolu de CA S3 requis")
     try:
-        context = ssl.create_default_context(
-            cadata=private_read(path, nonblocking=True).decode("ascii")
-        )
+        bundle = private_read(path, nonblocking=True).decode("ascii")
+        if not bundle.strip():
+            # cadata vide serait ignoré par create_default_context, qui chargerait
+            # alors les CA du système et validerait un fichier sans aucune CA.
+            raise ValueError("CA S3 : bundle PEM vide")
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.load_verify_locations(cadata=bundle)
     except (UnicodeDecodeError, ssl.SSLError):
         raise ValueError("CA S3 : bundle PEM illisible") from None
     if not context.cert_store_stats()["x509_ca"]:

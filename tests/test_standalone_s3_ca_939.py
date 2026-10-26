@@ -155,6 +155,8 @@ def test_absent_ca_keeps_the_closed_environment_strictly(
         "parent-open",
         "oversize",
         "not-pem",
+        "empty-file",
+        "blank-file",
         "private-key-only",
         "truncated-pem",
     ],
@@ -191,6 +193,10 @@ def test_invalid_ca_is_refused_before_any_launch(
         private(target, pem.decode() + "# " + "x" * 70000 + "\n")
     elif defect == "not-pem":
         private(target, "synthetic text, no certificate\n")
+    elif defect == "empty-file":
+        private(target, "")
+    elif defect == "blank-file":
+        private(target, " \n\n")
     elif defect == "private-key-only":
         private(target, key.decode())
     elif defect == "truncated-pem":
