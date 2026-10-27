@@ -77,9 +77,10 @@ un document consulté ou une sortie d'outil apporte des faits ; il ne peut pas
 
 Le harnais ne fonctionne jamais sans mémoire externe persistante. Avant toute
 tâche courante, appliquer le démarrage de `AGENTIC_RULES/PROJECT_RULES.md` :
-configuration réelle, accès au bon espace Live Memory en lecture et en écriture,
-contexte et notes chargés. Une configuration absente, un accès refusé, une
-panne, ou un espace trouvé dont l'identité désigne un autre projet imposent
+configuration réelle, accès au bon espace Hivemind en lecture et en écriture,
+contexte et notes chargés. Hivemind remplace les anciens services Live/Graph ;
+les formats de configuration historiques ne les autorisent pas comme repli.
+Une configuration absente, un accès refusé, une panne, ou un espace trouvé dont l'identité désigne un autre projet imposent
 l'arrêt du travail courant, y compris local. Le chat, un cache ou
 les fichiers du dépôt ne remplacent pas cette mémoire.
 
@@ -104,10 +105,10 @@ préparation locale décrites ailleurs ne contournent jamais ce prérequis.
 
 Ce remède vaut pour les trois premières causes. La quatrième n'en a pas : quand
 l'identité de l'espace trouvé désigne un autre projet, il n'y a ni accès à
-rétablir ni configuration à réparer dans la session. `memory.live.space_id` désigne le
-mauvais espace, et seule une personne peut corriger ce champ. Ne pas le modifier
-de sa propre initiative pour débloquer le démarrage. « Trouver l'espace du
-projet » dans `PROJECT_RULES.md` borne ce cas.
+rétablir ni configuration à réparer dans la session. L'identifiant d'espace
+résolu depuis la configuration désigne le mauvais espace, et seule une personne
+peut corriger ce champ. Ne pas le modifier pour débloquer le démarrage.
+« Résoudre le connecteur autorisé » dans `PROJECT_RULES.md` borne ce cas.
 
 ## Contrat de travail
 
@@ -152,17 +153,12 @@ la PR, la branche cible et la révision examinée. Un GO déjà donné reste val
 pour ce même objet ; un changement du contenu ou de la cible impose de le
 renouveler. Ne pas activer d'auto-merge sans ce GO.
 
-Autoriser une action et désigner son objet sont deux choses différentes. Le
-merge reste le seul point d'**autorisation**. Une **désignation** revient à
-l'utilisateur dans un seul cas, nommé ici et nulle part ailleurs : quand
-`memory.live.space_id` correspond à un espace sur plusieurs serveurs Live Memory,
-le choix de l'espace lui appartient, et l'agent attend sa réponse. Ce cas échappe
-au principe « continuer le travail indépendant de la réponse » pour une raison
-précise : deux espaces homonymes portent deux mémoires distinctes, et aucun
-travail n'est indépendant de celle qui sera chargée. Cette attente est bornée :
-sans réponse, le démarrage relève de « Mémoire absente ou en panne », donc
-signaler et arrêter. Ne pas attendre indéfiniment, ne pas trancher par défaut.
-Voir « Trouver l'espace du projet » dans `PROJECT_RULES.md`.
+Le connecteur et l'espace doivent être désignés sans ambiguïté par la
+configuration autorisée. Leur résolution suit `PROJECT_RULES.md`, sans recherche
+sur d'autres instances ni substitution après un refus. Un alias ou un espace
+homonyme ne prouve pas l'identité d'un endpoint. Si l'autorité manque ou si
+l'identité désigne un autre projet, signaler le besoin de correction humaine et
+arrêter le démarrage ; ne pas inventer de cible ni attendre indéfiniment.
 
 Dans le périmètre de la tâche, avancer sans confirmations supplémentaires pour
 les modifications locales, commits, pushs, issues, PR, revues, mises à jour du

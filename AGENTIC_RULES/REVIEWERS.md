@@ -54,19 +54,18 @@ dépôts ne produisent pas des verdicts issus de configurations différentes.
   lisant réellement l'espace du projet, et il en rend compte. Il n'établit pas la
   moitié écriture du prérequis mémoire et ne l'affirme pas : `MAIN_RULES.md`
   nomme cette exception et la borne à ce seul rôle. Ne pas la remplacer par un
-  droit déclaré. Un jeton porte ses permissions globalement et ses espaces dans
-  une liste à plat, sans les croiser : y lire `write` n'établit pas le droit
-  d'écrire sur un espace donné.
-- **Nommer le serveur mémoire et l'espace** parmi les éléments de contexte
-  fournis au relecteur, quand plusieurs serveurs exposent des outils homonymes.
-  Le relecteur travaille en session non interactive : il ne peut pas exécuter la
-  branche de « Trouver l'espace du projet », dans `PROJECT_RULES.md`, qui demande
-  à l'utilisateur de choisir entre deux espaces homonymes. Lever l'ambiguïté en
-  amont l'en dispense. Sans cette précision, il adresse le mauvais serveur et
-  rend « accès refusé » : une erreur d'adressage qui se lit comme une panne. Si
-  l'ambiguïté l'atteint quand même, il n'attend pas une réponse qu'une invocation
-  bornée ne recevra jamais : c'est un blocage mémoire, il le signale et s'arrête
-  sans rendre de verdict.
+  droit déclaré. Des permissions déclarées ne prouvent ni une écriture réussie
+  ni son autorisation effective sur l'espace de cette tâche.
+- **Nommer le connecteur Hivemind autorisé et l'espace** dans le mandat.
+  Indiquer la preuve de routage issue de la configuration MCP ou des métadonnées
+  autorisées, sans URL privée ni secret. Le relecteur vérifie son accès réel
+  via les outils natifs `space_summary` ou `space_rules`/`mid_*`, puis
+  `short_read`, sans appeler un autre endpoint ni les anciens services.
+  Rapporter aussi l'état de coordination et les réserves qui limitent le
+  contexte lu ; des fichiers présents ne prouvent pas un état partagé sain.
+  L'absence d'ambiguïté est à établir en amont ; si elle subsiste dans cette
+  session non interactive, signaler le blocage sans verdict. Un accès établi
+  par le pilote ne remplace pas cette lecture personnelle.
 
 ## Mise à jour
 
