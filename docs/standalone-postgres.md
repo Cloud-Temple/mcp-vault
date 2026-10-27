@@ -87,6 +87,15 @@ immédiatement. Aucun init, unseal, migration legacy ou `set_hvac_client` n'est
 appelé par ce chargeur opérateur. Bao doit déjà être unsealed et lookup-self
 doit réussir **avant toute SQL**, y compris provision, sonde, dump ou restore.
 
+Un S3 en HTTPS signé par une CA privée se déclare dans `auth.s3_ca_file`
+(facultatif, `existing_bootstrap` seulement, chemin absolu). Le fichier suit les
+règles des fichiers privés (répertoire 0700, fichier 0600, propriétaire courant,
+régulier, sans lien, 64 Kio au plus) et doit contenir une CA PEM chargeable ;
+sinon l'opérateur refuse avant de lancer le chargeur. Il est relayé au seul
+chargeur en `AWS_CA_BUNDLE`. Le fichier est lu sans blocage : un FIFO, un
+socket ou un périphérique est refusé avant toute lecture. Sans cette option,
+l'environnement reste fermé comme avant. Aucune autre variable du serveur n'est transmise.
+
 Bao écoute HTTP loopback avec TLS désactivé. `vault_ca_file` est sans effet en
 HTTP ; il ne fournit aucune sécurité TLS native. Ne pas publier son port. La
 CA HTTPS produit et la CA PG `verify-full` ont des usages distincts.

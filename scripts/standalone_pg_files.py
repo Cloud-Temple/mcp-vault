@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import ssl
 import stat
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -20,9 +21,22 @@ def private_directory(path):
         raise ValueError("Répertoire privé 0700 du propriétaire courant requis")
 
 
-def private_read(path):
+def private_read(path, *, nonblocking=False):
+    """Lit un fichier privé ; nonblocking refuse tout non-régulier sans l'attendre.
+
+    Un FIFO sans écrivain bloque os.open en lecture seule. Avec nonblocking, un
+    type non régulier est refusé par lstat avant l'ouverture, et O_NONBLOCK borne
+    le cas où le chemin change entre lstat et open (le fstat refuse ensuite).
+    """
     private_directory(Path(path).parent)
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    if nonblocking:
+        if not stat.S_ISREG(Path(path).lstat().st_mode):
+            raise ValueError(
+                "Fichier privé régulier, propriétaire courant, <=64KiB requis"
+            )
+        flags |= os.O_NONBLOCK
+    descriptor = os.open(path, flags)
     with os.fdopen(descriptor, "rb") as stream:
         info = os.fstat(stream.fileno())
         if (
@@ -61,9 +75,36 @@ def digest(value):
     return hashlib.sha256(canonical(value)).hexdigest()
 
 
-def exact(value, fields):
-    if not isinstance(value, dict) or set(value) != set(fields.split()):
+def exact(value, fields, optional=""):
+    if not isinstance(value, dict):
         raise ValueError("Champs manquants ou inconnus")
+    required = set(fields.split())
+    if not required <= set(value) <= required | set(optional.split()):
+        raise ValueError("Champs manquants ou inconnus")
+
+
+def s3_ca_bundle(path):
+    """CA S3 explicite : mêmes invariants que private_read, PEM réellement chargeable.
+
+    Lecture non bloquante : un FIFO sans écrivain est refusé, jamais attendu.
+
+    Le chemin n'est pas un secret ; il est relayé tel quel en AWS_CA_BUNDLE.
+    """
+    if type(path) is not str or not Path(path).is_absolute() or "\0" in path:
+        raise ValueError("Chemin absolu de CA S3 requis")
+    try:
+        bundle = private_read(path, nonblocking=True).decode("ascii")
+        if not bundle.strip():
+            # cadata vide serait ignoré par create_default_context, qui chargerait
+            # alors les CA du système et validerait un fichier sans aucune CA.
+            raise ValueError("CA S3 : bundle PEM vide")
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.load_verify_locations(cadata=bundle)
+    except (UnicodeDecodeError, ssl.SSLError):
+        raise ValueError("CA S3 : bundle PEM illisible") from None
+    if not context.cert_store_stats()["x509_ca"]:
+        raise ValueError("CA S3 : aucun certificat d'autorité dans le bundle")
+    return path
 
 
 def endpoint(value, *, bao=False):
@@ -130,9 +171,16 @@ def load_config(path):
         raise ValueError("Chemin KV non canonique")
     endpoint(config["vault_url"], bao=True)
     endpoint(config["product_url"])
-    exact(config["auth"], "mode token_file")
+    exact(config["auth"], "mode token_file", optional="s3_ca_file")
     if config["auth"]["mode"] not in {"token_file", "existing_bootstrap"}:
         raise ValueError("Mode natif explicite requis")
+    if "s3_ca_file" in config["auth"]:
+        # Forme seule ici ; le fichier est validé au lancement du bootstrap.
+        if config["auth"]["mode"] != "existing_bootstrap" or not (
+            type(config["auth"]["s3_ca_file"]) is str
+            and Path(config["auth"]["s3_ca_file"]).is_absolute()
+        ):
+            raise ValueError("CA S3 : chemin absolu, mode existing_bootstrap requis")
     if config["auth"]["mode"] == "existing_bootstrap" and config["auth"]["token_file"]:
         raise ValueError("Pas de fallback ni token alternatif")
     exact(config["tls"], "directory host pg_uid pg_gid")
