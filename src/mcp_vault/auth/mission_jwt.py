@@ -676,7 +676,7 @@ _ACTIVE_MISSION_STATES = frozenset({"RUNNING", "WAITING_HUMAN", "PAUSED"})
 
 
 async def check_mission_active(
-    mission_id: str, status_url_template: str, cache_ttl: int
+    mission_id: str, status_url_template: str, cache_ttl: int, bearer: str | None = None
 ) -> tuple[bool, str]:
     """Vérifie si une mission est active auprès de mcp-mission.
 
@@ -688,6 +688,14 @@ async def check_mission_active(
     par mission ; les appelants concurrents attendent SON résultat. Mesuré avant :
     onze ouvriers d'un même éventail produisaient onze appels sortants vers un
     endpoint MONO-INSTANCE partagé avec l'exécution des missions.
+
+    `bearer` : le mission_token DÉJÀ validé par l'appelant. Il est transmis tel quel dans
+    `Authorization: Bearer`, car la route de statut de mcp-mission
+    (`/internal/missions/{mission_id}/active`) n'accepte qu'un mission_token signé. Il n'est
+    envoyé qu'à une URL https. Le cache et le single-flight restent par `mission_id` : ils ne
+    remplacent pas la validation du JWT, que l'appelant a faite avant d'arriver ici. Le jeton
+    du meneur sert aux suiveurs de la même mission ; un refus du meneur est un
+    `service_unavailable`, jamais une conclusion sur la mission.
     """
     import time as _time
     now = _time.time()
@@ -707,7 +715,7 @@ async def check_mission_active(
             # poursuit et chacun reçoit le vrai verdict. Correction issue de la revue
             # de plan.
             tache = asyncio.get_running_loop().create_task(
-                _resoudre_statut_mission(mission_id, status_url_template, cache_ttl)
+                _resoudre_statut_mission(mission_id, status_url_template, cache_ttl, bearer)
             )
             _mission_status_en_vol[mission_id] = tache
             # Se retire elle-même : le registre est borné par les missions EN VOL, pas
@@ -722,8 +730,28 @@ async def check_mission_active(
     return await asyncio.shield(tache)
 
 
+def _lire_verdict_statut(body: object, mission_id: str) -> tuple[bool, str] | None:
+    """Verdict d'un corps 200, ou `None` si le corps est ambigu (l'appelant échoue fermé).
+
+    Contrat courant de mcp-mission : `{"mission_id", "active"}`. Dès que `active` est présent
+    il fait seul foi : `mission_id` doit valoir celui demandé et `active` doit être un
+    booléen (jamais "true", 1 ni None). Sans `active`, ancien contrat : `status` ou `state`
+    contre l'allow-list des états vivants."""
+    if not isinstance(body, dict):
+        return None
+    if "active" in body:
+        if body.get("mission_id") != mission_id or type(body["active"]) is not bool:
+            return None
+        return (True, "") if body["active"] else (False, "mission_inactive")
+    state = str(body.get("status", body.get("state", "")))
+    if state.upper() in _ACTIVE_MISSION_STATES:
+        return True, ""
+    logger.info("check_mission_active: mission %r inactive (state=%r)", mission_id[:16], state)
+    return False, "mission_inactive"
+
+
 async def _resoudre_statut_mission(
-    mission_id: str, status_url_template: str, cache_ttl: int
+    mission_id: str, status_url_template: str, cache_ttl: int, bearer: str | None = None
 ) -> tuple[bool, str]:
     """L'interrogation réelle. UN seul appelant à la fois par mission (#86 F5).
 
@@ -756,24 +784,25 @@ async def _resoudre_statut_mission(
 
     try:
         url = status_url_template.format(mission_id=mission_id)
-        async with httpx.AsyncClient(timeout=3.0) as http:
-            resp = await http.get(url)
+        # Redirections refusées : un 3xx ne doit jamais emporter le jeton ailleurs. Il tombe
+        # dans le non-200 ci-dessous (service_unavailable).
+        async with httpx.AsyncClient(timeout=3.0, follow_redirects=False) as http:
+            if bearer and url.startswith("https://"):
+                resp = await http.get(url, headers={"Authorization": f"Bearer {bearer}"})
+            else:
+                resp = await http.get(url)
         if resp.status_code == 200:
-            body = resp.json()
-            state = str(body.get("status", body.get("state", "")))
-            active = state.upper() in _ACTIVE_MISSION_STATES
-            motif = "" if active else "mission_inactive"
-            await _memoriser(active, motif, cache_ttl)
-            if active:
-                return True, ""
-            # #78/D5 : reason FERMÉ — l'état renvoyé par le service mission est une valeur
-            # EXTERNE ; on la loggue côté serveur mais on ne la reflète jamais dans le code
-            # d'erreur (renvoyé au client / versé à l'audit).
-            # #78 : %r (repr) — state est une valeur EXTERNE du service mission ;
-            # repr échappe tout caractère de contrôle (anti-injection du log serveur).
-            logger.info("check_mission_active: mission %r inactive (state=%r)",
-                        mission_id[:16], state)
-            return False, motif
+            # #78/D5 : reason FERMÉ — le corps vient d'un service externe ; on ne le reflète
+            # jamais dans le code d'erreur (renvoyé au client / versé à l'audit).
+            verdict = _lire_verdict_statut(resp.json(), mission_id)
+            if verdict is None:
+                logger.warning("check_mission_active: mission %r → corps ambigu — indisponible",
+                               mission_id[:16])
+                await _memoriser(False, "service_unavailable",
+                                 min(cache_ttl, _MISSION_STATUS_ERROR_TTL))
+                return False, "service_unavailable"
+            await _memoriser(verdict[0], verdict[1], cache_ttl)
+            return verdict
         # Tout non-200 : nous n'avons pas pu vérifier. Code HTTP jamais reflété.
         logger.warning("check_mission_active: mission %r → HTTP %s — indisponible",
                        mission_id[:16], resp.status_code)

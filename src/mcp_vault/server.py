@@ -1072,6 +1072,7 @@ async def secret_consume(
             mission_id=mission_id,
             status_url_template=settings.mission_status_url,
             cache_ttl=settings.mission_status_cache_ttl,
+            bearer=mission_token or None,
         )
         if not status_ok:
             logger.warning("secret_consume : mission non validée — %s", status_reason)

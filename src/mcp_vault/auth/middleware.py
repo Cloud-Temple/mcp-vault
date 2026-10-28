@@ -421,6 +421,7 @@ class AuthMiddleware:
                 claims["mission_id"],
                 status_url_template=settings.mission_status_url,
                 cache_ttl=settings.mission_status_cache_ttl,
+                bearer=token,
             )
             if not active:
                 status = 503 if why == "service_unavailable" else 403
