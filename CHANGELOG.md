@@ -12,6 +12,8 @@
 
 ## [Unreleased]
 
+- Statut Mission : avec un bearer, une `MISSION_STATUS_URL` non `https://` (schéma insensible à la casse) est refusée avant tout appel réseau (`service_unavailable`) au lieu d'un appel anonyme ; sans bearer, rien ne change. Route documentée : `/internal/missions/{mission_id}/active`.
+
 - #846 : mode opérateur `retention-only` fermé aux cinq POST de rétention sur
   toute la pile ASGI, avec refus avant lecture du corps ou dispatch pour les
   autres routes. Les modes `disabled`, `install` et `restore` gardent leur

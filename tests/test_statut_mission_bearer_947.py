@@ -70,8 +70,36 @@ def test_bearer_is_forwarded_exactly_on_https_get():
     assert TOKEN not in str(seen[0].url)
 
 
-def test_bearer_is_never_sent_over_plain_http():
-    verdict, seen, _ = _call(_ok(mission_id=MID, active=True), url=HTTP)
+@pytest.mark.parametrize(
+    "url",
+    [HTTP, "HTTP://mission.interne/internal/missions/{mission_id}/active", "ftp://mission.interne/{mission_id}"],
+)
+def test_bearer_with_a_non_https_url_fails_closed_before_any_network_call(url):
+    """Ni jeton en clair, ni appel anonyme à sa place : le client HTTP n'est même pas construit."""
+    verdict, seen, kwargs = _call(_ok(mission_id=MID, active=True), url=url)
+    assert verdict == (False, "service_unavailable")
+    assert seen == [] and kwargs == []
+
+
+def test_https_scheme_is_read_without_case_sensitivity():
+    verdict, seen, _ = _call(
+        _ok(mission_id=MID, active=True), url="HTTPS://mission.interne/internal/missions/{mission_id}/active"
+    )
+    assert verdict == (True, "")
+    assert seen[0].headers["authorization"] == f"Bearer {TOKEN}"
+
+
+def test_non_https_refusal_is_cached_at_most_one_second_and_never_logs_the_token(caplog):
+    with caplog.at_level(logging.DEBUG):
+        _call(_ok(mission_id=MID, active=True), url=HTTP, ttl=30)
+    ok, reason, expires = mj._mission_status_cache[MID]
+    assert (ok, reason) == (False, "service_unavailable")
+    assert expires - time.time() <= mj._MISSION_STATUS_ERROR_TTL + 0.5
+    assert TOKEN not in caplog.text
+
+
+def test_without_bearer_a_plain_http_url_keeps_the_old_unauthenticated_call():
+    verdict, seen, _ = _call(_ok(status="RUNNING"), url=HTTP, bearer=None)
     assert verdict == (True, "")
     assert "authorization" not in seen[0].headers
 
