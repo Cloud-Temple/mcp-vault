@@ -692,7 +692,9 @@ async def check_mission_active(
     `bearer` : le mission_token DÉJÀ validé par l'appelant. Il est transmis tel quel dans
     `Authorization: Bearer`, car la route de statut de mcp-mission
     (`/internal/missions/{mission_id}/active`) n'accepte qu'un mission_token signé. Il n'est
-    envoyé qu'à une URL https. Le cache et le single-flight restent par `mission_id` : ils ne
+    envoyé qu'à une URL https (schéma lu sans tenir compte de la casse) : avec toute autre URL,
+    refus fermé `service_unavailable` avant tout appel réseau, jamais d'appel anonyme à la place.
+    Le cache et le single-flight restent par `mission_id` : ils ne
     remplacent pas la validation du JWT, que l'appelant a faite avant d'arriver ici. Le jeton
     du meneur sert aux suiveurs de la même mission ; un refus du meneur est un
     `service_unavailable`, jamais une conclusion sur la mission.
@@ -784,10 +786,16 @@ async def _resoudre_statut_mission(
 
     try:
         url = status_url_template.format(mission_id=mission_id)
+        if bearer and url[:8].lower() != "https://":
+            # Ni jeton en clair, ni appel anonyme à sa place : refus avant tout appel réseau.
+            logger.error("check_mission_active: URL de statut non HTTPS, aucun appel émis")
+            await _memoriser(False, "service_unavailable",
+                             min(cache_ttl, _MISSION_STATUS_ERROR_TTL))
+            return False, "service_unavailable"
         # Redirections refusées : un 3xx ne doit jamais emporter le jeton ailleurs. Il tombe
         # dans le non-200 ci-dessous (service_unavailable).
         async with httpx.AsyncClient(timeout=3.0, follow_redirects=False) as http:
-            if bearer and url.startswith("https://"):
+            if bearer:
                 resp = await http.get(url, headers={"Authorization": f"Bearer {bearer}"})
             else:
                 resp = await http.get(url)
