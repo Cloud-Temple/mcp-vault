@@ -92,6 +92,11 @@ def init_mission_binding_store():
     """
     global _mission_binding_store
     settings = get_settings()
+    if getattr(settings,"metadata_backend","s3") == "postgres":
+        from ..storage.stores import PGStore
+        _mission_binding_store = PGStore("binding")
+        return
+
 
     if not (settings.s3_endpoint_url and settings.s3_bucket_name):
         print("🎟️  Mission Binding Store S3 non configuré", file=sys.stderr)
@@ -183,6 +188,9 @@ def validate_allowed_resources(allowed_resources) -> tuple[Optional[list], str]:
         if vid in seen:
             return None, f"vault_id dupliqué dans allowed_resources : {vid!r}"
         seen.add(vid)
+    from ..reserved_metadata import target_error
+    if any(target_error(v) for v in allowed_resources):
+        return None, "Périmètre de coffre refusé"
     return list(allowed_resources), ""
 
 

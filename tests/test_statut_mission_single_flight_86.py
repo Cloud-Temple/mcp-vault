@@ -29,6 +29,10 @@ import pytest
 from mcp_vault.auth import mission_jwt as mj
 
 URL = "http://mission.interne/api/v1/missions/{mission_id}/status"
+# Banc de consommation : `secret_consume` présente le mission_token en Bearer, donc le client refuse une
+# URL non HTTPS avant tout appel. Le service reste un faux `httpx.AsyncClient` : HTTPS ici ne
+# veut pas dire TLS réel. `URL` garde son schéma pour les tests sans bearer (appels anonymes).
+URL_HTTPS = "https://mission.interne/api/v1/missions/{mission_id}/status"
 TTL = 30
 
 
@@ -256,6 +260,7 @@ def _consommer_avec_statut(statut_http=None, etat=None, enforce=True):
 
     mj._mission_status_cache.clear()
     mj._mission_status_en_vol.clear()
+    entetes: list = []
 
     class _Reg(WrapRegistry):
         def __init__(self):
@@ -296,7 +301,8 @@ def _consommer_avec_statut(statut_http=None, etat=None, enforce=True):
         async def __aexit__(self, *a):
             return False
 
-        async def get(self, url):
+        async def get(self, url, headers=None):
+            entetes.append(headers)
             if statut_http is None and etat is None:
                 raise OSError("service de missions injoignable")
             return _Statut()
@@ -308,7 +314,7 @@ def _consommer_avec_statut(statut_http=None, etat=None, enforce=True):
     reglages = SimpleNamespace(
         enforce_mission_token_validation=enforce,
         mission_jwks_url="https://mission.interne/jwks",
-        mission_status_url=URL, mission_status_cache_ttl=30,
+        mission_status_url=URL_HTTPS, mission_status_cache_ttl=30,
         mission_token_aud="mcp-vault:test:v1",
         resolved_mission_aud="mcp-vault:test:v1",
         mcp_component_kind="vault", mission_token_leeway_seconds=10,
@@ -333,6 +339,11 @@ def _consommer_avec_statut(statut_http=None, etat=None, enforce=True):
          patch("mcp_vault.vault.wrapping.get_wrap_registry", return_value=reg):
         res = asyncio.run(s.secret_consume(wrap_token="wt", operation_id=OP,
                                           mission_token="a.b.c"))
+    # Le jeton part en Bearer : constaté ici et non dans le faux, dont une exception serait avalée
+    # par `check_mission_active` et relue comme une panne.
+    assert entetes and all(h == {"Authorization": "Bearer a.b.c"} for h in entetes), (
+        f"en-têtes reçus par le service de statut : {entetes!r}"
+    )
     return res, reg._wraps[0]["status"]
 
 

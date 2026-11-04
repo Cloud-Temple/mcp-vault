@@ -1014,7 +1014,9 @@ class TestSecretConsumeEndToEnd:
             # Discriminant : A est active, B est inactive. Un code qui vérifierait
             # (par erreur) l'identité du transport (A) au lieu du paramètre (B)
             # obtiendrait `active=True` et le test échouerait sur l'assertion finale.
-            async def fake_check_mission_active(mission_id, status_url_template, cache_ttl):
+            async def fake_check_mission_active(mission_id, status_url_template, cache_ttl, bearer=None):
+                # Le jeton transmis au statut est le paramètre `mission_token`, jamais l'identité du transport.
+                assert bearer == "jwt-of-mission-b"
                 if mission_id == "mission-A":
                     return True, ""
                 if mission_id == "mission-B":
@@ -1084,7 +1086,9 @@ class TestSecretConsumeEndToEnd:
                 "permissions": ["read"], "allowed_resources": ["vault-a"],
             })
 
-            async def fake_check_mission_active(mission_id, status_url_template, cache_ttl):
+            async def fake_check_mission_active(mission_id, status_url_template, cache_ttl, bearer=None):
+                # Le jeton transmis au statut est le paramètre `mission_token`, jamais l'identité du transport.
+                assert bearer == "jwt-of-mission-b"
                 if mission_id == "mission-A":
                     return False, "mission_inactive"  # A inactive n'a AUCUNE importance
                 if mission_id == "mission-B":

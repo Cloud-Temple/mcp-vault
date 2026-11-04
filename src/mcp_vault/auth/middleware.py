@@ -89,7 +89,6 @@ class HealthCheckMiddleware:
     async def _root_response(self, send):
         """GET / → status du service MCP Vault (public, sans auth)."""
         from pathlib import Path
-        import platform
 
         settings = get_settings()
         version = "dev"
@@ -231,6 +230,12 @@ class AuthMiddleware:
         self.mcp = mcp
 
     async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope.get("path") not in self.PUBLIC_PATHS and getattr(get_settings(), "metadata_backend", "s3") == "postgres":
+            from ..storage.admission import admitted_call
+            return await admitted_call(scope, receive, send, self._call_authenticated)
+        return await self._call_authenticated(scope, receive, send)
+
+    async def _call_authenticated(self, scope, receive, send):
         if scope["type"] not in ("http", "websocket"):
             return await self.app(scope, receive, send)
 
@@ -244,7 +249,7 @@ class AuthMiddleware:
         token = self._extract_token(scope)
         settings = get_settings()
 
-        if settings.mcp_auth_mode == "bearer-anonymous":
+        if settings.mcp_auth_mode == "bearer-anonymous" and getattr(settings, "metadata_backend", "s3") != "postgres":
             # ── Mode d'exception EXPLICITE (issue #116) ────────────────────
             # Comportement historique : un appelant sans jeton — ou avec un
             # jeton invalide — atteint les outils dont les gardes ne contrôlent
@@ -252,7 +257,7 @@ class AuthMiddleware:
             # documenté, jamais comme défaut. Voir l'avertissement CRITICAL
             # émis par `create_app()`.
             token_info = self._validate_token(token) if token else None
-        elif settings.mcp_auth_mode == "bearer":
+        elif settings.mcp_auth_mode in {"bearer", "bearer-anonymous"}:
             # ── Refus ACTIF (issue #116) ──────────────────────────────────
             # Le défaut historique injectait `None` et poursuivait. Les gardes
             # des outils ALORS EXPOSÉS (`get_listing_filter`, `check_policy`,
@@ -272,6 +277,10 @@ class AuthMiddleware:
             if token_info is None:
                 self._audit_bearer_deny("missing_token" if not token
                                         else "invalid_token")
+                if getattr(settings, 'metadata_backend', 's3') == 'postgres':
+                    from ..storage.audit_pg import record_auth_denial
+                    if not await record_auth_denial('bearer_auth'):
+                        return await self._deny_response(scope, send, 503)
                 return await self._deny_response(scope, send, 401)
         else:
             # ── PEP mission JWT (modes jwt / dual-stack) ───────────────────
@@ -279,6 +288,10 @@ class AuthMiddleware:
             if deny is not None:
                 status, reason, claims_ctx = deny
                 self._audit_pep_deny(reason, claims_ctx)
+                if getattr(settings, 'metadata_backend', 's3') == 'postgres':
+                    from ..storage.audit_pg import record_auth_denial
+                    if not await record_auth_denial('mission_pep'):
+                        return await self._deny_response(scope, send, 503)
                 return await self._deny_response(scope, send, status)
 
         # Injecter dans le contextvar (même si None → les outils vérifieront)
@@ -310,6 +323,8 @@ class AuthMiddleware:
         # Bootstrap key admin : testée en constant-time AVANT tout dispatch JWT
         # (break-glass — jamais routée vers la validation JWT).
         if hmac.compare_digest(token, settings.admin_bootstrap_key):
+            if getattr(settings, "metadata_backend", "s3") == "postgres":
+                return None, (403, "bootstrap_business_forbidden", {})
             return {
                 "auth_type": "bootstrap",
                 "client_name": "admin",
@@ -406,6 +421,7 @@ class AuthMiddleware:
                 claims["mission_id"],
                 status_url_template=settings.mission_status_url,
                 cache_ttl=settings.mission_status_cache_ttl,
+                bearer=token,
             )
             if not active:
                 status = 503 if why == "service_unavailable" else 403
@@ -547,6 +563,8 @@ class AuthMiddleware:
 
         # Bootstrap key → admin total (comparaison constant-time contre timing attacks)
         if hmac.compare_digest(token, settings.admin_bootstrap_key):
+            if getattr(settings, "metadata_backend", "s3") == "postgres":
+                return None
             return {
                 "auth_type": "bootstrap",
                 "client_name": "admin",

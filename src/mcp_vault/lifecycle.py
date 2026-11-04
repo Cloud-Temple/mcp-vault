@@ -22,6 +22,9 @@ SHUTDOWN (SIGTERM) :
 """
 
 import logging
+import asyncio
+import time
+import weakref
 from pathlib import Path
 
 from .config import get_settings
@@ -36,6 +39,8 @@ logger = logging.getLogger("mcp-vault.lifecycle")
 # définitivement l'arrêt sur une annulation précoce (revue pré-commit).
 _shutdown_running: bool = False
 _shutdown_done: bool = False
+_metadata_probe_states = weakref.WeakKeyDictionary()
+_metadata_probe_generation = 0
 
 
 def _reset_shutdown_state() -> None:
@@ -45,9 +50,38 @@ def _reset_shutdown_state() -> None:
     lifespans (embedding ASGI, redémarrage à chaud) — sans réarmement, le
     second coffre ne serait jamais arrêté proprement.
     """
-    global _shutdown_running, _shutdown_done
+    global _shutdown_running, _shutdown_done, _metadata_probe_generation
     _shutdown_running = False
     _shutdown_done = False
+    _metadata_probe_generation += 1
+
+
+async def _metadata_readiness() -> bool:
+    """Une sonde PG par boucle ; cache de santé, jamais cache d'autorisation."""
+    from .storage.postgres import connection, offload, MetadataUnavailable
+    loop = asyncio.get_running_loop()
+    state = _metadata_probe_states.setdefault(loop,{"task":None,"expires":0,"generation":-1})
+    task = state["task"]
+    if task is not None and not task.done() and state["generation"] != _metadata_probe_generation:
+        await asyncio.shield(task)  # Drainer l'ancien cycle avant une nouvelle sonde.
+        return await _metadata_readiness()
+    if task is None or task.done() and (
+            time.monotonic() >= state["expires"] or state["generation"] != _metadata_probe_generation):
+        def probe():
+            with connection() as conn:
+                for table in ("tokens","policies","mission_bindings","wrap_registry"):
+                    conn.execute("SELECT 1 FROM vault_metadata."+table+" LIMIT 1")
+        async def shared_probe():
+            try:
+                await offload(probe)
+                return True
+            except MetadataUnavailable:
+                return False
+            finally:
+                state["expires"] = time.monotonic()+get_settings().metadata_readiness_ttl_seconds
+        state["generation"] = _metadata_probe_generation
+        task = state["task"] = asyncio.create_task(shared_probe())
+    return await asyncio.shield(task)
 
 
 # Alias historique conservé pour les tests.
@@ -140,6 +174,11 @@ async def availability_status() -> tuple[str, str]:
             # alors qu'aucun instantané d'autorisation fiable n'est disponible.
             # Lire ce rapport reste strictement mémoire : `/health` ne doit
             # jamais devenir une sonde S3 bloquante.
+            from .config import get_settings
+            if getattr(get_settings(), "metadata_backend", "s3") == "postgres":
+                if await _metadata_readiness():
+                    return HEALTH_HEALTHY, probe.detail
+                return HEALTH_UNAVAILABLE, "métadonnées indisponibles"
             try:
                 from .store_refresh import freshness_report
                 magasins = freshness_report()

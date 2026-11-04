@@ -1,0 +1,22 @@
+# Infrastructure publique de qualification, démarrage explicite après admission.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+    secrets:
+      - pg_password
+    command: [postgres, -c, ssl=on, -c, ssl_cert_file=/tls/server.crt, -c, ssl_key_file=/tls/server.key, -c, ssl_ca_file=/tls/ca.crt, -c, fsync=on]
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ${PG_TLS_DIR:?répertoire TLS public propre requis}:/tls:ro
+    ports:
+      - "127.0.0.1:${PG_TEST_PORT:-55432}:5432"
+    mem_limit: 512m
+    cpus: 1
+    restart: "no"
+secrets:
+  pg_password:
+    file: ${PG_PASSWORD_FILE:?credential récupéré par auth Vault avant démarrage SQL}
+volumes:
+  pg_data:

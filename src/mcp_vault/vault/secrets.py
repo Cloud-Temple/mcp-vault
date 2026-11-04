@@ -6,6 +6,8 @@ Chaque secret est stocké dans un vault (= mount point KV v2).
 Supporte le versioning natif de KV v2.
 """
 
+from ..reserved_metadata import business_target, target_error
+
 import logging
 import re
 from typing import Optional
@@ -13,6 +15,7 @@ from typing import Optional
 import hvac
 
 from ..openbao.manager import get_hvac_client
+from ..storage.audit_bao import bao_step
 from .spaces import VAULT_META_PATH
 from .types import validate_secret, enrich_secret_data, list_types, generate_password, SECRET_TYPES
 
@@ -103,6 +106,7 @@ def _is_reserved_path(path: str) -> bool:
     )
 
 
+@business_target(ssh=False)
 async def write_secret(vault_id: str, path: str, data: dict,
                        secret_type: str = "custom", tags: str = "",
                        favorite: bool = False,
@@ -159,9 +163,7 @@ async def write_secret(vault_id: str, path: str, data: dict,
             # absente. Un contrôle GET puis POST ne fournirait pas cette
             # garantie (fenêtre TOCTOU entre les deux appels).
             write_options["cas"] = 0
-        response = client.secrets.kv.v2.create_or_update_secret(
-            **write_options,
-        )
+        response = await bao_step(lambda: client.secrets.kv.v2.create_or_update_secret(**write_options))
         version = response.get("data", {}).get("version", 0) if isinstance(response, dict) else 0
         icon = SECRET_TYPES.get(secret_type, {}).get("icon", "⚙️")
         logger.info(f"{icon} Secret {secret_type} écrit: {vault_id}/{path} (v{version})")
@@ -193,6 +195,7 @@ async def write_secret(vault_id: str, path: str, data: dict,
         }
 
 
+@business_target(ssh=False)
 async def read_secret(vault_id: str, path: str, version: int = 0) -> dict:
     """Lit un secret (dernière version ou version spécifique)."""
     # SÉCURITÉ V3-23 : validation du chemin
@@ -217,7 +220,7 @@ async def read_secret(vault_id: str, path: str, version: int = 0) -> dict:
         if version > 0:
             kwargs["version"] = version
 
-        response = client.secrets.kv.v2.read_secret_version(**kwargs)
+        response = await bao_step(lambda: client.secrets.kv.v2.read_secret_version(**kwargs))
         secret_data = response.get("data", {}).get("data", {})
         metadata = response.get("data", {}).get("metadata", {})
 
@@ -234,7 +237,7 @@ async def read_secret(vault_id: str, path: str, version: int = 0) -> dict:
         # l'autorité OpenBao atteste que le mount KV v2 demandé existe encore.
         # Toute erreur de cette contre-preuve reste ambiguë et fail-close.
         try:
-            mounts_response = client.sys.list_mounted_secrets_engines()
+            mounts_response = await bao_step(client.sys.list_mounted_secrets_engines)
             mounts = mounts_response.get("data", mounts_response)
             mount = mounts.get(f"{vault_id}/") if isinstance(mounts, dict) else None
             mount_is_kv_v2 = (
@@ -277,6 +280,7 @@ async def read_secret(vault_id: str, path: str, version: int = 0) -> dict:
         }
 
 
+@business_target(ssh=False)
 async def list_secrets(vault_id: str, path: str = "") -> dict:
     """
     Liste les entrées d'un niveau du vault (clés uniquement, pas les valeurs).
@@ -301,7 +305,7 @@ async def list_secrets(vault_id: str, path: str = "") -> dict:
         return {"status": "error", "message": "OpenBao non connecté"}
 
     try:
-        response = client.secrets.kv.v2.list_secrets(path=norm_path, mount_point=vault_id)
+        response = await bao_step(lambda: client.secrets.kv.v2.list_secrets(path=norm_path, mount_point=vault_id))
         all_keys = response.get("data", {}).get("keys", [])
         # Filtrer les chemins réservés (ex: _vault_meta)
         keys = [k for k in all_keys if k not in RESERVED_PATHS]
@@ -313,6 +317,7 @@ async def list_secrets(vault_id: str, path: str = "") -> dict:
         return {"status": "error", "message": str(e)}
 
 
+@business_target(ssh=False)
 async def delete_secret(vault_id: str, path: str) -> dict:
     """Supprime un secret et toutes ses versions."""
     # SÉCURITÉ V3-23 : validation du chemin
@@ -329,7 +334,7 @@ async def delete_secret(vault_id: str, path: str) -> dict:
         return {"status": "error", "message": "OpenBao non connecté"}
 
     try:
-        client.secrets.kv.v2.delete_metadata_and_all_versions(path=path, mount_point=vault_id)
+        await bao_step(lambda: client.secrets.kv.v2.delete_metadata_and_all_versions(path=path, mount_point=vault_id))
         logger.info(f"🗑️ Secret supprimé: {vault_id}/{path}")
         return {"status": "deleted", "vault_id": vault_id, "path": path}
     except Exception as e:

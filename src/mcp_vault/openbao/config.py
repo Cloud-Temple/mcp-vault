@@ -10,6 +10,7 @@ Note: disable_mlock a été supprimé — OpenBao ≥2.0 ne supporte plus ce par
       La protection mémoire est gérée au niveau OS (swap désactivé).
 """
 
+import json
 import logging
 from pathlib import Path
 
@@ -48,6 +49,21 @@ ui = false
 """
 
 
+def _operator_tls_listener(settings) -> str:
+    address = settings.openbao_operator_tls_address
+    if not address:
+        return ""
+    cluster = f"127.0.0.1:{int(address.rsplit(':', 1)[1]) + 1}"
+    return '\n\nlistener "tcp" {\n' + (
+        f"  address = {json.dumps(address)}\n"
+        "  tls_disable = false\n"
+        '  tls_min_version = "tls12"\n'
+        f"  tls_cert_file = {json.dumps(settings.openbao_operator_tls_cert_file)}\n"
+        f"  tls_key_file = {json.dumps(settings.openbao_operator_tls_key_file)}\n"
+        f"  cluster_address = {json.dumps(cluster)}\n"
+    ) + "}"
+
+
 def generate_hcl_config() -> str:
     """
     Génère le fichier HCL de configuration OpenBao.
@@ -64,6 +80,9 @@ def generate_hcl_config() -> str:
         listen_addr=_compute_openbao_listen_addr(settings.openbao_addr),
         api_addr=settings.openbao_addr,
     )
+    extra_listener = _operator_tls_listener(settings)
+    if extra_listener:
+        hcl_content = hcl_content.replace('\napi_addr = ', extra_listener + '\n\napi_addr = ', 1)
 
     config_path = config_dir / "server.hcl"
     config_path.write_text(hcl_content.strip())

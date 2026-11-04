@@ -34,6 +34,11 @@ def check_access(resource_id: str) -> Optional[dict]:
     Returns:
         None si OK, dict {"status": "error", ...} si refusé
     """
+    from ..reserved_metadata import target_error
+    reserved = target_error(resource_id)
+    if reserved:
+        return reserved
+
     token_info = current_token_info.get()
 
     # Pas de token → accès refusé
@@ -92,6 +97,17 @@ def check_access(resource_id: str) -> Optional[dict]:
             "message": f"Accès refusé à '{resource_id}' "
                        "(aucun périmètre vault provisionné pour cette identité mission)",
         }
+
+    from ..config import get_settings
+    if getattr(get_settings(), "metadata_backend", "s3") == "postgres":
+        from ..storage.postgres import request_facts
+        facts = request_facts.get() or {}
+        if facts.get("creating") == resource_id:
+            return None
+        owner = facts.get("owners", {}).get(resource_id, {}).get("created_by")
+        if owner and owner == token_info.get("client_name"):
+            return None
+        return {"status":"error","error_type":"access_denied", "message":"Accès au coffre refusé"}
 
     # Liste vide → owner-based isolation
     # Le token n'a accès qu'aux vaults qu'il a créés
@@ -178,7 +194,7 @@ def get_listing_filter() -> dict:
 # secret_consume n'appelle pas check_policy : il s'auto-garde par la validation C18
 # de son paramètre mission_token (+ refus des bearers wrap-only, #115).
 MISSION_JWT_ALLOWED_TOOLS = frozenset({
-    "vault_list", "vault_info",
+    "vault_list", "vault_info", "vault_metadata_batch",
     "secret_read", "secret_list", "secret_write", "secret_delete",
 })
 
@@ -446,6 +462,11 @@ def check_wrap_path_policy(vault_id: str, secret_path: str,
     Returns:
         None si OK, dict {"status": "error", ...} si refusé
     """
+    from ..reserved_metadata import target_error
+    reserved = target_error(vault_id)
+    if reserved:
+        return reserved
+
     token_info = current_token_info.get()
 
     if token_info is None:
@@ -651,6 +672,11 @@ def check_path_policy(vault_id: str, path: str,
     Returns:
         None si OK, dict {"status": "error", ...} si refusé
     """
+    from ..reserved_metadata import target_error
+    reserved = target_error(vault_id)
+    if reserved:
+        return reserved
+
     token_info = current_token_info.get()
 
     if token_info is None:
@@ -743,6 +769,11 @@ def can_read_vault_content(vault_id: str) -> bool:
     fonctions restent la référence pour les vraies opérations. L'accès au vault
     lui-même est supposé déjà validé par `check_access()` chez l'appelant.
     """
+    from ..reserved_metadata import target_error
+    reserved = target_error(vault_id)
+    if reserved:
+        return False
+
     token_info = current_token_info.get()
     if token_info is None:
         return True

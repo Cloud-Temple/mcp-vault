@@ -1,0 +1,24 @@
+# Override opt-in : une seule instance PG, un seul volume persistant.
+# Préparer Bao/unseal/auth et les credentials natifs AVANT de démarrer postgres.
+# Aucun depends_on ou healthcheck SQL ne contourne cet ordre.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: engine_bootstrap
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/engine.password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    volumes:
+      - standalone-pg-data:/var/lib/postgresql/data
+      - ${PG_TLS_DIRECTORY:?PG_TLS_DIRECTORY requis}/server.key:/run/pg/server.key:ro
+      - ${PG_TLS_DIRECTORY:?PG_TLS_DIRECTORY requis}/server.crt:/run/pg/server.crt:ro
+      - ${PG_ENGINE_DIRECTORY:?PG_ENGINE_DIRECTORY requis}/engine.password:/run/secrets/engine.password:ro
+      - ${PG_ENGINE_DIRECTORY:?PG_ENGINE_DIRECTORY requis}/init.sql:/docker-entrypoint-initdb.d/010-infra.sql:ro
+      - ${PG_ENGINE_DIRECTORY:?PG_ENGINE_DIRECTORY requis}/pg_hba.conf:/run/pg/pg_hba.conf:ro
+    command: ["postgres", "-c", "ssl=on", "-c", "ssl_cert_file=/run/pg/server.crt", "-c", "ssl_key_file=/run/pg/server.key", "-c", "hba_file=/run/pg/pg_hba.conf"]
+    restart: unless-stopped
+    networks: [mcp-net]
+
+volumes:
+  standalone-pg-data:

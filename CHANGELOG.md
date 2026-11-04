@@ -1,5 +1,73 @@
 # Changelog — MCP Vault
 
+## Non publié — compagnon Mission #842
+
+- PostgreSQL standalone : `auth.s3_ca_file` facultatif relaie une CA S3 privée validée au seul chargeur de bootstrap (`AWS_CA_BUNDLE`) ; absent, l'environnement reste fermé. Un FIFO sans écrivain à cet emplacement est refusé sans blocage (`private_read(nonblocking=True)`, réservé à ce contrôle).
+
+- PostgreSQL standalone : clients opérateur16 explicites et contrôle serveur/archive avant gel ou restauration (#187).
+
+- Lecture hub optionnelle des métadonnées et traces Mission conservées : opaque local et contexte Mission cumulés, scope PG filtré avant pagination, sans accès aux secrets ni changement du lecteur standalone.
+- #831 — La policy exacte du token Hub est l'unique autorité positive de lecture metadata. La policy C18 distincte du binding doit exister avec sa révision chargée; ses refus `denied_tools` sur `audit_log` ou `vault_metadata_batch` restent un veto canonique `fnmatch`, tandis que ses allow-lists et chemins ne donnent aucun droit metadata. Le contrat d'autorité est explicitement séparé; le binding reste le plafond de ressources et C18 conserve son rôle data-plane Mission.
+- Les continuations Mission gardent leur borne et leur empreinte de périmètre malgré les nouvelles lectures de credentials hors scope ; une suppression ou un remplacement dans ce périmètre refuse la continuation.
+
+## [Unreleased]
+
+- Statut Mission : avec un bearer, une `MISSION_STATUS_URL` non `https://` (schéma insensible à la casse) est refusée avant tout appel réseau (`service_unavailable`) au lieu d'un appel anonyme ; sans bearer, rien ne change. Route documentée : `/internal/missions/{mission_id}/active`.
+
+- #846 : mode opérateur `retention-only` fermé aux cinq POST de rétention sur
+  toute la pile ASGI, avec refus avant lecture du corps ou dispatch pour les
+  autres routes. Les modes `disabled`, `install` et `restore` gardent leur
+  contrat.
+
+- Listener natif OpenBao TLS opérateur optionnel, désactivé par défaut : triplet
+  adresse privée/certificat/clé, TLS 1.2 minimum, préflight fichiers avant startup.
+  Le listener HTTP loopback, le backend et le cycle restauration/arrêt restent
+  inchangés. Accès opérateur isolé, sans nouvel outil MCP ni droit métier.
+
+- #831 : producteurs privés de préparation Vault (`prepare_read`, writer d'audit et job OpenBao), avec trace opérateur filtrée par scope ; exige le lecteur Mission de préparation associé avant campagne.
+
+- #846 : segments techniques UTC privés et nettoyage propriétaire borné à30jours minimum.
+
+### Préparation Mission #846
+
+- Reçu de retrait Vault agrégé : quatre références fixes (`vault_audit_calls`,
+  `vault_audit_events`, `vault_binding_references`, `vault_wrap_references`),
+  empreinte SHA-256 triée en `COLLATE "C"` et compte en `revision`. L'inventaire
+  stocké reste exhaustif, borné à 100000 références et 16 Mio. Une Mission à
+  plus de 1000 événements d'audit peut donc être finalisée. Mission #914 accepte
+  ces quatre kinds dans sa branche Vault.
+
+- Aucun audit Vault conservé pour le scope à la clôture : `audit_close_mission` (redéfinie en v4) crée la
+  protection du scope si elle manque, puis refuse toute nouvelle corrélation.
+  prepare accepte alors un scope clos sans appel, et le dernier lot ne supprime
+  rien et ne produit ni lot ni reçu audit179. Le reçu porte des comptes nuls,
+  chacun lié à l'empreinte de la liste vide. Sans clôture, le scope reste protégé.
+
+- Candidat opérateur v4 : inventaire corrélé borné, lots avec IDs réellement
+  retirés et reçu de référence annuel indépendant du sweep audit. Bindings
+  partagés et wraps inconnus restent protégés. Callback revalidé après attente ;
+  aucune qualification SQL/TLS de ce nouveau candidat encore annoncée.
+
+- Protection SQL locale des audits corrélés Mission, installée explicitement en
+  v3 sur domaine neuf ; aucune prolongation de token ni GC de coffre OpenBao.
+  Raccords opérateur signés et qualification PostgreSQL/flotte encore ouverts.
+
+### ACME lié à un rôle
+
+- Proxy des endpoints clients natifs `/v1/_sys_pki_int/roles/<role>/acme/…`,
+  limité à GET/HEAD/POST, y compris `key-change` annoncé par OpenBao 2.5.1.
+  Aucun proxy général `/v1`, ni accès opérateur
+  `new-eab`, `eab`, CRUD des rôles ou configuration OpenBao ajouté.
+- Le setup PKI conserve les rôles explicitement nommés dans `allowed_roles`,
+  en plus de `acme-servers`, sans créer ni modifier leurs définitions.
+  Une lecture en erreur ou une configuration illisible interrompt le setup
+  avant toute mutation ; les rôles nommés doivent encore exister.
+  Aucun rôle supprimé n’est retiré silencieusement de la configuration. Le défaut OpenBao `["*"]` reste restreint à
+  `acme-servers`, comme avant ; il n'autorise pas tous les rôles.
+- Aucun changement de version, variable d'environnement ou déploiement dans
+  ce lot. L'ouverture WAF/Edge, les URL ACME, les rôles/EAB et la validation DNS
+  restent à préparer et qualifier séparément.
+
 ## [0.20.1] — 2026-08-29
 
 ### Readiness alignée sur les magasins d'autorisation

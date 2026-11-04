@@ -9,11 +9,10 @@ par la clé `review.reviewer_provider` de `project.config.yml`.
 
 | Clé | Fournisseur | Modèle | Contrainte d'invocation |
 | --- | --- | --- | --- |
-| `claude` | Anthropic | `claude-sonnet-5` | Session distincte, lecture seule, invocation non interactive et bornée. |
-| `codex` | OpenAI | `gpt-5.6-terra` | Les outils MCP n'apparaissent pas dans la liste visible du modèle et restent appelables par leur nom ; voir les règles d'emploi. |
-| `llmaas` | Cloud Temple LLMaaS (SecNumCloud) | `qwen3.8:27b` | Alias appelable du modèle `Qwen/Qwen3.8-27B-FP8`, endpoint `api.ai.cloud-temple.com`. |
+| `claude` | Anthropic | `claude opus 5.5 high` | Session distincte, lecture seule, invocation non interactive et bornée. |
+| `codex` | OpenAI | `gpt 6.1 sol high` | Les outils MCP n'apparaissent pas dans la liste visible du modèle et restent appelables par leur nom ; voir les règles d'emploi. |
+| `llmaas` | Cloud Temple LLMaaS (SecNumCloud) | `nemotron-3-super:120b` | Modèle de raisonnement avancé, endpoint `api.ai.cloud-temple.com`. |
 
-Aucun niveau de raisonnement, aucun tier et aucune variante ne sont déclarés ici.
 Un seul modèle par fournisseur, pour que la revue soit reproductible et que deux
 dépôts ne produisent pas des verdicts issus de configurations différentes.
 
@@ -29,12 +28,17 @@ dépôts ne produisent pas des verdicts issus de configurations différentes.
   indisponible tant que cela n'a pas été vérifié. Une indisponibilité constatée
   se signale, elle ne se contourne pas par une auto-relecture présentée comme
   indépendante.
-- **Ne pas forcer le niveau de raisonnement du relecteur.** Laisser le défaut de
-  l'outil. Un niveau bas produit des verdicts rendus sans que les règles du dépôt
-  aient été ouvertes, et parfois un blocage annoncé sans qu'un seul appel ait été
-  tenté, ce qui est indiscernable d'un vrai blocage. Si une contrainte technique
-  existe pour un usage précis, la nommer avec son périmètre exact plutôt que de
-  la généraliser à toutes les revues.
+- **Ne pas abaisser le niveau de raisonnement du relecteur.** Le pilote transmet
+  explicitement le niveau `high` du tableau dans les paramètres de l'outil,
+  selon son schéma réel (`effort` ou `reasoningEffort`, par exemple), puis vérifie
+  le réglage retourné. Un libellé dans le prompt ne configure pas l'outil et son
+  défaut peut être bas. Si le niveau demandé n'est pas disponible ou vérifiable,
+  signaler la limite sans affirmer qu'il a été appliqué.
+  Un niveau bas produit des verdicts rendus sans que
+  les règles du dépôt aient été ouvertes, et parfois un blocage annoncé sans qu'un
+  seul appel ait été tenté, ce qui est indiscernable d'un vrai blocage. Si une
+  contrainte technique existe pour un usage précis, la nommer avec son périmètre
+  exact plutôt que de la généraliser à toutes les revues.
 - **Les outils MCP de `codex` sont différés.** Ils n'apparaissent pas dans la
   liste que le modèle introspecte, et ils restent appelables par leur nom.
   Un relecteur qui se fie à sa liste conclut honnêtement qu'il n'a pas de
@@ -50,19 +54,18 @@ dépôts ne produisent pas des verdicts issus de configurations différentes.
   lisant réellement l'espace du projet, et il en rend compte. Il n'établit pas la
   moitié écriture du prérequis mémoire et ne l'affirme pas : `MAIN_RULES.md`
   nomme cette exception et la borne à ce seul rôle. Ne pas la remplacer par un
-  droit déclaré. Un jeton porte ses permissions globalement et ses espaces dans
-  une liste à plat, sans les croiser : y lire `write` n'établit pas le droit
-  d'écrire sur un espace donné.
-- **Nommer le serveur mémoire et l'espace** parmi les éléments de contexte
-  fournis au relecteur, quand plusieurs serveurs exposent des outils homonymes.
-  Le relecteur travaille en session non interactive : il ne peut pas exécuter la
-  branche de « Trouver l'espace du projet », dans `PROJECT_RULES.md`, qui demande
-  à l'utilisateur de choisir entre deux espaces homonymes. Lever l'ambiguïté en
-  amont l'en dispense. Sans cette précision, il adresse le mauvais serveur et
-  rend « accès refusé » : une erreur d'adressage qui se lit comme une panne. Si
-  l'ambiguïté l'atteint quand même, il n'attend pas une réponse qu'une invocation
-  bornée ne recevra jamais : c'est un blocage mémoire, il le signale et s'arrête
-  sans rendre de verdict.
+  droit déclaré. Des permissions déclarées ne prouvent ni une écriture réussie
+  ni son autorisation effective sur l'espace de cette tâche.
+- **Nommer le connecteur Hivemind autorisé et l'espace** dans le mandat.
+  Indiquer la preuve de routage issue de la configuration MCP ou des métadonnées
+  autorisées, sans URL privée ni secret. Le relecteur vérifie son accès réel
+  via les outils natifs `space_summary` ou `space_rules`/`mid_*`, puis
+  `short_read`, sans appeler un autre endpoint ni les anciens services.
+  Rapporter aussi l'état de coordination et les réserves qui limitent le
+  contexte lu ; des fichiers présents ne prouvent pas un état partagé sain.
+  L'absence d'ambiguïté est à établir en amont ; si elle subsiste dans cette
+  session non interactive, signaler le blocage sans verdict. Un accès établi
+  par le pilote ne remplace pas cette lecture personnelle.
 
 ## Mise à jour
 

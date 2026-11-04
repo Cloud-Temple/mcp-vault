@@ -163,7 +163,7 @@ Utilise `pydantic-settings` pour charger la configuration depuis les variables d
 | `MISSION_JWKS_CACHE_TTL` | `60`                      | TTL cache JWKS en secondes. ⚠️ **Ce n'est pas un réglage de latence** : une clé révoquée DISPARAÎT du JWKS de `mcp-mission`, donc ce TTL est la **fenêtre de propagation d'une révocation de clé de signature**. Borné à `[10,60]`s dès que la validation mission est active — fail-fast au boot (#86). Trop grand : une clé révoquée reste acceptée ; nul ou négatif : un fetch par validation, donc amplification sur un endpoint mono-instance. |
 | `MISSION_JWKS_MAX_REFRESH_PER_MIN` | `3`             | ⚠️ **SANS EFFET (#86)** — accepté puis ignoré par le validateur. La protection réelle du refresh JWKS est le throttle « kid inconnu » (10 s) + le backoff exponentiel + le déport hors boucle (#148). Conservé car le modèle refuse les variables inconnues — le retirer ferait échouer le démarrage des déploiements qui le posent ; avertissement au boot. |
 | `MISSION_TOKEN_LEEWAY_SECONDS` | `10`                | Tolérance clock skew JWT en secondes — s'applique UNIQUEMENT à `iat` (anti-skew futur). `exp` est TOUJOURS strict (leeway=0), y compris pour secret_consume depuis le Lot 2 (#86). |
-| `MISSION_STATUS_URL`     | *(vide)*                  | Template URL statut mission mcp-mission — **doit contenir littéralement `{mission_id}`** (fail-fast sinon, #86 : une URL statique validerait silencieusement n'importe quelle mission). Allow-list d'états actifs `{RUNNING, WAITING_HUMAN, PAUSED}` (fail-close : état inconnu = inactif). Requis dès que la validation mission_token est active (PEP ou `ENFORCE_MISSION_TOKEN_VALIDATION=true` seul) — fail-fast au boot (#86, remplace l'ancien mode dégradé signalé par un simple warning). |
+| `MISSION_STATUS_URL`     | *(vide)*                  | Template URL statut mission mcp-mission, route `/internal/missions/{mission_id}/active` qui répond `{mission_id, active}` (401 `invalid_token`/`missing_token`, 503 `broker_unavailable`) — avec un bearer, une URL non `https://` (schéma insensible à la casse) est refusée avant tout appel réseau (`service_unavailable`), sans redirection — **doit contenir littéralement `{mission_id}`** (fail-fast sinon, #86 : une URL statique validerait silencieusement n'importe quelle mission). Verdict courant : `active` booléen strict avec `mission_id` égal à celui demandé, sinon fail-close `service_unavailable`. Ancien parse, utilisé seulement si le corps n'a pas de clé `active` : `status` ou `state` contre l'allow-list `{RUNNING, WAITING_HUMAN, PAUSED}` (état inconnu = inactif). Requis dès que la validation mission_token est active (PEP ou `ENFORCE_MISSION_TOKEN_VALIDATION=true` seul) — fail-fast au boot (#86, remplace l'ancien mode dégradé signalé par un simple warning). |
 | `MISSION_STATUS_CACHE_TTL` | `5`                     | TTL cache statut mission en secondes (court — fail-close rapide). Borné à `[0,30]`s dès que `MISSION_STATUS_URL` est requis (0 = pas de cache) — fail-fast au boot (#86). |
 
 **Variables CLI (NE PAS stocker dans `.env`)** :
@@ -533,10 +533,37 @@ CA interne souveraine basée sur l'engine PKI d'OpenBao. CA globale (non par vau
 
 **Sync S3 forcée** : `setup_pki_ca`, `revoke_cert`, `rotate_intermediate` appellent `upload_to_s3()` avant de retourner — la fenêtre de perte S3 est documentée comme acceptable si crash entre appel OpenBao et upload.
 
-**Middleware ACME** (`pki_middleware.py`) : couche ASGI la plus externe, proxy transparent sur trois patterns :
+**Middleware ACME** (`pki_middleware.py`) : couche ASGI la plus externe, proxy transparent :
 - `/acme/*` → `/v1/_sys_pki_int/acme/*` (URL courte user-facing)
 - `/v1/_sys_pki_int/acme/*` → idem (URL longue générée par OpenBao dans les réponses ACME directory)
+- `/v1/_sys_pki_int/roles/<role>/acme/<endpoint-client>` → chemin natif lié au rôle, sans réécriture du corps JWS ou des URL
 - `/pki/ca/*.pem` → endpoints CA/CRL OpenBao (lecture publique)
+
+Le chemin par rôle n'accepte que GET/HEAD/POST et les endpoints clients
+OpenBao 2.5.1 : directory, nonce, compte, ordres, autorisations, challenges,
+finalisation/certificat et révocation. `new-eab`, `eab`, configuration et CRUD
+des rôles ne sont pas proxifiés par ce nouveau chemin. Les en-têtes
+`Authorization`, `X-Vault-Token` et `Cookie` ne sont jamais transmis au backend.
+OpenBao reste responsable des autorisations ACME, de l'EAB et des SAN du rôle.
+
+Le setup lit `config/acme` avant toute mutation et conserve sa liste explicite
+`allowed_roles`, en ajoutant `acme-servers` s'il manque et en dédupliquant.
+Il ne rend pas éligibles les autres rôles du mount et n'en modifie pas les
+définitions. Un 404/None permet le premier setup ; une erreur de lecture ou une
+forme invalide l'arrête. Le défaut OpenBao `["*"]` est restreint au rôle maison
+comme auparavant ; un mélange wildcard/noms est refusé. Les paramètres EAB
+lab/prod et le directory par défaut gardent leur comportement existant.
+La configuration et l'admission EAB additionnelles restent des opérations
+privilégiées OpenBao ; aucun outil MCP ou écran d'édition nouveau n'est ajouté.
+Les interfaces d'inventaire des rôles existantes restent utilisables.
+
+**Limite de livraison** : ce code seul ne publie pas la nouvelle route dans le
+WAF/Edge, ne change ni `PKI_BASE_URL` ni les URL du directory et ne fournit pas
+la validation DNS-01. Ces opérations nécessitent une qualification distincte,
+notamment l'inventaire des consommateurs avant changement de l'origine ACME.
+Un retour à l'ancien code retire le proxy par rôle ; un ancien setup peut
+réduire `allowed_roles` à `acme-servers`. Ne pas présenter ce rollback comme
+transparent pour les clients des rôles additionnels.
 
 Non-authentifié par design (RFC 8555 ACME + JWS). Anti-traversal sur acme_suffix et query_string. WAF Coraza : exclusions ciblées par regex sur les 3 paths PEM et endpoints ACME normalisés RFC 8555. **Ces exclusions `ctl:ruleRemoveById` sont déclarées AVANT l'`Include` du CRS** (pattern « exclusions before CRS ») — sinon les règles CRS en phase:1 (ex. 920440 sur l'extension `.pem`) s'évaluent et scorent avant le `ctl`, qui devient inopérant (issue #42, fix v0.6.8). ⚠️ **Sémantique inverse pour `SecRuleUpdateTargetById`** (exclusions de CIBLES, ajoutées en v0.9.2 / issue #107) : cette directive réécrit la définition de la règle, qui doit donc être **déjà chargée** — elle se déclare APRÈS l'`Include`. Confondre les deux rend l'exclusion silencieusement inopérante. Validé par test d'intégration à travers le WAF (`tests/pki/` T3d : `.pem` connus → 200, `.pem` arbitraire → 403).
 
@@ -669,6 +696,26 @@ lève `MissionBindingStoreUnavailable` (→ `503` au PEP), les mutations sont re
 `GET/DELETE /admin/api/mission-bindings/{tenant_id}`, `POST /admin/api/mission-bindings/purge`
 (route `/purge` déclarée avant le segment variable). Audit des mutations avec `decision_id` en tête.
 CLI Click : groupe `mission-binding` (create/list/get/delete/purge).
+
+### 3.12c Lecture Hub des métadonnées Mission (#831)
+
+La lecture Hub locale de métadonnées n'hérite pas de l'autorisation positive
+du binding Mission. La policy du token Hub doit exister et autoriser exactement
+`audit_log` et `vault_metadata_batch`; elle fournit seule les règles positives
+de lecture metadata. Le binding du tenant reste obligatoire, actif, `read`, lié
+à l'instance et à une policy C18 distincte, existante, cohérente avec son ID et
+dont la révision a été chargée. Les
+`denied_tools` de cette policy C18 restent un veto : un motif correspondant à
+`audit_log` ou `vault_metadata_batch` refuse toute la requête, selon le matcher
+`fnmatch.fnmatch` du `PolicyStore`. Ses `allowed_tools` et `path_rules` ne
+donnent aucun droit positif metadata.
+
+Les ressources du binding restent un plafond intersecté avec celles du token
+Hub. Les révisions du token, du binding et des deux policies restent dans le
+fingerprint de continuation et sont revalidées avant et après la page. Ce
+contrat sépare explicitement l'autorité positive metadata du Hub de l'autorité
+de veto C18 et de l'autorité data-plane C18 pour les lectures `secret_read` de
+Mission; il ne modifie ni le lecteur Mission ni les policies C18/job.
 
 ### 3.13 `openbao/` — OpenBao Process Manager
 

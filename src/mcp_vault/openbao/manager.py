@@ -269,7 +269,10 @@ async def probe_openbao() -> OpenBaoProbe:
     n'annule PAS la sonde partagée : `wait_for` annule le `shield`, jamais la
     tâche derrière.
 
-    PAS de cache de résultat. Un cache permettrait de répondre « disponible »
+    PAS de cache du résultat OpenBao. La sonde PG distincte de lifecycle garde
+    un cache de santé court configurable : elle consomme un slot SQL métier,
+    un lecteur OpenBao et une connexion TLS ; les droits restent lus frais.
+    Un cache OpenBao permettrait de répondre « disponible »
     APRÈS la panne — une régression de contrat déguisée en optimisation, déjà
     refusée en revue au lot 2 de #110. Le prix est un appel par requête
     séquentielle ; il est borné par `openbao_health_timeout`.

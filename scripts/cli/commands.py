@@ -1596,3 +1596,130 @@ def logs_cmd(ctx):
             result = {"status": "error", "message": str(e)}
         show_json(result)
     asyncio.run(_run())
+
+
+@vault_group.command("metadata-batch")
+@click.argument("vault_ids", nargs=-1, required=True)
+@click.option("--limit", type=click.IntRange(1,100), default=50)
+@click.option("--cursor", default=None)
+@click.pass_context
+def vault_metadata_batch_cmd(ctx,vault_ids,limit,cursor):
+    """Métadonnées ciblées et paginées, sans contenu de secret (profil PostgreSQL)."""
+    async def run():
+        result = await MCPClient(ctx.obj["url"],ctx.obj["token"]).call_tool(
+            "vault_metadata_batch",{"vault_ids":list(vault_ids),"limit":limit,"cursor":cursor})
+        show_json(result)
+        if result.get("status")!="ok":
+            raise click.ClickException("Lecture non confirmée")
+    asyncio.run(run())
+
+
+@cli.group("metadata")
+def metadata_group():
+    """Voie opérateur finie ; clé bootstrap, jamais un bearer métier."""
+
+
+def _metadata_request(ctx,name,data=None,parameters=None):
+    import httpx
+    async def run():
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(40,connect=3),follow_redirects=False) as http:
+                request = http.get if name.startswith("installation-result/") or name=="status" else http.post
+                options = {"params":parameters} if request==http.get else {"json":data or {}}
+                response = await request(ctx.obj["url"].rstrip("/")+"/admin/api/metadata-operator/"+name,
+                    headers={"Authorization":"Bearer "+ctx.obj["token"]},**options)
+                result = response.json()
+                if not isinstance(result,dict):
+                    raise ValueError()
+        except Exception:
+            result = {"status":"error","error_type":"operator_outcome_unconfirmed",
+                      "message":"Réponse non confirmée ; vérifier sans rejouer"}
+        show_json(result)
+        return result
+    return asyncio.run(run())
+
+
+def _metadata_simple(name):
+    @click.pass_context
+    def command(ctx):
+        if _metadata_request(ctx,name).get("status")!="ok":
+            raise click.ClickException("Action non confirmée")
+    return command
+
+
+for _command,_action in (("status","status"),("install-vault","vault"),
+        ("verify-connections","verify-connections"),("schema-init","schema-init")):
+    metadata_group.command(_command)(_metadata_simple(_action))
+
+
+@metadata_group.command("install-connections")
+@click.option("--app-file",type=click.Path(exists=True,dir_okay=False),required=True)
+@click.option("--provisioner-file",type=click.Path(exists=True,dir_okay=False),required=True)
+@click.pass_context
+def metadata_connections_cmd(ctx,app_file,provisioner_file):
+    """Installer les deux credentials privés sans écraser une version existante."""
+    import json
+    from pathlib import Path
+    try:
+        values = {"app":json.loads(Path(app_file).read_text()),
+                  "provisioner":json.loads(Path(provisioner_file).read_text())}
+    except Exception:
+        raise click.ClickException("Fichier credential invalide") from None
+    if _metadata_request(ctx,"connections",values).get("status")!="ok":
+        raise click.ClickException("Installation non confirmée")
+
+
+def _private_json(path,value):
+    import os,json
+    descriptor = os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    with os.fdopen(descriptor,"w") as output:
+        json.dump(value,output)
+        output.flush()
+        os.fsync(output.fileno())
+
+
+@metadata_group.command("initial-admin")
+@click.option("--token-file",type=click.Path(dir_okay=False),required=True)
+@click.option("--client-name",required=True)
+@click.pass_context
+def metadata_initial_admin_cmd(ctx,token_file,client_name):
+    """Émettre une seule fois ; conserver token, UUID et classification privée."""
+    import hashlib,secrets,uuid,os
+    from pathlib import Path
+    # Aucun renouvellement/replay si un fichier ou une intention existe déjà.
+    if Path(token_file).exists() or Path(token_file+".intent.json").exists():
+        raise click.ClickException("Intention existante : utiliser installation-result, aucun replay")
+    token = secrets.token_urlsafe(32)
+    mid = str(uuid.uuid4())
+    intent = {"mutation_id":mid,"token_hash":hashlib.sha256(token.encode()).hexdigest(),
+              "client_name":client_name,"initial_confirmation":"unknown"}
+    descriptor = os.open(token_file,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    with os.fdopen(descriptor,"w") as output:
+        output.write(token)
+        output.flush()
+        os.fsync(output.fileno())
+    _private_json(token_file+".intent.json",intent)
+    result = _metadata_request(ctx,"initial-admin",{k:intent[k] for k in
+        ("mutation_id","token_hash","client_name")})
+    # Append-only : l'intention unknown n'est jamais réécrite par une résolution.
+    _private_json(token_file+".ack.json",{"mutation_id":mid,
+        "initial_confirmation":"confirmed" if result.get("status")=="ok" else "unknown"})
+    if result.get("status")!="ok":
+        raise click.ClickException("Seed non confirmé ; fichiers conservés, aucun replay")
+
+
+@metadata_group.command("installation-result")
+@click.option("--intent-file",type=click.Path(exists=True,dir_okay=False),required=True)
+@click.pass_context
+def metadata_installation_result_cmd(ctx,intent_file):
+    """Constater le marqueur et l'intention ; ne réécrit jamais l'ACK historique."""
+    import json,uuid
+    from pathlib import Path
+    try:
+        intent = json.loads(Path(intent_file).read_text())
+        mid = str(uuid.UUID(intent["mutation_id"]))
+        parameters = {k:intent[k] for k in ("token_hash","client_name")}
+    except Exception:
+        raise click.ClickException("Intention invalide") from None
+    if _metadata_request(ctx,"installation-result/"+mid,parameters=parameters).get("status")!="ok":
+        raise click.ClickException("État non constaté")

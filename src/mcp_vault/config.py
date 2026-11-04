@@ -3,6 +3,7 @@
 
 from functools import lru_cache
 from pydantic_settings import BaseSettings
+from pydantic import Field, model_validator
 
 
 class Settings(BaseSettings):
@@ -13,6 +14,7 @@ class Settings(BaseSettings):
     mcp_server_host: str = "0.0.0.0"
     mcp_server_port: int = 8030
     mcp_server_debug: bool = False
+    technical_log_directory: str = ""
 
     # --- WAF ---
     # Port externe du WAF Caddy (variable partagée avec docker-compose). Déclaré ici
@@ -32,6 +34,99 @@ class Settings(BaseSettings):
 
     # --- Auth ---
     admin_bootstrap_key: str = "change_me_in_production"
+
+    # Métadonnées applicatives : une seule autorité, sans fallback.
+    metadata_backend: str = "s3"
+    metadata_instance_id: str = ""
+    metadata_pg_vault_id: str = ""
+    metadata_pg_secret_path: str = ""
+    metadata_pg_provisioner_secret_path: str = ""
+    metadata_pg_database: str = ""
+    metadata_pg_owner_role: str = ""
+    metadata_pg_app_role: str = ""
+    metadata_pg_provisioner_role: str = ""
+    metadata_pg_ca_file: str = ""
+    metadata_operator_mode: str = "disabled"
+    metadata_sql_concurrency: int = Field(default=4, ge=1, le=16)
+    metadata_sql_connect_seconds: int = Field(default=3, ge=1, le=30)
+    metadata_sql_statement_seconds: int = Field(default=5, ge=1, le=60)
+    metadata_sql_lock_seconds: int = Field(default=2, ge=1, le=30)
+    metadata_sql_cancel_seconds: int = Field(default=2, ge=1, le=10)
+
+    # Audit applicatif PG : budget de dispatch/étape, pas SLA de drainage.
+    audit_retention_days: int = Field(default=365, ge=1, le=36500)
+    audit_stage_seconds: int = Field(default=30, ge=10, le=300)
+    audit_maintenance_role: str = Field(default="vault_audit_maintenance", pattern=r"^[a-z][a-z0-9_]{0,62}$")
+    audit_maintenance_secret_path: str = "sql/audit-maintenance"
+    audit_mission_retention_enabled: bool = False
+    mission_retention_issuer: str = ""
+    mission_retention_audience: str = ""
+    mission_retention_callback_seconds: float = Field(default=5, ge=1, le=10)
+    metadata_readiness_ttl_seconds: float = Field(default=2, ge=0.1, le=30)
+    metadata_batch_max_ids: int = Field(default=50, ge=1, le=100)
+    metadata_initial_admin_hours: int = Field(default=24, ge=1, le=24)
+    metadata_pg_durability: str = "standalone"
+
+    @model_validator(mode="after")
+    def validate_metadata(self):
+        from .vault_ids import is_valid_vault_id
+        import re
+        if self.metadata_backend not in {"s3", "postgres"}:
+            raise ValueError("METADATA_BACKEND invalide")
+        if self.metadata_operator_mode not in {
+            "disabled",
+            "install",
+            "restore",
+            "retention-only",
+        }:
+            raise ValueError("METADATA_OPERATOR_MODE invalide")
+        if self.metadata_pg_durability not in {"standalone", "ha"}:
+            raise ValueError("METADATA_PG_DURABILITY invalide")
+        if self.audit_mission_retention_enabled and (self.metadata_backend != "postgres" or self.audit_retention_days < 365):
+            raise ValueError("Mission retention requires annual PostgreSQL audit")
+        if self.metadata_backend == "postgres":
+            if not all(is_valid_vault_id(v) for v in (
+                self.metadata_instance_id, self.metadata_pg_vault_id,
+                self.metadata_pg_database, self.metadata_pg_owner_role, self.metadata_pg_app_role,
+                self.metadata_pg_provisioner_role,
+            )):
+                raise ValueError("Identités PostgreSQL requises et canoniques")
+            segment = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*")
+            paths = (self.metadata_pg_secret_path, self.metadata_pg_provisioner_secret_path, self.audit_maintenance_secret_path)
+            if (len(set(paths)) != 3 or any(
+                not p or len(p) > 256 or p.startswith("_vault_meta")
+                or not all(segment.fullmatch(s) for s in p.split("/")) for p in paths
+            )):
+                raise ValueError("Chemins de connexion distincts et canoniques requis")
+            if len({self.metadata_pg_owner_role, self.metadata_pg_app_role, self.metadata_pg_provisioner_role}) != 3:
+                raise ValueError("Rôles propriétaire, app et provisionneur distincts requis")
+            if not self.metadata_pg_ca_file:
+                raise ValueError("CA PostgreSQL requise")
+        return self
+
+    # Lecture hub842 optionnelle ; aucun droit ou dépendance Mission en standalone.
+    hub_vault_enabled: bool = False
+    hub_vault_issuer: str = ""
+    hub_vault_audience: str = ""
+    hub_vault_jwks_url: str = ""
+    hub_vault_check_url: str = ""
+    hub_vault_ca_file: str = ""
+    hub_vault_timeout_seconds: float = Field(default=5, gt=0, le=10)
+    hub_vault_total_seconds: float = Field(default=20, gt=0, le=30)
+    hub_vault_max_inflight: int = Field(default=1, ge=1, le=16)
+    hub_vault_max_pending: int = Field(default=4, ge=0, le=64)
+    hub_vault_max_response_bytes: int = Field(default=1048576, ge=1024, le=1048576)
+
+    @model_validator(mode="after")
+    def validate_hub_vault(self):
+        if self.hub_vault_enabled:
+            from .auth.hub_vault_activity import https_url
+            if (self.metadata_backend != "postgres" or self.mcp_auth_mode not in {"bearer", "dual-stack"}
+                    or not 10 <= self.mission_jwks_cache_ttl <= 60 or not self.hub_vault_audience
+                    or not self.hub_vault_ca_file or not all(https_url(v) for v in
+                        (self.hub_vault_issuer, self.hub_vault_jwks_url, self.hub_vault_check_url))):
+                raise ValueError("Configuration hub Vault incomplète")
+        return self
 
     # --- Accès SSH JIT opérateur ---
     # Objet JSON profile_id -> profil nominatif. Vide = fonctionnalité désactivée.
@@ -83,6 +178,90 @@ class Settings(BaseSettings):
     openbao_threshold: int = 1
     openbao_data_dir: str = "/openbao/file"
     openbao_config_dir: str = "/openbao/config"
+    # Listener natif opérateur optionnel ; aucun accès aux fichiers à la lecture
+    # des Settings (scripts partageant le .env sans les mounts du serveur).
+    openbao_operator_tls_address: str = ""
+    openbao_operator_tls_cert_file: str = ""
+    openbao_operator_tls_key_file: str = ""
+
+    @model_validator(mode="after")
+    def validate_openbao_operator_tls(self):
+        import ipaddress
+        import re
+        from pathlib import PurePosixPath
+
+        values = (self.openbao_operator_tls_address,
+                  self.openbao_operator_tls_cert_file,
+                  self.openbao_operator_tls_key_file)
+        if values == ("", "", ""):
+            return self
+        if not all(values) or self.openbao_addr != "http://127.0.0.1:8200":
+            raise ValueError("Configuration TLS opérateur OpenBao incomplète ou incohérente")
+        match = re.fullmatch(r"([0-9.]+):([1-9][0-9]{3,4})", values[0])
+        if not match:
+            raise ValueError("Adresse TLS opérateur OpenBao invalide")
+        try:
+            ip = ipaddress.IPv4Address(match[1])
+        except ipaddress.AddressValueError:
+            raise ValueError("Adresse TLS opérateur OpenBao invalide") from None
+        networks = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+        port = int(match[2])
+        if (not any(ip in ipaddress.IPv4Network(n) for n in networks)
+                or not 1024 <= port <= 65534
+                or {port, port + 1} & {8200, 8201, self.mcp_server_port}):
+            raise ValueError("Adresse TLS opérateur OpenBao invalide")
+        for value in values[1:]:
+            path = PurePosixPath(value)
+            if (not re.fullmatch(r"/[A-Za-z0-9_./-]+", value)
+                    or str(path) != value or ".." in path.parts
+                    or path == PurePosixPath("/")
+                    or path.is_relative_to(PurePosixPath(self.openbao_data_dir))
+                    or path == PurePosixPath(self.openbao_config_dir) / "server.hcl"):
+                raise ValueError("Chemin TLS opérateur OpenBao invalide")
+        if values[1] == values[2]:
+            raise ValueError("Certificat et clé TLS opérateur doivent être distincts")
+        return self
+
+    def check_openbao_operator_tls(self) -> tuple[bool, str]:
+        """Préflight serveur uniquement, avant S3/startup ; aucun correctif de droits."""
+        if not self.openbao_operator_tls_address:
+            return True, ""
+        import os
+        import ssl
+        import stat
+        from pathlib import Path
+
+        def refuse_password():
+            # Sans ce callback OpenSSL peut ouvrir un prompt interactif.
+            raise ValueError("Clé TLS chiffrée non acceptée")
+
+        try:
+            for value, is_key in ((self.openbao_operator_tls_cert_file, False),
+                                  (self.openbao_operator_tls_key_file, True)):
+                path = Path(value)
+                if (path.is_relative_to(Path(self.openbao_data_dir).resolve())
+                        or path == (Path(self.openbao_config_dir) / "server.hcl").resolve()):
+                    raise ValueError("Fichier TLS dans le backend ou la configuration")
+                for component in (*reversed(path.parents), path):
+                    if stat.S_ISLNK(component.lstat().st_mode):
+                        raise ValueError("Lien TLS interdit")
+                info = path.stat()
+                parent = path.parent.stat()
+                mode = stat.S_IMODE(info.st_mode)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                        or parent.st_uid != os.geteuid()
+                        or stat.S_IMODE(parent.st_mode) != 0o700
+                        or (is_key and mode not in (0o400, 0o600))
+                        or (not is_key and mode & 0o022)):
+                    raise ValueError("Droits TLS invalides")
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(self.openbao_operator_tls_cert_file,
+                                    self.openbao_operator_tls_key_file,
+                                    password=refuse_password)
+        except (OSError, ValueError):
+            return False, "Fichiers TLS opérateur OpenBao invalides ou indisponibles"
+        return True, ""
+
     # Borne de la sonde de santé OpenBao (issue #103). `/health` est PUBLIC et
     # non authentifié : sans borne, un OpenBao qui accepte la connexion sans
     # répondre immobiliserait un thread de l'exécuteur par sonde. Cette valeur
