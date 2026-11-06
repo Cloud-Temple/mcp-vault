@@ -1,6 +1,30 @@
 # Changelog — MCP Vault
 
-## Non publié — compagnon Mission #842
+## [Unreleased]
+
+## [0.21.0] — 2026-11-07
+
+### Sécurité du SDK MCP
+
+- Le runtime est verrouillé sur `mcp==2.2.0` et `mcp-types==2.2.0`. Le client
+  CLI refuse les redirections HTTP avant toute retransmission de son bearer ;
+  le prochain majeur du SDK reste exclu sans migration auditée.
+
+### Métadonnées et audit PostgreSQL optionnels
+
+- `METADATA_BACKEND=postgres` fournit une autorité PostgreSQL unique pour les
+  tokens hashés, policies, bindings et registres applicatifs. Le profil reste
+  opt-in, Vault-first, sans migration automatique, double écriture ni fallback
+  S3. Installation et limites : [guide des métadonnées](docs/postgres-metadata.md).
+- Le journal applicatif PostgreSQL durable enregistre les admissions et effets
+  expurgés, avec consultation protégée et rétention explicite par un rôle de
+  maintenance distinct. Il ne sauvegarde ni les coffres ni leurs secrets :
+  [guide d'audit](docs/audit-postgres.md).
+- Le contrat `.env.example` ajoute 43 déclarations depuis `0.20.1`, sans retrait.
+  Les profils PostgreSQL, Hub/Mission, rétention et listener TLS restent
+  désactivés ou opt-in par défaut ; le profil historique S3 est conservé.
+
+### Compagnon Mission #842
 
 - PostgreSQL standalone : `auth.s3_ca_file` facultatif relaie une CA S3 privée validée au seul chargeur de bootstrap (`AWS_CA_BUNDLE`) ; absent, l'environnement reste fermé. Un FIFO sans écrivain à cet emplacement est refusé sans blocage (`private_read(nonblocking=True)`, réservé à ce contrôle).
 
@@ -9,8 +33,6 @@
 - Lecture hub optionnelle des métadonnées et traces Mission conservées : opaque local et contexte Mission cumulés, scope PG filtré avant pagination, sans accès aux secrets ni changement du lecteur standalone.
 - #831 — La policy exacte du token Hub est l'unique autorité positive de lecture metadata. La policy C18 distincte du binding doit exister avec sa révision chargée; ses refus `denied_tools` sur `audit_log` ou `vault_metadata_batch` restent un veto canonique `fnmatch`, tandis que ses allow-lists et chemins ne donnent aucun droit metadata. Le contrat d'autorité est explicitement séparé; le binding reste le plafond de ressources et C18 conserve son rôle data-plane Mission.
 - Les continuations Mission gardent leur borne et leur empreinte de périmètre malgré les nouvelles lectures de credentials hors scope ; une suppression ou un remplacement dans ce périmètre refuse la continuation.
-
-## [Unreleased]
 
 - Statut Mission : avec un bearer, une `MISSION_STATUS_URL` non `https://` (schéma insensible à la casse) est refusée avant tout appel réseau (`service_unavailable`) au lieu d'un appel anonyme ; sans bearer, rien ne change. Route documentée : `/internal/missions/{mission_id}/active`.
 
