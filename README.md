@@ -8,7 +8,7 @@ Profil PostgreSQL standalone : [installation, quatre parcours et retour contrôl
 
 MCP Vault centralise les secrets, les politiques d’accès et les accès temporaires dont ont besoin des agents IA. Il embarque [OpenBao](https://openbao.org/) pour le chiffrement et le stockage, ajoute une API MCP protégée par authentification et politiques, puis fournit une console d’administration et une CLI.
 
-**Version** : 0.20.1 · **Licence** : [Apache-2.0](LICENSE)
+**Version** : 0.21.0 · **Licence** : [Apache-2.0](LICENSE)
 
 > [!IMPORTANT]
 > MCP Vault est un composant de sécurité à exploiter dans un environnement maîtrisé. Lisez le [modèle de sécurité](#modèle-de-sécurité) et le [rapport d’audit](DESIGN/mcp-vault/SECURITY_AUDIT.md) avant toute mise en production.
@@ -155,32 +155,6 @@ Le proxy ACME supporte aussi les endpoints clients natifs liés à un rôle.
 La publication réseau, l'admission EAB et les restrictions du rôle restent à
 configurer côté opérateur : voir le [contrat PKI](DESIGN/mcp-vault/TECHNICAL.md#311b-vaultpki_capy--pki-certificate-authority-v051).
 
-## Développement et tests
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-python -m pytest -q
-```
-
-Certaines suites d’intégration nécessitent Docker, S3 et un serveur en fonctionnement. Le [guide des tests](tests/README.md) décrit les niveaux, prérequis et commandes ciblées ; le [catalogue E2E](tests/TEST_CATALOG.md) documente les scénarios couverts.
-
-## Documentation
-
-| Document | Contenu |
-| --- | --- |
-| [Architecture](DESIGN/mcp-vault/ARCHITECTURE.md) | Architecture, persistance, sécurité et contrats détaillés |
-| [Documentation technique](DESIGN/mcp-vault/TECHNICAL.md) | Modules, dépendances, déploiement et maintenance |
-| [Audit de sécurité](DESIGN/mcp-vault/SECURITY_AUDIT.md) | Constats consolidés, corrections et risques résiduels |
-| [Guide CLI](scripts/README.md) | Commandes d’administration et d’exploitation |
-| [Guide des tests](tests/README.md) | Exécution locale, live et Docker |
-| [Changelog](CHANGELOG.md) | Historique des versions |
-
-## Licence
-
-MCP Vault est distribué sous licence [Apache License 2.0](LICENSE).
-
 ### Métadonnées PostgreSQL (profil opt-in)
 
 Le [guide public](docs/postgres-metadata.md) décrit l'installation Vault-first,
@@ -216,3 +190,29 @@ HTTPS réelle. Si le manager réutilise un Bao déjà joignable, sa configuratio
 n'est pas régénérée : TLS peut manquer, le client doit refuser sans repli HTTP.
 Les [limites d'architecture](DESIGN/mcp-vault/ARCHITECTURE.md#listener-tls-opérateur-optionnel)
 précisent les responsabilités ; aucun déploiement automatique n'est ajouté.
+
+## Développement et tests
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m pytest -q
+```
+
+Certaines suites d’intégration nécessitent Docker, S3 et un serveur en fonctionnement. Le [guide des tests](tests/README.md) décrit les niveaux, prérequis et commandes ciblées ; le [catalogue E2E](tests/TEST_CATALOG.md) documente les scénarios couverts.
+
+## Documentation
+
+| Document | Contenu |
+| --- | --- |
+| [Architecture](DESIGN/mcp-vault/ARCHITECTURE.md) | Architecture, persistance, sécurité et contrats détaillés |
+| [Documentation technique](DESIGN/mcp-vault/TECHNICAL.md) | Modules, dépendances, déploiement et maintenance |
+| [Audit de sécurité](DESIGN/mcp-vault/SECURITY_AUDIT.md) | Constats consolidés, corrections et risques résiduels |
+| [Guide CLI](scripts/README.md) | Commandes d’administration et d’exploitation |
+| [Guide des tests](tests/README.md) | Exécution locale, live et Docker |
+| [Changelog](CHANGELOG.md) | Historique des versions |
+
+## Licence
+
+MCP Vault est distribué sous licence [Apache License 2.0](LICENSE).

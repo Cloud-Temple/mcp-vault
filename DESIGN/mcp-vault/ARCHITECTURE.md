@@ -1,6 +1,6 @@
 # Architecture — MCP Vault
 
-> **Version** : 0.20.1 | **Date** : 2026-08-29 | **Auteur** : Cloud Temple
+> **Version** : 0.21.0 | **Date** : 2026-11-07 | **Auteur** : Cloud Temple
 > **Projet** : mcp-vault | **Licence** : Apache 2.0  
 > **Statut** : ✅ Implémenté — Production-ready (PKI interne v0.5.x + C18 v0.6.x)
 
@@ -140,7 +140,7 @@
 | **HealthCheckMiddleware** | Health check HTTP (/health, /healthz, /ready)    | ASGI middleware               |
 | **AuthMiddleware**        | Auth Bearer Token + **PEP mission JWT** (#47) + **octroi périmètre vault** (MissionBindingStore, #69) + ContextVar | ASGI middleware (starter-kit) |
 | **LoggingMiddleware**     | Logging requêtes + ring buffer mémoire           | ASGI middleware (starter-kit) |
-| **Outils MCP**            | Façade MCP (39 outils)                           | `MCPServer` (`mcp==2.1.1`)    |
+| **Outils MCP**            | Façade MCP (39 outils)                           | `MCPServer` (`mcp==2.2.0`)    |
 | **hvac client**           | Client Python vers OpenBao                       | `hvac` library                |
 | **OpenBao process**       | Moteur de secrets (chiffrement, policies, audit) | Binaire `bao` (Go, embedded)  |
 | **S3 Sync Manager**       | Synchronisation storage local ↔ S3               | boto3 + tar/gzip              |
@@ -189,9 +189,9 @@ def create_app():
     return app
 ```
 
-#### Contrat transport MCP v0.20.0
+#### Contrat transport MCP v0.21.0
 
-Le SDK livré est exactement `mcp==2.1.1`. Le même endpoint `/mcp` sert le
+Le SDK livré est exactement `mcp==2.2.0`. Le même endpoint `/mcp` sert le
 protocole moderne `2026-07-28` et les clients legacy jusqu'à `2025-11-25`.
 `stateless_http=True` s'applique aux deux ères : l'identité est relue à chaque
 requête et le transport n'exige plus d'affinité de session. Cela ne rend pas le

@@ -1,6 +1,6 @@
 # Documentation Technique — MCP Vault
 
-> **Version** : 0.20.1 | **Date** : 2026-08-29 | **Auteur** : Cloud Temple
+> **Version** : 0.21.0 | **Date** : 2026-11-07 | **Auteur** : Cloud Temple
 > **Licence** : Apache 2.0 | **Statut** : ✅ Production-ready (audit V2.1 complété + PKI interne v0.5.1)
 
 ---
@@ -89,7 +89,7 @@ Les requêtes traversent 6 couches middleware dans cet ordre :
 
 `PkiMiddleware` (v0.5.0) est la couche la plus externe — intercepte avant l'auth. Les endpoints `/acme/*` et `/pki/ca/*.pem` sont délibérément non-authentifiés (standard PKI/ACME). Sécurité : anti-traversal path, validation query string, `follow_redirects=False`.
 
-Le transport MCP v0.20.0 repose sur `mcp==2.1.1`, sert le protocole moderne
+Le transport MCP v0.21.0 repose sur `mcp==2.2.0`, sert le protocole moderne
 `2026-07-28` et les clients legacy jusqu'à `2025-11-25`, avec
 `stateless_http=True` dans les deux ères. L'identité bearer est donc évaluée à
 chaque requête et le transport n'exige plus d'affinité de session. Le produit
