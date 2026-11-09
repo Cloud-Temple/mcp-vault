@@ -277,10 +277,19 @@ Ne pas écrire de note sans nouveauté à chaque contrôle. À échéance, contr
 activité continue sans jalon exige un rappel ou superviseur existant et
 autorisé ; sans lui, aucun déclenchement autonome n'est garanti.
 
-Examiner les nouveautés non consolidées, l'âge des notes, la fraîcheur du
-résumé et les budgets avec les informations disponibles et des lectures
-ciblées. Consolider sur demande de mise à jour de la banque, lorsque des faits
-durables rendent le résumé obsolète, nécessitent une première synthèse dans
+Après chaque étape importante qui apporte des faits durables nouveaux —
+décision structurante, bloc de travail terminé ou validé, blocage ou passation
+significative — le pilote ou coordinateur consigne le bilan de fin de bloc
+défini ci-dessus, puis soumet une consolidation selon les gardes ci-dessous.
+Une micro-action, un réveil sans changement, une fin de session ou une
+passation sans fait durable nouveau ne déclenchent pas de consolidation.
+Si l'écriture SHORT est refusée ou expire, ne rien soumettre : appliquer le
+blocage et la réconciliation prévus dans « Mémoire indisponible ».
+
+Examiner aussi les nouveautés non consolidées, l'âge des notes, la fraîcheur
+du résumé et les budgets avec les informations disponibles et des lectures
+ciblées. Consolider également sur demande de mise à jour de la banque, lorsque
+des faits durables rendent le résumé obsolète, nécessitent une première synthèse dans
 une banque vide, ou dépassent ses budgets. L'ancienneté seule ne suffit pas.
 Écrire d'abord les faits durables absents des notes. Une fin de session ne déclenche pas à elle
 seule une consolidation ; aucun GO humain supplémentaire n'est requis.
@@ -288,8 +297,12 @@ seule une consolidation ; aucun GO humain supplémentaire n'est requis.
 Avant de soumettre, consulter la coordination et les files disponibles, par
 exemple `bank_consolidation_queues(space_ids="<espace>")` après vérification
 du type attendu par le schéma (`space_ids` est une chaîne dans le contrat
-1.6.4). Si un travail est `queued` ou `running`, ne pas en ajouter. Réutiliser les mécanismes disponibles
-sans inventer de verrou. La file Hivemind 1.6.4 est locale au processus et
+1.6.4). Si un travail est `queued` ou `running`, ne pas en ajouter. Conserver
+les nouveaux faits dans SHORT sans présumer leur inclusion dans ce travail ;
+reporter le contrôle au prochain jalon, à la prochaine reprise ou à la prochaine
+échéance configurée existante si elle est activée, sans boucle de surveillance.
+Réutiliser les mécanismes disponibles sans inventer de verrou.
+La file Hivemind 1.6.4 est locale au processus et
 best-effort ; son état ne prouve pas une exclusion entre toutes les instances.
 
 Soumettre `mid_consolidate(space_id="<espace>")` une seule fois. Dans le contrat
