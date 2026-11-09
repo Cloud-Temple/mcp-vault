@@ -149,4 +149,5 @@ DESIGN pour l'architecture et les contrats, changelog pour les changements
 livrés. Lors d'une livraison, aligner VERSION, les exemples et les métadonnées
 concernées. Distinguer version préparée, commit intégré, tag créé et release
 effectivement publiée ; ne jamais annoncer l'un comme preuve de l'autre.
-Ne pas ajouter automatiquement de signature d'outil ou de coauteur artificiel.
+Dans les commits, PR, releases et tags, l'attribution d'un changement à un
+outil est interdite : voir `WORKFLOW_GIT.md`.
