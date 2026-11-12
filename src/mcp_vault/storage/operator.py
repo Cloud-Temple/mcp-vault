@@ -82,6 +82,13 @@ def validate_connection(value, provisioner=False):
 
 
 def action(name, body):
+    """Chemin opérateur : chaque connexion relit le login dans le coffre."""
+    from .pg_login import fresh_reads
+    with fresh_reads():
+        return _action(name, body)
+
+
+def _action(name, body):
     s = get_settings()
     mount = s.metadata_pg_vault_id
     if name == 'audit-maintenance-connection':

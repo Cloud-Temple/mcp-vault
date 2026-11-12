@@ -129,15 +129,36 @@ def connection(*, provisioner=False, schema=True):
     if not admission_slots.acquire(timeout=1):
         raise MetadataUnavailable("admission_timeout")
     conn = None
+    memory = login = None
     try:
-        value = credentials(provisioner=provisioner)
-        conn = psycopg.connect(**value, options="-c statement_timeout="+str(s.metadata_sql_statement_seconds*1000),
-            keepalives=1, keepalives_idle=2, keepalives_interval=1, keepalives_count=2, tcp_user_timeout=5000, sslmode="verify-full", sslrootcert=s.metadata_pg_ca_file,
-            target_session_attrs="read-write", connect_timeout=s.metadata_sql_connect_seconds,
-            autocommit=True, row_factory=dict_row)
+        if not provisioner:
+            # Login app en mémoire quand le serveur l'a démarrée ; sinon (scripts,
+            # chemins opérateur, réglages à 0) lecture du coffre comme avant.
+            from .pg_login import active
+            memory = active()
+        if memory is None:
+            value = credentials(provisioner=provisioner)
+        else:
+            login = memory.current()
+            value = login.value
+        try:
+            conn = psycopg.connect(**value, options="-c statement_timeout="+str(s.metadata_sql_statement_seconds*1000),
+                keepalives=1, keepalives_idle=2, keepalives_interval=1, keepalives_count=2, tcp_user_timeout=5000, sslmode="verify-full", sslrootcert=s.metadata_pg_ca_file,
+                target_session_attrs="read-write", connect_timeout=s.metadata_sql_connect_seconds,
+                autocommit=True, row_factory=dict_row)
+        except psycopg.OperationalError as exc:
+            # libpq ne rend pas de SQLSTATE sur un échec de connexion : refus
+            # d'authentification et coupure réseau ne se distinguent pas sans
+            # lire le texte du message. Relecture immédiate, login conservé ;
+            # PostgreSQL reste juge du mot de passe. Pas de nouvel essai ici.
+            if login is not None:
+                memory.report_failure(login, forget=False)
+            raise MetadataUnavailable("connect_failed") from exc
         conn = BoundedConnection(conn)
         identity = conn.execute("SELECT current_database() AS db, current_user AS role").fetchone()
         if identity != {"db": s.metadata_pg_database, "role": value["user"]}:
+            if login is not None:
+                memory.report_failure(login, forget=True)
             raise MetadataUnavailable("identity_invalid")
         conn.execute("SELECT set_config('statement_timeout', %s, false)",
                      (str(s.metadata_sql_statement_seconds * 1000),))
