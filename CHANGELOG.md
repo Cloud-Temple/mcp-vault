@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### Métadonnées PostgreSQL : login applicatif en mémoire
+
+- Avec `METADATA_BACKEND=postgres`, le serveur ne lit plus le login PostgreSQL
+  applicatif dans OpenBao à chaque connexion. Il le lit après l'unseal, le
+  relit en fond toutes les 30 s et le garde valable 60 s au plus après la
+  dernière lecture réussie, puis refuse en fermé. `/ready` reste en échec tant
+  qu'aucune lecture n'a réussi. Un refus explicite d'OpenBao ou une identité
+  SQL inattendue fait oublier le login aussitôt ; un échec de connexion
+  PostgreSQL déclenche une relecture immédiate, sans retenter la requête.
+- Deux réglages : `METADATA_PG_LOGIN_REFRESH_SECONDS` (30, de 5 à 300) et
+  `METADATA_PG_LOGIN_VALIDITY_SECONDS` (60, au plus 900, strictement plus que
+  l'intervalle). Les deux à 0 rétablissent la lecture du coffre à chaque
+  connexion. Le contrat `.env.example` ajoute ces 2 déclarations, sans retrait.
+- Rien ne change pour les tokens, policies, bindings et droits, relus dans
+  PostgreSQL à chaque requête. Provisionneur, maintenance d'audit, actions
+  opérateur et scripts relisent toujours le coffre.
+- Chaque 503 de l'admission HTTP des métadonnées journalise sa raison fermée,
+  sans secret ni DSN, au plus une ligne par raison toutes les 10 s.
+- Limites : ni le nombre de places SQL, ni la limite de lectures OpenBao
+  simultanées, ni l'absence de pool de connexions ne changent ici.
+
 ## [0.21.0] — 2026-11-07
 
 ### Sécurité du SDK MCP

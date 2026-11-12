@@ -23,8 +23,11 @@ Chaque secret de connexion contient exactement cinq chaînes : `host`, `port`,
 `dbname`, `user`, `password`. Les deux users correspondent aux rôles configurés.
 La CA est distribuée séparément ; libpq utilise `sslmode=verify-full`. Ni mot de
 passe, DSN complet, secret direct en environnement ni cache périmé ne sert de
-repli. Chaque connexion lit d'abord son credential par HTTP/KV2 natif OpenBao,
-après restauration/unseal/auth de celui-ci ; elle n'appelle pas sa propre API MCP.
+repli. Les credentials se lisent par HTTP/KV2 natif OpenBao, après
+restauration/unseal/auth de celui-ci ; Vault n'appelle pas sa propre API MCP.
+Le serveur garde le login app en mémoire pour une durée bornée, voir
+[Login applicatif en mémoire](#login-applicatif-en-mémoire). Les credentials
+provisionneur et maintenance d'audit sont relus à chaque connexion.
 
 Standalone : PostgreSQL propre au déploiement et OpenBao existant. Externe : un
 serveur PostgreSQL partagé explicitement configuré, une base et des rôles propres
@@ -143,6 +146,55 @@ tente sa révocation native indépendamment de PG. La réponse reste
 `wrap_created_revoked` ou `wrap_created_orphaned`, sans token ni accessor.
 Une issue SQL inconnue ajoute `metadata_outcome=unknown` et `mutation_id` ;
 une révocation OpenBao confirmée ne confirme pas le COMMIT SQL.
+
+## Login applicatif en mémoire
+
+Le serveur lit le login app (`METADATA_PG_SECRET_PATH`) juste après l'unseal.
+`/ready` reste en échec tant qu'aucune lecture n'a réussi : la sonde passe par
+la même connexion que les requêtes, et une requête sans login valide est
+refusée sans toucher PostgreSQL. Ensuite :
+
+- un thread relit le coffre toutes les `METADATA_PG_LOGIN_REFRESH_SECONDS`
+  (30 s par défaut, 5 à 300 s). Les requêtes lisent la mémoire, jamais le coffre ;
+- le login reste valable `METADATA_PG_LOGIN_VALIDITY_SECONDS` (60 s par défaut,
+  au plus 900 s, strictement plus que l'intervalle) après le début de la
+  dernière lecture réussie. Au-delà, les requêtes reçoivent un 503, sans délai
+  de grâce ;
+- après un échec de lecture, un nouvel essai part toutes les 5 s. Un échec ne
+  prolonge jamais la validité. Un 401 ou 403 d'OpenBao, une absence confirmée
+  du secret ou un contenu invalide font oublier le login tout de suite ;
+- un échec de connexion PostgreSQL déclenche une relecture immédiate, sans
+  oublier le login : libpq ne donne pas de SQLSTATE à la connexion, donc un
+  mot de passe refusé ne se distingue pas d'une coupure réseau, et PostgreSQL
+  reste juge du mot de passe. Une identité SQL inattendue fait en plus oublier
+  le login fautif. Un login relu entre-temps n'est jamais effacé, et la requête
+  en échec n'est pas retentée. N requêtes refusées donnent au plus une lecture
+  du coffre, avec au moins 1 s entre deux lectures ;
+- si le thread de relecture s'arrête sur une erreur imprévue, il n'est pas
+  relancé. Le journal porte `raison=refresher_died`, le login expire à sa
+  validité, puis les requêtes sont refusées avec `login_refresher_dead`.
+  Redémarrer le service.
+
+Les deux réglages à 0 rétablissent la lecture du coffre à chaque connexion :
+c'est le retour arrière. Une seule des deux valeurs à 0 est refusée au
+démarrage. Les scripts et jobs hors serveur, les actions opérateur, le
+provisionneur et la maintenance d'audit relisent toujours le coffre.
+
+Seul ce login est gardé, en mémoire du processus, jamais journalisé ni écrit.
+Les faits d'autorisation (tokens, policies, bindings) et les droits restent
+relus dans PostgreSQL à chaque requête : une révocation reste immédiate. Si
+OpenBao est arrêté, Vault ne sert de toute façon plus de secret ; la validité
+de 60 s ne concerne que ce login.
+
+Chaque 503 de l'admission HTTP journalise sa raison fermée (`raison=...`, par
+exemple `login_expired`, `connect_failed`, `admission_timeout`), sans secret ni
+DSN, au plus une ligne par raison toutes les 10 s avec le nombre de lignes
+supprimées.
+
+Limites connues, hors de ce changement : le nombre de places SQL
+(`METADATA_SQL_CONCURRENCY`) et la limite de 4 lectures OpenBao simultanées,
+fixée dans le code, ne sont pas redimensionnés, et chaque opération ouvre
+toujours sa propre connexion PostgreSQL, sans pool.
 
 ## Reprise logique et qualification
 

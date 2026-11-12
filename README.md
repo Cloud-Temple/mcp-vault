@@ -162,6 +162,11 @@ les deux topologies autonomes, les credentials/rôles séparés, les lectures
 metadata bornées et la reprise logique. En ce profil, la clé bootstrap est
 réservée à la voie opérateur finie ; elle ne donne aucun accès admin métier.
 Les secrets et backups OpenBao conservent leur mécanisme existant.
+Le serveur garde le login PostgreSQL applicatif en mémoire, relu en fond toutes
+les 30 s et valable 60 s au plus (`METADATA_PG_LOGIN_REFRESH_SECONDS`,
+`METADATA_PG_LOGIN_VALIDITY_SECONDS`, les deux à 0 pour relire le coffre à
+chaque connexion). Les droits et la révocation des tokens restent vérifiés à
+chaque requête.
 
 ### Listener TLS natif pour un opérateur
 
