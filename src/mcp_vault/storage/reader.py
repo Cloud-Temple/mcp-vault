@@ -32,6 +32,10 @@ def _request(vault_id, path, *, deadline=None, listing=False):
         with httpx.Client(timeout=httpx.Timeout(connect=1, read=2, write=1, pool=1),
                           follow_redirects=False) as http:
             with http.stream("LIST" if listing else "GET", url, headers={"X-Vault-Token": client.token}) as response:
+                # Un refus d'OpenBao se décide sur le statut, avant le corps :
+                # un 401/403 au corps illisible reste un refus, pas une corruption.
+                if response.status_code in {401, 403}:
+                    raise MetadataUnavailable("backend_denied")
                 body = bytearray()
                 for chunk in response.iter_bytes():
                     if time.monotonic() >= end or len(body) + len(chunk) > 65536:

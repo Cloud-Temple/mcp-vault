@@ -20,6 +20,9 @@
   opérateur et scripts relisent toujours le coffre.
 - Chaque 503 de l'admission HTTP des métadonnées journalise sa raison fermée,
   sans secret ni DSN, au plus une ligne par raison toutes les 10 s.
+- Le lecteur KV ciblé classe un 401 ou 403 d'OpenBao en refus
+  (`backend_denied`) dès le statut, même si le corps n'est pas du JSON ;
+  il le classait jusqu'ici en corruption.
 - Limites : ni le nombre de places SQL, ni la limite de lectures OpenBao
   simultanées, ni l'absence de pool de connexions ne changent ici.
 

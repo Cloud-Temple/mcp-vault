@@ -106,7 +106,9 @@ class LoginCache:
                 return False
             if forget:
                 self._forget("login_refused")
-        self._wake.set()
+            # Sous le verrou : une lecture qui installe un nouveau login vide le
+            # réveil sous ce même verrou, donc un signal tardif est impossible.
+            self._wake.set()
         return True
 
     # ── Relecture ─────────────────────────────────────────────────────
@@ -127,6 +129,9 @@ class LoginCache:
         except Exception:  # noqa: BLE001, une lecture ratée ne tue jamais la boucle
             return self._failed("login_read_failed")
         with self._lock:
+            if self._stop.is_set():
+                # Lecture terminée après la demande d'arrêt : rien n'est publié.
+                return self._refresh
             self._generation += 1
             self._login = Login(value, self._generation)
             self._valid_until = started + self._validity
@@ -220,6 +225,9 @@ class LoginCache:
 
 _active = None
 _active_lock = threading.Lock()
+# Mémoires arrêtées dont le thread n'a pas encore rendu la main : gardées pour
+# qu'un `stop()` suivant puisse encore les drainer.
+_draining = []
 
 
 def start():
@@ -238,10 +246,9 @@ def start():
     from . import postgres
     cache = LoginCache(lambda: postgres.credentials(), refresh=s.metadata_pg_login_refresh_seconds,
                        validity=s.metadata_pg_login_validity_seconds)
+    stop()  # Une mémoire précédente est arrêtée, ou gardée pour être drainée.
     with _active_lock:
-        previous, _active = _active, cache
-    if previous is not None:
-        previous.stop()
+        _active = cache
     return cache.start()
 
 
@@ -249,8 +256,19 @@ def stop():
     """Arrête la boucle et oublie le login. Rend True si rien ne reste en vol."""
     global _active
     with _active_lock:
-        cache, _active = _active, None
-    return True if cache is None else cache.stop()
+        if _active is not None:
+            _draining.append(_active)
+            _active = None
+        pending = list(_draining)
+    drained = True
+    for cache in pending:
+        if cache.stop():
+            with _active_lock:
+                if cache in _draining:
+                    _draining.remove(cache)
+        else:
+            drained = False
+    return drained
 
 
 def active():

@@ -669,3 +669,123 @@ def test_raison_hors_format_journalisee_comme_non_classee(pg, caplog):
         call(reason="postgresql://user:secret@host/db")
     (line,) = records(caplog)
     assert "raison=unclassified" in line and "secret" not in line
+
+
+# =============================================================================
+# 5) Constats de revue : refus HTTP au corps illisible, réveil tardif, arrêt
+# =============================================================================
+
+@pytest.mark.parametrize("status,body", [(401, b"<html>denied</html>"), (403, b""), (403, b"not json")])
+def test_refus_http_au_corps_illisible_oublie_le_login(pg, monkeypatch, status, body):
+    """Parcours réel credentials() puis reader : le statut décide, pas le corps."""
+    import httpx
+    from mcp_vault.openbao import manager
+    from mcp_vault.storage import pg_login
+    import json as _json
+    monkeypatch.setattr(manager, "get_hvac_client", lambda: SimpleNamespace(token="unit-token"))
+    responses = [httpx.Response(200, content=_json.dumps({"data": {"data": login_value()}}).encode()),
+                 httpx.Response(status, content=body)]
+    real_client = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(
+        transport=httpx.MockTransport(lambda request: responses.pop(0)), **kwargs))
+    assert pg_login.start() is True
+    memory = pg_login.active()
+    assert memory.current().value == login_value()
+    memory.refresh_once()
+    assert memory.last_error == "backend_denied"
+    with pytest.raises(MetadataUnavailable, match="login_refused"):
+        memory.current()
+
+
+class PausingLock:
+    """Verrou qui suspend un thread désigné juste APRÈS sa prochaine libération."""
+
+    def __init__(self):
+        self.real = threading.Lock()
+        self.target = None
+        self.paused = threading.Event()
+        self.resume = threading.Event()
+
+    def __enter__(self):
+        self.real.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self.real.release()
+        if threading.current_thread() is self.target:
+            self.target = None
+            self.paused.set()
+            self.resume.wait(5)
+
+
+def test_refus_tardif_du_meme_login_ne_relance_pas_de_lecture():
+    """Entrelacement imposé : A vérifie, est suspendu, B déclenche la relecture,
+    puis A reprend. Le login a changé : A ne doit rien réveiller."""
+    from mcp_vault.storage.pg_login import LoginCache
+    reads = Reads(login_value("old"), login_value("new"), login_value("third"))
+    c = LoginCache(reads, refresh=100, validity=200, retry=50, spacing=0)
+    lock = PausingLock()
+    c._lock = lock
+    try:
+        c.start()
+        old = c.current()
+        a = threading.Thread(target=lambda: c.report_failure(old, forget=False))
+        lock.target = a
+        a.start()
+        assert lock.paused.wait(2)
+        c.report_failure(old, forget=False)  # B, sans effet ou déjà réveillé
+        assert wait_until(lambda: c.current().value["password"] == "new")
+        lock.resume.set()
+        a.join(2)
+        time.sleep(0.3)
+        assert reads.count == 2, f"{reads.count} lectures pour deux refus du même login"
+    finally:
+        lock.resume.set()
+        assert c.stop()
+
+
+def test_lecture_terminee_apres_l_arret_ne_republie_pas_le_login():
+    from mcp_vault.storage.pg_login import LoginCache
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def read():
+        calls.append(1)
+        if len(calls) == 2:
+            entered.set()
+            release.wait(5)
+        return login_value(f"p{len(calls)}")
+    c = LoginCache(read, refresh=100, validity=200, retry=50, spacing=0)
+    c.start()
+    c.report_failure(c.current(), forget=False)
+    assert entered.wait(2)
+    assert c.stop(timeout=0.1) is False, "le thread est encore dans sa lecture"
+    release.set()
+    assert wait_until(lambda: not c._thread.is_alive())
+    # Avant tout second arrêt, qui oublierait de nouveau et masquerait le défaut.
+    with pytest.raises(MetadataUnavailable):
+        c.current()
+    assert c.stop(timeout=2) is True
+
+
+def test_singleton_garde_et_draine_une_memoire_encore_en_lecture(server, monkeypatch):
+    from mcp_vault.storage import pg_login
+    entered, release = threading.Event(), threading.Event()
+    assert pg_login.start() is True
+    memory = pg_login.active()
+
+    def blocked():
+        entered.set()
+        release.wait(5)
+        return login_value("late")
+    memory._read = blocked
+    memory.report_failure(memory.current(), forget=False)
+    assert entered.wait(2)
+    monkeypatch.setattr(memory, "stop", lambda timeout=10.0, real=memory.stop: real(timeout=0.1))
+    assert pg_login.stop() is False
+    assert pg_login.active() is None and pg_login._draining == [memory]
+    release.set()
+    assert wait_until(lambda: not memory._thread.is_alive())
+    assert pg_login.stop() is True and pg_login._draining == []
+    with pytest.raises(MetadataUnavailable):
+        memory.current()
