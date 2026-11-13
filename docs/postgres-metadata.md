@@ -220,9 +220,14 @@ propre place, en plus des places communes et indépendante de ce réglage.
   les partage avec les autres opérations bloquantes.
 - Une valeur plus grande n'accélère pas un OpenBao lent. Chaque lecture garde
   ses délais réseau : 1 s pour se connecter, 2 s au plus entre deux réceptions.
-  Un budget de 5 s est vérifié avant l'appel et à chaque fragment reçu. Ce
-  n'est pas une borne stricte de la requête : une lecture bloquée n'est pas
-  interrompue, et l'attente d'un worker libre n'est pas comptée.
+  Elle a aussi un budget de 5 s. Les contrôles d'accès aux coffres fixent un
+  budget commun à toutes les lectures d'un même appel, avant de les lancer ;
+  les autres appelants le fixent au début de chaque lecture. L'attente d'un
+  worker libre, ou des lectures précédentes du même appel, consomme donc ce
+  budget. Il est vérifié avant l'appel et à chaque fragment reçu : une lecture
+  qui démarre après son échéance est refusée sans appeler OpenBao. Ce n'est
+  pas une borne stricte : ni l'attente d'un worker ni une lecture bloquée ne
+  sont interrompues à l'échéance.
 - La valeur est lue une fois par processus. La changer demande un redémarrage.
 
 ## Reprise logique et qualification
