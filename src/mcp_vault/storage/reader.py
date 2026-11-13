@@ -8,13 +8,26 @@ from urllib.parse import quote
 from ..config import get_settings
 from .postgres import MetadataUnavailable
 
-_reads = threading.BoundedSemaphore(4)
+_reads = None
+_reads_lock = threading.Lock()
 # Place réservée à la relecture de fond du login PG des métadonnées
 # (storage/pg_login.py), qui ne lance jamais deux lectures à la fois. Sans
 # elle, des lectures propriétaire qui saturent `_reads` pourraient priver cette
 # relecture de place jusqu'à l'expiration du login : toutes les requêtes
 # seraient alors refusées, au lieu de quelques-unes.
 _login_reads = threading.BoundedSemaphore(1)
+
+
+def slots():
+    """Places communes, construites une seule fois depuis METADATA_READER_CONCURRENCY.
+
+    La place réservée au login PG (`_login_reads`) ne dépend pas de ce réglage.
+    """
+    global _reads
+    with _reads_lock:
+        if _reads is None:
+            _reads = threading.BoundedSemaphore(get_settings().metadata_reader_concurrency)
+        return _reads
 
 
 class MetadataAbsent(MetadataUnavailable):
@@ -28,7 +41,7 @@ def _request(vault_id, path, *, deadline=None, listing=False, sem=None):
     if client is None or not client.token:
         raise MetadataUnavailable("vault_unavailable")
     end = deadline if deadline is not None else time.monotonic() + 5
-    reads = _reads if sem is None else sem
+    reads = slots() if sem is None else sem
     if not reads.acquire(timeout=max(0, min(1, end - time.monotonic()))):
         raise MetadataUnavailable("reader_admission_timeout")
     try:
