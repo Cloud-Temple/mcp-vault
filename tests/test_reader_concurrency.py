@@ -11,7 +11,8 @@ Contrat testé :
 - sur le flux HTTP réel, ce refus devient un 503 et la ligne
   `raison=reader_admission_timeout` de l'admission reste journalisée ;
 - le login PG gardé en mémoire ne prend aucune place du lecteur sur le chemin
-  des requêtes.
+  des requêtes, et sa relecture de fond passe sur sa place dédiée quelle que
+  soit la valeur de N.
 
 Aucun OpenBao réel : `httpx.Client` est remplacé par un faux coffre qui bloque
 les lectures propriétaire sur un événement et rend le login PG tout de suite.
@@ -45,6 +46,14 @@ class FakeBao:
         self.owner_calls = 0
         self.login_calls = 0
         self.entered = threading.Semaphore(0)
+        self.threads = []
+
+    def drain(self):
+        """Libère et termine les lectures tenues, même après un test en échec."""
+        self.gate.set()
+        for thread in self.threads:
+            thread.join(5)
+        assert not any(t.is_alive() for t in self.threads), "lecture propriétaire encore en vol"
 
     def client(self, *args, **kwargs):
         return _Client(self)
@@ -94,7 +103,7 @@ def bao(monkeypatch):
     monkeypatch.setattr(httpx, "Client", fake.client)
     monkeypatch.setattr(manager, "get_hvac_client", lambda: SimpleNamespace(token="unit-token"))
     yield fake
-    fake.gate.set()
+    fake.drain()
 
 
 def configure(monkeypatch, value):
@@ -130,6 +139,7 @@ def hold(bao, n):
         except BaseException as exc:  # noqa: BLE001, examinée par le test
             results.append(exc)
     threads = [threading.Thread(target=read, args=(i,), daemon=True) for i in range(n)]
+    bao.threads.extend(threads)
     for thread in threads:
         thread.start()
     for _ in range(n):
@@ -138,9 +148,7 @@ def hold(bao, n):
 
 
 def release(bao, threads, results, n):
-    bao.gate.set()
-    for thread in threads:
-        thread.join(5)
+    bao.drain()
     assert results == [OWNER] * n
 
 
@@ -212,7 +220,8 @@ def test_n_plus_unieme_lecture_attend_puis_reader_admission_timeout(bao, monkeyp
         reader.owner_metadata("coffre-en-trop")
     waited = time.monotonic() - started
     assert exc.value.reason == "reader_admission_timeout"
-    assert 0.9 <= waited < 3, waited
+    # Refus sur l'attente d'1 s, bien avant l'échéance de 5 s de la lecture.
+    assert 0.9 <= waited < 4.5, waited
     assert bao.owner_calls == n, "la lecture refusée ne doit jamais atteindre OpenBao"
     release(bao, threads, results, n)
     # Toutes les places sont rendues : N nouvelles prises immédiates, pas une de plus.
@@ -313,4 +322,23 @@ def test_login_en_memoire_ne_prend_aucune_place_du_lecteur(pg_server, bao, monke
             pass
     assert exc.value.reason == "reader_admission_timeout"
     assert bao.login_calls == 1
+    release(bao, threads, results, n)
+
+
+@pytest.mark.parametrize("n", [2, 6])
+def test_relecture_de_fond_du_login_ne_depend_pas_du_reglage(pg, bao, monkeypatch, n):  # noqa: F811
+    """N places communes prises : lecture initiale et relecture du login passent
+    sur leur place dédiée, alors qu'une N+1e lecture propriétaire est refusée."""
+    from mcp_vault.storage import pg_login, reader
+    configure(monkeypatch, n)
+    threads, results = hold(bao, n)
+    assert pg_login.start() is True
+    memory = pg_login.active()
+    memory.refresh_once()
+    assert memory.last_error == "" and memory.current().value == login_value()
+    assert bao.login_calls == 2
+    with pytest.raises(MetadataUnavailable) as exc:
+        reader.owner_metadata("coffre-en-trop")
+    assert exc.value.reason == "reader_admission_timeout"
+    assert bao.owner_calls == n
     release(bao, threads, results, n)
