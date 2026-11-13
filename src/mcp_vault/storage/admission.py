@@ -2,11 +2,36 @@
 
 import hashlib
 import hmac
+import logging
+import re
 import time
 
 from ..config import get_settings
 from .postgres import connection, MetadataUnavailable, offload, request_facts
 from .stores import view
+
+logger = logging.getLogger("mcp-vault.metadata")
+
+# Une ligne au plus par raison et par fenêtre : une rafale de requêtes, même
+# non authentifiées, ne doit pas pouvoir faire grossir le journal à volonté.
+UNAVAILABLE_LOG_INTERVAL_SECONDS = 10.0
+_unavailable_log = {}
+_REASON = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
+def log_unavailable(reason):
+    """Journalise la raison fermée d'un 503 métadonnées, sans secret ni DSN."""
+    if not isinstance(reason, str) or not _REASON.fullmatch(reason):
+        reason = "unclassified"
+    now = time.monotonic()
+    state = _unavailable_log.get(reason)
+    if state is not None and now - state[0] < UNAVAILABLE_LOG_INTERVAL_SECONDS:
+        state[1] += 1
+        return
+    suppressed = state[1] if state is not None else 0
+    _unavailable_log[reason] = [now, 0]
+    logger.warning("Métadonnées indisponibles : réponse 503, raison=%s, lignes supprimées=%d",
+                   reason, suppressed)
 
 
 def load_facts(raw_token, tenant_id=None):
@@ -184,6 +209,9 @@ async def admitted_call(scope, receive, send, fn):
             from .audit_pg import record_auth_denial
             if not await record_auth_denial('bearer_auth'):
                 status = 503
+                log_unavailable("auth_denial_unrecorded")
+        else:
+            log_unavailable(exc.reason)
         body = json.dumps({"status":"error","message":"Accès aux métadonnées indisponible"}).encode()
         await send({"type":"http.response.start","status":status,"headers":[(b"content-type",b"application/json")]})
         return await send({"type":"http.response.body","body":body})
@@ -197,9 +225,10 @@ async def admitted_call(scope, receive, send, fn):
     try:
         try:
             return await fn(scope,receive,monitored_send)
-        except MetadataUnavailable:
+        except MetadataUnavailable as exc:
             if started:
                 raise
+            log_unavailable(exc.reason)
             body = b'{"status":"error","message":"Metadonnees indisponibles"}'
             await send({"type":"http.response.start","status":503,"headers":[(b"content-type",b"application/json")]})
             return await send({"type":"http.response.body","body":body})

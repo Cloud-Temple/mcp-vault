@@ -174,6 +174,9 @@ async def test_jit_reserved_profiles_hidden_and_request_refused(pg,monkeypatch):
     (404,b'{"errors":[]}',"metadata_absent_confirmed"),
     (404,b'{"errors":["unknown mount"]}',"backend_unavailable"),
     (403,b'{"errors":["permission denied"]}',"backend_denied"),
+    # Refus au corps non JSON : le statut décide, jamais une corruption.
+    (401,b'<html>denied</html>',"backend_denied"),
+    (403,b'',"backend_denied"),
     (200,b'{"data":{"data":[]}}',"metadata_corrupt"),
     (503,b'{"errors":[]}',"backend_unavailable"),
 ])

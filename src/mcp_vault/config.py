@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     metadata_sql_statement_seconds: int = Field(default=5, ge=1, le=60)
     metadata_sql_lock_seconds: int = Field(default=2, ge=1, le=30)
     metadata_sql_cancel_seconds: int = Field(default=2, ge=1, le=10)
+    # Login PG app gardé en mémoire et relu en fond (storage/pg_login.py).
+    # Les deux à 0 : lecture du coffre à chaque connexion (retour arrière).
+    metadata_pg_login_refresh_seconds: int = Field(default=30, ge=0, le=300)
+    metadata_pg_login_validity_seconds: int = Field(default=60, ge=0, le=900)
 
     # Audit applicatif PG : budget de dispatch/étape, pas SLA de drainage.
     audit_retention_days: int = Field(default=365, ge=1, le=36500)
@@ -82,6 +86,10 @@ class Settings(BaseSettings):
             raise ValueError("METADATA_OPERATOR_MODE invalide")
         if self.metadata_pg_durability not in {"standalone", "ha"}:
             raise ValueError("METADATA_PG_DURABILITY invalide")
+        refresh, validity = self.metadata_pg_login_refresh_seconds, self.metadata_pg_login_validity_seconds
+        if (refresh == 0) != (validity == 0) or refresh and (refresh < 5 or validity <= refresh):
+            raise ValueError("METADATA_PG_LOGIN_REFRESH_SECONDS et METADATA_PG_LOGIN_VALIDITY_SECONDS : "
+                             "tous deux 0, ou relecture 5..300 s et validité strictement supérieure")
         if self.audit_mission_retention_enabled and (self.metadata_backend != "postgres" or self.audit_retention_days < 365):
             raise ValueError("Mission retention requires annual PostgreSQL audit")
         if self.metadata_backend == "postgres":

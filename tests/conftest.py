@@ -132,3 +132,20 @@ def admin_auth_context():
     with auth_context({"client_name": "test-admin", "permissions": ["admin"],
                        "allowed_resources": []}):
         yield
+
+
+# ── Login PG des métadonnées : aucun thread ni login hérité d'un autre test ──
+# `storage.pg_login` garde un singleton de module (mémoire + thread de relecture)
+# et `storage.admission` un état de limitation du journal 503. Les deux sont
+# arrêtés et remis à zéro avant ET après chaque test.
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolation_login_pg_metadonnees():
+    from mcp_vault.storage import admission, pg_login
+    pg_login.stop()
+    admission._unavailable_log.clear()
+    yield
+    assert pg_login.stop(), "thread de relecture du login PG encore actif après le test"
+    admission._unavailable_log.clear()

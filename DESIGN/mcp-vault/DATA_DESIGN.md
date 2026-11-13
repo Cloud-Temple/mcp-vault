@@ -87,6 +87,13 @@ Provider exact : OpenBao HTTP/KV v2 existant, pas la propre API métier MCP
 Vault. Restore/unseal/auth OpenBao avant toute connexion SQL, y compris jobs
 opérateur, provisioning et probes. Identité infrastructure indépendante PG et
 privée ; aucun credential direct/périmé ou admin métier en fallback.
+Le serveur garde le seul login app en mémoire : lu après l'unseal, relu en fond
+toutes les 30 s, valable 60 s au plus après le début de la dernière lecture
+réussie, puis refus fermé. Un refus explicite d'OpenBao ou une identité SQL
+inattendue l'oublie aussitôt. Les deux réglages à 0 rétablissent la lecture à
+chaque connexion. Provisionneur, maintenance d'audit et actions opérateur
+relisent toujours le coffre ; les faits d'autorisation restent relus dans PG
+à chaque requête. Détail : `docs/postgres-metadata.md`.
 
 La clé bootstrap reste une autorité finie R2 sur metadata-operator, refusée
 sur le métier en PG. Install : mount configuré create-only, deux chemins

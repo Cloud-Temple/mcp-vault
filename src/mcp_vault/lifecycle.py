@@ -258,6 +258,23 @@ def _check_local_data_status(data_dir: Path) -> bool:
     )
 
 
+async def _start_metadata_login() -> None:
+    """Lecture initiale du login PG app et démarrage de sa relecture de fond."""
+    from .async_offload import run_blocking
+    from .storage import pg_login
+    try:
+        loaded = await run_blocking(pg_login.start)
+    except Exception as e:
+        logger.error("❌ Login PG des métadonnées : démarrage impossible (%s)", type(e).__name__)
+        return
+    if loaded is None:
+        logger.info("ℹ️  Login PG des métadonnées lu dans le coffre à chaque connexion (réglages à 0)")
+    elif loaded:
+        logger.info("✅ Login PG des métadonnées en mémoire, relecture de fond démarrée")
+    else:
+        logger.error("❌ Login PG des métadonnées non lu : service non prêt, nouvel essai toutes les 5 s")
+
+
 async def vault_startup() -> bool:
     """
     Séquence complète de démarrage du vault.
@@ -519,6 +536,12 @@ async def vault_startup() -> bool:
         logger.error(f"❌ Erreur unseal OpenBao : {e}")
         return False
 
+    # ── 6b. Login PG des métadonnées, lu avant d'être prêt ────────
+    # Sans login valide en mémoire, la sonde de `/ready` échoue : le service
+    # n'est donc prêt qu'après cette lecture (storage/pg_login.py).
+    if getattr(settings, "metadata_backend", "s3") == "postgres":
+        await _start_metadata_login()
+
     # ── 7. Démarrer le sync S3 périodique ─────────────────────────
     try:
         from .s3_sync import start_periodic_sync
@@ -627,6 +650,15 @@ async def _vault_shutdown_sequence(skip_upload: bool = False):
     # magasin arrivée tard ne peut donc pas figer un état antérieur dans
     # l'archive : les deux ne se recouvrent pas. Y renoncer coûterait une
     # sauvegarde réelle du coffre pour couvrir un risque inexistant.
+
+    # ── 1c. Arrêter la relecture du login PG et l'oublier ─────────
+    try:
+        from .async_offload import run_blocking
+        from .storage import pg_login
+        if not await run_blocking(pg_login.stop):
+            logger.warning("⚠️ Relecture du login PG des métadonnées non terminée à l'arrêt")
+    except Exception as e:
+        logger.warning("⚠️ Arrêt de la relecture du login PG : %s", type(e).__name__)
 
     # ── 2. Sceller OpenBao + effacer les clés mémoire ────────────
     try:
