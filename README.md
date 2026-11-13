@@ -166,7 +166,10 @@ Le serveur garde le login PostgreSQL applicatif en mémoire, relu en fond toutes
 les 30 s et valable 60 s au plus (`METADATA_PG_LOGIN_REFRESH_SECONDS`,
 `METADATA_PG_LOGIN_VALIDITY_SECONDS`, les deux à 0 pour relire le coffre à
 chaque connexion). Les droits et la révocation des tokens restent vérifiés à
-chaque requête.
+chaque requête. Les métadonnées propriétaire des coffres sont relues dans
+OpenBao à chaque appel, avec au plus `METADATA_READER_CONCURRENCY` lectures
+simultanées (4 par défaut, de 1 à 32). Une lecture sans place après 1 s donne
+un 503, journalisé avec `raison=reader_admission_timeout`.
 
 ### Listener TLS natif pour un opérateur
 

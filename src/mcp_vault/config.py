@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     metadata_sql_statement_seconds: int = Field(default=5, ge=1, le=60)
     metadata_sql_lock_seconds: int = Field(default=2, ge=1, le=30)
     metadata_sql_cancel_seconds: int = Field(default=2, ge=1, le=10)
+    # Places communes du lecteur KV OpenBao (storage/reader.py) : métadonnées
+    # propriétaire, opérateur, provisionneur. La relecture de fond du login PG a
+    # sa place à part. Les lectures des requêtes passent par l'exécuteur asyncio
+    # par défaut (32 workers au plus) : au-delà de 32, aucune de plus en parallèle.
+    metadata_reader_concurrency: int = Field(default=4, ge=1, le=32)
     # Login PG app gardé en mémoire et relu en fond (storage/pg_login.py).
     # Les deux à 0 : lecture du coffre à chaque connexion (retour arrière).
     metadata_pg_login_refresh_seconds: int = Field(default=30, ge=0, le=300)

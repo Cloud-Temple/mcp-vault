@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Métadonnées PostgreSQL : limite de lectures OpenBao réglable
+
+- Le nombre de lectures KV OpenBao simultanées du lecteur de métadonnées,
+  figé à 4 dans le code, devient le réglage `METADATA_READER_CONCURRENCY`
+  (4 par défaut, de 1 à 32, lu une fois par processus). Le comportement par
+  défaut ne change pas. Une lecture sans place après 1 s reste refusée en 503,
+  journalisée avec `raison=reader_admission_timeout`.
+- Les métadonnées propriétaire restent relues à chaque appel, sans cache.
+- Le contrat `.env.example` ajoute 1 déclaration, sans retrait.
+
 ### Métadonnées PostgreSQL : login applicatif en mémoire
 
 - Avec `METADATA_BACKEND=postgres`, le serveur ne lit plus le login PostgreSQL
@@ -24,13 +34,13 @@
   (`backend_denied`) dès le statut, même si le corps n'est pas du JSON ;
   il le classait jusqu'ici en corruption.
 - La relecture de fond du login a sa propre place dans le lecteur KV ciblé.
-  Des lectures propriétaire qui occupent les 4 places communes ne peuvent plus
-  la bloquer jusqu'à l'expiration du login, ce qui aurait refusé toutes les
-  requêtes. Le retour arrière, l'opérateur et le provisionneur restent sur les
-  places communes.
-- Limites : ni le nombre de places SQL, ni les 4 places communes du lecteur
-  OpenBao (en plus de la place dédiée au login), ni l'absence de pool de
-  connexions ne changent ici.
+  Des lectures propriétaire qui occupent toutes les places communes ne peuvent
+  plus la bloquer jusqu'à l'expiration du login, ce qui aurait refusé toutes
+  les requêtes. Le retour arrière, l'opérateur et le provisionneur restent sur
+  les places communes.
+- Limites : ni le nombre de places SQL ni l'absence de pool de connexions ne
+  changent ici. Le nombre de places communes du lecteur OpenBao fait l'objet
+  de l'entrée précédente.
 
 ## [0.21.0] — 2026-11-07
 

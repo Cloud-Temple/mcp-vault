@@ -194,10 +194,40 @@ exemple `login_expired`, `connect_failed`, `admission_timeout`), sans secret ni
 DSN, au plus une ligne par raison toutes les 10 s avec le nombre de lignes
 supprimées.
 
-Limites connues, hors de ce changement : le nombre de places SQL
-(`METADATA_SQL_CONCURRENCY`) et la limite de 4 lectures OpenBao simultanées
-communes aux autres lectures, fixée dans le code, ne sont pas redimensionnés,
-et chaque opération ouvre toujours sa propre connexion PostgreSQL, sans pool.
+Limites connues : le nombre de places SQL (`METADATA_SQL_CONCURRENCY`) n'est
+pas redimensionné par ce mécanisme, et chaque opération ouvre toujours sa
+propre connexion PostgreSQL, sans pool.
+
+## Lectures OpenBao simultanées
+
+Les métadonnées propriétaire d'un coffre (`_vault_meta`) sont relues dans
+OpenBao à chaque appel qui vise ce coffre, sans cache, parce qu'elles portent
+les droits. Un lot lit un coffre par identifiant, en parallèle.
+
+Ces lectures partagent `METADATA_READER_CONCURRENCY` places communes (4 par
+défaut, de 1 à 32), comme le retour arrière du login, l'opérateur et le
+provisionneur. Une lecture qui n'obtient pas de place en 1 s est refusée sans
+appeler OpenBao. La requête reçoit un 503, et le journal porte
+`raison=reader_admission_timeout`. La relecture de fond du login PG a sa
+propre place, en plus des places communes et indépendante de ce réglage.
+
+- Si ces lignes apparaissent alors qu'OpenBao répond vite, augmenter la
+  valeur. Chaque place correspond à une connexion HTTP locale vers OpenBao,
+  ouverte le temps d'une lecture.
+- Pour les requêtes, une valeur au-delà de 32 ne ferait tourner aucune
+  lecture de plus en parallèle. Elles passent par l'exécuteur de threads par
+  défaut d'asyncio, qui a 32 workers au plus, moins sous 28 processeurs, et
+  les partage avec les autres opérations bloquantes.
+- Une valeur plus grande n'accélère pas un OpenBao lent. Chaque lecture garde
+  ses délais réseau : 1 s pour se connecter, 2 s au plus entre deux réceptions.
+  Elle a aussi un budget de 5 s, qui part d'un instant fixé par l'appelant,
+  au plus tard au début de la lecture. Seul le temps écoulé depuis cet instant
+  compte : selon l'appelant, il inclut ou non l'attente d'un worker libre et
+  les lectures précédentes du même appel. Le budget est vérifié avant l'appel
+  et à chaque fragment reçu ; une lecture qui démarre après son échéance est
+  refusée sans appeler OpenBao. Ce n'est pas une borne stricte : rien n'est
+  interrompu à l'échéance.
+- La valeur est lue une fois par processus. La changer demande un redémarrage.
 
 ## Reprise logique et qualification
 
