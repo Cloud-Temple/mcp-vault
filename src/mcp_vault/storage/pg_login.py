@@ -116,6 +116,10 @@ class LoginCache:
     def refresh_once(self):
         """Une lecture du coffre. Rend le délai avant la lecture suivante."""
         with self._read_lock:
+            # stop() pose l'arrêt AVANT d'attendre ce verrou : une lecture est
+            # donc soit attendue par stop(), soit jamais engagée.
+            if self._stop.is_set():
+                return self._refresh
             return self._refresh_locked()
 
     def _refresh_locked(self):

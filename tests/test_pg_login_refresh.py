@@ -893,13 +893,32 @@ def test_deux_demarrages_concurrents_ne_laissent_aucun_thread_orphelin(server, m
             if threading.current_thread().name == "start-a":
                 paused.set()
                 resume.wait(5)
+    class ObservedLock:
+        """Verrou de cycle de vie qui signale la TENTATIVE d'acquisition par B."""
+
+        def __init__(self, real_lock):
+            self.real_lock = real_lock
+            self.b_attempted = threading.Event()
+
+        def __enter__(self):
+            if threading.current_thread().name == "start-b":
+                self.b_attempted.set()
+            self.real_lock.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self.real_lock.release()
+    lock = ObservedLock(pg_login._lifecycle_lock)
     monkeypatch.setattr(pg_login, "LoginCache", Tracked)
+    monkeypatch.setattr(pg_login, "_lifecycle_lock", lock)
     a = threading.Thread(target=pg_login.start, name="start-a")
     b = threading.Thread(target=pg_login.start, name="start-b")
     a.start()
     assert paused.wait(2)
     b.start()
-    b.join(0.3)
+    # B a réellement tenté le démarrage : soit il attend le verrou, soit (code
+    # sans verrou) il a déjà terminé. Ce n'est qu'ensuite que A reprend.
+    assert wait_until(lambda: lock.b_attempted.is_set() or not b.is_alive())
     resume.set()
     a.join(5)
     b.join(5)
@@ -907,3 +926,15 @@ def test_deux_demarrages_concurrents_ne_laissent_aucun_thread_orphelin(server, m
     assert pg_login.stop() is True
     assert all(m._thread is None or not m._thread.is_alive() for m in created), "thread orphelin"
     assert pg_login._draining == [] and pg_login.active() is None
+
+
+def test_aucune_lecture_initiale_apres_un_arret_deja_conclu():
+    """start() repris après un stop() qui a conclu : aucune lecture du coffre,
+    aucun thread, et le drainage reste vrai."""
+    from mcp_vault.storage.pg_login import LoginCache
+    reads = Reads(login_value())
+    c = LoginCache(reads, refresh=100, validity=200)
+    assert c.stop(timeout=1) is True
+    assert c.start() is False
+    assert reads.count == 0 and c._thread is None
+    assert c.stop(timeout=1) is True
