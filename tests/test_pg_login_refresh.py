@@ -232,26 +232,41 @@ def test_relecture_de_fond_sans_aucune_requete():
 
 
 def test_n_refus_simultanes_donnent_une_seule_lecture():
+    """Le premier refus déclenche la lecture ; les 19 autres arrivent PENDANT
+    cette lecture, avec le même login. Une seule lecture doit en résulter."""
     from mcp_vault.storage.pg_login import LoginCache
-    reads = Reads(login_value("old"), login_value("new"))
-    c = LoginCache(reads, refresh=100, validity=200, retry=50, spacing=0.05)
+    entered, release = threading.Event(), threading.Event()
+    values = iter([login_value("old"), login_value("new"), login_value("third")])
+    reads = []
+
+    def read():
+        reads.append(1)
+        if len(reads) == 2:
+            entered.set()
+            release.wait(5)
+        return next(values)
+    c = LoginCache(read, refresh=100, validity=200, retry=50, spacing=0)
     try:
         c.start()
         login = c.current()
-        barrier = threading.Barrier(20)
+        c.report_failure(login, forget=False)
+        assert entered.wait(2)
+        barrier = threading.Barrier(19)
 
         def refuse():
             barrier.wait()
             c.report_failure(login, forget=False)
-        threads = [threading.Thread(target=refuse) for _ in range(20)]
+        threads = [threading.Thread(target=refuse) for _ in range(19)]
         for th in threads:
             th.start()
         for th in threads:
             th.join()
+        release.set()
         assert wait_until(lambda: c.current().value["password"] == "new")
-        time.sleep(0.3)
-        assert reads.count == 2, reads.count
+        # Côté vert, aucune lecture ne peut suivre : l'attente ne masque rien.
+        assert not wait_until(lambda: len(reads) > 2, timeout=0.5), f"{len(reads)} lectures"
     finally:
+        release.set()
         assert c.stop()
 
 
@@ -700,8 +715,9 @@ def test_refus_http_au_corps_illisible_oublie_le_login(pg, monkeypatch, status, 
 class PausingLock:
     """Verrou qui suspend un thread désigné juste APRÈS sa prochaine libération."""
 
-    def __init__(self):
+    def __init__(self, log):
         self.real = threading.Lock()
+        self.log = log
         self.target = None
         self.paused = threading.Event()
         self.resume = threading.Event()
@@ -716,29 +732,48 @@ class PausingLock:
             self.target = None
             self.paused.set()
             self.resume.wait(5)
+            self.log.append(("resumed", threading.current_thread().name))
+
+
+class RecordingEvent(threading.Event):
+    """Événement de réveil qui note quel thread le pose, dans l'ordre."""
+
+    def __init__(self, log):
+        super().__init__()
+        self.log = log
+
+    def set(self):
+        self.log.append(("set", threading.current_thread().name))
+        super().set()
 
 
 def test_refus_tardif_du_meme_login_ne_relance_pas_de_lecture():
-    """Entrelacement imposé : A vérifie, est suspendu, B déclenche la relecture,
-    puis A reprend. Le login a changé : A ne doit rien réveiller."""
+    """Entrelacement imposé : A vérifie le login, est suspendu juste après avoir
+    rendu le verrou, B déclenche la relecture qui installe un nouveau login,
+    puis A reprend. A ne doit poser aucun réveil après sa reprise."""
     from mcp_vault.storage.pg_login import LoginCache
+    log = []
     reads = Reads(login_value("old"), login_value("new"), login_value("third"))
     c = LoginCache(reads, refresh=100, validity=200, retry=50, spacing=0)
-    lock = PausingLock()
+    lock = PausingLock(log)
     c._lock = lock
+    c._wake = RecordingEvent(log)
     try:
         c.start()
         old = c.current()
-        a = threading.Thread(target=lambda: c.report_failure(old, forget=False))
+        a = threading.Thread(target=lambda: c.report_failure(old, forget=False), name="worker-a")
         lock.target = a
         a.start()
         assert lock.paused.wait(2)
-        c.report_failure(old, forget=False)  # B, sans effet ou déjà réveillé
+        c.report_failure(old, forget=False)  # B
         assert wait_until(lambda: c.current().value["password"] == "new")
         lock.resume.set()
         a.join(2)
-        time.sleep(0.3)
-        assert reads.count == 2, f"{reads.count} lectures pour deux refus du même login"
+        assert not a.is_alive()
+        resumed = log.index(("resumed", "worker-a"))
+        assert ("set", "worker-a") not in log[resumed:], log
+        assert not c._wake.is_set()
+        assert reads.count == 2
     finally:
         lock.resume.set()
         assert c.stop()
@@ -789,3 +824,86 @@ def test_singleton_garde_et_draine_une_memoire_encore_en_lecture(server, monkeyp
     assert pg_login.stop() is True and pg_login._draining == []
     with pytest.raises(MetadataUnavailable):
         memory.current()
+
+
+def test_arret_pendant_la_lecture_initiale_attend_et_ne_cree_aucun_thread():
+    from mcp_vault.storage.pg_login import LoginCache
+    entered, release = threading.Event(), threading.Event()
+
+    def read():
+        entered.set()
+        release.wait(5)
+        return login_value()
+    c = LoginCache(read, refresh=100, validity=200)
+    result = {}
+    starter = threading.Thread(target=lambda: result.setdefault("start", c.start()))
+    starter.start()
+    assert entered.wait(2)
+    assert c.stop(timeout=0.1) is False, "lecture initiale en vol : pas encore drainée"
+    release.set()
+    starter.join(2)
+    assert result["start"] is False and c._thread is None
+    assert c.stop(timeout=2) is True
+    with pytest.raises(MetadataUnavailable):
+        c.current()
+
+
+def test_arret_du_module_draine_la_lecture_initiale(server):
+    from mcp_vault.storage import pg_login
+    from mcp_vault.storage import postgres
+    entered, release = threading.Event(), threading.Event()
+    real = postgres.credentials
+
+    def blocked(**kwargs):
+        entered.set()
+        release.wait(5)
+        return real(**kwargs)
+    postgres.credentials = blocked
+    try:
+        starter = threading.Thread(target=pg_login.start)
+        starter.start()
+        assert entered.wait(2)
+        memory = pg_login.active()
+        result = {}
+        stopper = threading.Thread(target=lambda: result.setdefault("stop", pg_login.stop()))
+        stopper.start()
+        stopper.join(0.3)
+        assert stopper.is_alive(), "stop() a conclu alors que la lecture initiale est en vol"
+        release.set()
+        stopper.join(5)
+        starter.join(5)
+    finally:
+        release.set()
+        postgres.credentials = real
+    assert result["stop"] is True and pg_login._draining == []
+    assert pg_login.active() is None and memory._thread is None
+
+
+def test_deux_demarrages_concurrents_ne_laissent_aucun_thread_orphelin(server, monkeypatch):
+    """A est suspendu entre l'arrêt de l'ancienne mémoire et l'installation de la
+    sienne ; B démarre pendant ce temps. Aucune mémoire ne doit échapper à stop()."""
+    from mcp_vault.storage import pg_login
+    created, paused, resume = [], threading.Event(), threading.Event()
+    real = pg_login.LoginCache
+
+    class Tracked(real):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            created.append(self)
+            if threading.current_thread().name == "start-a":
+                paused.set()
+                resume.wait(5)
+    monkeypatch.setattr(pg_login, "LoginCache", Tracked)
+    a = threading.Thread(target=pg_login.start, name="start-a")
+    b = threading.Thread(target=pg_login.start, name="start-b")
+    a.start()
+    assert paused.wait(2)
+    b.start()
+    b.join(0.3)
+    resume.set()
+    a.join(5)
+    b.join(5)
+    assert len(created) == 2
+    assert pg_login.stop() is True
+    assert all(m._thread is None or not m._thread.is_alive() for m in created), "thread orphelin"
+    assert pg_login._draining == [] and pg_login.active() is None
