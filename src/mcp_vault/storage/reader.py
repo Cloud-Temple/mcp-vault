@@ -9,20 +9,27 @@ from ..config import get_settings
 from .postgres import MetadataUnavailable
 
 _reads = threading.BoundedSemaphore(4)
+# Place réservée à la relecture de fond du login PG des métadonnées
+# (storage/pg_login.py), qui ne lance jamais deux lectures à la fois. Sans
+# elle, des lectures propriétaire qui saturent `_reads` pourraient priver cette
+# relecture de place jusqu'à l'expiration du login : toutes les requêtes
+# seraient alors refusées, au lieu de quelques-unes.
+_login_reads = threading.BoundedSemaphore(1)
 
 
 class MetadataAbsent(MetadataUnavailable):
     pass
 
 
-def _request(vault_id, path, *, deadline=None, listing=False):
+def _request(vault_id, path, *, deadline=None, listing=False, sem=None):
     import httpx
     from ..openbao.manager import get_hvac_client
     client = get_hvac_client()
     if client is None or not client.token:
         raise MetadataUnavailable("vault_unavailable")
     end = deadline if deadline is not None else time.monotonic() + 5
-    if not _reads.acquire(timeout=max(0, min(1, end - time.monotonic()))):
+    reads = _reads if sem is None else sem
+    if not reads.acquire(timeout=max(0, min(1, end - time.monotonic()))):
         raise MetadataUnavailable("reader_admission_timeout")
     try:
         if time.monotonic() >= end:
@@ -67,11 +74,12 @@ def _request(vault_id, path, *, deadline=None, listing=False):
     except Exception as exc:
         raise MetadataUnavailable("backend_unavailable") from exc
     finally:
-        _reads.release()
+        reads.release()
 
 
-def exact_kv(vault_id, path, *, deadline=None):
-    return _request(vault_id,path,deadline=deadline)
+def exact_kv(vault_id, path, *, deadline=None, login_refresh=False):
+    """`login_refresh` : lecture du login par pg_login, sur sa place dédiée."""
+    return _request(vault_id,path,deadline=deadline,sem=_login_reads if login_refresh else None)
 
 
 def root_keys(vault_id):

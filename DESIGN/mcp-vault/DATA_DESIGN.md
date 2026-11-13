@@ -89,7 +89,8 @@ opérateur, provisioning et probes. Identité infrastructure indépendante PG et
 privée ; aucun credential direct/périmé ou admin métier en fallback.
 Le serveur garde le seul login app en mémoire : lu après l'unseal, relu en fond
 toutes les 30 s, valable 60 s au plus après le début de la dernière lecture
-réussie, puis refus fermé. Un refus explicite d'OpenBao ou une identité SQL
+réussie, puis refus fermé. Sa relecture a une place dédiée dans le lecteur KV,
+hors des places communes des lectures propriétaire. Un refus explicite d'OpenBao ou une identité SQL
 inattendue l'oublie aussitôt. Les deux réglages à 0 rétablissent la lecture à
 chaque connexion. Provisionneur, maintenance d'audit et actions opérateur
 relisent toujours le coffre ; les faits d'autorisation restent relus dans PG

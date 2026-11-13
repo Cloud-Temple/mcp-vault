@@ -155,7 +155,10 @@ la même connexion que les requêtes, et une requête sans login valide est
 refusée sans toucher PostgreSQL. Ensuite :
 
 - un thread relit le coffre toutes les `METADATA_PG_LOGIN_REFRESH_SECONDS`
-  (30 s par défaut, 5 à 300 s). Les requêtes lisent la mémoire, jamais le coffre ;
+  (30 s par défaut, 5 à 300 s). Les requêtes lisent la mémoire, jamais le coffre.
+  Cette relecture a sa propre place dans le lecteur KV. Les lectures
+  propriétaire des requêtes peuvent occuper toutes les places communes sans la
+  bloquer, donc sans faire expirer le login ;
 - le login reste valable `METADATA_PG_LOGIN_VALIDITY_SECONDS` (60 s par défaut,
   au plus 900 s, strictement plus que l'intervalle) après le début de la
   dernière lecture réussie. Au-delà, les requêtes reçoivent un 503, sans délai
@@ -192,9 +195,9 @@ DSN, au plus une ligne par raison toutes les 10 s avec le nombre de lignes
 supprimées.
 
 Limites connues, hors de ce changement : le nombre de places SQL
-(`METADATA_SQL_CONCURRENCY`) et la limite de 4 lectures OpenBao simultanées,
-fixée dans le code, ne sont pas redimensionnés, et chaque opération ouvre
-toujours sa propre connexion PostgreSQL, sans pool.
+(`METADATA_SQL_CONCURRENCY`) et la limite de 4 lectures OpenBao simultanées
+communes aux autres lectures, fixée dans le code, ne sont pas redimensionnés,
+et chaque opération ouvre toujours sa propre connexion PostgreSQL, sans pool.
 
 ## Reprise logique et qualification
 

@@ -98,8 +98,12 @@ class MutationUnknown(MetadataUnavailable):
         self.mutation_id = mutation_id
 
 
-def credentials(*, provisioner=False):
-    """Seule couture interne de lecture de connexion ; jamais une API métier."""
+def credentials(*, provisioner=False, login_refresh=False):
+    """Seule couture interne de lecture de connexion ; jamais une API métier.
+
+    `login_refresh` est réservé à la relecture de fond de pg_login : sa lecture
+    prend la place dédiée du lecteur KV au lieu des places communes.
+    """
     from ..openbao.manager import get_hvac_client
     settings = get_settings()
     client = get_hvac_client()
@@ -109,7 +113,7 @@ def credentials(*, provisioner=False):
             else settings.metadata_pg_secret_path)
     # Client HTTP dédié borné : pas de mutation du singleton hvac partagé.
     from .reader import exact_kv
-    value = exact_kv(settings.metadata_pg_vault_id, path)
+    value = exact_kv(settings.metadata_pg_vault_id, path, login_refresh=login_refresh)
     role = settings.metadata_pg_provisioner_role if provisioner else settings.metadata_pg_app_role
     required = {"host", "port", "dbname", "user", "password"}
     if (not isinstance(value, dict) or set(value) != required

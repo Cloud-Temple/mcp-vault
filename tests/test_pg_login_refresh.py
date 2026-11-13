@@ -426,9 +426,10 @@ def server(pg, monkeypatch):
     monkeypatch.setattr(postgres, "_slots", threading.BoundedSemaphore(4))
     fake.vault = {"app": [], "provisioner": []}
 
-    def credentials(*, provisioner=False):
+    def credentials(*, provisioner=False, login_refresh=False):
         kind = "provisioner" if provisioner else "app"
         fake.vault[kind].append(1)
+        fake.vault.setdefault("login_refresh", []).append(login_refresh)
         outcome = fake.vault.get(kind + "_next")
         if isinstance(outcome, BaseException):
             raise outcome
@@ -938,3 +939,112 @@ def test_aucune_lecture_initiale_apres_un_arret_deja_conclu():
     assert c.start() is False
     assert reads.count == 0 and c._thread is None
     assert c.stop(timeout=1) is True
+
+
+# =============================================================================
+# 6) Place dédiée du lecteur KV pour la relecture du login
+# =============================================================================
+
+class BlockedOpenBao:
+    """Faux OpenBao derrière le vrai lecteur : les lectures propriétaire
+    restent bloquées dans la réponse HTTP, donc gardent leur place du lecteur."""
+
+    def __init__(self, monkeypatch):
+        import httpx
+        import json as _json
+        from mcp_vault.openbao import manager
+        self.release = threading.Event()
+        self.lock = threading.Lock()
+        self.owner_in_flight = 0
+        self.login_in_flight = 0
+        self.login_entered = threading.Event()
+        self.login_release = threading.Event()
+        self.login_release.set()
+        monkeypatch.setattr(manager, "get_hvac_client", lambda: SimpleNamespace(token="unit-token"))
+        login = _json.dumps({"data": {"data": login_value()}}).encode()
+        owner = _json.dumps({"data": {"data": {"created_by": "business"}}}).encode()
+
+        def handle(request):
+            if request.url.path.endswith("/_vault_meta"):
+                with self.lock:
+                    self.owner_in_flight += 1
+                self.release.wait(5)
+                return httpx.Response(200, content=owner)
+            self.login_entered.set()
+            self.login_release.wait(5)
+            return httpx.Response(200, content=login)
+
+        real_client = httpx.Client
+        monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(
+            transport=httpx.MockTransport(handle), **kwargs))
+
+    def saturate(self, n=4):
+        """N lectures propriétaire réelles, bloquées en vol : le lecteur est plein."""
+        from mcp_vault.storage import reader
+        threads = [threading.Thread(target=reader.owner_metadata, args=("ordinary",)) for _ in range(n)]
+        for t in threads:
+            t.start()
+        assert wait_until(lambda: self.owner_in_flight == n)
+        self.threads = threads
+
+    def drain(self):
+        self.release.set()
+        self.login_release.set()
+        for t in self.threads:
+            t.join(5)
+        assert not any(t.is_alive() for t in self.threads)
+
+
+def test_relecture_du_login_passe_quand_les_lectures_proprietaire_saturent_le_lecteur(pg, monkeypatch):
+    """Les 4 places du lecteur prises par des lectures propriétaire : la lecture
+    initiale et la relecture de fond du login réussissent quand même, alors
+    qu'une 5e lecture propriétaire est bien refusée. Sans place dédiée, le login
+    expirerait et toutes les requêtes tomberaient en login_expired."""
+    from mcp_vault.storage import pg_login, reader
+    bao = BlockedOpenBao(monkeypatch)
+    bao.saturate(4)
+    try:
+        assert pg_login.start() is True
+        memory = pg_login.active()
+        memory.refresh_once()
+        assert memory.last_error == ""
+        assert memory.current().value == login_value()
+        # La saturation est réelle, et la lecture du login n'a pas pris (ni
+        # rendu) une place du lecteur commun.
+        with pytest.raises(MetadataUnavailable, match="reader_admission_timeout"):
+            reader.owner_metadata("ordinary")
+    finally:
+        bao.drain()
+
+
+def test_les_autres_lectures_du_login_restent_sur_le_lecteur_commun(pg, monkeypatch):
+    """Retour arrière (lecture à chaque connexion), provisionneur et opérateur
+    gardent le lecteur commun : saturé, il les refuse comme avant."""
+    from mcp_vault.storage import postgres
+    bao = BlockedOpenBao(monkeypatch)
+    bao.saturate(4)
+    try:
+        for provisioner in (False, True):
+            with pytest.raises(MetadataUnavailable, match="reader_admission_timeout"):
+                postgres.credentials(provisioner=provisioner)
+    finally:
+        bao.drain()
+
+
+def test_la_place_du_login_est_unique(pg, monkeypatch):
+    """Une seule lecture du login à la fois sur la place dédiée : une seconde,
+    concurrente, attend puis reçoit reader_admission_timeout."""
+    from mcp_vault.storage import postgres
+    bao = BlockedOpenBao(monkeypatch)
+    bao.threads = []
+    bao.login_release.clear()
+    first = threading.Thread(target=postgres.credentials, kwargs={"login_refresh": True})
+    first.start()
+    try:
+        assert bao.login_entered.wait(2)
+        with pytest.raises(MetadataUnavailable, match="reader_admission_timeout"):
+            postgres.credentials(login_refresh=True)
+    finally:
+        bao.drain()
+        first.join(5)
+    assert not first.is_alive()

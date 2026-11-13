@@ -23,6 +23,11 @@
 - Le lecteur KV ciblé classe un 401 ou 403 d'OpenBao en refus
   (`backend_denied`) dès le statut, même si le corps n'est pas du JSON ;
   il le classait jusqu'ici en corruption.
+- La relecture de fond du login a sa propre place dans le lecteur KV ciblé.
+  Des lectures propriétaire qui occupent les 4 places communes ne peuvent plus
+  la bloquer jusqu'à l'expiration du login, ce qui aurait refusé toutes les
+  requêtes. Le retour arrière, l'opérateur et le provisionneur restent sur les
+  places communes.
 - Limites : ni le nombre de places SQL, ni la limite de lectures OpenBao
   simultanées, ni l'absence de pool de connexions ne changent ici.
 

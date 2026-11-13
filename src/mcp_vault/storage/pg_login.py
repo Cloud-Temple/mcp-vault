@@ -10,7 +10,9 @@ Modèle :
 - le serveur lit le login juste après l'unseal ; `/ready` reste rouge tant
   qu'aucun login valide n'est en mémoire, car la sonde passe par `connection()` ;
 - un thread relit le coffre toutes les `METADATA_PG_LOGIN_REFRESH_SECONDS`
-  (30 s par défaut). Les requêtes lisent la mémoire, jamais le coffre ;
+  (30 s par défaut). Les requêtes lisent la mémoire, jamais le coffre. Cette
+  relecture prend la place dédiée du lecteur KV (`reader._login_reads`) : les
+  lectures propriétaire ne peuvent pas l'affamer ;
 - le login reste valable `METADATA_PG_LOGIN_VALIDITY_SECONDS` (60 s par défaut)
   après le DÉBUT de la dernière lecture réussie. Au-delà, refus fermé ;
 - après un échec de lecture, nouvel essai toutes les 5 s. Un échec ne
@@ -264,7 +266,7 @@ def start():
         _stop_locked()  # La mémoire précédente est arrêtée, ou gardée pour drainage.
         if s.metadata_backend != "postgres" or s.metadata_pg_login_refresh_seconds == 0:
             return None
-        cache = LoginCache(lambda: postgres.credentials(), refresh=s.metadata_pg_login_refresh_seconds,
+        cache = LoginCache(lambda: postgres.credentials(login_refresh=True), refresh=s.metadata_pg_login_refresh_seconds,
                            validity=s.metadata_pg_login_validity_seconds)
         _active = cache
     # Lecture initiale hors du verrou : un stop() concurrent la draine par le
