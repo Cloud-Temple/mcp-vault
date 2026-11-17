@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-11-17
+
 ### Métadonnées PostgreSQL : clé bootstrap comme en mode S3
 
 - Avec `METADATA_BACKEND=postgres`, `ADMIN_BOOTSTRAP_KEY` retrouve le
