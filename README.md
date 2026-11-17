@@ -8,7 +8,7 @@ Profil PostgreSQL standalone : [installation, quatre parcours et retour contrôl
 
 MCP Vault centralise les secrets, les politiques d’accès et les accès temporaires dont ont besoin des agents IA. Il embarque [OpenBao](https://openbao.org/) pour le chiffrement et le stockage, ajoute une API MCP protégée par authentification et politiques, puis fournit une console d’administration et une CLI.
 
-**Version** : 0.21.0 · **Licence** : [Apache-2.0](LICENSE)
+**Version** : 0.22.0 · **Licence** : [Apache-2.0](LICENSE)
 
 > [!IMPORTANT]
 > MCP Vault est un composant de sécurité à exploiter dans un environnement maîtrisé. Lisez le [modèle de sécurité](#modèle-de-sécurité) et le [rapport d’audit](DESIGN/mcp-vault/SECURITY_AUDIT.md) avant toute mise en production.
@@ -155,12 +155,20 @@ Le proxy ACME supporte aussi les endpoints clients natifs liés à un rôle.
 La publication réseau, l'admission EAB et les restrictions du rôle restent à
 configurer côté opérateur : voir le [contrat PKI](DESIGN/mcp-vault/TECHNICAL.md#311b-vaultpki_capy--pki-certificate-authority-v051).
 
+`pki_sign_csr` signe une CSR sans jamais voir la clé privée, sous un rôle
+restreint à un seul nom DNS sous `PKI_CSR_DOMAIN` (désactivé tant que cette
+variable est vide). Les durées de la racine et de l'intermédiaire se règlent au
+setup et à la rotation (`root_ttl`, `int_ttl`) ; un certificat plus court que
+demandé est refusé au lieu d'être tronqué en silence.
+
 ### Métadonnées PostgreSQL (profil opt-in)
 
 Le [guide public](docs/postgres-metadata.md) décrit l'installation Vault-first,
 les deux topologies autonomes, les credentials/rôles séparés, les lectures
-metadata bornées et la reprise logique. En ce profil, la clé bootstrap est
-réservée à la voie opérateur finie ; elle ne donne aucun accès admin métier.
+metadata bornées et la reprise logique. En ce profil, la clé bootstrap garde
+le comportement du mode S3 : admin total sur les routes ordinaires et sur /mcp.
+En mode `METADATA_OPERATOR_MODE=install`, elle n'autorise que les actions
+opérateur finies du groupe `metadata`.
 Les secrets et backups OpenBao conservent leur mécanisme existant.
 Le serveur garde le login PostgreSQL applicatif en mémoire, relu en fond toutes
 les 30 s et valable 60 s au plus (`METADATA_PG_LOGIN_REFRESH_SECONDS`,
