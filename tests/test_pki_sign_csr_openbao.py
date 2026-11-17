@@ -497,10 +497,14 @@ async def test_rotation_intermediaire_transparente_pour_un_client_racine_seule(p
     root_pem = await _root_pem()
     a = await _sign(_csr(_name())[0])
 
-    rotated = await rotate_intermediate(int_ttl="8760h")
+    # Durée DIFFÉRENTE du setup (revue du diff) : sinon le réglage du plafond par
+    # la rotation n'est pas prouvé.
+    rotated = await rotate_intermediate(int_ttl="4380h")
     assert rotated["status"] == "ok", rotated
+    assert 4380 - 1 <= _lifetime_hours(await _int_pem()) <= 4380
+    assert _mount_max(client, _INT_MOUNT) == 4380 * _HOUR
     b = await _sign(_csr(_name())[0])
-    again = await rotate_intermediate()  # sans durée : plafond actuel conservé
+    again = await rotate_intermediate()  # sans durée : le nouveau plafond est conservé
     assert again["status"] == "ok", again
     c = await _sign(_csr(_name())[0])
 
@@ -511,8 +515,8 @@ async def test_rotation_intermediaire_transparente_pour_un_client_racine_seule(p
         assert _openssl_verify(tmp_path, root_pem, signed["certificate"], signed["ca_chain"])
     # Le certificat A ne dépend pas de l'intermédiaire courant : sa chaîne reste la sienne.
     assert not _openssl_verify(tmp_path, root_pem, a["certificate"], c["ca_chain"])
-    assert 8760 - 1 <= _lifetime_hours(await _int_pem()) <= 8760
-    assert _mount_max(client, _INT_MOUNT) == 8760 * _HOUR
+    assert 4380 - 1 <= _lifetime_hours(await _int_pem()) <= 4380
+    assert _mount_max(client, _INT_MOUNT) == 4380 * _HOUR
 
 
 # ── 7. Jamais de troncature silencieuse ─────────────────────────────────────
@@ -571,6 +575,61 @@ async def test_rotation_au_dela_de_la_fin_de_racine_rien_n_est_importe(pki):
     assert result["error_type"] == "issuer_expires_too_soon", result
     assert (_default_issuer(client), _issuer_count(client),
             _mount_max(client, _INT_MOUNT)) == state
+
+
+async def test_pki_heritee_intermediaire_au_dela_de_la_racine_aucune_feuille_remise(pki):
+    """Hiérarchie antérieure au correctif : un intermédiaire qui survit à la racine
+    (OpenBao le signe, mesuré). Une feuille couverte par l'intermédiaire mais pas
+    par la racine cesserait d'être vérifiable : refus sur les deux outils."""
+    from mcp_vault.vault.pki_ca import issue_certificate
+    await _setup(leaf_ttl="240h", root_ttl="4000h", int_ttl="2000h")
+    client = pki.bao.client
+    # Construction « à l'ancienne », sans le contrôle d'import de #206.
+    client.sys.tune_mount_configuration(path=_ROOT_MOUNT, max_lease_ttl="87600h")
+    client.sys.tune_mount_configuration(path=_INT_MOUNT, max_lease_ttl="87600h")
+    csr = client.write(f"{_INT_MOUNT}/intermediate/generate/internal", common_name="Héritée",
+                       key_type="rsa", key_bits=2048, add_basic_constraints=True)["data"]["csr"]
+    signed = client.write(f"{_ROOT_MOUNT}/issuer/mcp-vault-root/sign-intermediate",
+                          csr=csr, format="pem_bundle", ttl="5000h")["data"]["certificate"]
+    new_id = client.write(f"{_INT_MOUNT}/intermediate/set-signed",
+                          certificate=signed)["data"]["imported_issuers"][0]
+    client.write(f"{_INT_MOUNT}/config/issuers", default=new_id)
+    _patch_json(pki.bao, f"{_INT_MOUNT}/roles/acme-servers", {"max_ttl": "4500h"})
+    pki.settings.pki_csr_ttl = "4500h"
+
+    issued = await issue_certificate(f"m.{_DOMAIN}", ttl="4500h")
+    signed_csr = await _sign(_csr(_name())[0])
+
+    for result in (issued, signed_csr):
+        assert result["error_type"] == "issuer_expires_too_soon", result
+        assert "certificate" not in result and "private_key" not in result
+
+
+@pytest.mark.parametrize("acme_response", [
+    {"data": {}},
+    {"data": {"allowed_roles": ""}},
+    {"data": {"allowed_roles": {}}},
+    {"data": {"allowed_roles": [""]}},
+    {"data": {"allowed_roles": [None]}},
+    {"data": None},
+    {},
+    "inattendu",
+])
+async def test_config_acme_malformee_refus_ferme_sans_ecrire_le_role(acme_response):
+    """Revue du diff : une réponse que le contrat OpenBao ne prévoit pas n'est pas
+    une liste vide. Seul le 404 (None) passe ; ici, rien n'est écrit ni signé.
+    Doublure délibérée : un OpenBao réel ne produit pas ces formes."""
+    from mcp_vault.vault import pki_ca
+    client = MagicMock()
+    client.read = MagicMock(return_value=acme_response)
+    settings = SimpleNamespace(pki_csr_domain=_DOMAIN, pki_csr_ttl="2160h")
+    with patch.object(pki_ca, "_get_hvac_client", return_value=client), \
+            patch.object(pki_ca, "get_settings", return_value=settings), \
+            patch.object(pki_ca, "is_pki_initialized", return_value=True), \
+            admin_auth_context():
+        result = await pki_ca.sign_csr(_csr(_name())[0])
+    assert result["error_type"] == "unsafe_configuration", result
+    client.write.assert_not_called()
 
 
 def test_controle_de_duree_refuse_un_certificat_raccourci_de_60_secondes():

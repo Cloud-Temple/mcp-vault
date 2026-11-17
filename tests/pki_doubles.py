@@ -11,7 +11,8 @@ ne produit jamais, et que le contrôle refuse, à juste titre.
 `pki_write(base)` rend une fonction à brancher en `side_effect` de `client.write` :
 - `.../sign-intermediate` → un VRAI intermédiaire X.509 de la durée demandée ;
 - `.../issue/<rôle>`      → la réponse `base` dont le certificat est un VRAI
-                            certificat feuille de la durée demandée ;
+                            certificat feuille de la durée demandée, avec une
+                            vraie chaîne qui la couvre ;
 - tout autre chemin       → `base`, inchangé.
 Les assertions des bancs (chemins appelés, kwargs) restent celles d'origine.
 """
@@ -56,6 +57,9 @@ def pki_write(base: dict):
             data = dict((base or {}).get("data") or {})
             data["certificate"] = make_cert(_seconds(kwargs["ttl"]), ca=False,
                                             cn=kwargs.get("common_name", "leaf"))
+            # Chaîne qui couvre la feuille : le contrôle de chaîne (#206) la lit.
+            data["ca_chain"] = [make_cert(_seconds(kwargs["ttl"]) + 3600, ca=True,
+                                          cn="Double Intermediate")]
             return {"data": data}
         return base
     return write

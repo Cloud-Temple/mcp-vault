@@ -103,13 +103,13 @@ La version actuelle expose **41 outils MCP**. Le [catalogue canonique](src/mcp_v
 | Domaine | Nombre | Capacités principales |
 | --- | ---: | --- |
 | Système | 2 | Informations de service et état de santé |
-| Vaults | 5 | Création, inventaire, métadonnées et suppression |
+| Vaults | 6 | Création, inventaire, métadonnées et suppression |
 | Secrets | 6 | Écriture, lecture, inventaire, suppression, types et génération |
 | Wrapping JIT | 5 | Livraison à usage unique, consommation, état et révocation |
 | SSH | 7 | CA SSH, rôles, signature et accès opérateur temporaire |
 | Politiques | 4 | Création, lecture, inventaire et suppression |
 | Tokens | 1 | Cycle de vie d’un token |
-| PKI | 8 | CA, rôles, émission, inventaire, révocation et rotation |
+| PKI | 9 | CA, rôles, émission, signature de CSR, inventaire, révocation et rotation |
 | Audit | 1 | Consultation filtrée du journal d’audit |
 
 > [!CAUTION]

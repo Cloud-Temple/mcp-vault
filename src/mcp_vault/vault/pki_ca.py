@@ -949,6 +949,23 @@ async def issue_certificate(common_name: str, ttl: str = "720h",
         return {"status": "error", "error_type": "ttl_truncated",
                 "serial_number": data.get("serial_number", ""),
                 "message": f"Émission refusée, {shortfall}. Faire tourner l'intermédiaire."}
+    # Une feuille qui survivrait à sa chaîne (PKI héritée dont l'intermédiaire
+    # dépasse la racine) cesserait d'être vérifiable avant sa fin : refus.
+    try:
+        leaf = x509.load_pem_x509_certificate(data["certificate"].encode())
+        raw_chain = data.get("ca_chain") or []
+        chain = [x509.load_pem_x509_certificate(p.encode())
+                 for p in (raw_chain if isinstance(raw_chain, list) else [raw_chain])]
+    except ValueError:
+        return {"status": "error", "error_type": "backend_error",
+                "message": "Chaîne d'émission illisible"}
+    if any(leaf.not_valid_after_utc > c.not_valid_after_utc for c in chain):
+        logger.error("issue_certificate : certificat au-delà de sa chaîne (serial=%s)",
+                     data.get("serial_number", "?"))
+        return {"status": "error", "error_type": "issuer_expires_too_soon",
+                "serial_number": data.get("serial_number", ""),
+                "message": "Émission refusée : le certificat expirerait après son autorité. "
+                           "Faire tourner l'intermédiaire."}
 
     # Sync S3 (le nouveau cert est stocké dans l'inventaire).
     from ..s3_sync import upload_to_s3
@@ -1100,8 +1117,16 @@ async def sign_csr(csr_pem: str) -> dict:
             logger.error("sign_csr : lecture config/acme échouée : %s", type(e).__name__)
             return {"status": "error", "error_type": "backend_error",
                     "message": "Configuration ACME illisible : signature refusée par précaution"}
-        acme_roles = ((acme or {}).get("data") or {}).get("allowed_roles") or []
-        if not isinstance(acme_roles, list) or _CSR_ROLE_NAME in acme_roles or "*" in acme_roles:
+        # Fermé par défaut : seule l'absence franche (404 → None) n'expose rien.
+        # Toute autre forme doit porter une liste de noms de rôles non vides.
+        if acme is None:
+            acme_roles = []
+        else:
+            data = acme.get("data") if isinstance(acme, dict) else None
+            acme_roles = data.get("allowed_roles") if isinstance(data, dict) else None
+        if (not isinstance(acme_roles, list)
+                or any(not isinstance(r, str) or not r.strip() for r in acme_roles)
+                or _CSR_ROLE_NAME in acme_roles or "*" in acme_roles):
             return {"status": "error", "error_type": "unsafe_configuration",
                     "message": f"La configuration ACME autorise le rôle {_CSR_ROLE_NAME} "
                                "(nommément ou par '*') : signature refusée. Relancer "

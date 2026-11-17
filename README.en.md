@@ -103,13 +103,13 @@ The current version exposes **41 MCP tools**. The [canonical catalog](src/mcp_va
 | Domain | Count | Main capabilities |
 | --- | ---: | --- |
 | System | 2 | Service information and health |
-| Vaults | 5 | Creation, inventory, metadata, and deletion |
+| Vaults | 6 | Creation, inventory, metadata, and deletion |
 | Secrets | 6 | Write, read, list, delete, types, and generation |
 | JIT wrapping | 5 | Single-use delivery, consumption, status, and revocation |
 | SSH | 7 | SSH CA, roles, signing, and temporary operator access |
 | Policies | 4 | Create, read, list, and delete |
 | Tokens | 1 | Token lifecycle |
-| PKI | 8 | CA, roles, issuance, inventory, revocation, and rotation |
+| PKI | 9 | CA, roles, issuance, CSR signing, inventory, revocation, and rotation |
 | Audit | 1 | Filtered audit log access |
 
 > [!CAUTION]
