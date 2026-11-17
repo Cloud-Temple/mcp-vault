@@ -19,11 +19,14 @@ from ..async_offload import run_blocking
 import asyncio
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
 from cryptography import x509
-from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 
 from ..config import get_settings
 from ._hvac_utils import safe_list_keys
@@ -37,6 +40,17 @@ _ACME_ROLE_NAME = "acme-servers"
 # ACME : autorise les IP SANs, refuse les wildcards manuels, no_store=False pour
 # apparaître dans l'inventaire. allowed_domains alignés sur le rôle ACME.
 _MANUAL_ROLE_NAME = "manual-servers"
+# Rôle de signature de CSR (issue #206) : un seul nom DNS, sous-domaine strict de
+# PKI_CSR_DOMAIN, ni joker ni IP, clés EC. Nom FIXE : l'outil pki_sign_csr ne
+# prend pas de nom de rôle, un jeton autorisé à signer ne signe que sous celui-ci.
+_CSR_ROLE_NAME = "csr-servers"
+_CSR_MAX_PEM_BYTES = 16 * 1024
+# Durées historiques des autorités, appliquées à la CRÉATION quand l'appelant
+# n'en donne pas. Une PKI existante conserve ses plafonds (issue #206).
+_DEFAULT_ROOT_TTL = "87600h"
+_DEFAULT_INT_TTL = "43800h"
+# X.509 encode les dates à la seconde : seule tolérance admise au contrôle de durée.
+_VALIDITY_SLACK = timedelta(seconds=1)
 # Format TTL OpenBao (ex : 720h, 30m, 90d) — validation locale.
 _TTL_PATTERN = re.compile(r'^\d{1,6}[smhd]$')
 _TTL_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -71,6 +85,118 @@ _EAB_POLICY_PROD = "new-account-required"
 # Headers de réponse ACME (RFC 8555) qu'OpenBao doit être autorisé à renvoyer ;
 # sinon ils sont strippés et l'enrôlement ACME réel échoue.
 _ACME_RESPONSE_HEADERS = ["Replay-Nonce", "Link", "Location"]
+
+
+class PkiTtlError(Exception):
+    """Refus explicite lié à une durée (issue #206) : jamais de troncature silencieuse."""
+
+    def __init__(self, error_type: str, message: str):
+        super().__init__(message)
+        self.error_type = error_type
+
+
+def _validity_shortfall(cert, t0: datetime, ttl_seconds: int) -> Optional[str]:
+    """Message si `cert` expire avant `t0 + ttl` (à la seconde près), sinon None.
+
+    `t0` est pris AVANT l'appel OpenBao, qui calcule `not_after = maintenant + ttl`
+    sur la même horloge. Un certificat plus court a été tronqué, quelle qu'en soit
+    la cause : plafond du mount ou du rôle, fin de l'autorité émettrice, émetteur
+    configuré `leaf_not_after_behavior=truncate`.
+    """
+    expected = t0 + timedelta(seconds=ttl_seconds)
+    if cert.not_valid_after_utc + _VALIDITY_SLACK < expected:
+        return (f"certificat tronqué : expire le {cert.not_valid_after_utc.isoformat()}, "
+                f"durée demandée jusqu'au {expected.isoformat()}")
+    return None
+
+
+def _read_mount_max_ttl(client, mount: str) -> Optional[int]:
+    """`max_lease_ttl` (secondes) d'un mount existant ; None s'il n'existe pas ou n'en fixe pas."""
+    mounts = bao_step_sync(lambda: client.sys.list_mounted_secrets_engines())
+    if f"{mount}/" not in mounts.get("data", mounts):
+        return None
+    tune = bao_step_sync(lambda: client.sys.read_mount_configuration(path=mount))
+    value = tune.get("data", tune).get("max_lease_ttl") if isinstance(tune, dict) else None
+    return int(value) if isinstance(value, int) and value > 0 else None
+
+
+def _resolve_ttl(explicit: Optional[str], current_seconds: Optional[int],
+                 default: str, label: str) -> tuple[int, str]:
+    """Durée effective : valeur explicite, sinon plafond actuel du mount, sinon défaut historique.
+
+    Une omission CONSERVE l'existant : un second setup sans durée ne ramène pas
+    une PKI 25 ans / 1 an aux défauts 10 ans / 5 ans (revue de plan #206).
+    """
+    if explicit is not None:
+        seconds = _ttl_to_seconds(explicit)
+        if not isinstance(explicit, str) or not seconds:
+            raise PkiTtlError("invalid_input", f"{label} invalide (ex : 219000h, 8760h, 365d)")
+        return seconds, explicit.strip()
+    if current_seconds:
+        return current_seconds, f"{current_seconds}s"
+    return _ttl_to_seconds(default), default
+
+
+def _tune_max_ttl(client, mount: str, ttl: str) -> None:
+    bao_step_sync(lambda: client.sys.tune_mount_configuration(path=mount, max_lease_ttl=ttl))
+
+
+async def _sign_and_import_intermediate(client, common_name: str,
+                                        int_ttl: str, int_ttl_seconds: int) -> str:
+    """CSR intermédiaire → signature par la racine → contrôle de durée → import → défaut.
+
+    Partagé par le setup et la rotation. Si la racine rend un intermédiaire plus
+    court que demandé (plafond du mount racine, fin de la racine), RIEN n'est
+    importé : aucun émetteur ajouté, l'émetteur par défaut reste inchangé.
+    Retourne l'identifiant du nouvel émetteur par défaut.
+    """
+    csr_resp = await bao_step(lambda: client.write(
+        f"{_INT_MOUNT}/intermediate/generate/internal",
+        common_name=common_name,
+        ttl=int_ttl,
+        key_type="rsa",
+        key_bits=4096,
+        add_basic_constraints=True,
+    ))
+    csr = csr_resp["data"]["csr"]
+
+    t0 = datetime.now(timezone.utc)
+    # issuer_ref est un paramètre de PATH (pas de body) dans l'API OpenBao :
+    # /issuer/:issuer_ref/sign-intermediate.
+    sign_resp = await bao_step(lambda: client.write(
+        f"{_ROOT_MOUNT}/issuer/mcp-vault-root/sign-intermediate",
+        csr=csr,
+        format="pem_bundle",
+        ttl=int_ttl,
+    ))
+    signed_bundle = sign_resp["data"]["certificate"]
+    bundle = x509.load_pem_x509_certificates(signed_bundle.encode())
+    signed = [c for c in bundle if c.subject != c.issuer]
+    if len(signed) != 1:
+        raise PkiTtlError("backend_error", "Réponse de signature d'intermédiaire inattendue")
+    shortfall = _validity_shortfall(signed[0], t0, int_ttl_seconds)
+    if shortfall:
+        raise PkiTtlError("ttl_truncated",
+                          f"Intermédiaire non importé, {shortfall}. Vérifier la durée "
+                          "restante de la racine et le plafond du mount racine.")
+    # Mesuré sur 2.5.1 : la racine signe un intermédiaire qui lui SURVIT. La chaîne
+    # deviendrait invalide à la fin de la racine, avant celle des certificats émis :
+    # une troncature silencieuse vue du client. Refus explicite.
+    roots = [c for c in bundle if c.subject == c.issuer]
+    if roots and signed[0].not_valid_after_utc > roots[0].not_valid_after_utc:
+        raise PkiTtlError("issuer_expires_too_soon",
+                          "Intermédiaire non importé : il expirerait après la racine "
+                          f"({roots[0].not_valid_after_utc.isoformat()}). Réduire int_ttl.")
+
+    import_resp = await bao_step(lambda: client.write(
+        f"{_INT_MOUNT}/intermediate/set-signed",
+        certificate=signed_bundle,
+    ))
+    imported_issuers = import_resp.get("data", {}).get("imported_issuers", []) if import_resp else []
+    new_issuer_id = imported_issuers[0] if imported_issuers else ""
+    if new_issuer_id:
+        await bao_step(lambda: client.write(f"{_INT_MOUNT}/config/issuers", default=new_issuer_id))
+    return new_issuer_id
 
 
 def _eab_required(eab_policy: str) -> bool:
@@ -249,12 +375,20 @@ def _configured_acme_roles(client) -> list[str]:
 
 async def setup_pki_ca(lab_mode: bool = True,
                        allowed_domains: Optional[list] = None,
-                       leaf_ttl: str = "720h") -> dict:
+                       leaf_ttl: str = "720h",
+                       root_ttl: Optional[str] = None,
+                       int_ttl: Optional[str] = None) -> dict:
     """
     Configure la hiérarchie PKI complète (racine + intermédiaire + ACME).
 
     Idempotent : reconfigure sans détruire les mounts existants.
     Lab : CA racine self-signed. Prod : générer un CSR, signer extern, importer.
+
+    Durées (issue #206) : `root_ttl` / `int_ttl` explicites règlent aussi le
+    `max_lease_ttl` des mounts. Omises, elles CONSERVENT les plafonds d'une PKI
+    existante (défauts historiques 87600h / 43800h à la création). La racine
+    n'est générée qu'une fois : sur une racine existante, `root_ttl` ne change
+    que le plafond du mount (`root_created: false` dans la réponse).
 
     Sync S3 forcée après setup (durabilité CA critique).
     """
@@ -282,25 +416,58 @@ async def setup_pki_ca(lab_mode: bool = True,
             # ne doit jamais être pris pour une liste vide à écraser.
             acme_roles = await run_blocking(_configured_acme_roles, client)
 
+            # Durées effectives (issue #206) : explicite > plafond existant > défaut.
+            root_sec, root_ttl_eff = _resolve_ttl(
+                root_ttl, await run_blocking(_read_mount_max_ttl, client, _ROOT_MOUNT),
+                _DEFAULT_ROOT_TTL, "root_ttl")
+            int_sec, int_ttl_eff = _resolve_ttl(
+                int_ttl, await run_blocking(_read_mount_max_ttl, client, _INT_MOUNT),
+                _DEFAULT_INT_TTL, "int_ttl")
+            leaf_sec = _ttl_to_seconds(leaf_ttl)
+            if not int_sec < root_sec or (leaf_sec is not None and not leaf_sec < int_sec):
+                raise PkiTtlError("invalid_input",
+                                  "Durées incohérentes : leaf_ttl < int_ttl < root_ttl requis")
+
             # ── 1. CA Racine ────────────────────────────────────────────────
-            await run_blocking(_mount_pki_engine, client, _ROOT_MOUNT, "87600h")
+            await run_blocking(_mount_pki_engine, client, _ROOT_MOUNT, root_ttl_eff)
+            if root_ttl is not None:
+                # Avant la génération : le plafond du mount tronque SILENCIEUSEMENT
+                # la racine et les intermédiaires qu'elle signe (mesuré sur 2.5.1).
+                await run_blocking(_tune_max_ttl, client, _ROOT_MOUNT, root_ttl_eff)
 
             root_cert_pem = ""
+            root_created = False
             try:
+                t0 = datetime.now(timezone.utc)
                 root_resp = await bao_step(lambda: client.write(
                     f"{_ROOT_MOUNT}/root/generate/internal",
                     common_name="MCP Vault Root CA",
-                    ttl="87600h",
+                    ttl=root_ttl_eff,
                     key_type="rsa",
                     key_bits=4096,
                     issuer_name="mcp-vault-root",
                 ))
                 root_cert_pem = root_resp.get("data", {}).get("certificate", "") if root_resp else ""
+                root_created = bool(root_cert_pem)
+                if root_created:
+                    shortfall = _validity_shortfall(
+                        x509.load_pem_x509_certificate(root_cert_pem.encode()), t0, root_sec)
+                    if shortfall:
+                        # Défense en profondeur : le tune ci-dessus l'empêche.
+                        raise PkiTtlError("ttl_truncated", f"Racine {shortfall}")
+            except PkiTtlError:
+                raise
             except Exception as e:
                 if "issuer name already in use" in str(e).lower():
                     logger.info("ℹ️  CA racine déjà générée — skip génération (idempotent)")
                 else:
                     raise
+            if not root_cert_pem:
+                # Racine existante : rendre son expiration RÉELLE plutôt que « inconnu ».
+                try:
+                    root_cert_pem = await _read_pem_url(f"{_ROOT_MOUNT}/ca/pem")
+                except Exception as e:
+                    logger.warning("Lecture de la racine existante impossible : %s", type(e).__name__)
 
             await bao_step(lambda: client.write(
                 f"{_ROOT_MOUNT}/config/urls",
@@ -310,7 +477,7 @@ async def setup_pki_ca(lab_mode: bool = True,
             logger.info("✅ CA racine PKI configurée")
 
             # ── 2. CA Intermédiaire ─────────────────────────────────────────
-            await run_blocking(_mount_pki_engine, client, _INT_MOUNT, "43800h")
+            await run_blocking(_mount_pki_engine, client, _INT_MOUNT, int_ttl_eff)
 
             # Autoriser OpenBao à renvoyer les headers de réponse ACME (RFC 8555).
             # Sans ce tuning, OpenBao strippe Replay-Nonce/Link/Location et
@@ -331,41 +498,19 @@ async def setup_pki_ca(lab_mode: bool = True,
                 ) from e
 
             try:
-                csr_resp = await bao_step(lambda: client.write(
-                    f"{_INT_MOUNT}/intermediate/generate/internal",
-                    common_name="MCP Vault Intermediate CA",
-                    ttl="43800h",
-                    key_type="rsa",
-                    key_bits=4096,
-                    issuer_name="mcp-vault-int",
-                    add_basic_constraints=True,
-                ))
-                csr = csr_resp["data"]["csr"]
-
-                # issuer_ref est un paramètre de PATH (pas de body) dans l'API OpenBao :
-                # /issuer/:issuer_ref/sign-intermediate.
-                sign_resp = await bao_step(lambda: client.write(
-                    f"{_ROOT_MOUNT}/issuer/mcp-vault-root/sign-intermediate",
-                    csr=csr,
-                    format="pem_bundle",
-                    ttl="43800h",
-                ))
-                signed_cert = sign_resp["data"]["certificate"]
-
-                import_resp = await bao_step(lambda: client.write(
-                    f"{_INT_MOUNT}/intermediate/set-signed",
-                    certificate=signed_cert,
-                ))
-                imported_issuers = import_resp.get("data", {}).get("imported_issuers", []) if import_resp else []
-                new_issuer_id = imported_issuers[0] if imported_issuers else ""
-
-                if new_issuer_id:
-                    await bao_step(lambda: client.write(f"{_INT_MOUNT}/config/issuers", default=new_issuer_id))
+                await _sign_and_import_intermediate(
+                    client, "MCP Vault Intermediate CA", int_ttl_eff, int_sec)
+            except PkiTtlError:
+                raise
             except Exception as e:
                 if "issuer name already in use" in str(e).lower():
                     logger.info("ℹ️  CA intermédiaire déjà générée — skip génération (idempotent)")
                 else:
                     raise
+            if int_ttl is not None:
+                # Après l'import réussi : le plafond du mount intermédiaire borne
+                # les feuilles, il ne doit pas changer si l'intermédiaire est refusé.
+                await run_blocking(_tune_max_ttl, client, _INT_MOUNT, int_ttl_eff)
 
             await bao_step(lambda: client.write(
                 f"{_INT_MOUNT}/config/urls",
@@ -429,8 +574,11 @@ async def setup_pki_ca(lab_mode: bool = True,
             else:
                 logger.info("✅ Sync S3 OK après setup PKI")
 
-            root_expiry = _cert_expiry_iso(root_cert_pem) if root_cert_pem else "inconnu"
-            root_fp = _sha256_fingerprint(root_cert_pem) if root_cert_pem else ""
+            try:
+                root_expiry = _cert_expiry_iso(root_cert_pem) if root_cert_pem else "inconnu"
+                root_fp = _sha256_fingerprint(root_cert_pem) if root_cert_pem else ""
+            except ValueError:  # racine existante relue illisible : ne pas inventer
+                root_expiry, root_fp = "inconnu", ""
 
             return {
                 "status": "ok",
@@ -445,10 +593,16 @@ async def setup_pki_ca(lab_mode: bool = True,
                 "root_fingerprint_sha256": root_fp,
                 "allowed_domains": allowed_domains,
                 "leaf_ttl": leaf_ttl,
+                "root_ttl": root_ttl_eff,
+                "int_ttl": int_ttl_eff,
+                "root_created": root_created,
                 "eab_policy": eab_policy,
                 "eab_required": _eab_required(eab_policy),
                 "s3_sync_ok": sync_ok,
             }
+        except PkiTtlError as e:
+            logger.error("❌ Setup PKI CA refusé (%s) : %s", e.error_type, e)
+            return {"status": "error", "error_type": e.error_type, "message": str(e)}
         except Exception as e:
             logger.error(f"❌ Erreur setup PKI CA : {e}")
             return {"status": "error", "message": str(e)}
@@ -766,6 +920,7 @@ async def issue_certificate(common_name: str, ttl: str = "720h",
             issue_args["alt_names"] = ",".join(extra_dns)
         if ip_list:
             issue_args["ip_sans"] = ",".join(ip_list)
+        t0 = datetime.now(timezone.utc)
         resp = await bao_step(lambda: client.write(f"{_INT_MOUNT}/issue/{_MANUAL_ROLE_NAME}", **issue_args))
         data = (resp or {}).get("data") or {}
     except Exception as e:
@@ -780,6 +935,37 @@ async def issue_certificate(common_name: str, ttl: str = "720h",
     if not data.get("certificate") or not data.get("private_key"):
         return {"status": "error", "error_type": "backend_error",
                 "message": "Réponse d'émission incomplète"}
+
+    # Jamais de troncature silencieuse (issue #206) : un certificat plus court
+    # que demandé n'est pas rendu, et sa clé non plus.
+    try:
+        shortfall = _validity_shortfall(
+            x509.load_pem_x509_certificate(data["certificate"].encode()), t0, req_ttl_sec)
+    except ValueError:
+        return {"status": "error", "error_type": "backend_error",
+                "message": "Certificat émis illisible"}
+    if shortfall:
+        logger.error("issue_certificate : %s (serial=%s)", shortfall, data.get("serial_number", "?"))
+        return {"status": "error", "error_type": "ttl_truncated",
+                "serial_number": data.get("serial_number", ""),
+                "message": f"Émission refusée, {shortfall}. Faire tourner l'intermédiaire."}
+    # Une feuille qui survivrait à sa chaîne (PKI héritée dont l'intermédiaire
+    # dépasse la racine) cesserait d'être vérifiable avant sa fin : refus.
+    try:
+        leaf = x509.load_pem_x509_certificate(data["certificate"].encode())
+        raw_chain = data.get("ca_chain") or []
+        chain = [x509.load_pem_x509_certificate(p.encode())
+                 for p in (raw_chain if isinstance(raw_chain, list) else [raw_chain])]
+    except ValueError:
+        return {"status": "error", "error_type": "backend_error",
+                "message": "Chaîne d'émission illisible"}
+    if any(leaf.not_valid_after_utc > c.not_valid_after_utc for c in chain):
+        logger.error("issue_certificate : certificat au-delà de sa chaîne (serial=%s)",
+                     data.get("serial_number", "?"))
+        return {"status": "error", "error_type": "issuer_expires_too_soon",
+                "serial_number": data.get("serial_number", ""),
+                "message": "Émission refusée : le certificat expirerait après son autorité. "
+                           "Faire tourner l'intermédiaire."}
 
     # Sync S3 (le nouveau cert est stocké dans l'inventaire).
     from ..s3_sync import upload_to_s3
@@ -800,6 +986,227 @@ async def issue_certificate(common_name: str, ttl: str = "720h",
         "private_key": data.get("private_key", ""),  # SENSIBLE — one-shot
         "ca_chain": ca_chain or data.get("issuing_ca", ""),
         "expiration": data.get("expiration", ""),
+        "s3_sync_ok": sync_ok,
+    }
+
+
+def _csr_rejected(reason: str) -> dict:
+    return {"status": "error", "error_type": "csr_rejected", "message": f"CSR refusée : {reason}"}
+
+
+def _validate_csr(csr_pem, domain: str):
+    """Valide une CSR pour le rôle `csr-servers`. Retourne (csr, nom_dns) ou (None, erreur).
+
+    Contrôle LOCAL, avant tout appel OpenBao : mesuré sur 2.5.1, `/sign/<rôle>`
+    ACCEPTE une CSR à deux SAN (ou CN ≠ SAN) et IGNORE silencieusement une
+    demande d'usage CA. Le rôle seul ne garantit donc pas « un seul nom, jamais CA ».
+    """
+    if not isinstance(csr_pem, str) or not csr_pem.strip():
+        return None, _csr_rejected("CSR PEM requise")
+    raw = csr_pem.strip().encode()
+    if len(raw) > _CSR_MAX_PEM_BYTES:
+        return None, _csr_rejected("taille supérieure à 16 Kio")
+    if (raw.count(b"-----BEGIN ") != 1
+            or not raw.startswith(b"-----BEGIN CERTIFICATE REQUEST-----")
+            or not raw.endswith(b"-----END CERTIFICATE REQUEST-----")):
+        return None, _csr_rejected("un seul bloc PEM « CERTIFICATE REQUEST » attendu")
+    try:
+        csr = x509.load_pem_x509_csr(raw)
+        valid_signature = csr.is_signature_valid
+        extensions = list(csr.extensions)  # lève sur une extension dupliquée ou invalide
+        common_names = csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+        public_key = csr.public_key()
+    except Exception:
+        return None, _csr_rejected("CSR illisible")
+    if not valid_signature:
+        return None, _csr_rejected("signature de la CSR invalide")
+    if not isinstance(public_key, ec.EllipticCurvePublicKey) or public_key.curve.key_size < 256:
+        return None, _csr_rejected("clé EC (P-256 ou plus) requise")
+
+    by_type = {type(ext.value): ext.value for ext in extensions}
+    san = by_type.get(x509.SubjectAlternativeName)
+    if san is None or len(san) != 1 or not isinstance(list(san)[0], x509.DNSName):
+        return None, _csr_rejected("exactement un SAN, de type DNS, est requis (ni IP, ni URI, ni e-mail)")
+    name = list(san)[0].value
+    if len(common_names) > 1 or (common_names and common_names[0].value != name):
+        return None, _csr_rejected("le CN, s'il est présent, doit être égal au SAN")
+    if ("*" in name or name != name.lower() or len(name) > 253
+            or not _DOMAIN_PATTERN.fullmatch(name)):
+        return None, _csr_rejected(f"nom DNS invalide : {name[:80]!r} (ni joker, minuscules)")
+    if not name.endswith("." + domain):
+        return None, _csr_rejected(f"{name} n'est pas un sous-domaine de {domain}")
+
+    constraints = by_type.get(x509.BasicConstraints)
+    usage = by_type.get(x509.KeyUsage)
+    if (constraints is not None and constraints.ca) or (
+            usage is not None and (usage.key_cert_sign or usage.crl_sign)):
+        return None, _csr_rejected("usage d'autorité de certification interdit")
+    return csr, name
+
+
+def _ensure_csr_role(client, domain: str, ttl: str) -> None:
+    """Crée/met à jour (idempotent) le rôle `csr-servers` — restrictif sur tous les axes."""
+    bao_step_sync(lambda: client.write(
+        f"{_INT_MOUNT}/roles/{_CSR_ROLE_NAME}",
+        server_flag=True,
+        client_flag=False,
+        allow_any_name=False,
+        allow_localhost=False,
+        allow_ip_sans=False,
+        allowed_uri_sans="",
+        allowed_other_sans="",
+        allowed_domains=[domain],
+        allow_bare_domains=False,
+        allow_subdomains=True,
+        allow_glob_domains=False,
+        allow_wildcard_certificates=False,
+        enforce_hostnames=True,
+        key_type="ec",
+        key_bits=256,
+        ttl=ttl,
+        max_ttl=ttl,
+        no_store=False,      # inventaire pki_list_certs
+        require_cn=False,
+    ))
+
+
+def _spki(key) -> bytes:
+    return key.public_bytes(serialization.Encoding.DER,
+                            serialization.PublicFormat.SubjectPublicKeyInfo)
+
+
+async def sign_csr(csr_pem: str) -> dict:
+    """
+    Signe une CSR sous le rôle restreint `csr-servers` (issue #206).
+
+    La clé privée reste chez l'appelant : rien n'est généré, reçu ni rendu.
+    Domaine et durée viennent de PKI_CSR_DOMAIN / PKI_CSR_TTL ; domaine vide =
+    fonction désactivée. Le certificat rendu est contrôlé (un seul SAN, non-CA,
+    même clé publique que la CSR, durée complète) avant d'être remis.
+
+    Returns: {status, dns_name, serial_number, certificate, ca_chain
+              (intermédiaire(s) sans la racine), not_after, root_fingerprint_sha256}
+    """
+    settings = get_settings()
+    domain = (settings.pki_csr_domain or "").strip()
+    if not domain:
+        return {"status": "error", "error_type": "feature_disabled",
+                "message": "Signature de CSR désactivée sur cette instance (PKI_CSR_DOMAIN vide)"}
+    ttl = settings.pki_csr_ttl.strip()
+    ttl_seconds = _ttl_to_seconds(ttl)
+
+    csr, name_or_error = _validate_csr(csr_pem, domain)
+    if csr is None:
+        return name_or_error
+    name = name_or_error
+
+    if not await run_blocking(is_pki_initialized):
+        return {"status": "error", "message": "PKI non initialisée"}
+    client = _get_hvac_client()
+    if not client:
+        return {"status": "error", "message": "OpenBao non connecté"}
+
+    async with _get_setup_lock():
+        # La façade ACME (/acme/*, non authentifiée) sert les rôles que
+        # config/acme autorise. Si `csr-servers` en fait partie (nommément ou
+        # par `*`), on pourrait émettre sous ce rôle sans la garde MCP ni le
+        # contrôle d'unicité du SAN : refuser de créer ou réécrire le rôle.
+        try:
+            acme = await bao_step(lambda: client.read(f"{_INT_MOUNT}/config/acme"))
+        except Exception as e:
+            logger.error("sign_csr : lecture config/acme échouée : %s", type(e).__name__)
+            return {"status": "error", "error_type": "backend_error",
+                    "message": "Configuration ACME illisible : signature refusée par précaution"}
+        # Fermé par défaut : seule l'absence franche (404 → None) n'expose rien.
+        # Toute autre forme doit porter une liste de noms de rôles non vides.
+        if acme is None:
+            acme_roles = []
+        else:
+            data = acme.get("data") if isinstance(acme, dict) else None
+            acme_roles = data.get("allowed_roles") if isinstance(data, dict) else None
+        if (not isinstance(acme_roles, list)
+                or any(not isinstance(r, str) or not r.strip() for r in acme_roles)
+                or _CSR_ROLE_NAME in acme_roles or "*" in acme_roles):
+            return {"status": "error", "error_type": "unsafe_configuration",
+                    "message": f"La configuration ACME autorise le rôle {_CSR_ROLE_NAME} "
+                               "(nommément ou par '*') : signature refusée. Relancer "
+                               "pki_ca_setup, qui restreint ACME au rôle acme-servers."}
+        try:
+            await run_blocking(_ensure_csr_role, client, domain, ttl)
+        except Exception as e:
+            logger.error("sign_csr : configuration du rôle échouée : %s", type(e).__name__)
+            return {"status": "error", "error_type": "backend_error",
+                    "message": "Impossible de configurer le rôle de signature"}
+
+    t0 = datetime.now(timezone.utc)
+    try:
+        resp = await bao_step(lambda: client.write(
+            f"{_INT_MOUNT}/sign/{_CSR_ROLE_NAME}", csr=csr_pem.strip(), ttl=ttl))
+        data = (resp or {}).get("data") or {}
+    except Exception as e:
+        err = str(e).lower()
+        logger.error("sign_csr OpenBao error: %s", type(e).__name__)
+        if "beyond the expiration of the ca certificate" in err:
+            return {"status": "error", "error_type": "issuer_expires_too_soon",
+                    "message": f"L'intermédiaire expire avant {ttl} : faire tourner "
+                               "l'intermédiaire (pki_ca_rotate_intermediate). Aucun "
+                               "certificat raccourci n'est émis."}
+        if "not allowed" in err:
+            return _csr_rejected("nom refusé par la politique du rôle")
+        return {"status": "error", "error_type": "backend_error",
+                "message": "Signature échouée (voir logs serveur)"}
+
+    serial = data.get("serial_number", "")
+    try:
+        cert = x509.load_pem_x509_certificate((data.get("certificate") or "").encode())
+        chain = [x509.load_pem_x509_certificate(p.encode()) for p in (data.get("ca_chain") or [])]
+        sans = list(cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value)
+        try:
+            is_ca = cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca
+        except x509.ExtensionNotFound:
+            is_ca = False
+    except Exception:
+        logger.error("sign_csr : réponse illisible (serial=%s)", serial or "?")
+        return {"status": "error", "error_type": "backend_error",
+                "serial_number": serial, "message": "Certificat signé illisible"}
+    if (is_ca or len(sans) != 1 or not isinstance(sans[0], x509.DNSName)
+            or sans[0].value != name or _spki(cert.public_key()) != _spki(csr.public_key())):
+        logger.error("sign_csr : certificat non conforme à la CSR validée (serial=%s)", serial)
+        return {"status": "error", "error_type": "backend_error", "serial_number": serial,
+                "message": "Certificat signé non conforme à la CSR validée : non remis"}
+    shortfall = _validity_shortfall(cert, t0, ttl_seconds)
+    if shortfall:
+        logger.error("sign_csr : %s (serial=%s)", shortfall, serial)
+        return {"status": "error", "error_type": "ttl_truncated", "serial_number": serial,
+                "message": f"Certificat non remis, {shortfall}. Faire tourner l'intermédiaire."}
+    # Un certificat qui survivrait à sa chaîne cesserait d'être vérifiable avant
+    # sa propre fin : même effet qu'une troncature, refus explicite.
+    if not chain or any(cert.not_valid_after_utc > c.not_valid_after_utc for c in chain):
+        logger.error("sign_csr : certificat au-delà de sa chaîne (serial=%s)", serial)
+        return {"status": "error", "error_type": "issuer_expires_too_soon", "serial_number": serial,
+                "message": "Certificat non remis : il expirerait après son autorité. "
+                           "Faire tourner l'intermédiaire."}
+
+    # Le serveur présente feuille + intermédiaire ; le client ne garde que la racine.
+    intermediates = [c for c in chain if c.subject != c.issuer]
+    roots = [c for c in chain if c.subject == c.issuer]
+
+    from ..s3_sync import upload_to_s3
+    sync_ok = await upload_to_s3()
+    if not sync_ok:
+        logger.error("❌ Sync S3 échouée après signature de CSR — durabilité inventaire compromise")
+
+    logger.info("✅ CSR signée : dns=%s serial=%s", name, serial)
+    return {
+        "status": "ok",
+        "dns_name": name,
+        "serial_number": serial,
+        "certificate": data["certificate"].strip() + "\n",
+        "ca_chain": "".join(c.public_bytes(serialization.Encoding.PEM).decode()
+                            for c in intermediates),
+        "not_after": cert.not_valid_after_utc.isoformat(),
+        "root_fingerprint_sha256": (
+            ":".join(f"{b:02X}" for b in roots[0].fingerprint(hashes.SHA256())) if roots else ""),
         "s3_sync_ok": sync_ok,
     }
 
@@ -850,12 +1257,18 @@ async def revoke_cert(serial_number: str) -> dict:
 
 
 async def rotate_intermediate(keep_old_issuer: bool = True,
-                               overlap_ttl: str = "48h") -> dict:
+                               overlap_ttl: str = "48h",
+                               int_ttl: Optional[str] = None) -> dict:
     """
     Rotation sans coupure de la CA intermédiaire.
 
-    Nouveau CSR → signature racine → import → set default issuer.
+    Nouveau CSR → signature racine → contrôle de durée → import → set default issuer.
     L'ancien issuer reste actif si keep_old_issuer=True (certs existants valides).
+    `int_ttl` explicite (issue #206) : durée du nouvel intermédiaire, et plafond
+    du mount intermédiaire réglé APRÈS l'import réussi. Omis : durée = plafond
+    actuel du mount intermédiaire (comportement inchangé). Le plafond racine
+    n'est jamais modifié ici. Un intermédiaire plus court que demandé n'est pas
+    importé (`ttl_truncated`).
     Sync S3 forcée après rotation.
     """
     if not await run_blocking(is_pki_initialized):
@@ -866,38 +1279,19 @@ async def rotate_intermediate(keep_old_issuer: bool = True,
         return {"status": "error", "message": "OpenBao non connecté"}
 
     try:
+        int_sec, int_ttl_eff = _resolve_ttl(
+            int_ttl, await run_blocking(_read_mount_max_ttl, client, _INT_MOUNT),
+            _DEFAULT_INT_TTL, "int_ttl")
+
         old_config = await bao_step(lambda: client.read(f"{_INT_MOUNT}/config/issuers"))
         old_default_id = old_config.get("data", {}).get("default", "") if old_config else ""
 
-        csr_resp = await bao_step(lambda: client.write(
-            f"{_INT_MOUNT}/intermediate/generate/internal",
-            common_name="MCP Vault Intermediate CA (rotated)",
-            key_type="rsa",
-            key_bits=4096,
-            issuer_name="mcp-vault-int-new",
-            add_basic_constraints=True,
-        ))
-        csr = csr_resp["data"]["csr"]
-
-        # issuer_ref est un paramètre de PATH (cf. setup_pki_ca) — pas de body.
-        sign_resp = await bao_step(lambda: client.write(
-            f"{_ROOT_MOUNT}/issuer/mcp-vault-root/sign-intermediate",
-            csr=csr,
-            format="pem_bundle",
-            ttl="43800h",
-        ))
-        signed_cert = sign_resp["data"]["certificate"]
-
-        import_resp = await bao_step(lambda: client.write(
-            f"{_INT_MOUNT}/intermediate/set-signed",
-            certificate=signed_cert,
-        ))
-        imported_issuers = import_resp.get("data", {}).get("imported_issuers", []) if import_resp else []
-        new_issuer_id = imported_issuers[0] if imported_issuers else ""
-
+        new_issuer_id = await _sign_and_import_intermediate(
+            client, "MCP Vault Intermediate CA (rotated)", int_ttl_eff, int_sec)
         if new_issuer_id:
-            await bao_step(lambda: client.write(f"{_INT_MOUNT}/config/issuers", default=new_issuer_id))
             logger.info(f"✅ Nouvel issuer intermédiaire défini comme default : {new_issuer_id}")
+        if int_ttl is not None:
+            await run_blocking(_tune_max_ttl, client, _INT_MOUNT, int_ttl_eff)
 
         if not keep_old_issuer and old_default_id:
             try:
@@ -924,8 +1318,12 @@ async def rotate_intermediate(keep_old_issuer: bool = True,
             "new_expires": new_expires,
             "keep_old_issuer": keep_old_issuer,
             "overlap_ttl": overlap_ttl,
+            "int_ttl": int_ttl_eff,
             "s3_sync_ok": sync_ok,
         }
+    except PkiTtlError as e:
+        logger.error("❌ Rotation intermédiaire refusée (%s) : %s", e.error_type, e)
+        return {"status": "error", "error_type": e.error_type, "message": str(e)}
     except Exception as e:
         logger.error(f"❌ Erreur rotation intermédiaire PKI : {e}")
         return {"status": "error", "message": str(e)}

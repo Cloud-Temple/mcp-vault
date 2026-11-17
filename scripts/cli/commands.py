@@ -768,9 +768,15 @@ def pki_group(ctx):
 @click.option("--domains", default=None,
               help="OBLIGATOIRE. Domaines ACME autorisés (virgules). Aucun défaut.")
 @click.option("--ttl", default="720h", help="TTL max des certificats feuilles")
+@click.option("--root-ttl", default=None,
+              help="Durée de la racine et plafond de son mount (ex. 219000h ≈ 25 ans). "
+                   "Omis : plafond existant conservé.")
+@click.option("--int-ttl", default=None,
+              help="Durée de l'intermédiaire et plafond de son mount (ex. 8760h = 1 an). "
+                   "Omis : plafond existant conservé.")
 @click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
 @click.pass_context
-def pki_setup_cmd(ctx, lab, domains, ttl, output_json):
+def pki_setup_cmd(ctx, lab, domains, ttl, root_ttl, int_ttl, output_json):
     """Initialiser la PKI interne (CA racine + intermédiaire + ACME).
 
     \b
@@ -815,11 +821,10 @@ def pki_setup_cmd(ctx, lab, domains, ttl, output_json):
 
     async def _run():
         client = MCPClient(ctx.obj["url"], ctx.obj["token"])
-        result = await client.call_tool("pki_ca_setup", {
-            "lab_mode": lab,
-            "allowed_domains": domains,
-            "leaf_ttl": ttl,
-        })
+        args = {"lab_mode": lab, "allowed_domains": domains, "leaf_ttl": ttl}
+        # Omission ≠ défaut : une durée absente conserve les plafonds existants (#206).
+        args.update({k: v for k, v in (("root_ttl", root_ttl), ("int_ttl", int_ttl)) if v})
+        result = await client.call_tool("pki_ca_setup", args)
         if output_json:
             show_json(result)
         else:
@@ -960,9 +965,11 @@ def pki_revoke_cmd(ctx, serial_number, output_json):
 @pki_group.command("rotate")
 @click.option("--keep-old/--no-keep-old", default=True, help="Conserver l'ancien issuer")
 @click.option("--overlap", default="48h", help="Durée de chevauchement documentée")
+@click.option("--int-ttl", default=None,
+              help="Durée du nouvel intermédiaire (ex. 8760h). Omis : plafond actuel conservé.")
 @click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
 @click.pass_context
-def pki_rotate_cmd(ctx, keep_old, overlap, output_json):
+def pki_rotate_cmd(ctx, keep_old, overlap, int_ttl, output_json):
     """Rotation sans coupure de la CA intermédiaire.
 
     \b
@@ -971,10 +978,10 @@ def pki_rotate_cmd(ctx, keep_old, overlap, output_json):
     """
     async def _run():
         client = MCPClient(ctx.obj["url"], ctx.obj["token"])
-        result = await client.call_tool("pki_ca_rotate_intermediate", {
-            "keep_old_issuer": keep_old,
-            "overlap_ttl": overlap,
-        })
+        args = {"keep_old_issuer": keep_old, "overlap_ttl": overlap}
+        if int_ttl:
+            args["int_ttl"] = int_ttl
+        result = await client.call_tool("pki_ca_rotate_intermediate", args)
         if output_json:
             show_json(result)
         else:

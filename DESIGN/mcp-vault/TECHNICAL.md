@@ -154,6 +154,8 @@ Utilise `pydantic-settings` pour charger la configuration depuis les variables d
 | `VAULT_S3_PREFIX`        | `_storage`                | Préfixe S3 pour le sync     |
 | `VAULT_S3_SYNC_INTERVAL` | `60`                      | Intervalle sync en secondes |
 | `PKI_BASE_URL`           | *(vide)*                  | Override URL base PKI (ACME directory, CDPs). Utile en test Docker : `http://mcp-vault:8030`. Doit être http(s)://. |
+| `PKI_CSR_DOMAIN`         | *(vide)*                  | Domaine parent de `pki_sign_csr` (#206) : un seul nom DNS, sous-domaine strict. Vide = signature de CSR **désactivée**. Instance DBaaS : `dbaas.cloud-temple.app`. |
+| `PKI_CSR_TTL`            | `2160h`                   | Durée des certificats signés par `pki_sign_csr` (90 jours). Jamais tronquée : refus si l'intermédiaire expire avant. |
 | `MCP_AUTH_MODE`          | `bearer`                  | PEP mission JWT porte /mcp (#47). `bearer` = bearer valide **exigé** — sans jeton ou jeton invalide, 401 au middleware (#116). `bearer-anonymous` = ⚠️ mode d'exception, ancien comportement (appelant anonyme accepté), CRITICAL au démarrage. `jwt` = mission_token obligatoire. `dual-stack` = JWT valide OU bearer (migration). `jwt`/`dual-stack` exigent `MISSION_JWKS_URL` + `MCP_INSTANCE_ID` + `ENFORCE_MISSION_TOKEN_VALIDATION=true` + `MISSION_STATUS_URL` (fail-fast au boot, #86). |
 | `MCP_INSTANCE_ID`        | *(vide)*                  | Identifiant d'instance de CE vault : doit figurer dans `aud` du mission_token ET valoir `component_id[MCP_COMPONENT_KIND]`. Source unique d'audience (`resolved_mission_aud`) — remplace `MISSION_TOKEN_AUD` (alias legacy ; divergence des deux = fail-fast boot). |
 | `MCP_COMPONENT_KIND`     | `vault`                   | Clé de `component_id` vérifiée (`component_id[kind] == MCP_INSTANCE_ID`). |
@@ -516,20 +518,29 @@ Contrôlé au point d'usage plutôt qu'à la création, puisque
 
 ### 3.11b `vault/pki_ca.py` — PKI Certificate Authority *(v0.5.1)*
 
-CA interne souveraine basée sur l'engine PKI d'OpenBao. CA globale (non par vault) — deux mounts réservés `_sys_pki_root/` (racine, TTL 10 ans) et `_sys_pki_int/` (intermédiaire, TTL 5 ans). Protégés contre `vault_delete` (mounts système).
+CA interne souveraine basée sur l'engine PKI d'OpenBao. CA globale (non par vault) — deux mounts réservés `_sys_pki_root/` (racine, 10 ans par défaut) et `_sys_pki_int/` (intermédiaire, 5 ans par défaut). Protégés contre `vault_delete` (mounts système).
 
 | Fonction | Description |
 | --- | --- |
-| `setup_pki_ca(lab_mode, allowed_domains, leaf_ttl)` | CA racine + intermédiaire + rôle ACME + sync S3 forcée |
+| `setup_pki_ca(lab_mode, allowed_domains, leaf_ttl, root_ttl, int_ttl)` | CA racine + intermédiaire + rôle ACME + sync S3 forcée ; durées optionnelles (#206) |
 | `get_ca_root_pem()` | CA racine PEM + empreinte SHA-256 + URL stable |
 | `get_pki_status()` | État PKI (expiration, ACME on/off, compteur certs) |
 | `list_pki_roles()` | Rôles d'émission configurés |
 | `get_pki_role_info(role_name)` | Détails rôle (domaines, TTL, flags TLS) |
 | `list_issued_certs(limit, offset)` | Inventaire paginé des certificats émis |
 | `revoke_cert(serial_number)` | Révocation + CRL + sync S3 forcée |
-| `rotate_intermediate(keep_old_issuer, overlap_ttl)` | Rotation CA intermédiaire sans coupure + sync S3 |
+| `rotate_intermediate(keep_old_issuer, overlap_ttl, int_ttl)` | Rotation CA intermédiaire sans coupure + sync S3 ; durée optionnelle (#206) |
+| `sign_csr(csr_pem)` | Signature d'une CSR sous le rôle restreint `csr-servers` (#206) — aucune clé privée générée, reçue ni rendue |
 
 **Sécurité** : validation regex `serial_number` (`^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2})+$`), validation FQDN/wildcard `allowed_domains`, `asyncio.Lock` sur `setup_pki_ca`, `follow_redirects=False` dans httpx.
+
+**Durées des autorités** *(#206)* : `root_ttl` / `int_ttl` (setup) et `int_ttl` (rotation) fixent la durée du certificat **et** le `max_lease_ttl` du mount — OpenBao 2.5.1 tronque **silencieusement** un certificat au plafond de son mount (une racine demandée à 25 ans sort à 10 ans sur un mount de 10 ans, mesuré). Omises, elles **conservent** les plafonds existants (défauts 87600h / 43800h à la création) : un second setup sans durée ne ramène jamais une PKI 25 ans / 1 an aux défauts. La racine n'est générée qu'une fois (`root_created`). Contraintes : `leaf_ttl < int_ttl < root_ttl`. Un intermédiaire signé plus court que demandé (`ttl_truncated`) ou qui survivrait à la racine (`issuer_expires_too_soon` — OpenBao le signe pourtant, mesuré) n'est **pas importé** : aucun émetteur ajouté, défaut et plafond intermédiaire inchangés. Le plafond intermédiaire n'est réglé qu'après un import réussi.
+
+**Jamais de troncature silencieuse** *(#206)* : `pki_issue_cert` et `pki_sign_csr` comparent le certificat rendu à la durée demandée (référence prise avant l'appel, tolérance 1 s = précision X.509) ; un certificat plus court n'est pas remis (`ttl_truncated`), sa clé non plus. Une feuille qui dépasserait un certificat de sa chaîne — y compris sur une PKI héritée dont l'intermédiaire survit à la racine — est refusée (`issuer_expires_too_soon`) : il faut faire tourner l'intermédiaire au moins une durée de feuille avant sa fin (90 jours pour la cible DBaaS).
+
+**Signature de CSR — `pki_sign_csr`** *(#206)* : la clé privée reste chez le demandeur. Activée seulement si `PKI_CSR_DOMAIN` est renseigné ; durée `PKI_CSR_TTL` (90 jours par défaut), sans paramètre de durée côté appelant. Rôle OpenBao à nom fixe `csr-servers` (réécrit à chaque signature) : sous-domaine strict du domaine, ni domaine nu, ni joker, ni IP/URI, clé EC (P-256 ou plus), `no_store=false` (inventaire). Le rôle seul ne suffit pas — mesuré sur 2.5.1, `/sign` accepte une CSR à deux SAN (ou CN ≠ SAN) et ignore une demande d'usage CA — donc l'outil valide la CSR **avant** OpenBao : un seul bloc PEM ≤ 16 Kio, signature valide, exactement un SAN DNS, CN absent ou égal, minuscules, pas d'usage CA (`BasicConstraints`, `keyCertSign`, `cRLSign`). Puis il contrôle le certificat rendu (un SAN, non-CA, même clé publique que la CSR, durée complète, pas au-delà de sa chaîne). Réponse : `certificate`, `ca_chain` (**intermédiaire(s) sans la racine** : le serveur présente feuille + intermédiaire, le client n'approuve que la racine, publiée par `pki_ca_public_key` / `/pki/ca/root.pem`), `serial_number`, `not_after`, `root_fingerprint_sha256`. Refus si `config/acme` autorise `csr-servers` ou `*`, ou si sa réponse n'a pas la forme attendue (`unsafe_configuration`, fermé par défaut ; seule son absence, 404, passe) : la façade ACME, non authentifiée, ne doit pas servir ce rôle.
+
+*Autorisation* : admin, ou permission `write` **et** une policy qui nomme `pki_sign_csr` **en toutes lettres** dans `allowed_tools` (ni liste vide, ni joker : une policy existante en `pki_*` ne gagne pas ce droit). Policy type pour un client dédié : `allowed_tools=["pki_sign_csr"]`, jeton `permissions=["write"]`. Ce jeton ne lit aucun secret ni n'administre rien ; restent accessibles à tout jeton valide, par conception existante, `secret_types`, `secret_generate_password` et les lectures PKI publiques (`/pki/ca/*.pem`, `GET /admin/api/pki/status|roles`) ; `secret_wrap`, `secret_consume`, `ssh_request_operator_access` et `vault_metadata_batch` gardent leurs propres gardes. Autre public : pas de route admin ni de commande CLI de signature ; une personne inspecte les certificats signés par `pki_list_certs` / la console et le rôle par `pki_ca_role_info csr-servers`.
 
 **Sync S3 forcée** : `setup_pki_ca`, `revoke_cert`, `rotate_intermediate` appellent `upload_to_s3()` avant de retourner — la fenêtre de perte S3 est documentée comme acceptable si crash entre appel OpenBao et upload.
 

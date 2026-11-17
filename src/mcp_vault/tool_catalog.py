@@ -35,14 +35,14 @@ test, ce fichier serait un piège de plus.
 
 import fnmatch
 
-# Les 40 outils exposés par `@mcp.tool()` dans `server.py`.
+# Les 41 outils exposés par `@mcp.tool()` dans `server.py`.
 # ⚠️ Modifier cette liste sans modifier `server.py` (ou l'inverse) fait échouer
 # `tests/test_tool_catalog_128.py::test_le_catalogue_ne_derive_pas_de_server`.
 MCP_TOOL_NAMES = frozenset({
     "audit_log",
     "pki_ca_list_roles", "pki_ca_public_key", "pki_ca_role_info",
     "pki_ca_rotate_intermediate", "pki_ca_setup",
-    "pki_issue_cert", "pki_list_certs", "pki_revoke_cert",
+    "pki_issue_cert", "pki_list_certs", "pki_revoke_cert", "pki_sign_csr",
     "policy_create", "policy_delete", "policy_get", "policy_list",
     "secret_consume", "secret_delete", "secret_generate_password",
     "secret_list", "secret_read", "secret_revoke_wrap", "secret_types",
