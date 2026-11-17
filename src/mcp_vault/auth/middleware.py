@@ -323,8 +323,6 @@ class AuthMiddleware:
         # Bootstrap key admin : testée en constant-time AVANT tout dispatch JWT
         # (break-glass — jamais routée vers la validation JWT).
         if hmac.compare_digest(token, settings.admin_bootstrap_key):
-            if getattr(settings, "metadata_backend", "s3") == "postgres":
-                return None, (403, "bootstrap_business_forbidden", {})
             return {
                 "auth_type": "bootstrap",
                 "client_name": "admin",
@@ -563,8 +561,6 @@ class AuthMiddleware:
 
         # Bootstrap key → admin total (comparaison constant-time contre timing attacks)
         if hmac.compare_digest(token, settings.admin_bootstrap_key):
-            if getattr(settings, "metadata_backend", "s3") == "postgres":
-                return None
             return {
                 "auth_type": "bootstrap",
                 "client_name": "admin",

@@ -62,8 +62,12 @@ def load_facts(raw_token, tenant_id=None):
 
 async def admit(raw_token):
     s = get_settings()
-    if not raw_token or len(raw_token)>8192 or hmac.compare_digest(raw_token,s.admin_bootstrap_key):
-        raise PermissionError("Métier fermé à la clé bootstrap")
+    if not raw_token or len(raw_token)>8192:
+        raise PermissionError("Bearer absent ou hors borne")
+    if hmac.compare_digest(raw_token, s.admin_bootstrap_key):
+        # Comme en S3 : la clé ne dépend d'aucune ligne PG, même si son hash y figure.
+        return {"token":view("token",[]),"policy":view("policy",[]),"binding":view("binding",[]),
+                "owners":{},"actor_hash":None,"actor_revision":None,"policy_revisions":{}}
     tenant = None
     if raw_token.count(".") == 2 and s.mcp_auth_mode in {"jwt","dual-stack"}:
         # Une sélection SQL n'est pas une décision d'auth : la signature et le

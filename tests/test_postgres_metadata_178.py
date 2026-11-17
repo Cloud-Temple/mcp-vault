@@ -62,16 +62,6 @@ async def test_kv_pure_target_and_mixed_batch(pg,monkeypatch):
     assert result["status"]=="error" and "total" not in result and "vaults" not in result
 
 
-async def test_bootstrap_rejected_without_pg_or_vault(pg,monkeypatch):
-    from mcp_vault.storage import admission
-    monkeypatch.setattr(admission,"offload",forbidden_backend)
-    with pytest.raises(PermissionError):
-        await admission.admit(pg.admin_bootstrap_key)
-    from mcp_vault.auth.middleware import AuthMiddleware
-    result = await AuthMiddleware(None)._resolve_pep(pg.admin_bootstrap_key,pg)
-    assert result[0] is None and result[1][0]==403
-
-
 async def test_batch_preloads_all_before_page_and_no_partial(pg,monkeypatch):
     from mcp_vault.storage import admission,reader
     from mcp_vault.storage.postgres import request_facts,MetadataUnavailable
