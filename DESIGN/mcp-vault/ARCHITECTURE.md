@@ -71,7 +71,7 @@
 │  └────────────────────────────────────────────────────────────┘  │
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐  │
-│  │  36 Outils MCP (façade)                                    │  │
+│  │  41 Outils MCP (façade)                                    │  │
 │  │                                                            │  │
 │  │  Vaults :  vault_create, _list, _info, _update, _delete    │  │
 │  │  Secrets : secret_write, _read, _list, _delete             │  │
@@ -82,7 +82,8 @@
 │  │            _list_roles, _role_info                         │  │
 │  │  PKI :     pki_ca_setup, _public_key, _list_roles,         │  │
 │  │            _role_info, pki_list_certs, pki_issue_cert,     │  │
-│  │            _revoke_cert, pki_ca_rotate_intermediate        │  │
+│  │            _revoke_cert, pki_ca_rotate_intermediate,       │  │
+│  │            pki_sign_csr (#206)                             │  │
 │  │  Policies: policy_create, _list, _get, _delete             │  │
 │  │  Token :   token_update                                    │  │
 │  │  Audit :   audit_log                                       │  │
@@ -140,7 +141,7 @@
 | **HealthCheckMiddleware** | Health check HTTP (/health, /healthz, /ready)    | ASGI middleware               |
 | **AuthMiddleware**        | Auth Bearer Token + **PEP mission JWT** (#47) + **octroi périmètre vault** (MissionBindingStore, #69) + ContextVar | ASGI middleware (starter-kit) |
 | **LoggingMiddleware**     | Logging requêtes + ring buffer mémoire           | ASGI middleware (starter-kit) |
-| **Outils MCP**            | Façade MCP (39 outils)                           | `MCPServer` (`mcp==2.2.0`)    |
+| **Outils MCP**            | Façade MCP (41 outils)                           | `MCPServer` (`mcp==2.2.0`)    |
 | **hvac client**           | Client Python vers OpenBao                       | `hvac` library                |
 | **OpenBao process**       | Moteur de secrets (chiffrement, policies, audit) | Binaire `bao` (Go, embedded)  |
 | **S3 Sync Manager**       | Synchronisation storage local ↔ S3               | boto3 + tar/gzip              |
@@ -1284,7 +1285,7 @@ bootstrap admin survivent au redémarrage). Révoquer puis purger les jetons
 
 > 💡 **Introspection** : l'endpoint `/admin/api/whoami` et la commande CLI `whoami` permettent de vérifier l'identité et les permissions du token courant (client_name, auth_type, permissions, vaults autorisés).
 
-**Total : 39 outils MCP** (5 vaults + 6 secrets + 5 wrap/broker C18 + 5 SSH CA + 2 SSH JIT opérateur + 8 PKI + 4 policies + 1 token + 1 audit + 2 system)
+**Total : 41 outils MCP** (6 vaults + 6 secrets + 5 wrap/broker C18 + 5 SSH CA + 2 SSH JIT opérateur + 9 PKI + 4 policies + 1 token + 1 audit + 2 system)
 
 #### 6.7.1 Architecture du journal d'audit
 
@@ -1844,7 +1845,7 @@ mcp-vault/
 ├── src/mcp_vault/
 │   ├── __init__.py
 │   ├── __main__.py            # python -m mcp_vault
-│   ├── server.py              # 39 outils MCP + create_app() + middlewares + bannière
+│   ├── server.py              # 41 outils MCP + create_app() + middlewares + bannière
 │   ├── config.py              # Config Pydantic-settings (S3, OpenBao, sync, WAF)
 │   ├── admin/                 # Console d'administration web (/admin)
 │   │   ├── __init__.py

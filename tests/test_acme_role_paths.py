@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from tests.pki_doubles import pki_write
+
 from mcp_vault.pki_middleware import PkiMiddleware
 from mcp_vault.vault.pki_ca import setup_pki_ca
 
@@ -126,7 +128,8 @@ async def test_backend_role_rejection_is_not_masked():
 def setup_client(config):
     client = MagicMock()
     client.read.return_value = config
-    client.write.return_value = {"data": {"certificate": "", "csr": "test-csr", "imported_issuers": []}}
+    # Doublure réaliste (#206) : la signature d'intermédiaire rend un vrai certificat.
+    client.write.side_effect = pki_write({"data": {"certificate": "", "csr": "test-csr", "imported_issuers": []}})
     return client
 
 

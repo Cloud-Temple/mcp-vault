@@ -282,6 +282,58 @@ def check_admin_permission() -> Optional[dict]:
     return None
 
 
+PKI_SIGN_TOOL = "pki_sign_csr"
+
+
+def check_pki_sign_permission() -> Optional[dict]:
+    """Garde de `pki_sign_csr` (issue #206) : émettre une identité TLS de confiance.
+
+    Admin : autorisé. Non-admin : TOUTES les conditions suivantes.
+    1. `check_policy` passe (denied_tools prioritaires, policy absente ou store
+       indisponible = refus, identités mission / wrap-only confinées) ;
+    2. permission `write` ;
+    3. une policy est assignée ET elle nomme `pki_sign_csr` EN TOUTES LETTRES
+       dans `allowed_tools`. Ni liste vide (« tout permis » ailleurs), ni joker
+       (`pki_*`, `*`) : une policy existante ne gagne pas ce droit sans le dire.
+    """
+    token_info = current_token_info.get()
+    if token_info is None:
+        return {"status": "error", "error_type": "unauthenticated",
+                "message": "Authentification requise"}
+    if "admin" in token_info.get("permissions", []):
+        return None
+
+    policy_err = check_policy(PKI_SIGN_TOOL)
+    if policy_err:
+        return policy_err
+    write_err = check_write_permission()
+    if write_err:
+        return write_err
+
+    denied = {"status": "error", "error_type": "permission_denied",
+              "message": f"`{PKI_SIGN_TOOL}` exige une policy qui le nomme explicitement "
+                         "dans allowed_tools (ni liste vide, ni joker)"}
+    policy_id = token_info.get("policy_id", "")
+    if not isinstance(policy_id, str) or not policy_id:
+        return denied
+    from .policies import get_policy_store, PolicyStoreUnavailable
+    store = get_policy_store()
+    if not store:
+        return {"status": "error", "error_type": "policy_store_unavailable",
+                "message": f"PolicyStore indisponible — policy '{policy_id}' ne peut être vérifiée",
+                "policy_id": policy_id}
+    try:
+        policy = store.get(policy_id)
+    except PolicyStoreUnavailable:
+        return {"status": "error", "error_type": "policy_store_unavailable",
+                "message": f"PolicyStore indisponible — policy '{policy_id}' ne peut être vérifiée",
+                "policy_id": policy_id}
+    allowed = policy.get("allowed_tools") if isinstance(policy, dict) else None
+    if not isinstance(allowed, list) or PKI_SIGN_TOOL not in allowed:
+        return denied
+    return None
+
+
 # ── Permission `wrap` — broker JIT non-admin (issue #115) ────────────────────
 # Un token `wrap` est destiné au broker de credentials mcp-mission : il ne doit
 # pouvoir QUE créer/révoquer/consulter des wraps, dans un périmètre vault+chemins

@@ -20,6 +20,8 @@ import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+from tests.pki_doubles import pki_write  # noqa: E402 — doublure réaliste (#206)
 from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -318,14 +320,14 @@ class TestS3SyncAfterMutations:
             "data": {"_sys_pki_root/": {}, "_sys_pki_int/": {}}
         })
         # certificate vide → _cert_expiry_iso / _sha256_fingerprint ne sont pas appelés
-        client.write = MagicMock(return_value={
+        client.write = MagicMock(side_effect=pki_write({
             "data": {
                 "certificate": "",
                 "csr": "-----BEGIN CERTIFICATE REQUEST-----\nMOCK\n-----END CERTIFICATE REQUEST-----",
                 "imported_issuers": ["issuer-uuid-new"],
                 "default": "issuer-uuid-old",
             }
-        })
+        }))
         client.read = MagicMock(side_effect=lambda path: (
             None if path == "_sys_pki_int/config/acme"
             else {"data": {"default": "issuer-uuid-old"}}
@@ -408,7 +410,7 @@ class TestS3SyncAfterMutations:
         from mcp_vault.vault.pki_ca import revoke_cert
 
         mock_client = MagicMock()
-        mock_client.write = MagicMock(return_value={"data": {"revocation_time": 1234567890}})
+        mock_client.write = MagicMock(side_effect=pki_write({"data": {"revocation_time": 1234567890}}))
 
         with patch("mcp_vault.vault.pki_ca._get_hvac_client", return_value=mock_client), \
              patch("mcp_vault.s3_sync.upload_to_s3", new_callable=AsyncMock, return_value=True), \
@@ -501,7 +503,7 @@ class TestIssueCertificate:
         client.read = MagicMock(return_value={
             "data": {"allowed_domains": allowed_domains, "max_ttl": "8760h"}
         })
-        client.write = MagicMock(return_value={
+        client.write = MagicMock(side_effect=pki_write({
             "data": {
                 "serial_number": "12:34:ab:cd",
                 "certificate": "-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----",
@@ -509,7 +511,7 @@ class TestIssueCertificate:
                 "ca_chain": ["-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----"],
                 "expiration": 1800000000,
             }
-        })
+        }))
         return client
 
     def test_acme_role_accepts_ec_and_bare_domains(self):
@@ -521,10 +523,10 @@ class TestIssueCertificate:
         from mcp_vault.vault.pki_ca import setup_pki_ca, _ACME_ROLE_NAME
         mock_client = MagicMock()
         mock_client.read.return_value = None  # config/acme absente avant setup
-        mock_client.write = MagicMock(return_value={"data": {
+        mock_client.write = MagicMock(side_effect=pki_write({"data": {
             "certificate": "", "csr": "-----BEGIN CERTIFICATE REQUEST-----\nM\n-----END CERTIFICATE REQUEST-----",
             "imported_issuers": ["i"], "default": "i",
-        }})
+        }}))
         with patch("mcp_vault.vault.pki_ca._get_hvac_client", return_value=mock_client), \
              patch("mcp_vault.s3_sync.upload_to_s3", new_callable=AsyncMock, return_value=True), \
              patch("mcp_vault.vault.pki_ca._read_pem_url", new_callable=AsyncMock, return_value=_MOCK_CERT_PEM):
@@ -598,9 +600,9 @@ class TestIssueCertificate:
         from mcp_vault.vault.pki_ca import issue_certificate
         client = MagicMock()
         client.read = MagicMock(return_value={"data": {"allowed_domains": "cloud-temple.app", "max_ttl": "8760h"}})
-        client.write = MagicMock(return_value={"data": {
+        client.write = MagicMock(side_effect=pki_write({"data": {
             "serial_number": "aa:bb", "certificate": "C", "private_key": "K", "ca_chain": "CH", "expiration": 1,
-        }})
+        }}))
         with patch("mcp_vault.vault.pki_ca._get_hvac_client", return_value=client), \
              patch("mcp_vault.vault.pki_ca.is_pki_initialized", return_value=True), \
              patch("mcp_vault.s3_sync.upload_to_s3", new_callable=AsyncMock, return_value=True):
@@ -670,12 +672,12 @@ class TestEabPolicyProd:
         client = MagicMock()
         client.sys.enable_secrets_engine = MagicMock()
         client.sys.tune_mount_configuration = MagicMock()
-        client.write = MagicMock(return_value={
+        client.write = MagicMock(side_effect=pki_write({
             "data": {
                 "certificate": "",
                 "csr": "-----BEGIN CERTIFICATE REQUEST-----\nMOCK\n-----END CERTIFICATE REQUEST-----",
             }
-        })
+        }))
         client.read = MagicMock(side_effect=lambda path: (
             None if path == "_sys_pki_int/config/acme" else {"data": {}}
         ))
@@ -818,14 +820,14 @@ class TestEabPolicyProd:
         from mcp_vault.vault.pki_ca import rotate_intermediate
 
         mock_client = self._mock_hvac()
-        mock_client.write = MagicMock(return_value={
+        mock_client.write = MagicMock(side_effect=pki_write({
             "data": {
                 "certificate": "",
                 "csr": "-----BEGIN CERTIFICATE REQUEST-----\nMOCK\n-----END CERTIFICATE REQUEST-----",
                 "imported_issuers": ["issuer-uuid-new"],
                 "default": "issuer-uuid-old",
             }
-        })
+        }))
         with patch("mcp_vault.vault.pki_ca._get_hvac_client", return_value=mock_client), \
              patch("mcp_vault.s3_sync.upload_to_s3", new_callable=AsyncMock, return_value=True), \
              patch("mcp_vault.vault.pki_ca.is_pki_initialized", return_value=True), \

@@ -98,7 +98,7 @@ La CLI et ses prérequis Python locaux sont documentés dans
 
 ## Outils MCP
 
-La version actuelle expose **39 outils MCP**. Le [catalogue canonique](src/mcp_vault/tool_catalog.py) est contrôlé automatiquement contre les outils enregistrés par le serveur.
+La version actuelle expose **41 outils MCP**. Le [catalogue canonique](src/mcp_vault/tool_catalog.py) est contrôlé automatiquement contre les outils enregistrés par le serveur.
 
 | Domaine | Nombre | Capacités principales |
 | --- | ---: | --- |

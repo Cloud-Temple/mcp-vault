@@ -98,7 +98,7 @@ The CLI and its local Python prerequisites are documented in
 
 ## MCP tools
 
-The current version exposes **39 MCP tools**. The [canonical catalog](src/mcp_vault/tool_catalog.py) is checked automatically against the tools registered by the server.
+The current version exposes **41 MCP tools**. The [canonical catalog](src/mcp_vault/tool_catalog.py) is checked automatically against the tools registered by the server.
 
 | Domain | Count | Main capabilities |
 | --- | ---: | --- |
