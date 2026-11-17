@@ -1,7 +1,6 @@
 """Faits frais par requête, partagés entre les deux résolutions bearer."""
 
 import hashlib
-import hmac
 import logging
 import re
 import time
@@ -62,8 +61,8 @@ def load_facts(raw_token, tenant_id=None):
 
 async def admit(raw_token):
     s = get_settings()
-    if not raw_token or len(raw_token)>8192 or hmac.compare_digest(raw_token,s.admin_bootstrap_key):
-        raise PermissionError("Métier fermé à la clé bootstrap")
+    if not raw_token or len(raw_token)>8192:
+        raise PermissionError("Bearer absent ou hors borne")
     tenant = None
     if raw_token.count(".") == 2 and s.mcp_auth_mode in {"jwt","dual-stack"}:
         # Une sélection SQL n'est pas une décision d'auth : la signature et le

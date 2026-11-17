@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Métadonnées PostgreSQL : clé bootstrap comme en mode S3
+
+- Avec `METADATA_BACKEND=postgres`, `ADMIN_BOOTSTRAP_KEY` retrouve le
+  comportement du mode S3 : admin total sur l'Admin API et sur /mcp, y compris
+  le secours en mode `jwt`. Elle était refusée en PG (401, 403
+  `bootstrap_business_forbidden`), ce qui cassait à la bascule tout client
+  configuré avec la clé, comme l'Agent de sec-ai.
+- L'admission PG laisse passer la clé, la revalidation de l'acteur l'accepte
+  sans ligne en base, et l'audit nomme ses appels `tok_` + 16 hex du sha256 de
+  la clé, au lieu de les refuser comme `anonymous`.
+- Inchangé : la route opérateur du mode `install` et le refus propre au
+  parcours JIT SSH, identique en S3.
+
 ### Métadonnées PostgreSQL : limite de lectures OpenBao réglable
 
 - Le nombre de lectures KV OpenBao simultanées du lecteur de métadonnées,

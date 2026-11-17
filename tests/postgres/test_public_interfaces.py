@@ -120,10 +120,20 @@ def test_grant_access_batch_revoke_and_reserved(deployment):
         os.fsync(output.fileno())
 
 
-def test_bootstrap_business_closed(deployment):
+def test_bootstrap_admin_like_s3(deployment):
+    # Même comportement qu'en mode S3 : la clé bootstrap est admin total.
+    _,_,_,run = deployment
     bootstrap = Path(os.environ["VAULT_PG_BOOTSTRAP_FILE"]).read_text().strip()
-    status,_ = rest(deployment,"GET","whoami",token=bootstrap)
-    require(status==403,"Bootstrap utilisé comme admin métier")
+    status,who = rest(deployment,"GET","whoami",token=bootstrap)
+    require(status==200 and who.get("client_name")=="admin","Bootstrap non reconnu comme admin")
+    coffer = "boot-"+run
+    status,_ = rest(deployment,"POST","vaults",token=bootstrap,data={"vault_id":coffer})
+    require(status==201,"Création de coffre par bootstrap non confirmée")
+    status,created = rest(deployment,"POST","tokens",token=bootstrap,data={"client_name":coffer,
+        "permissions":["read"],"allowed_resources":[coffer],"expires_in_days":1})
+    require(status==201 and isinstance(created.get("raw_token"),str),"Octroi de token par bootstrap non confirmé")
+    status,_ = rest(deployment,"DELETE","tokens/"+hashlib.sha256(created["raw_token"].encode()).hexdigest()[:12],token=bootstrap)
+    require(status==200,"Révocation par bootstrap non confirmée")
 
 
 def test_final_after_new_process(deployment):

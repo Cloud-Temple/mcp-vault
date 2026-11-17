@@ -260,6 +260,8 @@ def revalidate_actor(conn):
             raise MetadataUnavailable("actor_changed")
     elif identity.get("auth_type")=="mission_jwt" and facts.get("actor_binding"):
         _revalidate_binding(conn, instance, facts, identity)
+    elif identity.get("auth_type")=="bootstrap":
+        pass  # Clé de configuration, comme en S3 : aucune ligne à revalider.
     else:
         raise MetadataUnavailable("actor_missing")
     if identity.get("auth_type") == "hub_vault_read":

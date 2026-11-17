@@ -50,6 +50,8 @@ def make_call(tool, vault_id="", *, operation_id=None):
         if any(not isinstance(v, str) or not IDENT.fullmatch(v) for v in (tenant, mission)):
             raise MetadataUnavailable("audit_identity_invalid")
         actor = "mission_" + hashlib.sha256(json.dumps([tenant, mission, identity.get("jti")]).encode()).hexdigest()[:16]
+    elif identity.get("auth_type") == "bootstrap":
+        actor = "tok_" + hashlib.sha256(get_settings().admin_bootstrap_key.encode()).hexdigest()[:16]
     else:
         actor = "anonymous"
     if operation_id is not None and (not isinstance(operation_id, str) or not IDENT.fullmatch(operation_id)):

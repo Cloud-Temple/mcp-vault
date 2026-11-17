@@ -96,8 +96,9 @@ chaque connexion. Provisionneur, maintenance d'audit et actions opérateur
 relisent toujours le coffre ; les faits d'autorisation restent relus dans PG
 à chaque requête. Détail : `docs/postgres-metadata.md`.
 
-La clé bootstrap reste une autorité finie R2 sur metadata-operator, refusée
-sur le métier en PG. Install : mount configuré create-only, deux chemins
+La clé bootstrap garde en PG le comportement du mode S3 (admin total sur
+l'Admin API et sur /mcp, audit sous `tok_` + 16 hex de son sha256). Elle reste
+aussi l'autorité finie R2 sur metadata-operator. Install : mount configuré create-only, deux chemins
 credentials distincts CAS, schema-init par provisionneur, premier hash admin
 borné avec marqueur/reçu atomiques. Restore ne réinstalle ni schéma ni seed,
 n'écrase pas les credentials. Runtime app seulement. Readiness fermée si

@@ -69,8 +69,8 @@ remplace l'authentification.
    seed/instance/UUID/intention ; constate l'effet sans transformer l'ACK unknown
    en succès historique. Conserver ces fichiers hors Git et preuves publiques.
 6. Utiliser ce premier bearer par les routes ordinaires pour créer policies,
-   tokens/coffres métier et délégations. La clé bootstrap reste refusée sur le
-   métier, même quand PostgreSQL est disponible. Désactiver le mode opérateur
+   tokens/coffres métier et délégations. La clé bootstrap garde le comportement
+   du mode S3 : admin total sur les routes ordinaires et sur /mcp. Désactiver le mode opérateur
    après installation. Le JIT SSH utilise exclusivement les bearers métier.
 
 Mode `restore` : status, verify-connections et résolution du seul seed initial.

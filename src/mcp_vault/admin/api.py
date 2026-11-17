@@ -1536,8 +1536,6 @@ def _is_admin(token: str) -> bool:
     settings = get_settings()
     # Comparaison constant-time contre timing attacks
     if hmac.compare_digest(token, settings.admin_bootstrap_key):
-        if getattr(settings, "metadata_backend", "s3") == "postgres":
-            return False
         return True
     store = get_token_store()
     if store:
@@ -1555,8 +1553,6 @@ def _get_token_info(token: str) -> dict | None:
     settings = get_settings()
     # Bootstrap key = admin total (comparaison constant-time contre timing attacks)
     if hmac.compare_digest(token, settings.admin_bootstrap_key):
-        if getattr(settings, "metadata_backend", "s3") == "postgres":
-            return None
         return {
             "client_name": "admin",
             "permissions": ["read", "write", "admin"],
