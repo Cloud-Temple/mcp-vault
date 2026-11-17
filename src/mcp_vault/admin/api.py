@@ -1746,7 +1746,14 @@ async def _api_pki_setup(send, body):
         })
 
     leaf_ttl = data.get("leaf_ttl", "720h")
-    result = await setup_pki_ca(lab_mode, allowed_domains, leaf_ttl)
+    # Durées des autorités (#206) : absentes = plafonds existants conservés.
+    ttls = {k: data[k] for k in ("root_ttl", "int_ttl") if data.get(k) is not None}
+    if any(v is not None and not isinstance(v, str) for v in ttls.values()):
+        return await _json_response(send, 400, {
+            "status": "error", "error_type": "invalid_input",
+            "message": "`root_ttl` et `int_ttl` sont des chaînes (ex. 219000h, 8760h).",
+        })
+    result = await setup_pki_ca(lab_mode, allowed_domains, leaf_ttl, **ttls)
     await _json_response(send, 200 if result.get("status") == "ok" else 500, result)
 
 
@@ -1796,9 +1803,16 @@ async def _api_pki_rotate(send, body):
         data = json.loads(body) if body else {}
     except json.JSONDecodeError:
         data = {}
+    int_ttl = data.get("int_ttl") if isinstance(data, dict) else None
+    if int_ttl is not None and not isinstance(int_ttl, str):
+        return await _json_response(send, 400, {
+            "status": "error", "error_type": "invalid_input",
+            "message": "`int_ttl` est une chaîne (ex. 8760h).",
+        })
     result = await rotate_intermediate(
         keep_old_issuer=data.get("keep_old_issuer", True),
         overlap_ttl=data.get("overlap_ttl", "48h"),
+        int_ttl=int_ttl,
     )
     await _json_response(send, 200 if result.get("status") == "ok" else 500, result)
 

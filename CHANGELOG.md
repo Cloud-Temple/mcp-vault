@@ -16,6 +16,26 @@
   n'est visible des lecteurs d'audit.
 - Inchangé : la route opérateur du mode `install` et le refus propre au
   parcours JIT SSH, identique en S3.
+### PKI : signature de CSR, durées configurables, rôle restreint (#206)
+
+- Nouvel outil MCP `pki_sign_csr` : signe une CSR sous le rôle restreint
+  `csr-servers`, sans générer, recevoir ni rendre de clé privée. Un seul SAN DNS,
+  sous-domaine strict de `PKI_CSR_DOMAIN`, ni joker, ni IP, ni usage CA, clé EC
+  P-256 ou plus ; durée `PKI_CSR_TTL` (90 jours). Rend le certificat et la chaîne
+  intermédiaire, sans la racine. Désactivé tant que `PKI_CSR_DOMAIN` est vide.
+  Un non-admin doit avoir `write` et une policy qui nomme l'outil en toutes
+  lettres (ni liste vide, ni joker).
+- `pki_ca_setup` accepte `root_ttl` et `int_ttl`, `pki_ca_rotate_intermediate`
+  accepte `int_ttl` (outil MCP, API admin, CLI `--root-ttl` / `--int-ttl`). Ils
+  règlent aussi le plafond des mounts, sans quoi OpenBao tronquait en silence.
+  Omis, les plafonds existants sont conservés ; les défauts (10 ans / 5 ans) ne
+  changent pas.
+- Jamais de troncature silencieuse : un certificat ou un intermédiaire plus
+  court que demandé, ou qui survivrait à son autorité, est refusé explicitement
+  (`ttl_truncated`, `issuer_expires_too_soon`) ; `pki_issue_cert` compris.
+- Le contrat `.env.example` ajoute 2 déclarations (`PKI_CSR_DOMAIN`,
+  `PKI_CSR_TTL`), sans retrait. Les tests de ce lot tournent contre un vrai
+  OpenBao dans l'image de test, qui échoue au lieu de sauter s'il manque.
 
 ### Métadonnées PostgreSQL : limite de lectures OpenBao réglable
 

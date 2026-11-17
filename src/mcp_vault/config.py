@@ -291,6 +291,26 @@ class Settings(BaseSettings):
     # de mcp_allowed_hosts. Override utile en test Docker (ex: http://mcp-vault:8030).
     # Doit commencer par http:// ou https:// — validé au démarrage.
     pki_base_url: str = ""
+    # Signature de CSR (`pki_sign_csr`, issue #206). Domaine parent sous lequel
+    # le rôle `csr-servers` signe, un seul nom DNS par certificat, sous-domaine
+    # strict. VIDE = fonction désactivée (l'outil refuse) : signer des identités
+    # TLS n'est ouvert que sur l'instance qui le déclare. Ex. instance DBaaS :
+    # `dbaas.cloud-temple.app`. Durée des certificats signés : PKI_CSR_TTL.
+    pki_csr_domain: str = ""
+    pki_csr_ttl: str = "2160h"
+
+    @model_validator(mode="after")
+    def validate_pki_csr(self):
+        import re
+        domain = self.pki_csr_domain.strip()
+        label = r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+        if domain and (len(domain) > 253
+                       or not re.fullmatch(rf"{label}(\.{label})*\.[a-z]{{2,}}", domain)):
+            raise ValueError("PKI_CSR_DOMAIN invalide : FQDN en minuscules, sans joker ni point final")
+        match = re.fullmatch(r"(\d{1,6})([smhd])", self.pki_csr_ttl.strip())
+        if not match or int(match.group(1)) == 0:
+            raise ValueError("PKI_CSR_TTL invalide (ex. 2160h, 90d)")
+        return self
 
     # --- Mission token enforcement (issue #26, anti-confused-deputy C18) ---
     # Désactivé par défaut : zéro impact sur les déploiements standalone (sans mcp-mission).

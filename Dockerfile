@@ -126,6 +126,10 @@ RUN pip install --no-cache-dir -r requirements.lock -r requirements.txt
 RUN python -c "from mcp.server import MCPServer"
 
 ENV PYTHONPATH=/app/src
+# Les tests contre un OpenBao réel (`bao server -dev`, ex. PKI #206) ÉCHOUENT au
+# lieu de sauter si `bao`, `openssl` ou le vrai `hvac` manquent : en CI, un
+# vert ne doit jamais venir d'un test qui n'a rien exercé.
+ENV MCP_VAULT_TEST_BAO_REQUIRED=1
 COPY src/ ./src/
 COPY tests/ ./tests/
 COPY scripts/ ./scripts/

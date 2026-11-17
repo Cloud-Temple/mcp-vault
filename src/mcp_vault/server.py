@@ -53,6 +53,7 @@ _TOOL_LABELS = {
     "pki_ca_list_roles": "Liste rôles PKI", "pki_ca_role_info": "Détails rôle PKI",
     "pki_list_certs": "Inventaire certs PKI", "pki_revoke_cert": "Révocation cert PKI",
     "pki_issue_cert": "Émission cert PKI",
+    "pki_sign_csr": "Signature CSR PKI",
     "pki_ca_rotate_intermediate": "Rotation intermédiaire PKI",
     "secret_consume": "Consommation médiée (C18)",
 }
@@ -1557,7 +1558,9 @@ async def ssh_ca_role_info(vault_id: str, role_name: str) -> dict:
 @audited_call
 async def pki_ca_setup(lab_mode: bool,
                        allowed_domains: str,
-                       leaf_ttl: str = "720h") -> dict:
+                       leaf_ttl: str = "720h",
+                       root_ttl: str | None = None,
+                       int_ttl: str | None = None) -> dict:
     """
     Configure la PKI interne complète (CA racine + intermédiaire + ACME).
 
@@ -1581,6 +1584,11 @@ async def pki_ca_setup(lab_mode: bool,
             séparés par des virgules. Écrase la liste en place.
         leaf_ttl: TTL max des certificats feuilles (ex: 720h = 30 jours).
             Écrase le `max_ttl` du rôle en place.
+        root_ttl: Durée de la CA racine ET plafond de son mount (ex: 219000h
+            ≈ 25 ans). Omis : plafond existant conservé (87600h à la création).
+            Sur une racine déjà générée, seul le plafond change.
+        int_ttl: Durée de l'intermédiaire ET plafond de son mount (ex: 8760h
+            = 1 an). Omis : plafond existant conservé (43800h à la création).
     """
     # ── SÉCURITÉ #128 : aucun défaut silencieux sur l'installation d'une AC ──
     # `lab_mode` valait True et `allowed_domains` valait "*.lesur.lan,lesur.lan".
@@ -1615,7 +1623,10 @@ async def pki_ca_setup(lab_mode: bool,
                 "message": "allowed_domains ne peut pas être vide : les domaines "
                            "autorisés par le rôle ACME doivent être nommés "
                            "explicitement (ils écrasent la liste en place)."}
-    return _r("pki_ca_setup", await setup_pki_ca(lab_mode, domains_list, leaf_ttl))
+    # Omission ≠ défaut : une durée absente n'est pas transmise et conserve les
+    # plafonds d'une PKI existante (#206).
+    ttls = {k: v for k, v in (("root_ttl", root_ttl), ("int_ttl", int_ttl)) if v is not None}
+    return _r("pki_ca_setup", await setup_pki_ca(lab_mode, domains_list, leaf_ttl, **ttls))
 
 
 @mcp.tool()
@@ -1746,8 +1757,45 @@ async def pki_issue_cert(common_name: str, ttl: str = "720h",
 
 @mcp.tool()
 @audited_call
+async def pki_sign_csr(csr: str) -> dict:
+    """
+    Signe une CSR (PEM) sous le rôle restreint `csr-servers` — la clé privée
+    reste chez l'appelant : rien n'est généré, reçu ni rendu.
+
+    Un seul SAN DNS, sous-domaine strict du domaine configuré sur l'instance
+    (PKI_CSR_DOMAIN ; vide = fonction désactivée), clé EC P-256 ou plus, ni
+    joker, ni IP, ni usage CA. Durée fixe : PKI_CSR_TTL. Un certificat plus
+    court que cette durée n'est jamais remis (refus explicite).
+
+    Autorisation : admin, ou permission `write` + policy nommant `pki_sign_csr`
+    en toutes lettres dans `allowed_tools`.
+
+    Args:
+        csr: Demande de signature PEM (« CERTIFICATE REQUEST »).
+
+    Returns: certificate (feuille PEM), ca_chain (intermédiaire(s) PEM, sans la
+        racine : le serveur présente feuille + chaîne, le client ne garde que la
+        racine), dns_name, serial_number, not_after, root_fingerprint_sha256.
+    """
+    from .auth.context import check_pki_sign_permission
+    from .vault.pki_ca import sign_csr
+
+    perm_err = check_pki_sign_permission()
+    if perm_err:
+        return perm_err
+
+    result = await sign_csr(csr)
+    # Audit : ni le certificat ni la chaîne — seulement le nom et le serial.
+    audit_result = {k: v for k, v in result.items() if k not in ("certificate", "ca_chain")}
+    _r("pki_sign_csr", audit_result, detail=f"dns={str(result.get('dns_name', ''))[:64]}")
+    return result
+
+
+@mcp.tool()
+@audited_call
 async def pki_ca_rotate_intermediate(keep_old_issuer: bool = True,
-                                      overlap_ttl: str = "48h") -> dict:
+                                      overlap_ttl: str = "48h",
+                                      int_ttl: str | None = None) -> dict:
     """
     Rotation sans coupure de la CA intermédiaire.
 
@@ -1757,6 +1805,9 @@ async def pki_ca_rotate_intermediate(keep_old_issuer: bool = True,
     Args:
         keep_old_issuer: Conserver l'ancien issuer pour valider les certs existants.
         overlap_ttl: Durée de chevauchement documentée (non appliquée automatiquement).
+        int_ttl: Durée du nouvel intermédiaire (ex: 8760h = 1 an) ; règle aussi
+            le plafond du mount intermédiaire. Omis : plafond actuel conservé.
+            Un intermédiaire plus court que demandé n'est pas importé.
     """
     from .auth.context import check_admin_permission, check_policy
     from .vault.pki_ca import rotate_intermediate
@@ -1768,7 +1819,9 @@ async def pki_ca_rotate_intermediate(keep_old_issuer: bool = True,
     if admin_err:
         return admin_err
 
-    return _r("pki_ca_rotate_intermediate", await rotate_intermediate(keep_old_issuer, overlap_ttl))
+    return _r("pki_ca_rotate_intermediate",
+              await rotate_intermediate(keep_old_issuer, overlap_ttl,
+                                        **({"int_ttl": int_ttl} if int_ttl is not None else {})))
 
 
 # ═══════════════════════════════════════════════════════════════════════
