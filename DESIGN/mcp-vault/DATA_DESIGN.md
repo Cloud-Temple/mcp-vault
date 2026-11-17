@@ -98,7 +98,10 @@ relisent toujours le coffre ; les faits d'autorisation restent relus dans PG
 
 La clé bootstrap garde en PG le comportement du mode S3 (admin total sur
 l'Admin API et sur /mcp). L'audit la nomme `tok_` + 16 hex du sha256 de
-`mcp-vault:bootstrap-actor:<instance_id>`, jamais d'une empreinte de la clé. Elle reste
+`mcp-vault:bootstrap-actor:<instance_id>`, jamais d'une empreinte de la clé.
+L'admission ne lit pas PG pour la clé : PG arrêté, elle ouvre comme en S3 les
+routes non auditées (whoami, tools/list, administration hors audit), et les
+outils audités restent fermés par l'admission d'audit. Elle reste
 aussi l'autorité finie R2 sur metadata-operator. Install : mount configuré create-only, deux chemins
 credentials distincts CAS, schema-init par provisionneur, premier hash admin
 borné avec marqueur/reçu atomiques. Restore ne réinstalle ni schéma ni seed,

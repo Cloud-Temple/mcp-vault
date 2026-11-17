@@ -64,7 +64,7 @@ def test_other_bearers_still_refused_in_pg(backend, monkeypatch):
     assert api._is_admin("") is False
 
 
-async def test_admission_lets_bootstrap_reach_facts(backend, monkeypatch):
+async def test_admission_isolates_bootstrap_from_pg_rows(backend, monkeypatch):
     from mcp_vault.storage import admission
     backend("postgres")
     seen = []
@@ -199,9 +199,20 @@ def test_audit_name_invariant_when_the_key_changes(backend, monkeypatch):
 
 
 def test_audit_name_never_derives_from_the_key(backend):
-    """Le nom d'audit ne publie aucune empreinte de la clé (clé choisie, chiffre l'unseal)."""
+    """Le nom produit par make_call ne publie aucune empreinte de la clé (clé choisie, chiffre l'unseal)."""
+    from mcp_vault.auth.context import current_token_info
+    from mcp_vault.storage.audit_pg import make_call
+    from mcp_vault.storage.postgres import request_facts
+    backend("postgres")
+    who = current_token_info.set({"auth_type": "bootstrap", "client_name": "admin"})
+    facts = request_facts.set({"owners": {}, "actor_hash": None})
+    try:
+        actor = make_call("vault_list").actor_ref
+    finally:
+        request_facts.reset(facts)
+        current_token_info.reset(who)
     digests = {hashlib.new(name, KEY.encode()).hexdigest() for name in ("sha256", "sha1", "md5", "sha512")}
-    assert not any(BOOTSTRAP_ACTOR[4:] in d for d in digests)
+    assert actor.startswith("tok_") and not any(actor[4:] in d for d in digests)
 
 
 @pytest.mark.parametrize("identity,admitted", [
