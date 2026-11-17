@@ -11,7 +11,9 @@
   configuré avec la clé, comme l'Agent de sec-ai.
 - L'admission PG laisse passer la clé, la revalidation de l'acteur l'accepte
   sans ligne en base, et l'audit nomme ses appels `tok_` + 16 hex du sha256 de
-  la clé, au lieu de les refuser comme `anonymous`.
+  `mcp-vault:bootstrap-actor:<instance_id>`, au lieu de les refuser comme
+  `anonymous`. Ce nom ne dérive pas de la clé : aucune empreinte de la clé
+  n'est visible des lecteurs d'audit.
 - Inchangé : la route opérateur du mode `install` et le refus propre au
   parcours JIT SSH, identique en S3.
 

@@ -117,8 +117,11 @@ def test_actor_revalidation(backend, identity, expected):
         current_token_info.reset(who)
 
 
+BOOTSTRAP_ACTOR = "tok_" + hashlib.sha256(b"mcp-vault:bootstrap-actor:test-vault").hexdigest()[:16]
+
+
 @pytest.mark.parametrize("identity,actor", [
-    ({"auth_type": "bootstrap", "client_name": "admin"}, "tok_" + hashlib.sha256(KEY.encode()).hexdigest()[:16]),
+    ({"auth_type": "bootstrap", "client_name": "admin"}, BOOTSTRAP_ACTOR),
     ({"client_name": "admin"}, "anonymous"),
     ({}, "anonymous"),
 ])
@@ -140,14 +143,81 @@ def test_audit_actor(backend, identity, actor):
     assert re.fullmatch(r"^(anonymous|(tok|mission|operator)_[0-9a-f]{16})$", call.actor_ref)
 
 
-def test_audit_admits_bootstrap_but_not_anonymous(backend, monkeypatch):
+def test_audit_name_never_derives_from_the_key(backend):
+    """Le nom d'audit ne publie aucune empreinte de la clé (clé choisie, chiffre l'unseal)."""
+    digests = {hashlib.new(name, KEY.encode()).hexdigest() for name in ("sha256", "sha1", "md5", "sha512")}
+    assert not any(BOOTSTRAP_ACTOR[4:] in d for d in digests)
+
+
+@pytest.mark.parametrize("identity,admitted", [
+    ({"auth_type": "bootstrap", "client_name": "admin"}, True),
+    ({"client_name": "admin"}, False),
+])
+def test_audit_admission_chain(backend, monkeypatch, identity, admitted):
+    """make_call puis _admit, comme le fait admit() : la clé est admise, l'inconnu ne l'est pas."""
+    from mcp_vault.auth.context import current_token_info
     from mcp_vault.storage import audit_pg
-    from mcp_vault.storage.postgres import MetadataUnavailable
+    from mcp_vault.storage.postgres import MetadataUnavailable, request_facts
     backend("postgres")
     monkeypatch.setattr(audit_pg, "_write", lambda call, deadline, op, validate=False: ("written", validate))
-    base = dict(instance="test-vault", call_id="c", tool="vault_list", vault_id="", tenant_id=None,
-                mission_id=None, operation_id=None, started=0.0)
-    bootstrap = audit_pg.Call(actor_ref="tok_" + "0" * 16, **base)
-    assert audit_pg._admit(bootstrap, "admitted", 0) == ("written", True)
-    with pytest.raises(MetadataUnavailable):
-        audit_pg._admit(audit_pg.Call(actor_ref="anonymous", **base), "admitted", 0)
+    who = current_token_info.set(identity)
+    facts = request_facts.set({"owners": {}, "actor_hash": None})
+    try:
+        call = audit_pg.make_call("secret_read", "coffer-a")
+    finally:
+        request_facts.reset(facts)
+        current_token_info.reset(who)
+    if admitted:
+        assert audit_pg._admit(call, "admitted", 0) == ("written", True)
+    else:
+        with pytest.raises(MetadataUnavailable):
+            audit_pg._admit(call, "admitted", 0)
+
+
+async def _asgi(middleware, token):
+    sent = []
+    scope = {"type": "http", "path": "/mcp", "method": "POST",
+             "headers": [(b"authorization", b"Bearer " + token.encode())]}
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+    await middleware(scope, receive, send)
+    return next((m["status"] for m in sent if m["type"] == "http.response.start"), None)
+
+
+@pytest.mark.parametrize("mode", ["bearer", "jwt", "dual-stack"])
+async def test_mcp_request_reaches_app_with_bootstrap_in_pg(backend, monkeypatch, mode):
+    """Chemin ASGI réel de /mcp en PG : admission, puis résolution du bearer, puis l'application."""
+    from mcp_vault.auth import middleware as mw
+    from mcp_vault.auth.context import current_token_info
+    from mcp_vault.storage import admission, audit_pg
+    from mcp_vault.storage.postgres import request_facts
+    monkeypatch.setenv("MCP_AUTH_MODE", mode)
+    backend("postgres")
+
+    async def offload(fn, raw, tenant):
+        return {"owners": {}, "actor_hash": None}
+
+    async def denial(tool):
+        return True
+    monkeypatch.setattr(admission, "offload", offload)
+    monkeypatch.setattr(audit_pg, "record_auth_denial", denial)
+    monkeypatch.setattr(mw, "get_token_store", lambda: None)
+    seen = []
+
+    async def app(scope, receive, send):
+        seen.append((current_token_info.get(), request_facts.get()))
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"{}"})
+
+    status = await _asgi(mw.AuthMiddleware(app), KEY)
+    assert status == 200 and len(seen) == 1
+    identity, facts = seen[0]
+    assert identity["auth_type"] == "bootstrap" and "admin" in identity["permissions"]
+    assert facts == {"owners": {}, "actor_hash": None}
+    # Un autre bearer, inconnu, n'atteint pas l'application.
+    status = await _asgi(mw.AuthMiddleware(app), KEY[:-1] + "y")
+    assert status in (401, 403) and len(seen) == 1

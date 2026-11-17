@@ -51,7 +51,9 @@ def make_call(tool, vault_id="", *, operation_id=None):
             raise MetadataUnavailable("audit_identity_invalid")
         actor = "mission_" + hashlib.sha256(json.dumps([tenant, mission, identity.get("jti")]).encode()).hexdigest()[:16]
     elif identity.get("auth_type") == "bootstrap":
-        actor = "tok_" + hashlib.sha256(get_settings().admin_bootstrap_key.encode()).hexdigest()[:16]
+        # Nom fixe par instance, jamais dérivé de la clé : la clé est choisie par
+        # l'opérateur et chiffre les clés d'unseal, son empreinte ne sort pas.
+        actor = "tok_" + hashlib.sha256(("mcp-vault:bootstrap-actor:" + get_settings().metadata_instance_id).encode()).hexdigest()[:16]
     else:
         actor = "anonymous"
     if operation_id is not None and (not isinstance(operation_id, str) or not IDENT.fullmatch(operation_id)):
