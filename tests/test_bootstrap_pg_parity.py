@@ -74,8 +74,14 @@ async def test_admission_lets_bootstrap_reach_facts(backend, monkeypatch):
         return {"owners": {}}
 
     monkeypatch.setattr(admission, "offload", offload)
-    assert await admission.admit(KEY) == {"owners": {}}
-    assert seen == [(admission.load_facts, KEY, None)]
+    # La clé : faits isolés, sans lecture PG, même si son hash figurait dans `tokens`.
+    facts = await admission.admit(KEY)
+    assert seen == []
+    assert (facts["actor_hash"], facts["actor_revision"], facts["policy_revisions"], facts["owners"]) == (None, None, {}, {})
+    assert facts["token"].get_by_hash(hashlib.sha256(KEY.encode()).hexdigest()) is None
+    # Un autre bearer suit le chemin PG ordinaire.
+    assert await admission.admit("autre-bearer") == {"owners": {}}
+    assert seen == [(admission.load_facts, "autre-bearer", None)]
     for refused in ("", "z" * 8193):
         with pytest.raises(PermissionError):
             await admission.admit(refused)
@@ -83,12 +89,41 @@ async def test_admission_lets_bootstrap_reach_facts(backend, monkeypatch):
 
 
 class _Conn:
-    def __init__(self):
-        self.sql = []
+    def __init__(self, row=None):
+        self.sql, self.row = [], row
 
     def execute(self, sql, params=None):
         self.sql.append(sql)
-        return SimpleNamespace(fetchone=lambda: None, fetchall=lambda: [])
+        return SimpleNamespace(fetchone=lambda: self.row, fetchall=lambda: [])
+
+
+BOOT_ID = {"auth_type": "bootstrap", "client_name": "admin", "permissions": ["admin", "read", "write"]}
+EXPIRED = {"payload": {"revoked": True, "expires_at": "2000-01-01T00:00:00+00:00"}, "revision": 1}
+
+
+@pytest.mark.parametrize("identity,expected", [
+    (BOOT_ID, None),
+    ({"auth_type": "token", "client_name": "x"}, "actor_changed"),
+])
+def test_bootstrap_ignores_a_token_row_with_its_hash(backend, identity, expected):
+    """Même si des faits portent un actor_hash dont la ligne est révoquée ou expirée, la clé passe ; un token non."""
+    from mcp_vault.auth.context import current_token_info
+    from mcp_vault.storage.postgres import MetadataUnavailable, request_facts, revalidate_actor
+    backend("postgres")
+    who = current_token_info.set(identity)
+    facts = request_facts.set({"owners": {}, "actor_hash": "a" * 64, "actor_revision": 1, "policy_revisions": {}})
+    conn = _Conn(EXPIRED)
+    try:
+        if expected is None:
+            revalidate_actor(conn)
+            assert not any("vault_metadata.tokens" in q for q in conn.sql)
+        else:
+            with pytest.raises(MetadataUnavailable) as exc:
+                revalidate_actor(conn)
+            assert exc.value.reason == expected
+    finally:
+        request_facts.reset(facts)
+        current_token_info.reset(who)
 
 
 @pytest.mark.parametrize("identity,expected", [
@@ -141,6 +176,26 @@ def test_audit_actor(backend, identity, actor):
     assert call.actor_ref == actor and ACTOR.fullmatch(call.actor_ref)
     # Le motif SQL de 002_audit.sql accepte la même valeur.
     assert re.fullmatch(r"^(anonymous|(tok|mission|operator)_[0-9a-f]{16})$", call.actor_ref)
+
+
+def test_audit_name_invariant_when_the_key_changes(backend, monkeypatch):
+    from mcp_vault.auth.context import current_token_info
+    from mcp_vault.config import get_settings
+    from mcp_vault.storage.audit_pg import make_call
+    from mcp_vault.storage.postgres import request_facts
+    backend("postgres")
+    names = []
+    for key in (KEY, "Zq9$" + "w2E@" * 15):
+        monkeypatch.setenv("ADMIN_BOOTSTRAP_KEY", key)
+        get_settings.cache_clear()
+        who = current_token_info.set({"auth_type": "bootstrap", "client_name": "admin"})
+        facts = request_facts.set({"owners": {}, "actor_hash": None})
+        try:
+            names.append(make_call("vault_list").actor_ref)
+        finally:
+            request_facts.reset(facts)
+            current_token_info.reset(who)
+    assert names == [BOOTSTRAP_ACTOR, BOOTSTRAP_ACTOR]
 
 
 def test_audit_name_never_derives_from_the_key(backend):
@@ -217,7 +272,7 @@ async def test_mcp_request_reaches_app_with_bootstrap_in_pg(backend, monkeypatch
     assert status == 200 and len(seen) == 1
     identity, facts = seen[0]
     assert identity["auth_type"] == "bootstrap" and "admin" in identity["permissions"]
-    assert facts == {"owners": {}, "actor_hash": None}
+    assert facts["actor_hash"] is None and facts["policy_revisions"] == {}
     # Un autre bearer, inconnu, n'atteint pas l'application.
     status = await _asgi(mw.AuthMiddleware(app), KEY[:-1] + "y")
     assert status in (401, 403) and len(seen) == 1

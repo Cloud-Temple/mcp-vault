@@ -252,7 +252,9 @@ def revalidate_actor(conn):
     if facts is None:
         raise MetadataUnavailable("actor_missing")
     instance = get_settings().metadata_instance_id
-    if facts.get("actor_hash"):
+    if identity.get("auth_type")=="bootstrap":
+        pass  # Clé de configuration, comme en S3 : aucune ligne à revalider.
+    elif facts.get("actor_hash"):
         row = conn.execute("SELECT payload,revision FROM vault_metadata.tokens WHERE instance_id=%s AND token_hash=%s FOR SHARE",
                            (instance,facts["actor_hash"])).fetchone()
         if (not row or row["revision"]!=facts["actor_revision"]
@@ -260,8 +262,6 @@ def revalidate_actor(conn):
             raise MetadataUnavailable("actor_changed")
     elif identity.get("auth_type")=="mission_jwt" and facts.get("actor_binding"):
         _revalidate_binding(conn, instance, facts, identity)
-    elif identity.get("auth_type")=="bootstrap":
-        pass  # Clé de configuration, comme en S3 : aucune ligne à revalider.
     else:
         raise MetadataUnavailable("actor_missing")
     if identity.get("auth_type") == "hub_vault_read":
