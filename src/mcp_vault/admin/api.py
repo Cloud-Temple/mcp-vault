@@ -1690,30 +1690,14 @@ async def _api_pki_status(send):
 
 
 async def _api_pki_setup(send, body):
-    """POST /admin/api/pki/setup — Initialiser la PKI (admin).
-
-    ⚠️ `lab_mode` et `allowed_domains` sont OBLIGATOIRES dans le corps (#128).
-    """
-    # ── SÉCURITÉ #128 : aucun défaut silencieux sur l'installation d'une AC ──
-    # Cette route est la TROISIÈME surface du même défaut (avec l'outil MCP et la
-    # CLI), et c'était la plus permissive : `lab_mode` valait True par défaut et
-    # des domaines absents devenaient `None`, ce que setup_pki_ca traduisait en
-    # `*.lesur.lan`. Un POST au corps VIDE (`{}`) suffisait donc à rétrograder une
-    # production saine — domaines réels écrasés (plus aucun certificat émissible)
-    # et `eab_policy` ramené de `new-account-required` à `not-required`
-    # (enrôlement ACME ouvert), les deux écritures de setup_pki_ca étant
-    # INCONDITIONNELLES.
-    #
-    # La console web envoie toujours les deux champs ; c'est la route nue qui
-    # était exposée. Le remède est celui des deux autres surfaces : l'ABSENCE de
-    # défaut. Un corps illisible ou incomplet est un 400, jamais une installation.
+    """Configurer la PKI. Le mode est explicite et ACME actif exige des domaines."""
     from ..vault.pki_ca import setup_pki_ca
     try:
         data = json.loads(body) if body else {}
     except json.JSONDecodeError:
         return await _json_response(send, 400, {
             "status": "error", "error_type": "invalid_input",
-            "message": "Corps JSON illisible. `lab_mode` et `allowed_domains` sont requis.",
+            "message": "Corps JSON illisible.",
         })
     if not isinstance(data, dict):
         return await _json_response(send, 400, {
@@ -1731,6 +1715,13 @@ async def _api_pki_setup(send, body):
         })
     lab_mode = data["lab_mode"]
 
+    acme = data.get("acme")
+    if "acme" in data and not isinstance(acme, bool):
+        return await _json_response(send, 400, {
+            "status": "error", "error_type": "invalid_input",
+            "message": "`acme` doit être un booléen.",
+        })
+
     raw_domains = data.get("allowed_domains")
     if isinstance(raw_domains, str):
         allowed_domains = [d.strip() for d in raw_domains.split(",") if d.strip()]
@@ -1738,7 +1729,7 @@ async def _api_pki_setup(send, body):
         allowed_domains = [str(d).strip() for d in raw_domains if str(d).strip()]
     else:
         allowed_domains = []
-    if not allowed_domains:
+    if not allowed_domains and acme is not False:
         return await _json_response(send, 400, {
             "status": "error", "error_type": "invalid_input",
             "message": "`allowed_domains` est requis et ne peut pas être vide : "
@@ -1747,13 +1738,15 @@ async def _api_pki_setup(send, body):
 
     leaf_ttl = data.get("leaf_ttl", "720h")
     # Durées des autorités (#206) : absentes = plafonds existants conservés.
-    ttls = {k: data[k] for k in ("root_ttl", "int_ttl") if data.get(k) is not None}
-    if any(v is not None and not isinstance(v, str) for v in ttls.values()):
+    options = {k: data[k] for k in ("root_ttl", "int_ttl") if data.get(k) is not None}
+    if any(v is not None and not isinstance(v, str) for v in options.values()):
         return await _json_response(send, 400, {
             "status": "error", "error_type": "invalid_input",
             "message": "`root_ttl` et `int_ttl` sont des chaînes (ex. 219000h, 8760h).",
         })
-    result = await setup_pki_ca(lab_mode, allowed_domains, leaf_ttl, **ttls)
+    if acme is not None:
+        options["acme"] = acme
+    result = await setup_pki_ca(lab_mode, allowed_domains, leaf_ttl, **options)
     await _json_response(send, 200 if result.get("status") == "ok" else 500, result)
 
 

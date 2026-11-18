@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- PKI (#210) — `pki_ca_setup(lab_mode=False, acme=False)` permet de signer des
+  CSR sans ouvrir ACME. Les domaines deviennent facultatifs dans ce mode.
+  Le réglage existe aussi dans l’API admin et en CLI (`pki setup --prod --no-acme`).
+  Rejouer le setup conserve la fermeture. Une réactivation explicite demande
+  les domaines autorisés.
+
 ## [0.22.0] — 2026-11-17
 
 ### Métadonnées PostgreSQL : clé bootstrap comme en mode S3

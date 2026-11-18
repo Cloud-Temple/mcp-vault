@@ -522,7 +522,7 @@ CA interne souveraine basée sur l'engine PKI d'OpenBao. CA globale (non par vau
 
 | Fonction | Description |
 | --- | --- |
-| `setup_pki_ca(lab_mode, allowed_domains, leaf_ttl, root_ttl, int_ttl)` | CA racine + intermédiaire + rôle ACME + sync S3 forcée ; durées optionnelles (#206) |
+| `setup_pki_ca(lab_mode, allowed_domains, leaf_ttl, root_ttl, int_ttl, acme)` | CA racine + intermédiaire + rôle ACME + sync S3 forcée ; durées optionnelles (#206) |
 | `get_ca_root_pem()` | CA racine PEM + empreinte SHA-256 + URL stable |
 | `get_pki_status()` | État PKI (expiration, ACME on/off, compteur certs) |
 | `list_pki_roles()` | Rôles d'émission configurés |
@@ -538,7 +538,7 @@ CA interne souveraine basée sur l'engine PKI d'OpenBao. CA globale (non par vau
 
 **Jamais de troncature silencieuse** *(#206)* : `pki_issue_cert` et `pki_sign_csr` comparent le certificat rendu à la durée demandée (référence prise avant l'appel, tolérance 1 s = précision X.509) ; un certificat plus court n'est pas remis (`ttl_truncated`), sa clé non plus. Une feuille qui dépasserait un certificat de sa chaîne — y compris sur une PKI héritée dont l'intermédiaire survit à la racine — est refusée (`issuer_expires_too_soon`) : il faut faire tourner l'intermédiaire au moins une durée de feuille avant sa fin (90 jours pour la cible DBaaS).
 
-**Signature de CSR — `pki_sign_csr`** *(#206)* : la clé privée reste chez le demandeur. Activée seulement si `PKI_CSR_DOMAIN` est renseigné ; durée `PKI_CSR_TTL` (90 jours par défaut), sans paramètre de durée côté appelant. Rôle OpenBao à nom fixe `csr-servers` (réécrit à chaque signature) : sous-domaine strict du domaine, ni domaine nu, ni joker, ni IP/URI, clé EC (P-256 ou plus), `no_store=false` (inventaire). Le rôle seul ne suffit pas — mesuré sur 2.5.1, `/sign` accepte une CSR à deux SAN (ou CN ≠ SAN) et ignore une demande d'usage CA — donc l'outil valide la CSR **avant** OpenBao : un seul bloc PEM ≤ 16 Kio, signature valide, exactement un SAN DNS, CN absent ou égal, minuscules, pas d'usage CA (`BasicConstraints`, `keyCertSign`, `cRLSign`). Puis il contrôle le certificat rendu (un SAN, non-CA, même clé publique que la CSR, durée complète, pas au-delà de sa chaîne). Réponse : `certificate`, `ca_chain` (**intermédiaire(s) sans la racine** : le serveur présente feuille + intermédiaire, le client n'approuve que la racine, publiée par `pki_ca_public_key` / `/pki/ca/root.pem`), `serial_number`, `not_after`, `root_fingerprint_sha256`. Refus si `config/acme` autorise `csr-servers` ou `*`, ou si sa réponse n'a pas la forme attendue (`unsafe_configuration`, fermé par défaut ; seule son absence, 404, passe) : la façade ACME, non authentifiée, ne doit pas servir ce rôle.
+**Signature de CSR — `pki_sign_csr`** *(#206)* : la clé privée reste chez le demandeur. Activée seulement si `PKI_CSR_DOMAIN` est renseigné ; durée `PKI_CSR_TTL` (90 jours par défaut), sans paramètre de durée côté appelant. Rôle OpenBao à nom fixe `csr-servers` (réécrit à chaque signature) : sous-domaine strict du domaine, ni domaine nu, ni joker, ni IP/URI, clé EC (P-256 ou plus), `no_store=false` (inventaire). Le rôle seul ne suffit pas — mesuré sur 2.5.1, `/sign` accepte une CSR à deux SAN (ou CN ≠ SAN) et ignore une demande d'usage CA — donc l'outil valide la CSR **avant** OpenBao : un seul bloc PEM ≤ 16 Kio, signature valide, exactement un SAN DNS, CN absent ou égal, minuscules, pas d'usage CA (`BasicConstraints`, `keyCertSign`, `cRLSign`). Puis il contrôle le certificat rendu (un SAN, non-CA, même clé publique que la CSR, durée complète, pas au-delà de sa chaîne). Réponse : `certificate`, `ca_chain` (**intermédiaire(s) sans la racine** : le serveur présente feuille + intermédiaire, le client n'approuve que la racine, publiée par `pki_ca_public_key` / `/pki/ca/root.pem`), `serial_number`, `not_after`, `root_fingerprint_sha256`. Hors du mode fermé décrit ci-dessous, refus si `config/acme` autorise `csr-servers` ou `*`, ou si sa réponse n'a pas la forme attendue (`unsafe_configuration`, fermé par défaut ; seule son absence, 404, passe) : la façade ACME, non authentifiée, ne doit pas servir ce rôle.
 
 *Autorisation* : admin, ou permission `write` **et** une policy qui nomme `pki_sign_csr` **en toutes lettres** dans `allowed_tools` (ni liste vide, ni joker : une policy existante en `pki_*` ne gagne pas ce droit). Policy type pour un client dédié : `allowed_tools=["pki_sign_csr"]`, jeton `permissions=["write"]`. Ce jeton ne lit aucun secret ni n'administre rien ; restent accessibles à tout jeton valide, par conception existante, `secret_types`, `secret_generate_password` et les lectures PKI publiques (`/pki/ca/*.pem`, `GET /admin/api/pki/status|roles`) ; `secret_wrap`, `secret_consume`, `ssh_request_operator_access` et `vault_metadata_batch` gardent leurs propres gardes. Autre public : pas de route admin ni de commande CLI de signature ; une personne inspecte les certificats signés par `pki_list_certs` / la console et le rôle par `pki_ca_role_info csr-servers`.
 
@@ -557,7 +557,25 @@ des rôles ne sont pas proxifiés par ce nouveau chemin. Les en-têtes
 `Authorization`, `X-Vault-Token` et `Cookie` ne sont jamais transmis au backend.
 OpenBao reste responsable des autorisations ACME, de l'EAB et des SAN du rôle.
 
-Le setup lit `config/acme` avant toute mutation et conserve sa liste explicite
+**PKI dédiée à la signature de CSR (#210).** En MCP, appeler
+`pki_ca_setup(lab_mode=False, acme=False)`. L’API admin accepte
+`POST /admin/api/pki/setup` avec `{"lab_mode":false,"acme":false}` et la CLI
+accepte `pki setup --prod --no-acme`. Sur OpenBao, le setup applique
+`enabled=false` et `default_directory_policy=forbid` avant de supprimer
+le rôle maison `acme-servers`. Les autres rôles nommés sont conservés.
+OpenBao exige au moins une entrée dans `allowed_roles`. S’il ne reste aucun
+rôle tiers, le setup y met `["*"]` avec ACME fermé. La garde CSR accepte ce
+joker uniquement dans cet état. Le proxy transmet le refus OpenBao (HTTP 404)
+sur les URL ACME courtes, longues et par rôle. Les PEM publics et la signature
+de CSR restent disponibles. L’émission manuelle via `pki_issue_cert` dépend
+des domaines du rôle maison et devient donc indisponible.
+
+Sur une PKI neuve, ACME est actif par défaut. Une fois le service fermé, un
+ancien appel de setup avec domaines conserve la fermeture. Pour le rouvrir,
+passer `acme=true` avec des domaines explicites (CLI : `--acme --domains example.test`).
+Une version antérieure à #210 peut réactiver ACME si son setup est rejoué.
+
+En mode actif, le setup lit `config/acme` avant toute mutation et conserve sa liste explicite
 `allowed_roles`, en ajoutant `acme-servers` s'il manque et en dédupliquant.
 Il ne rend pas éligibles les autres rôles du mount et n'en modifie pas les
 définitions. Un 404/None permet le premier setup ; une erreur de lecture ou une

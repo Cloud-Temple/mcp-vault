@@ -34,7 +34,7 @@ async function loadPki() {
 
     // Détails du rôle ACME principal (acme-servers)
     let roleDetail = null;
-    if (roles.roles && roles.roles.length > 0) {
+    if (status.acme_enabled && roles.roles && roles.roles.length > 0) {
         const d = await api(`/pki/roles/${encodeURIComponent(roles.roles[0])}`);
         if (d.status === 'ok') roleDetail = d;
     }
@@ -119,7 +119,7 @@ function _renderPkiPage(s, certs, roles, roleDetail) {
         </div>
         <div class="card">
             <div class="card-label">EAB (enrôlement)</div>
-            <div class="card-value">${s.eab_required
+            <div class="card-value">${!s.acme_enabled ? 'Sans objet' : s.eab_required
                 ? `<span class="badge badge-ok">Requis</span> <span class="help-text">${esc(s.eab_policy || '')}</span>`
                 : `<span class="badge badge-warn">Non requis</span> <span class="help-text">${esc(s.eab_policy || '')}</span>`}</div>
         </div>
@@ -136,7 +136,7 @@ function _renderPkiPage(s, certs, roles, roleDetail) {
 
     <!-- Rôles ACME -->
     <div class="section-title">Rôle ACME — politique d'émission</div>
-    ${_renderAcmeRoles(roles, roleDetail)}
+    ${s.acme_enabled ? _renderAcmeRoles(roles, roleDetail) : 'ACME désactivé'}
 
     <!-- Inventaire certs -->
     <div class="section-title">Inventaire des certificats</div>

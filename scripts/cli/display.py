@@ -702,7 +702,7 @@ def show_pki_result(result: dict):
         table.add_column("Valeur")
         table.add_row("CA Racine",       result.get("root_mount", "?"))
         table.add_row("CA Intermédiaire", result.get("int_mount", "?"))
-        table.add_row("ACME Directory",  result.get("acme_directory", "?"))
+        table.add_row("ACME Directory",  result.get("acme_directory") or "Désactivé")
         table.add_row("CA Root URL",     result.get("root_pem_url", "?"))
         table.add_row("CRL URL",         result.get("crl_url", "?"))
         table.add_row("Expiration root", result.get("root_expires", "?"))
