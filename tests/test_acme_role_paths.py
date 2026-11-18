@@ -147,7 +147,7 @@ def acme_payload(client):
 
 
 async def test_setup_preserves_only_explicit_roles_and_is_idempotent():
-    original = {"data": {"allowed_roles": ["acme-servers", "dbaas-servers", "another-role", "dbaas-servers"]}}
+    original = {"data": {"enabled": True, "allowed_roles": ["acme-servers", "dbaas-servers", "another-role", "dbaas-servers"]}}
     state = copy.deepcopy(original)
     client = setup_client(state)
     for _ in range(2):
@@ -171,7 +171,7 @@ async def test_setup_preserves_only_explicit_roles_and_is_idempotent():
         state = {"data": copy.deepcopy(payload)}
 
 
-@pytest.mark.parametrize("config", [None, {"data": {"allowed_roles": ["*"]}}])
+@pytest.mark.parametrize("config", [None, {"data": {"enabled": False, "default_directory_policy": "sign-verbatim", "allowed_roles": ["*"]}}])
 async def test_new_setup_does_not_promote_default_wildcard(config):
     client = setup_client(config)
     assert (await run_setup(client))["status"] == "ok"
@@ -179,7 +179,9 @@ async def test_new_setup_does_not_promote_default_wildcard(config):
 
 
 @pytest.mark.parametrize("config", [
-    {}, {"data": None}, {"data": {}}, {"data": {"allowed_roles": "dbaas-servers"}},
+    {}, {"data": None}, {"data": {}},
+    {"data": {"allowed_roles": ["*"]}},
+    {"data": {"allowed_roles": ["acme-servers"], "enabled": False}}, {"data": {"allowed_roles": "dbaas-servers"}},
     {"data": {"allowed_roles": []}}, {"data": {"allowed_roles": [None]}},
     {"data": {"allowed_roles": [""]}}, {"data": {"allowed_roles": ["*", "dbaas-servers"]}},
 ])
@@ -204,7 +206,7 @@ async def test_config_read_failure_cannot_erase_roles():
 async def test_missing_preserved_role_stops_before_any_mutation(role_response):
     client = setup_client(None)
     client.read.side_effect = [
-        {"data": {"allowed_roles": ["acme-servers", "dbaas-servers"]}},
+        {"data": {"enabled": True, "allowed_roles": ["acme-servers", "dbaas-servers"]}},
         role_response,
     ]
     assert (await run_setup(client))["status"] == "error"
@@ -216,7 +218,7 @@ async def test_missing_preserved_role_stops_before_any_mutation(role_response):
 async def test_preserved_role_read_failure_stops_before_any_mutation():
     client = setup_client(None)
     client.read.side_effect = [
-        {"data": {"allowed_roles": ["acme-servers", "dbaas-servers"]}},
+        {"data": {"enabled": True, "allowed_roles": ["acme-servers", "dbaas-servers"]}},
         RuntimeError("role read unavailable"),
     ]
     assert (await run_setup(client))["status"] == "error"

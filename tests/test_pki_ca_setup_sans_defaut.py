@@ -30,8 +30,8 @@ fait, exactement la faute que #78 nous a apprise.
 
 ## Ce qui est verrouillé ici
 
-- `lab_mode` et `allowed_domains` n'ont **aucun défaut** ⇒ ils sont `required`
-  dans le schéma MCP. C'est la seule chose qui empêche l'appel sans argument ;
+- `lab_mode` reste requis dans le schéma. Depuis #210, les domaines ne sont
+  obligatoires que pour le setup ACME actif ;
 - une liste de domaines qui se réduit à du vide est **refusée**, et
   `setup_pki_ca` n'est **jamais atteint** ;
 - les valeurs explicites sont transmises **telles quelles** — `lab_mode=False`
@@ -64,8 +64,8 @@ from mcp_vault import server
 # Le contrat : aucun défaut sur les deux paramètres qui décident de la sécurité
 # ─────────────────────────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("param", ["lab_mode", "allowed_domains"])
-def test_parametre_sans_defaut_donc_requis_dans_le_schema(param):
+def test_mode_sans_defaut_donc_requis_dans_le_schema():
+    param = "lab_mode"
     sig = inspect.signature(server.pki_ca_setup)
     assert param in sig.parameters, f"{param} a disparu de la signature"
     assert sig.parameters[param].default is inspect.Parameter.empty, (
@@ -171,3 +171,17 @@ async def test_aucun_domaine_de_laboratoire_n_est_ajoute_par_le_code():
     _, appels = await _appel(False, "mcp.cloud-temple.app")
     assert appels[0]["domaines"] == ["mcp.cloud-temple.app"]
     assert not any("lesur" in d for d in appels[0]["domaines"])
+
+
+async def test_omission_des_domaines_uniquement_avec_desactivation_explicite():
+    from unittest.mock import AsyncMock
+    setup = AsyncMock(return_value={"status": "ok"})
+    with patch("mcp_vault.auth.context.check_policy", return_value=None), \
+         patch("mcp_vault.auth.context.check_admin_permission", return_value=None), \
+         patch("mcp_vault.vault.pki_ca.setup_pki_ca", setup):
+        for options in ({}, {"acme": True}):
+            result = await server.pki_ca_setup(lab_mode=False, **options)
+            assert result["error_type"] == "invalid_input"
+            setup.assert_not_awaited()
+        await server.pki_ca_setup(lab_mode=False, acme=False)
+        setup.assert_awaited_once_with(False, [], "720h", acme=False)

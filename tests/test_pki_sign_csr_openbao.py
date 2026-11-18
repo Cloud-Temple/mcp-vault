@@ -641,3 +641,82 @@ def test_controle_de_duree_refuse_un_certificat_raccourci_de_60_secondes():
     complete = x509.load_pem_x509_certificate(make_cert(90 * 86400 + 1, ca=False).encode())
     assert _validity_shortfall(shortened, t0, 90 * 86400)
     assert _validity_shortfall(complete, t0, 90 * 86400) is None
+
+
+async def _check_acme_http(pki, *, enabled, role="acme-servers"):
+    import httpx
+    from mcp_vault.pki_middleware import PkiMiddleware
+
+    async def unexpected_route(scope, receive, send):
+        pytest.fail(f"Route PKI non interceptée : {scope['path']}")
+
+    transport = httpx.ASGITransport(app=PkiMiddleware(unexpected_route))
+    with patch("mcp_vault.pki_middleware.get_settings", return_value=pki.settings):
+        async with httpx.AsyncClient(transport=transport, base_url="http://pki.test") as http:
+            for prefix in ("/acme", f"/v1/{_INT_MOUNT}/acme",
+                           f"/v1/{_INT_MOUNT}/roles/{role}/acme"):
+                directory = await http.get(f"{prefix}/directory")
+                if enabled:
+                    assert directory.status_code == 200, directory.text
+                    assert directory.json()["newAccount"]
+                else:
+                    for response in (directory, await http.post(f"{prefix}/new-account", json={}),
+                                     await http.post(f"{prefix}/new-order", json={})):
+                        assert response.status_code == 404, (response.url, response.text)
+            root = await http.get("/pki/ca/root.pem")
+            assert root.status_code == 200 and "BEGIN CERTIFICATE" in root.text
+
+
+async def test_setup_sans_acme_et_rejeu_avec_signature_reelle(pki, tmp_path):
+    from mcp_vault.vault.pki_ca import get_pki_status, setup_pki_ca
+
+    client = pki.bao.client
+    for options in ({"acme": False}, {"acme": False}, {"allowed_domains": ["example.test"]}):
+        result = await setup_pki_ca(lab_mode=False, **options)
+        assert result["status"] == "ok", result
+        assert result["acme_enabled"] is False and result["acme_directory"] is None
+        config = client.read(f"{_INT_MOUNT}/config/acme")["data"]
+        assert config["enabled"] is False
+        assert client.read(f"{_INT_MOUNT}/roles/acme-servers") is None
+        status = await get_pki_status()
+        assert status["acme_enabled"] is False and status["acme_directory"] is None
+        await _check_acme_http(pki, enabled=False)
+        signed = await _sign(_csr(_name())[0])
+        assert signed["status"] == "ok", signed
+        assert _openssl_verify(tmp_path, await _root_pem(), signed["certificate"], signed["ca_chain"])
+
+
+async def test_fermeture_et_reactivation_explicite_preservent_les_roles_tiers(pki):
+    from mcp_vault.vault.pki_ca import setup_pki_ca
+
+    await _setup()
+    await _check_acme_http(pki, enabled=True)
+    client = pki.bao.client
+    root = await _root_pem()
+    client.write(f"{_INT_MOUNT}/roles/partenaire", allowed_domains=["example.test"])
+    client.write(f"{_INT_MOUNT}/config/acme", allowed_roles=["partenaire", "acme-servers"])
+    closed = await setup_pki_ca(lab_mode=False, acme=False)
+    assert closed["status"] == "ok", closed
+    assert client.read(f"{_INT_MOUNT}/roles/acme-servers") is None
+    assert client.read(f"{_INT_MOUNT}/roles/partenaire")["data"]["allowed_domains"] == ["example.test"]
+    assert client.read(f"{_INT_MOUNT}/config/acme")["data"]["allowed_roles"] == ["partenaire"]
+    await _check_acme_http(pki, enabled=False, role="partenaire")
+    assert (await _setup(acme=True))["acme_enabled"] is True
+    assert client.read(f"{_INT_MOUNT}/config/acme")["data"]["allowed_roles"] == ["acme-servers", "partenaire"]
+    await _check_acme_http(pki, enabled=True)
+    assert await _root_pem() == root
+
+
+async def test_reprise_apres_fermeture_et_echec_de_suppression_du_role(pki):
+    from mcp_vault.vault.pki_ca import setup_pki_ca
+
+    await _setup()
+    client = pki.bao.client
+    with patch.object(client, "delete", side_effect=RuntimeError("suppression interrompue")):
+        failed = await setup_pki_ca(lab_mode=False, acme=False)
+    assert failed["status"] == "error"
+    assert client.read(f"{_INT_MOUNT}/roles/acme-servers") is not None
+    assert client.read(f"{_INT_MOUNT}/config/acme")["data"]["enabled"] is False
+    await _check_acme_http(pki, enabled=False)
+    assert (await _setup())["acme_enabled"] is False
+    assert client.read(f"{_INT_MOUNT}/roles/acme-servers") is None

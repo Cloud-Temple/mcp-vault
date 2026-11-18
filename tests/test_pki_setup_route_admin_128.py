@@ -247,3 +247,16 @@ async def test_aucun_domaine_de_laboratoire_n_atteint_l_autorite_sans_etre_deman
         assert not any("lesur" in str(d) for d in domaines), (
             f"{payload!r} a fait partir un domaine de laboratoire non demandé : {domaines!r}"
         )
+
+
+async def test_desactivation_acme_sans_domaines_via_api_admin():
+    status, _, setup = await _post({"lab_mode": False, "acme": False})
+    assert status == 200
+    setup.assert_awaited_once_with(False, [], "720h", acme=False)
+
+
+@pytest.mark.parametrize("acme", [None, "false", 0, 1])
+async def test_api_refuse_un_commutateur_acme_ambigu(acme):
+    status, _, setup = await _post({"lab_mode": False, "acme": acme, "allowed_domains": ["example.test"]})
+    assert status == 400
+    setup.assert_not_awaited()

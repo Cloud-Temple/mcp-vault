@@ -765,8 +765,10 @@ def pki_group(ctx):
 @click.option("--lab/--prod", default=None,
               help="OBLIGATOIRE. --lab : enrôlement ACME LIBRE (bancs). "
                    "--prod : enrôlement sur invitation (new-account-required).")
+@click.option("--acme/--no-acme", default=None,
+              help="Activer ou fermer ACME. Omis : conserve une fermeture existante.")
 @click.option("--domains", default=None,
-              help="OBLIGATOIRE. Domaines ACME autorisés (virgules). Aucun défaut.")
+              help="Domaines ACME autorisés (virgules). Obligatoire sauf avec --no-acme.")
 @click.option("--ttl", default="720h", help="TTL max des certificats feuilles")
 @click.option("--root-ttl", default=None,
               help="Durée de la racine et plafond de son mount (ex. 219000h ≈ 25 ans). "
@@ -776,7 +778,7 @@ def pki_group(ctx):
                    "Omis : plafond existant conservé.")
 @click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
 @click.pass_context
-def pki_setup_cmd(ctx, lab, domains, ttl, root_ttl, int_ttl, output_json):
+def pki_setup_cmd(ctx, lab, domains, ttl, root_ttl, int_ttl, acme, output_json):
     """Initialiser la PKI interne (CA racine + intermédiaire + ACME).
 
     \b
@@ -813,7 +815,7 @@ def pki_setup_cmd(ctx, lab, domains, ttl, root_ttl, int_ttl, output_json):
             "Cette commande installe une autorité de certification : le mode ne "
             "peut pas être deviné."
         )
-    if not domains or not domains.strip():
+    if acme is not False and (not domains or not domains.strip()):
         raise click.UsageError(
             "--domains est OBLIGATOIRE et n'a aucun défaut : nommez explicitement "
             "les domaines ACME autorisés (ex. --domains 'mcp.cloud-temple.app')."
@@ -821,7 +823,11 @@ def pki_setup_cmd(ctx, lab, domains, ttl, root_ttl, int_ttl, output_json):
 
     async def _run():
         client = MCPClient(ctx.obj["url"], ctx.obj["token"])
-        args = {"lab_mode": lab, "allowed_domains": domains, "leaf_ttl": ttl}
+        args = {"lab_mode": lab, "leaf_ttl": ttl}
+        if domains is not None:
+            args["allowed_domains"] = domains
+        if acme is not None:
+            args["acme"] = acme
         # Omission ≠ défaut : une durée absente conserve les plafonds existants (#206).
         args.update({k: v for k, v in (("root_ttl", root_ttl), ("int_ttl", int_ttl)) if v})
         result = await client.call_tool("pki_ca_setup", args)

@@ -199,7 +199,7 @@ async def _sign_and_import_intermediate(client, common_name: str,
     return new_issuer_id
 
 
-def _eab_required(eab_policy: str) -> bool:
+def _eab_required(eab_policy: Optional[str]) -> bool:
     """True si la politique EAB impose un External Account Binding."""
     return eab_policy in ("new-account-required", "always-required")
 
@@ -343,21 +343,32 @@ def _mount_pki_engine(client, mount: str, max_ttl: str) -> None:
             raise
 
 
-def _configured_acme_roles(client) -> list[str]:
+def _acme_closed(data) -> bool:
+    # Un mount vierge est aussi disabled, mais sa politique vaut sign-verbatim.
+    return (isinstance(data, dict) and data.get("enabled") is False
+            and data.get("default_directory_policy") == "forbid")
+
+
+def _read_acme_setup(client) -> tuple[bool, list[str]]:
     """Conserve les rôles nommés dans config/acme, pas tous les rôles du mount."""
     response = bao_step_sync(lambda: client.read(f"{_INT_MOUNT}/config/acme"))
     # hvac.read rend None pour un 404 (notamment avant le premier montage).
     if response is None:
-        return [_ACME_ROLE_NAME]
+        return False, [_ACME_ROLE_NAME]
     data = response.get("data") if isinstance(response, dict) else None
     roles = data.get("allowed_roles") if isinstance(data, dict) else None
     if (not isinstance(roles, list) or not roles
             or any(not isinstance(role, str) or not role.strip() for role in roles)):
         raise ValueError("Configuration ACME existante invalide : allowed_roles")
+    if not isinstance(data.get("enabled"), bool):
+        raise ValueError("Configuration ACME existante invalide : enabled")
+    if not data["enabled"] and not data.get("default_directory_policy"):
+        raise ValueError("Configuration ACME existante invalide : default_directory_policy")
+    closed = _acme_closed(data)
     # Le défaut OpenBao d'un mount neuf est ["*"]. Le setup le restreint
     # toujours au rôle maison, comme auparavant ; aucun wildcard n'est promu.
     if roles == ["*"]:
-        return [_ACME_ROLE_NAME]
+        return closed, [_ACME_ROLE_NAME]
     if "*" in roles:
         raise ValueError("Configuration ACME ambiguë : wildcard et rôles nommés")
     preserved = list(dict.fromkeys([_ACME_ROLE_NAME, *roles]))
@@ -370,14 +381,15 @@ def _configured_acme_roles(client) -> list[str]:
         response = bao_step_sync(lambda: client.read(f"{_INT_MOUNT}/roles/{role}"))
         if not isinstance(response, dict) or not isinstance(response.get("data"), dict):
             raise ValueError(f"Rôle ACME configuré absent ou illisible : {role}")
-    return preserved
+    return closed, preserved
 
 
 async def setup_pki_ca(lab_mode: bool = True,
                        allowed_domains: Optional[list] = None,
                        leaf_ttl: str = "720h",
                        root_ttl: Optional[str] = None,
-                       int_ttl: Optional[str] = None) -> dict:
+                       int_ttl: Optional[str] = None,
+                       acme: Optional[bool] = None) -> dict:
     """
     Configure la hiérarchie PKI complète (racine + intermédiaire + ACME).
 
@@ -392,10 +404,12 @@ async def setup_pki_ca(lab_mode: bool = True,
 
     Sync S3 forcée après setup (durabilité CA critique).
     """
+    if acme is not None and not isinstance(acme, bool):
+        return {"status": "error", "message": "acme doit être un booléen"}
     if allowed_domains is None:
-        allowed_domains = ["*.lesur.lan", "lesur.lan"] if lab_mode else []
+        allowed_domains = ["*.lesur.lan", "lesur.lan"] if lab_mode and acme is not False else []
 
-    if not allowed_domains:
+    if not allowed_domains and acme is not False:
         return {"status": "error", "message": "allowed_domains requis"}
 
     # MOYEN : validation du format des domaines autorisés (FQDN ou wildcard *.domain.tld)
@@ -414,7 +428,10 @@ async def setup_pki_ca(lab_mode: bool = True,
         try:
             # Lecture avant toute mutation : un accès refusé ou un état illisible
             # ne doit jamais être pris pour une liste vide à écraser.
-            acme_roles = await run_blocking(_configured_acme_roles, client)
+            closed, acme_roles = await run_blocking(_read_acme_setup, client)
+            enable_acme = not closed if acme is None else acme
+            if enable_acme and _CSR_ROLE_NAME in acme_roles:
+                raise ValueError("Le rôle de signature de CSR ne peut pas être exposé par ACME")
 
             # Durées effectives (issue #206) : explicite > plafond existant > défaut.
             root_sec, root_ttl_eff = _resolve_ttl(
@@ -427,6 +444,22 @@ async def setup_pki_ca(lab_mode: bool = True,
             if not int_sec < root_sec or (leaf_sec is not None and not leaf_sec < int_sec):
                 raise PkiTtlError("invalid_input",
                                   "Durées incohérentes : leaf_ttl < int_ttl < root_ttl requis")
+
+            if not enable_acme:
+                # Fermer avant toute mutation d'autorité. Une panne ultérieure
+                # laisse le marqueur persistant en place, y compris au rejeu.
+                await run_blocking(_mount_pki_engine, client, _INT_MOUNT, int_ttl_eff)
+                other_roles = [role for role in acme_roles if role != _ACME_ROLE_NAME]
+                await bao_step(lambda: client.write(
+                    f"{_INT_MOUNT}/config/acme", enabled=False,
+                    default_directory_policy="forbid", allowed_roles=other_roles or ["*"],
+                ))
+                role_path = f"{_INT_MOUNT}/roles/{_ACME_ROLE_NAME}"
+                existing = await bao_step(lambda: client.read(role_path))
+                if existing is not None:
+                    if not isinstance(existing, dict) or not isinstance(existing.get("data"), dict):
+                        raise ValueError("Rôle ACME illisible après fermeture du service")
+                    await bao_step(lambda: client.delete(role_path))
 
             # ── 1. CA Racine ────────────────────────────────────────────────
             await run_blocking(_mount_pki_engine, client, _ROOT_MOUNT, root_ttl_eff)
@@ -477,25 +510,26 @@ async def setup_pki_ca(lab_mode: bool = True,
             logger.info("✅ CA racine PKI configurée")
 
             # ── 2. CA Intermédiaire ─────────────────────────────────────────
-            await run_blocking(_mount_pki_engine, client, _INT_MOUNT, int_ttl_eff)
+            if enable_acme:
+                await run_blocking(_mount_pki_engine, client, _INT_MOUNT, int_ttl_eff)
 
-            # Autoriser OpenBao à renvoyer les headers de réponse ACME (RFC 8555).
-            # Sans ce tuning, OpenBao strippe Replay-Nonce/Link/Location et
-            # l'enrôlement ACME (newNonce, newOrder) échoue côté client — y compris
-            # en lab. C'est un prérequis dur : on fait échouer le setup si le tuning
-            # échoue, plutôt que d'annoncer une PKI opérationnelle qui ne l'est pas.
-            try:
-                await bao_step(lambda: client.sys.tune_mount_configuration(
-                    path=_INT_MOUNT,
-                    allowed_response_headers=_ACME_RESPONSE_HEADERS,
-                ))
-                logger.info("✅ Tuning ACME headers : %s", ", ".join(_ACME_RESPONSE_HEADERS))
-            except Exception as e:
-                logger.error("❌ Tuning allowed_response_headers échoué : %s", type(e).__name__)
-                raise RuntimeError(
-                    "Tuning ACME headers (Replay-Nonce/Link/Location) échoué — "
-                    "l'enrôlement ACME serait cassé ; setup PKI interrompu"
-                ) from e
+                # Autoriser OpenBao à renvoyer les headers de réponse ACME (RFC 8555).
+                # Sans ce tuning, OpenBao strippe Replay-Nonce/Link/Location et
+                # l'enrôlement ACME (newNonce, newOrder) échoue côté client — y compris
+                # en lab. C'est un prérequis dur : on fait échouer le setup si le tuning
+                # échoue, plutôt que d'annoncer une PKI opérationnelle qui ne l'est pas.
+                try:
+                    await bao_step(lambda: client.sys.tune_mount_configuration(
+                        path=_INT_MOUNT,
+                        allowed_response_headers=_ACME_RESPONSE_HEADERS,
+                    ))
+                    logger.info("✅ Tuning ACME headers : %s", ", ".join(_ACME_RESPONSE_HEADERS))
+                except Exception as e:
+                    logger.error("❌ Tuning allowed_response_headers échoué : %s", type(e).__name__)
+                    raise RuntimeError(
+                        "Tuning ACME headers (Replay-Nonce/Link/Location) échoué — "
+                        "l'enrôlement ACME serait cassé ; setup PKI interrompu"
+                    ) from e
 
             try:
                 await _sign_and_import_intermediate(
@@ -519,52 +553,54 @@ async def setup_pki_ca(lab_mode: bool = True,
             ))
             logger.info("✅ CA intermédiaire PKI configurée")
 
-            # ── 3. Rôle d'émission ACME ─────────────────────────────────────
-            await bao_step(lambda: client.write(
-                f"{_INT_MOUNT}/roles/{_ACME_ROLE_NAME}",
-                server_flag=True,
-                client_flag=False,
-                allow_any_name=False,
-                allow_localhost=False,
-                allow_ip_sans=False,
-                allowed_domains=allowed_domains,
-                allow_bare_domains=True,   # émettre pour les domaines exactement listés
-                allow_subdomains=True,
-                allow_glob_domains=True,   # supporter les patterns *.domain dans allowed_domains
-                allow_wildcard_certificates=True,
-                enforce_hostnames=True,
-                max_ttl=leaf_ttl,
-                no_store=False,
-                key_type="any",   # clients ACME (Caddy) génèrent souvent des clés EC — ne pas imposer RSA
-                require_cn=False,
-            ))
-            logger.info(f"✅ Rôle ACME '{_ACME_ROLE_NAME}' configuré pour {allowed_domains}")
+            eab_policy = None
+            if enable_acme:
+                # ── 3. Rôle d'émission ACME ─────────────────────────────────────
+                await bao_step(lambda: client.write(
+                    f"{_INT_MOUNT}/roles/{_ACME_ROLE_NAME}",
+                    server_flag=True,
+                    client_flag=False,
+                    allow_any_name=False,
+                    allow_localhost=False,
+                    allow_ip_sans=False,
+                    allowed_domains=allowed_domains,
+                    allow_bare_domains=True,   # émettre pour les domaines exactement listés
+                    allow_subdomains=True,
+                    allow_glob_domains=True,   # supporter les patterns *.domain dans allowed_domains
+                    allow_wildcard_certificates=True,
+                    enforce_hostnames=True,
+                    max_ttl=leaf_ttl,
+                    no_store=False,
+                    key_type="any",   # clients ACME (Caddy) génèrent souvent des clés EC — ne pas imposer RSA
+                    require_cn=False,
+                ))
+                logger.info(f"✅ Rôle ACME '{_ACME_ROLE_NAME}' configuré pour {allowed_domains}")
 
-            # ── 3b. Cluster path (requis par OpenBao pour ACME) ─────────────
-            # OpenBao génère des URLs absolues dans le directory ACME basées
-            # sur ce chemin. PkiMiddleware gère les deux patterns :
-            #   /acme/*               (URL courte, user-facing)
-            #   /v1/_sys_pki_int/acme/* (URL longue, générée par OpenBao)
-            # Note : hvac.write(path, **kwargs) a path en 1er arg → collision
-            # avec le champ body OpenBao "path". On passe par l'adaptateur.
-            _cluster_path = f"{base}/v1/{_INT_MOUNT}"
-            await bao_step(lambda: client._adapter.post(
-                f"/v1/{_INT_MOUNT}/config/cluster",
-                json={"path": _cluster_path},
-            ))
-            logger.info(f"✅ Cluster path PKI configuré : {_cluster_path}")
+                # ── 3b. Cluster path (requis par OpenBao pour ACME) ─────────────
+                # OpenBao génère des URLs absolues dans le directory ACME basées
+                # sur ce chemin. PkiMiddleware gère les deux patterns :
+                #   /acme/*               (URL courte, user-facing)
+                #   /v1/_sys_pki_int/acme/* (URL longue, générée par OpenBao)
+                # Note : hvac.write(path, **kwargs) a path en 1er arg → collision
+                # avec le champ body OpenBao "path". On passe par l'adaptateur.
+                _cluster_path = f"{base}/v1/{_INT_MOUNT}"
+                await bao_step(lambda: client._adapter.post(
+                    f"/v1/{_INT_MOUNT}/config/cluster",
+                    json={"path": _cluster_path},
+                ))
+                logger.info(f"✅ Cluster path PKI configuré : {_cluster_path}")
 
-            # ── 4. Serveur ACME ─────────────────────────────────────────────
-            eab_policy = _EAB_POLICY_LAB if lab_mode else _EAB_POLICY_PROD
-            await bao_step(lambda: client.write(
-                f"{_INT_MOUNT}/config/acme",
-                enabled=True,
-                default_directory_policy=f"role:{_ACME_ROLE_NAME}",
-                allowed_roles=acme_roles,
-                allowed_issuers=["*"],
-                eab_policy=eab_policy,
-            ))
-            logger.info("✅ Serveur ACME activé (eab_policy=%s)", eab_policy)
+                # ── 4. Serveur ACME ─────────────────────────────────────────────
+                eab_policy = _EAB_POLICY_LAB if lab_mode else _EAB_POLICY_PROD
+                await bao_step(lambda: client.write(
+                    f"{_INT_MOUNT}/config/acme",
+                    enabled=True,
+                    default_directory_policy=f"role:{_ACME_ROLE_NAME}",
+                    allowed_roles=acme_roles,
+                    allowed_issuers=["*"],
+                    eab_policy=eab_policy,
+                ))
+                logger.info("✅ Serveur ACME activé (eab_policy=%s)", eab_policy)
 
             # ── 5. Sync S3 forcée ───────────────────────────────────────────
             from ..s3_sync import upload_to_s3
@@ -585,13 +621,14 @@ async def setup_pki_ca(lab_mode: bool = True,
                 "lab_mode": lab_mode,
                 "root_mount": _ROOT_MOUNT,
                 "int_mount": _INT_MOUNT,
-                "acme_directory": f"{base}/acme/directory",
+                "acme_enabled": enable_acme,
+                "acme_directory": f"{base}/acme/directory" if enable_acme else None,
                 "root_pem_url": f"{base}/pki/ca/root.pem",
                 "chain_pem_url": f"{base}/pki/ca/chain.pem",
                 "crl_url": f"{base}/pki/ca/crl.pem",
                 "root_expires": root_expiry,
                 "root_fingerprint_sha256": root_fp,
-                "allowed_domains": allowed_domains,
+                "allowed_domains": allowed_domains if enable_acme else [],
                 "leaf_ttl": leaf_ttl,
                 "root_ttl": root_ttl_eff,
                 "int_ttl": int_ttl_eff,
@@ -656,13 +693,12 @@ async def get_pki_status() -> dict:
         except Exception:
             int_expires = "inconnu"
 
-        try:
-            acme_cfg = await bao_step(lambda: client.read(f"{_INT_MOUNT}/config/acme"))
-            acme_data = acme_cfg.get("data", {}) if acme_cfg else {}
-            acme_enabled = acme_data.get("enabled", False)
-            eab_policy = acme_data.get("eab_policy", "unknown")
-        except Exception:
-            acme_enabled, eab_policy = False, "unknown"
+        acme_cfg = await bao_step(lambda: client.read(f"{_INT_MOUNT}/config/acme"))
+        acme_data = acme_cfg.get("data") if isinstance(acme_cfg, dict) else None
+        if not isinstance(acme_data, dict) or not isinstance(acme_data.get("enabled"), bool):
+            return {"status": "error", "message": "État ACME illisible dans OpenBao"}
+        acme_enabled = acme_data["enabled"]
+        eab_policy = acme_data.get("eab_policy", "unknown") if acme_enabled else None
 
         base = _base_url()
         return {
@@ -675,7 +711,7 @@ async def get_pki_status() -> dict:
             "acme_enabled": acme_enabled,
             "eab_policy": eab_policy,
             "eab_required": _eab_required(eab_policy),
-            "acme_directory": f"{base}/acme/directory",
+            "acme_directory": f"{base}/acme/directory" if acme_enabled else None,
             "root_pem_url": f"{base}/pki/ca/root.pem",
             "chain_pem_url": f"{base}/pki/ca/chain.pem",
             "crl_url": f"{base}/pki/ca/crl.pem",
@@ -1119,14 +1155,15 @@ async def sign_csr(csr_pem: str) -> dict:
                     "message": "Configuration ACME illisible : signature refusée par précaution"}
         # Fermé par défaut : seule l'absence franche (404 → None) n'expose rien.
         # Toute autre forme doit porter une liste de noms de rôles non vides.
+        data = acme.get("data") if isinstance(acme, dict) else None
         if acme is None:
             acme_roles = []
         else:
-            data = acme.get("data") if isinstance(acme, dict) else None
             acme_roles = data.get("allowed_roles") if isinstance(data, dict) else None
         if (not isinstance(acme_roles, list)
                 or any(not isinstance(r, str) or not r.strip() for r in acme_roles)
-                or _CSR_ROLE_NAME in acme_roles or "*" in acme_roles):
+                or _CSR_ROLE_NAME in acme_roles
+                or ("*" in acme_roles and not (acme_roles == ["*"] and _acme_closed(data)))):
             return {"status": "error", "error_type": "unsafe_configuration",
                     "message": f"La configuration ACME autorise le rôle {_CSR_ROLE_NAME} "
                                "(nommément ou par '*') : signature refusée. Relancer "

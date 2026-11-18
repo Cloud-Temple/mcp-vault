@@ -237,3 +237,12 @@ def test_prod_ne_peut_pas_etre_obtenu_par_defaut():
                  ["pki", "setup", "--domains", "x.fr", "--ttl", "--prod"]):
         appels, _ = _run(argv)
         assert _setups(appels) == [], f"{argv} a émis un appel sans mode explicite"
+
+
+def test_acme_fermeture_et_reouverture_explicites():
+    appels, res = _run(["pki", "setup", "--prod", "--no-acme"])
+    assert res.exit_code == 0, res.output
+    assert _setups(appels)[0]["arguments"] == {"lab_mode": False, "leaf_ttl": "720h", "acme": False}
+    appels, res = _run(["pki", "setup", "--prod", "--acme", "--domains", "example.test"])
+    assert res.exit_code == 0, res.output
+    assert _setups(appels)[0]["arguments"]["acme"] is True
