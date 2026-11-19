@@ -1,6 +1,6 @@
 # Documentation Technique — MCP Vault
 
-> **Version** : 0.22.0 | **Date** : 2026-11-17 | **Auteur** : Cloud Temple
+> **Version** : 0.23.0 | **Date** : 2026-11-19 | **Auteur** : Cloud Temple
 > **Licence** : Apache 2.0 | **Statut** : ✅ Production-ready (audit V2.1 complété + PKI interne v0.5.1)
 
 ---
@@ -561,7 +561,8 @@ OpenBao reste responsable des autorisations ACME, de l'EAB et des SAN du rôle.
 `pki_ca_setup(lab_mode=False, acme=False)`. L’API admin accepte
 `POST /admin/api/pki/setup` avec `{"lab_mode":false,"acme":false}` et la CLI
 accepte `pki setup --prod --no-acme`. Sur OpenBao, le setup applique
-`enabled=false` et `default_directory_policy=forbid` avant de supprimer
+`enabled=false`, `default_directory_policy=forbid` et
+`eab_policy=always-required` avant de supprimer
 le rôle maison `acme-servers`. Les autres rôles nommés sont conservés.
 OpenBao exige au moins une entrée dans `allowed_roles`. S’il ne reste aucun
 rôle tiers, le setup y met `["*"]` avec ACME fermé. La garde CSR accepte ce
@@ -573,6 +574,7 @@ des domaines du rôle maison et devient donc indisponible.
 Sur une PKI neuve, ACME est actif par défaut. Une fois le service fermé, un
 ancien appel de setup avec domaines conserve la fermeture. Pour le rouvrir,
 passer `acme=true` avec des domaines explicites (CLI : `--acme --domains example.test`).
+Le setup rétablit alors la politique EAB du mode demandé (lab ou production).
 Une version antérieure à #210 peut réactiver ACME si son setup est rejoué.
 
 En mode actif, le setup lit `config/acme` avant toute mutation et conserve sa liste explicite

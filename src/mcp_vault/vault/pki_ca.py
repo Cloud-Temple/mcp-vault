@@ -453,6 +453,7 @@ async def setup_pki_ca(lab_mode: bool = True,
                 await bao_step(lambda: client.write(
                     f"{_INT_MOUNT}/config/acme", enabled=False,
                     default_directory_policy="forbid", allowed_roles=other_roles or ["*"],
+                    eab_policy="always-required",
                 ))
                 role_path = f"{_INT_MOUNT}/roles/{_ACME_ROLE_NAME}"
                 existing = await bao_step(lambda: client.read(role_path))
