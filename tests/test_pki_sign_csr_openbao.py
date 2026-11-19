@@ -409,6 +409,18 @@ async def test_role_csr_expose_par_acme_refus_sans_emission(pki):
     assert (await _sign(_csr(_name())[0]))["status"] == "ok"
 
 
+@pytest.mark.parametrize("enabled,directory_policy", [(True, "forbid"), (False, "sign-verbatim")])
+async def test_joker_refuse_si_le_marqueur_de_fermeture_est_incomplet(pki, enabled, directory_policy):
+    await _setup()
+    client = pki.bao.client
+    client.write(f"{_INT_MOUNT}/config/acme", allowed_roles=["*"], enabled=enabled,
+                 default_directory_policy=directory_policy, eab_policy="always-required")
+    before = _cert_count(client)
+    result = await _sign(_csr(_name())[0])
+    assert result["error_type"] == "unsafe_configuration", result
+    assert _cert_count(client) == before
+
+
 # ── 5. Autorisations : un jeton dédié qui ne sait QUE signer ────────────────
 
 def _policy_store():
@@ -677,13 +689,16 @@ async def test_setup_sans_acme_et_rejeu_avec_signature_reelle(pki, tmp_path):
         assert result["acme_enabled"] is False and result["acme_directory"] is None
         config = client.read(f"{_INT_MOUNT}/config/acme")["data"]
         assert config["enabled"] is False
+        assert config["allowed_roles"] == ["*"]
+        assert config["eab_policy"] == "always-required"
         assert client.read(f"{_INT_MOUNT}/roles/acme-servers") is None
         status = await get_pki_status()
         assert status["acme_enabled"] is False and status["acme_directory"] is None
-        await _check_acme_http(pki, enabled=False)
         signed = await _sign(_csr(_name())[0])
         assert signed["status"] == "ok", signed
         assert _openssl_verify(tmp_path, await _root_pem(), signed["certificate"], signed["ca_chain"])
+        assert client.read(f"{_INT_MOUNT}/roles/csr-servers") is not None
+        await _check_acme_http(pki, enabled=False, role="csr-servers")
 
 
 async def test_fermeture_et_reactivation_explicite_preservent_les_roles_tiers(pki):
@@ -702,7 +717,9 @@ async def test_fermeture_et_reactivation_explicite_preservent_les_roles_tiers(pk
     assert client.read(f"{_INT_MOUNT}/config/acme")["data"]["allowed_roles"] == ["partenaire"]
     await _check_acme_http(pki, enabled=False, role="partenaire")
     assert (await _setup(acme=True))["acme_enabled"] is True
-    assert client.read(f"{_INT_MOUNT}/config/acme")["data"]["allowed_roles"] == ["acme-servers", "partenaire"]
+    reopened = client.read(f"{_INT_MOUNT}/config/acme")["data"]
+    assert reopened["allowed_roles"] == ["acme-servers", "partenaire"]
+    assert reopened["eab_policy"] == "not-required"  # _setup réactive en mode lab.
     await _check_acme_http(pki, enabled=True)
     assert await _root_pem() == root
 

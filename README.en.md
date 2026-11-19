@@ -8,7 +8,7 @@ Standalone PostgreSQL: [installation, four deployment paths and safe return](doc
 
 MCP Vault centralizes the secrets, access policies, and temporary credentials required by AI agents. It embeds [OpenBao](https://openbao.org/) for encryption and storage, adds an authenticated and policy-controlled MCP API, and provides an administration console and CLI.
 
-**Version**: 0.22.0 · **License**: [Apache-2.0](LICENSE)
+**Version**: 0.23.0 · **License**: [Apache-2.0](LICENSE)
 
 > [!IMPORTANT]
 > MCP Vault is a security component intended for controlled environments. Read the [security model](#security-model) and [security audit](DESIGN/mcp-vault/SECURITY_AUDIT.md) before using it in production.
@@ -155,6 +155,7 @@ The ACME proxy also supports native role-scoped client endpoints. Network
 publication, EAB admission and role restrictions remain operator configuration:
 see the [PKI contract](DESIGN/mcp-vault/TECHNICAL.md#311b-vaultpki_capy--pki-certificate-authority-v051).
 
+For a PKI dedicated to signing CSRs, `pki setup --prod --no-acme` disables ACME.
 `pki_sign_csr` signs a CSR without ever seeing the private key, under a role
 restricted to a single DNS name below `PKI_CSR_DOMAIN` (disabled while that
 variable is empty). Root and intermediate lifetimes are set at setup and
