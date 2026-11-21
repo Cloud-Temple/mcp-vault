@@ -1605,6 +1605,7 @@ async def pki_ca_public_key() -> dict:
     """
     Retourne la CA racine PEM avec son empreinte SHA-256 et l'URL stable.
 
+    crl_next_update donne l'échéance de la CRL intermédiaire (UTC), si disponible.
     Utiliser l'URL stable pour les clients httpx (bundle CA) et le Caddyfile.
     """
     from .auth.context import check_policy

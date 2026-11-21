@@ -328,10 +328,10 @@ class TestS3SyncAfterMutations:
                 "default": "issuer-uuid-old",
             }
         }))
-        client.read = MagicMock(side_effect=lambda path: (
-            None if path == "_sys_pki_int/config/acme"
-            else {"data": {"default": "issuer-uuid-old"}}
-        ))
+        client.read = MagicMock(side_effect={
+            "_sys_pki_int/config/issuers": {"data": {"default": ""}},
+            "_sys_pki_int/crl/rotate": {"data": {"success": True}},
+        }.get)
         client.list = MagicMock(return_value={"data": {"keys": []}})
         client.delete = MagicMock()
         return client
@@ -411,6 +411,7 @@ class TestS3SyncAfterMutations:
 
         mock_client = MagicMock()
         mock_client.write = MagicMock(side_effect=pki_write({"data": {"revocation_time": 1234567890}}))
+        mock_client.read.return_value = {"data": {"success": True}}
 
         with patch("mcp_vault.vault.pki_ca._get_hvac_client", return_value=mock_client), \
              patch("mcp_vault.s3_sync.upload_to_s3", new_callable=AsyncMock, return_value=True), \
@@ -522,7 +523,8 @@ class TestIssueCertificate:
         """
         from mcp_vault.vault.pki_ca import setup_pki_ca, _ACME_ROLE_NAME
         mock_client = MagicMock()
-        mock_client.read.return_value = None  # config/acme absente avant setup
+        mock_client.read.side_effect = {"_sys_pki_int/config/issuers": {"data": {"default": ""}}}.get
+        mock_client.list.return_value = None
         mock_client.write = MagicMock(side_effect=pki_write({"data": {
             "certificate": "", "csr": "-----BEGIN CERTIFICATE REQUEST-----\nM\n-----END CERTIFICATE REQUEST-----",
             "imported_issuers": ["i"], "default": "i",
@@ -676,11 +678,11 @@ class TestEabPolicyProd:
             "data": {
                 "certificate": "",
                 "csr": "-----BEGIN CERTIFICATE REQUEST-----\nMOCK\n-----END CERTIFICATE REQUEST-----",
+                "imported_issuers": ["issuer-uuid-new"],
             }
         }))
-        client.read = MagicMock(side_effect=lambda path: (
-            None if path == "_sys_pki_int/config/acme" else {"data": {}}
-        ))
+        client.read.side_effect = {"_sys_pki_int/config/issuers": {"data": {"default": ""}}}.get
+        client.list.return_value = None
         return client
 
     def _acme_write_kwargs(self, mock_client):

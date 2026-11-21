@@ -1,6 +1,6 @@
 # Documentation Technique — MCP Vault
 
-> **Version** : 0.23.0 | **Date** : 2026-11-19 | **Auteur** : Cloud Temple
+> **Version** : 0.23.1 | **Date** : 2026-11-21 | **Auteur** : Cloud Temple
 > **Licence** : Apache 2.0 | **Statut** : ✅ Production-ready (audit V2.1 complété + PKI interne v0.5.1)
 
 ---
@@ -534,7 +534,9 @@ CA interne souveraine basée sur l'engine PKI d'OpenBao. CA globale (non par vau
 
 **Sécurité** : validation regex `serial_number` (`^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2})+$`), validation FQDN/wildcard `allowed_domains`, `asyncio.Lock` sur `setup_pki_ca`, `follow_redirects=False` dans httpx.
 
-**Durées des autorités** *(#206)* : `root_ttl` / `int_ttl` (setup) et `int_ttl` (rotation) fixent la durée du certificat **et** le `max_lease_ttl` du mount — OpenBao 2.5.1 tronque **silencieusement** un certificat au plafond de son mount (une racine demandée à 25 ans sort à 10 ans sur un mount de 10 ans, mesuré). Omises, elles **conservent** les plafonds existants (défauts 87600h / 43800h à la création) : un second setup sans durée ne ramène jamais une PKI 25 ans / 1 an aux défauts. La racine n'est générée qu'une fois (`root_created`). Contraintes : `leaf_ttl < int_ttl < root_ttl`. Un intermédiaire signé plus court que demandé (`ttl_truncated`) ou qui survivrait à la racine (`issuer_expires_too_soon` — OpenBao le signe pourtant, mesuré) n'est **pas importé** : aucun émetteur ajouté, défaut et plafond intermédiaire inchangés. Le plafond intermédiaire n'est réglé qu'après un import réussi.
+**Durées des autorités** *(#206, #214)*. `root_ttl` et `int_ttl` fixent la durée des certificats lors de la création et le `max_lease_ttl` des mounts. Au rejeu, le setup conserve les certificats d’autorité et règle les plafonds explicitement fournis. Une durée omise conserve le plafond existant. Les défauts à la création sont `87600h` pour la racine et `43800h` pour l’intermédiaire. La rotation explicite applique `int_ttl` au nouveau certificat et à son mount. Les durées doivent respecter `leaf_ttl < int_ttl < root_ttl`. OpenBao 2.5.1 peut tronquer le certificat au plafond du mount ou signer un intermédiaire qui survit à la racine. MCP Vault refuse alors l’import (`ttl_truncated` ou `issuer_expires_too_soon`) et conserve le plafond intermédiaire.
+
+**CRL intermédiaire.** Le setup active la publication, fixe une durée de validité de `168h` et demande à OpenBao de renouveler la liste de révocation quand il reste `72h` ou moins. Sur une PKI existante, rejouer le setup après la mise à niveau applique le réglage et régénère une CRL absente, expirée ou de durée différente avec le même émetteur. `pki_ca_public_key` renvoie l’échéance `crl_next_update` au format ISO 8601 UTC, ou `null` si la CRL est indisponible. La même échéance est lisible dans `/pki/ca/crl.pem` avec `openssl crl -noout -nextupdate`. La façade publie la CRL de l’intermédiaire courant.
 
 **Jamais de troncature silencieuse** *(#206)* : `pki_issue_cert` et `pki_sign_csr` comparent le certificat rendu à la durée demandée (référence prise avant l'appel, tolérance 1 s = précision X.509) ; un certificat plus court n'est pas remis (`ttl_truncated`), sa clé non plus. Une feuille qui dépasserait un certificat de sa chaîne — y compris sur une PKI héritée dont l'intermédiaire survit à la racine — est refusée (`issuer_expires_too_soon`) : il faut faire tourner l'intermédiaire au moins une durée de feuille avant sa fin (90 jours pour la cible DBaaS).
 

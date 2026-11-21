@@ -49,6 +49,12 @@ _CSR_MAX_PEM_BYTES = 16 * 1024
 # n'en donne pas. Une PKI existante conserve ses plafonds (issue #206).
 _DEFAULT_ROOT_TTL = "87600h"
 _DEFAULT_INT_TTL = "43800h"
+_INTERMEDIATE_CRL_CONFIG = {
+    "expiry": "168h",
+    "auto_rebuild": True,
+    "auto_rebuild_grace_period": "72h",
+    "disable": False,
+}
 # X.509 encode les dates à la seconde : seule tolérance admise au contrôle de durée.
 _VALIDITY_SLACK = timedelta(seconds=1)
 # Format TTL OpenBao (ex : 720h, 30m, 90d) — validation locale.
@@ -292,6 +298,56 @@ async def _read_pem_url(path: str) -> str:
     return text
 
 
+async def _has_intermediate_issuer(client) -> bool:
+    response = await bao_step(lambda: client.read(f"{_INT_MOUNT}/config/issuers"))
+    data = response.get("data") if isinstance(response, dict) else None
+    default = data.get("default") if isinstance(data, dict) else None
+    if not isinstance(default, str):
+        raise ValueError("Configuration des émetteurs intermédiaires illisible")
+    if default:
+        response = await bao_step(lambda: client.read(f"{_INT_MOUNT}/issuer/default"))
+        issuer = response.get("data") if isinstance(response, dict) else None
+        if not isinstance(issuer, dict) or issuer.get("issuer_id") != default or not issuer.get("key_id"):
+            raise ValueError("Émetteur intermédiaire par défaut introuvable ou sans clé")
+        return True
+
+    response = await bao_step(lambda: client.list(f"{_INT_MOUNT}/issuers"))
+    if response is None:  # OpenBao renvoie 404 quand la liste est vide.
+        return False
+    data = response.get("data") if isinstance(response, dict) else None
+    keys = data.get("keys") if isinstance(data, dict) else None
+    if not isinstance(keys, list) or keys:
+        raise ValueError("Inventaire des émetteurs intermédiaires illisible ou sans émetteur par défaut")
+    return False
+
+
+async def _read_intermediate_crl() -> x509.CertificateRevocationList:
+    pem = await _read_pem_url(f"{_INT_MOUNT}/crl/pem")
+    return x509.load_pem_x509_crl(pem.encode())
+
+
+async def _rotate_intermediate_crl(client) -> None:
+    # OpenBao expose la régénération sur un GET authentifié (POST → 405).
+    response = await bao_step(lambda: client.read(f"{_INT_MOUNT}/crl/rotate"))
+    if not response or response.get("data", {}).get("success") is not True:
+        raise ValueError("OpenBao n'a pas confirmé la régénération de la CRL intermédiaire")
+
+
+async def _refresh_intermediate_crl_if_needed(client) -> None:
+    try:
+        crl = await _read_intermediate_crl()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code != 404:
+            raise
+        crl = None
+    except ValueError:  # CRL absente (204) ou PEM illisible.
+        crl = None
+    expected_lifetime = timedelta(seconds=_ttl_to_seconds(_INTERMEDIATE_CRL_CONFIG["expiry"]))
+    if (crl is None or crl.next_update_utc <= datetime.now(timezone.utc)
+            or crl.next_update_utc - crl.last_update_utc != expected_lifetime):
+        await _rotate_intermediate_crl(client)
+
+
 def is_pki_initialized() -> bool:
     """Retourne True si les deux mounts PKI système sont montés."""
     client = _get_hvac_client()
@@ -393,7 +449,7 @@ async def setup_pki_ca(lab_mode: bool = True,
     """
     Configure la hiérarchie PKI complète (racine + intermédiaire + ACME).
 
-    Idempotent : reconfigure sans détruire les mounts existants.
+    Idempotent : reconfigure sans détruire les mounts ni changer l'émetteur existant.
     Lab : CA racine self-signed. Prod : générer un CSR, signer extern, importer.
 
     Durées (issue #206) : `root_ttl` / `int_ttl` explicites règlent aussi le
@@ -532,19 +588,18 @@ async def setup_pki_ca(lab_mode: bool = True,
                         "l'enrôlement ACME serait cassé ; setup PKI interrompu"
                     ) from e
 
-            try:
-                await _sign_and_import_intermediate(
+            has_issuer = await _has_intermediate_issuer(client)
+            await bao_step(lambda: client.write(f"{_INT_MOUNT}/config/crl", **_INTERMEDIATE_CRL_CONFIG))
+            if has_issuer:
+                await _refresh_intermediate_crl_if_needed(client)
+            else:
+                issuer_id = await _sign_and_import_intermediate(
                     client, "MCP Vault Intermediate CA", int_ttl_eff, int_sec)
-            except PkiTtlError:
-                raise
-            except Exception as e:
-                if "issuer name already in use" in str(e).lower():
-                    logger.info("ℹ️  CA intermédiaire déjà générée — skip génération (idempotent)")
-                else:
-                    raise
+                if not issuer_id:
+                    raise ValueError("OpenBao n'a pas confirmé l'import de l'émetteur intermédiaire")
             if int_ttl is not None:
-                # Après l'import réussi : le plafond du mount intermédiaire borne
-                # les feuilles, il ne doit pas changer si l'intermédiaire est refusé.
+                # Le plafond borne les feuilles. Sur un émetteur existant,
+                # le régler ne change pas la durée du certificat d'autorité.
                 await run_blocking(_tune_max_ttl, client, _INT_MOUNT, int_ttl_eff)
 
             await bao_step(lambda: client.write(
@@ -652,11 +707,17 @@ async def get_ca_root_pem() -> dict:
         return {"status": "error", "message": "PKI non initialisée — appelez pki_ca_setup"}
     try:
         pem = await _read_pem_url(f"{_ROOT_MOUNT}/ca/pem")
+        crl_next_update = None
+        try:
+            crl_next_update = (await _read_intermediate_crl()).next_update_utc.isoformat()
+        except (httpx.HTTPError, ValueError) as e:
+            logger.warning("Lecture de la CRL intermédiaire impossible : %s", type(e).__name__)
         return {
             "status": "ok",
             "pem": pem,
             "sha256_fingerprint": _sha256_fingerprint(pem),
             "expires": _cert_expiry_iso(pem),
+            "crl_next_update": crl_next_update,
             "url": f"{_base_url()}/pki/ca/root.pem",
             "usage": "Ajouter dans le trust store des clients httpx et Caddyfile (trusted_ca_file / acme_ca_root)",
         }
@@ -1274,7 +1335,7 @@ async def revoke_cert(serial_number: str) -> dict:
         ))
         rev_time = revoke_resp.get("data", {}).get("revocation_time", 0) if revoke_resp else 0
 
-        await bao_step(lambda: client.write(f"{_INT_MOUNT}/crl/rotate"))
+        await _rotate_intermediate_crl(client)
 
         from ..s3_sync import upload_to_s3
         sync_ok = await upload_to_s3()

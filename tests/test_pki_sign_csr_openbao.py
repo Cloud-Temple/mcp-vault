@@ -19,6 +19,7 @@ La chaîne est vérifiée par `openssl verify` avec la SEULE racine comme ancre,
 cas du client qui ne garde que la racine (modèle AWS RDS) ; chaque vérification
 positive a son témoin négatif, pour que le test discrimine.
 """
+import asyncio
 import base64
 import ipaddress
 import os
@@ -234,10 +235,13 @@ async def test_defauts_historiques_inchanges(pki):
 
 
 async def test_second_setup_sans_duree_conserve_la_pki_existante(pki):
-    """Revue de plan #206 : omettre les durées ne ramène pas 25 ans / 1 an à 10 / 5 ans."""
+    """#214 : rejouer le setup préserve également l'émetteur et sa chaîne."""
+    from mcp_vault.vault.pki_ca import _read_pem_url
     await _setup(root_ttl="219000h", int_ttl="8760h")
     client = pki.bao.client
     root_before, issuer_before = await _root_pem(), _default_issuer(client)
+    chain_before = await _read_pem_url(f"{_INT_MOUNT}/ca_chain")
+    count_before = _issuer_count(client)
 
     again = await _setup()
 
@@ -247,8 +251,9 @@ async def test_second_setup_sans_duree_conserve_la_pki_existante(pki):
         root_before.encode()).not_valid_after_utc.isoformat()
     assert _mount_max(client, _ROOT_MOUNT) == 219000 * _HOUR
     assert _mount_max(client, _INT_MOUNT) == 8760 * _HOUR
-    # Comportement existant (mesuré) : le setup recrée un intermédiaire — à la durée conservée.
-    assert _default_issuer(client) != issuer_before
+    assert _default_issuer(client) == issuer_before
+    assert _issuer_count(client) == count_before
+    assert await _read_pem_url(f"{_INT_MOUNT}/ca_chain") == chain_before
     assert 8760 - 1 <= _lifetime_hours(await _int_pem()) <= 8760
 
 
@@ -262,13 +267,97 @@ async def test_durees_explicites_sur_pki_existante_reglent_les_plafonds(pki):
     await _setup()
     client = pki.bao.client
     root_before = await _root_pem()
+    int_before = await _int_pem()
 
     result = await _setup(root_ttl="219000h", int_ttl="8760h")
 
     assert result["root_created"] is False and await _root_pem() == root_before
     assert _mount_max(client, _ROOT_MOUNT) == 219000 * _HOUR
     assert _mount_max(client, _INT_MOUNT) == 8760 * _HOUR
-    assert 8760 - 1 <= _lifetime_hours(await _int_pem()) <= 8760
+    assert await _int_pem() == int_before
+
+
+@pytest.mark.parametrize("default", ["", "introuvable", None])
+async def test_setup_refuse_un_etat_emetteur_ambigu(pki, default):
+    from mcp_vault.vault.pki_ca import setup_pki_ca
+
+    await _setup(acme=False)
+    client = pki.bao.client
+    before = (_default_issuer(client), _issuer_count(client))
+    read = client.read
+
+    def read_issuers(path):
+        if path == f"{_INT_MOUNT}/config/issuers":
+            return {"data": {"default": default}}
+        if path == f"{_INT_MOUNT}/issuer/default" and default == "introuvable":
+            return None
+        return read(path)
+
+    with patch.object(client, "read", side_effect=read_issuers):
+        result = await setup_pki_ca(acme=False)
+
+    assert result["status"] == "error", result
+    assert (_default_issuer(client), _issuer_count(client)) == before
+
+
+async def test_rejeu_migre_la_crl_sans_rotation_intermediaire(pki):
+    from mcp_vault.vault.pki_ca import get_ca_root_pem
+
+    await _setup(acme=False)
+    client = pki.bao.client
+    issuer_before = _default_issuer(client)
+    client.write(f"{_INT_MOUNT}/config/crl", expiry="72h", auto_rebuild=False)
+    assert client.read(f"{_INT_MOUNT}/crl/rotate")["data"]["success"] is True
+
+    await _setup(acme=False)
+
+    config = client.read(f"{_INT_MOUNT}/config/crl")["data"]
+    assert config["expiry"] == "168h" and config["auto_rebuild"] is True
+    assert config["auto_rebuild_grace_period"] == "72h" and config["disable"] is False
+    assert _default_issuer(client) == issuer_before
+    root = await get_ca_root_pem()
+    expiry = datetime.fromisoformat(root["crl_next_update"])
+    assert timedelta(hours=167) < expiry - datetime.now(timezone.utc) <= timedelta(hours=168)
+    await _setup(acme=False)
+    assert (await get_ca_root_pem())["crl_next_update"] == root["crl_next_update"]
+
+
+async def test_crl_se_renouvelle_sans_revocation(pki, monkeypatch):
+    from mcp_vault.vault import pki_ca
+
+    # Garder une marge supérieure à un cycle du moteur OpenBao.
+    monkeypatch.setattr(pki_ca, "_INTERMEDIATE_CRL_CONFIG", {
+        **pki_ca._INTERMEDIATE_CRL_CONFIG, "expiry": "120s", "auto_rebuild_grace_period": "115s",
+    })
+    await _setup(acme=False)
+    first = await pki_ca._read_intermediate_crl()
+    assert first.next_update_utc > datetime.now(timezone.utc)
+    assert len(first) == 0
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        await asyncio.sleep(1)
+        current = await pki_ca._read_intermediate_crl()
+        if current.next_update_utc > first.next_update_utc:
+            assert current.next_update_utc > datetime.now(timezone.utc)
+            assert current.last_update_utc <= first.next_update_utc
+            assert len(current) == 0
+            return
+    pytest.fail("OpenBao n’a pas renouvelé la CRL avant la fin du délai de test")
+
+
+async def test_revocation_met_a_jour_immediatement_la_crl(pki):
+    from mcp_vault.vault.pki_ca import _read_intermediate_crl, revoke_cert
+
+    await _setup(acme=False)
+    leaf = await _sign(_csr(_name())[0])
+    assert leaf["status"] == "ok", leaf
+    serial = int(leaf["serial_number"].replace(":", ""), 16)
+    assert (await _read_intermediate_crl()).get_revoked_certificate_by_serial_number(serial) is None
+
+    result = await revoke_cert(leaf["serial_number"])
+
+    assert result["status"] == "ok" and result["crl_updated"] is True, result
+    assert (await _read_intermediate_crl()).get_revoked_certificate_by_serial_number(serial) is not None
 
 
 async def test_durees_incoherentes_refusees_sans_rien_monter(pki):
