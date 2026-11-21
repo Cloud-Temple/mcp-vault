@@ -123,6 +123,18 @@ jobs:
           docker logs vault-probe 2>&1 | tail -40 || true
           docker rm -f vault-probe >/dev/null 2>&1 || true
 
+      # Contrats de la console (tests/js) : l'image de test n'a pas Node, leurs
+      # wrappers pytest y SAUTENT. Ils s'exécutent donc ici, sur le runner où
+      # Node est présent, et un échec est bloquant (#217).
+      - name: Contrats de la console (Node)
+        run: |
+          set -euo pipefail
+          node --version
+          for f in tests/js/*.test.js; do
+            echo "── $f"
+            node "$f"
+          done
+
       - name: Construire l'image de test
         run: docker build --target test -t mcp-vault:ci-test .
 
