@@ -8,7 +8,7 @@ Profil PostgreSQL standalone : [installation, quatre parcours et retour contrôl
 
 MCP Vault centralise les secrets, les politiques d’accès et les accès temporaires dont ont besoin des agents IA. Il embarque [OpenBao](https://openbao.org/) pour le chiffrement et le stockage, ajoute une API MCP protégée par authentification et politiques, puis fournit une console d’administration et une CLI.
 
-**Version** : 0.24.0 · **Licence** : [Apache-2.0](LICENSE)
+**Version** : 0.24.1 · **Licence** : [Apache-2.0](LICENSE)
 
 > [!IMPORTANT]
 > MCP Vault est un composant de sécurité à exploiter dans un environnement maîtrisé. Lisez le [modèle de sécurité](#modèle-de-sécurité) et le [rapport d’audit](DESIGN/mcp-vault/SECURITY_AUDIT.md) avant toute mise en production.
@@ -162,6 +162,15 @@ restreint à un seul nom DNS sous `PKI_CSR_DOMAIN` (désactivé tant que cette
 variable est vide). Les durées de la racine et de l'intermédiaire se règlent au
 setup et à la rotation (`root_ttl`, `int_ttl`) ; un certificat plus court que
 demandé est refusé au lieu d'être tronqué en silence.
+
+La signature de CSR et l'administration de la PKI sont disponibles sur toutes
+les surfaces : outil MCP `pki_sign_csr`, CLI (`pki sign-csr FICHIER --cert-out
+… --chain-out …`, `pki status`), API admin (`POST /admin/api/pki/sign-csr`,
+réservée aux admins) et console. `pki status` et la console affichent la
+prochaine mise à jour de la CRL. Dans la console, « Rejouer la configuration »
+fait ce que fait `pki setup` sur une PKI existante : les autorités et les
+certificats émis sont conservés, la configuration ACME, les adresses de
+publication et la CRL sont réécrites (un écran de confirmation le rappelle).
 
 ### Métadonnées PostgreSQL (profil opt-in)
 

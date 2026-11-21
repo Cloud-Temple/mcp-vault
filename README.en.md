@@ -8,7 +8,7 @@ Standalone PostgreSQL: [installation, four deployment paths and safe return](doc
 
 MCP Vault centralizes the secrets, access policies, and temporary credentials required by AI agents. It embeds [OpenBao](https://openbao.org/) for encryption and storage, adds an authenticated and policy-controlled MCP API, and provides an administration console and CLI.
 
-**Version**: 0.24.0 · **License**: [Apache-2.0](LICENSE)
+**Version**: 0.24.1 · **License**: [Apache-2.0](LICENSE)
 
 > [!IMPORTANT]
 > MCP Vault is a security component intended for controlled environments. Read the [security model](#security-model) and [security audit](DESIGN/mcp-vault/SECURITY_AUDIT.md) before using it in production.
@@ -162,6 +162,14 @@ restricted to a single DNS name below `PKI_CSR_DOMAIN` (disabled while that
 variable is empty). Root and intermediate lifetimes are set at setup and
 rotation (`root_ttl`, `int_ttl`); a certificate shorter than requested is
 refused instead of being silently truncated.
+
+CSR signing and PKI administration are available on every surface: MCP tool
+`pki_sign_csr`, CLI (`pki sign-csr FILE --cert-out … --chain-out …`,
+`pki status`), admin API (`POST /admin/api/pki/sign-csr`, admins only) and the
+console. `pki status` and the console show the next CRL update. In the console,
+"Replay the configuration" does what `pki setup` does on an existing PKI:
+authorities and issued certificates are kept, while the ACME configuration,
+publication URLs and CRL settings are rewritten (a confirmation screen says so).
 
 ### Optional native operator TLS listener
 
