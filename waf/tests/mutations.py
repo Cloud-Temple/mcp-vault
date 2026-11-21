@@ -58,6 +58,22 @@ MUTATIONS = {
 }
 
 
+# Test qui protège la propriété retirée par chaque mutation. Une mutation n'est
+# créditée que si CE test échoue sur une ASSERTION (pas sur une exception de
+# transport, un 5xx ou une interruption).
+ATTENDU = {
+    "m1_coraza_sur_mcp": "test_mcp_canonique_n_est_pas_inspecte",
+    "m2_sous_chemins_oublies": "test_mcp_canonique_n_est_pas_inspecte",
+    "m3_sans_refus_content_length": "test_borne_content_length_depassee_sans_aucun_contact",
+    "m4_exclusion_json_residuelle": "test_nom_json_forge_inspecte_comme_le_temoin",
+    "m5_cible_decodee_au_lieu_de_brute": "test_variante_non_canonique_passe_par_coraza",
+    "m6_put_autorise": "test_mcp_autres_methodes_405_sans_backend",
+    "m7_variantes_sans_borne": "test_variante_inspectee_garde_la_borne_de_64_kio",
+    "m8_preflight_hors_coraza": "test_preflight_hors_mcp_reste_inspecte",
+    "m9_borne_sur_cible_brute": "test_variante_inspectee_garde_la_borne_de_64_kio",
+}
+
+
 def _banc(caddy_txt, coraza_txt, suffixe):
     """Exécute le banc et rend (code, nb_échecs, nb_succès, nb_erreurs, résumé)."""
     import re
@@ -65,34 +81,41 @@ def _banc(caddy_txt, coraza_txt, suffixe):
         caddy, coraza = os.path.join(d, "Caddyfile"), os.path.join(d, "coraza.conf")
         open(caddy, "w").write(caddy_txt)
         open(coraza, "w").write(coraza_txt)
+        # COLUMNS large : sinon pytest tronque le motif d'échec en « ... » et
+        # l'on ne peut plus distinguer une assertion d'une exception.
         env = dict(os.environ, WAF_CADDYFILE=caddy, WAF_CORAZA_CONF=coraza,
-                   BENCH_SUFFIX=suffixe)
-        fini = subprocess.run([os.path.join(ICI, "run_bench.sh"), "-q", "--no-header"],
+                   BENCH_SUFFIX=suffixe, COLUMNS="4000")
+        fini = subprocess.run([os.path.join(ICI, "run_bench.sh"), "-q", "--no-header", "-rf"],
                               env=env, capture_output=True, text=True)
     resume = (fini.stdout.strip().splitlines() or ["?"])[-1]
 
     def nombre(mot):
         m = re.search(rf"(\d+) {mot}", resume)
         return int(m.group(1)) if m else 0
-    return fini.returncode, nombre("failed"), nombre("passed"), nombre("error"), resume
+    echecs = [ligne for ligne in fini.stdout.splitlines() if ligne.startswith("FAILED ")]
+    return fini.returncode, nombre("failed"), nombre("passed"), nombre("error"), resume, echecs
 
 
 def main(choix):
     # Référence : la configuration livrée, montée comme les mutations, doit
     # être verte. Sinon un échec de mutation ne prouverait rien.
-    code, echecs, succes, erreurs, resume = _banc(CADDY, CORAZA, "mut-ref")
+    code, echecs, succes, erreurs, resume, _ = _banc(CADDY, CORAZA, "mut-ref")
     if code or echecs or erreurs or not succes:
         sys.exit(f"référence non verte, mutations non interprétables : {resume}")
     print(f"REF   configuration livrée                 {resume}", flush=True)
     rate = []
     for nom in choix or sorted(MUTATIONS):
         fichier, muter = MUTATIONS[nom]
-        code, echecs, succes, erreurs, resume = _banc(
+        code, echecs, succes, erreurs, resume, lignes = _banc(
             muter(CADDY) if fichier == "Caddyfile" else CADDY,
             muter(CORAZA) if fichier == "coraza.conf" else CORAZA, f"mut-{nom[:2]}")
-        # Seul un échec d'ASSERTION exécutée compte. Une panne Docker, une
-        # configuration refusée ou une erreur de collecte ne prouve rien.
-        mord = code != 0 and echecs >= 1 and erreurs == 0 and succes >= 1
+        # Seul compte l'échec du test qui protège la propriété, sur une
+        # assertion. Une panne Docker, une configuration refusée, une erreur de
+        # collecte ou une exception de transport ne prouve rien.
+        attendus = [ligne for ligne in lignes if f"::{ATTENDU[nom]}" in ligne]
+        par_assertion = [ligne for ligne in attendus
+                         if " - AssertionError" in ligne or " - assert " in ligne]
+        mord = code != 0 and erreurs == 0 and succes >= 1 and bool(par_assertion)
         etat = "MORD " if mord else ("INFRA" if code and not echecs else "VERT!")
         print(f"{etat} {nom:36} {resume}", flush=True)
         if not mord:
