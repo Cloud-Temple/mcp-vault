@@ -45,6 +45,12 @@ LIMITE = 65536
 # ── Transport brut ───────────────────────────────────────────────────────────
 
 
+class PanneInfrastructure(RuntimeError):
+    """Réponse 5xx : le banc ne peut rien conclure. Volontairement PAS une
+    AssertionError, pour qu'une panne ne soit jamais lue comme la détection
+    d'une propriété perdue (waf/tests/mutations.py)."""
+
+
 class Reponse:
     def __init__(self, status, headers, body):
         self.status, self.headers, self.body = status, headers, body
@@ -78,6 +84,8 @@ def envoyer(methode, chemin, corps=None, entetes=None, chunked=False, base=WAF):
             c.send(data)
     r = c.getresponse()
     corps_r = r.read() if methode != "HEAD" else b""
+    if r.status >= 500:
+        raise PanneInfrastructure(f"{methode} {chemin} -> {r.status} {corps_r[:120]!r}")
     return Reponse(r.status, {k.lower(): v for k, v in r.getheaders()}, corps_r)
 
 
@@ -374,8 +382,11 @@ def _curl_h2(methode, chemin, corps=None):
            "-H", "Content-Type: application/json"]
     if corps is not None:
         cmd += ["--data-binary", corps]
-    return subprocess.run(cmd + [TLS + chemin], capture_output=True, text=True,
-                          check=True, timeout=30).stdout.split()
+    sortie = subprocess.run(cmd + [TLS + chemin], capture_output=True, text=True,
+                            check=True, timeout=30).stdout.split()
+    if int(sortie[1]) >= 500:
+        raise PanneInfrastructure(f"HTTP/2 {methode} {chemin} -> {sortie[1]}")
+    return sortie
 
 
 def test_http2_meme_contrat(factice):
@@ -395,7 +406,10 @@ def test_http2_flux_sans_longueur_borne(factice):
         ["curl", "-sk", "--http2", "-o", "/dev/null", "-w", "%{http_version} %{http_code}",
          "-H", "Content-Type: application/json", "-T", "-", "-X", "POST", TLS + "/mcp"],
         input=b"x" * (LIMITE * 3), capture_output=True, check=True, timeout=30)
-    assert fini.stdout.decode().split() == ["2", "413"]
+    version, statut = fini.stdout.decode().split()
+    if int(statut) >= 500:
+        raise PanneInfrastructure(f"HTTP/2 flux -> {statut}")
+    assert (version, statut) == ("2", "413")
     recu = factice()
     assert all(e["body_len"] <= LIMITE and e["etat"] != "complet" for e in recu), recu
 
