@@ -75,12 +75,15 @@ caddyfile_src="/etc/caddy/Caddyfile"
 docker run --rm ${mounts[@]+"${mounts[@]}"} "$WAF_IMAGE" \
   caddy adapt --config "$caddyfile_src" --adapter caddyfile 2>/dev/null > "$WORK/adapted.json"
 
+# Attend une réponse 2xx. `curl -f` est indispensable : sans lui, un 502 du WAF
+# (backend pas encore démarré) passait pour « prêt », et les tests partaient
+# contre une application absente — constaté en CI.
 wait_for() {
-  for _ in $(seq 60); do
-    if curl -sk -o /dev/null "$1"; then return 0; fi
+  for _ in $(seq 90); do
+    if curl -skf -o /dev/null "$1"; then return 0; fi
     sleep 2
   done
-  echo "::error::$1 ne répond pas"; exit 1
+  echo "::error::$1 ne répond pas en 2xx"; exit 1
 }
 wait_for "http://127.0.0.1:$PORT_STUB/__stub/log"
 wait_for "http://127.0.0.1:$PORT_STUB_WAF/healthz"
