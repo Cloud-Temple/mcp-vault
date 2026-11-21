@@ -1800,7 +1800,7 @@ async def _api_pki_list_certs(send, scope=None):
         if raw is None:
             values[name] = default
             continue
-        if len(raw) != 1 or not raw[0].isascii() or not raw[0].isdigit():
+        if len(raw) != 1 or not raw[0].isascii() or not raw[0].isdigit() or len(raw[0]) > 9:
             return await _json_response(send, 400, {
                 "status": "error", "error_type": "invalid_input",
                 "message": f"`{name}` doit être un entier décimal unique.",

@@ -59,7 +59,8 @@ Object.defineProperty(globalThis, 'navigator', { value: { clipboard: { writeText
 global.setTimeout = () => 0;
 
 /* ── API interceptée ── */
-const FUTUR = new Date(Date.now() + 5 * 86400000).toISOString();
+const jours = (n) => new Date(Date.now() + n * 86400000 + 3600000).toISOString();
+const FUTUR = jours(400);   // autorités : loin de toute alerte
 let calls = [];
 let server = {};
 global.api = async (endpoint, options = {}) => {
@@ -69,13 +70,14 @@ global.api = async (endpoint, options = {}) => {
     return typeof handler === 'function' ? handler(endpoint, options) : handler;
 };
 
-function scenario({ acme = true, eab = 'new-account-required', total = 2, urls = {}, serial = '12:34', roles } = {}) {
+function scenario({ acme = true, eab = 'new-account-required', total = 2, urls = {}, serial = '12:34', roles,
+                   crl = jours(2), intExpires = FUTUR, maxTtl = 2592000 } = {}) {
     calls = []; alerts = []; confirms = []; confirmAnswer = true;
     const roleNames = roles || (acme ? ['acme-servers', 'csr-servers'] : ['csr-servers']);
     server = {
         '/pki/status': {
-            status: 'ok', initialized: true, root_expires: FUTUR, int_expires: FUTUR,
-            root_fingerprint_sha256: 'AA:BB', crl_next_update: FUTUR, cert_count: total,
+            status: 'ok', initialized: true, root_expires: FUTUR, int_expires: intExpires,
+            root_fingerprint_sha256: 'AA:BB', crl_next_update: crl, cert_count: total,
             acme_enabled: acme, eab_policy: acme ? eab : null, eab_required: acme && eab !== 'not-required',
             csr_domain: 'dbaas.example.test', csr_ttl: '2160h',
             root_pem_url: urls.root || 'https://pki.example.test/pki/ca/root.pem',
@@ -90,7 +92,7 @@ function scenario({ acme = true, eab = 'new-account-required', total = 2, urls =
         },
         '/pki/roles': { status: 'ok', roles: roleNames },
         '/pki/roles/acme-servers': { status: 'ok', role_name: 'acme-servers',
-            allowed_domains: ['example.test', '*.example.test'], max_ttl: 2592000, server_flag: true },
+            allowed_domains: ['example.test', '*.example.test'], max_ttl: maxTtl, server_flag: true },
         '/pki/roles/csr-servers': { status: 'ok', role_name: 'csr-servers',
             allowed_domains: ['dbaas.example.test'], max_ttl: 7776000, server_flag: true },
         '/pki/setup': { status: 'ok' },
@@ -130,7 +132,9 @@ const pki = require(path.join(__dirname, '..', '..', 'src', 'mcp_vault', 'static
     assert.ok(sent('/pki/certs?limit=200&offset=0').length === 1, 'inventaire paginé demandé');
     assert.ok(sent('/pki/roles/acme-servers').length === 1 && sent('/pki/roles/csr-servers').length === 1);
     assert.ok(html.includes('csr-servers') && html.includes('dbaas.example.test'), 'rôle CSR affiché');
-    assert.ok(html.includes('Liste de révocation (CRL)') && html.includes('J-'), 'échéance CRL affichée');
+    // La carte CRL elle-même, pas n'importe quel « J- » de la page.
+    const carteCrl = (h) => (h.match(/<div class="card-value" data-crl>([\s\S]*?)<\/div>/) || [])[1] || '';
+    assert.ok(/badge-warn/.test(carteCrl(html)) && carteCrl(html).includes('J-2'), `échéance CRL : ${carteCrl(html)}`);
     assert.ok(html.includes('Suivants'), 'page suivante proposée');
     scenario({ total: 450 });
     pki.pkiPage(1);
@@ -142,6 +146,24 @@ const pki = require(path.join(__dirname, '..', '..', 'src', 'mcp_vault', 'static
     await pki.loadPki();
     html = elements.get('page-pki').innerHTML;
     assert.ok(html.includes('csr-servers'), 'rôles affichés même ACME fermé');
+
+    scenario({ crl: jours(-1) });
+    await pki.loadPki();
+    assert.ok(/badge-danger/.test(carteCrl(elements.get('page-pki').innerHTML)) &&
+              carteCrl(elements.get('page-pki').innerHTML).includes('expirée'), 'CRL expirée signalée');
+    scenario({ crl: null });
+    await pki.loadPki();
+    assert.ok(carteCrl(elements.get('page-pki').innerHTML).includes('illisible'), 'CRL illisible signalée');
+
+    /* 2 bis. Autorités : seuils de renouvellement (90 j / 30 j), pas ceux de la CRL */
+    const etatAutorite = (n) => pki.expiryBadgeState(jours(n)).cls;
+    assert.strictEqual(etatAutorite(20), 'badge-danger');
+    assert.strictEqual(etatAutorite(60), 'badge-warn');
+    assert.strictEqual(etatAutorite(120), 'badge-ok');
+    scenario({ intExpires: jours(20) });
+    await pki.loadPki();
+    assert.ok(/CA Intermédiaire<\/div>\s*<div class="card-value"><span class="badge badge-danger">/
+        .test(elements.get('page-pki').innerHTML), 'intermédiaire à J-20 en danger');
 
     /* 3. Rejeu : pré-remplissage = état lu ; soumission sans modification = corps exact */
     scenario({ acme: true, eab: 'new-account-required' });
@@ -179,6 +201,16 @@ const pki = require(path.join(__dirname, '..', '..', 'src', 'mcp_vault', 'static
     pki.openPkiReplay();
     assert.strictEqual(f('pkiLabMode'), '');
     assert.ok(elements.get('pkiSetupReplayNotice').textContent.includes("n'a pas pu être lu"));
+
+    /* 5 bis. Rejeu ACME actif dont la durée n'a pas pu être lue : saisie exigée */
+    scenario({ maxTtl: 1000001 });
+    await pki.loadPki();
+    pki.openPkiReplay();
+    assert.strictEqual(f('pkiLeafTtl'), '');
+    await pki.doPkiSetup();
+    assert.ok(alerts.length === 1 && sent('/pki/setup').length === 0, 'durée imposée en silence');
+    // Initialisation : le défaut historique reste appliqué.
+    assert.strictEqual(pki.pkiSetupBody({ labMode: 'false', acme: 'true', domains: 'a.test', leafTtl: '' }).body.leaf_ttl, '720h');
 
     /* 6. Rotation : int_ttl seulement s'il est saisi */
     scenario();

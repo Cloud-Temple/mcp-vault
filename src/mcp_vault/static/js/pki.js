@@ -59,8 +59,14 @@ async function loadPki(offset) {
 
 /* ─── Fonctions pures (testées sous Node) ─── */
 
+/* Seuils d'alerte (jours) : les autorités se renouvellent en semaines, la CRL
+   se régénère toute seule et ne doit jamais approcher son échéance. */
+const PKI_SEUILS_AUTORITE = { warn: 90, danger: 30 };
+const PKI_SEUILS_CRL = { warn: 3, danger: 1 };
+
 /* Badge d'échéance : `now` injectable pour les tests. */
-function expiryBadgeState(iso, now) {
+function expiryBadgeState(iso, now, seuils) {
+    const s = seuils || PKI_SEUILS_AUTORITE;
     if (!iso) return { cls: 'badge-warn', label: 'inconnue' };
     const dt = new Date(iso);
     if (isNaN(dt.getTime())) return { cls: 'badge-warn', label: 'inconnue' };
@@ -68,7 +74,7 @@ function expiryBadgeState(iso, now) {
     if (ms <= 0) return { cls: 'badge-danger', label: 'expirée' };
     const hours = Math.floor(ms / 3600000);
     const days = Math.floor(hours / 24);
-    const cls = days < 1 ? 'badge-danger' : days < 3 ? 'badge-warn' : 'badge-ok';
+    const cls = days < s.danger ? 'badge-danger' : days < s.warn ? 'badge-warn' : 'badge-ok';
     return { cls, label: days >= 1 ? `J-${days}` : `${hours} h` };
 }
 
@@ -100,11 +106,17 @@ function pkiSetupBody(form) {
     const acme = form.acme !== 'false';
     const domains = String(form.domains || '').split(',').map(d => d.trim()).filter(Boolean);
     if (acme && domains.length === 0) return { error: 'Domaines autorisés requis quand ACME est actif.' };
+    const leaf = String(form.leafTtl || '').trim();
+    // Rejeu avec ACME actif : la durée réelle n'a pas pu être lue → saisie
+    // obligatoire, jamais le défaut historique imposé en silence.
+    if (acme && !leaf && form.requireLeafTtl) {
+        return { error: 'Durée maximale des certificats ACME requise : la valeur actuelle n\'a pas pu être lue.' };
+    }
     const body = {
         lab_mode: form.labMode === 'true',
         acme,
         allowed_domains: acme ? domains : [],
-        leaf_ttl: String(form.leafTtl || '').trim() || '720h',
+        leaf_ttl: leaf || '720h',
     };
     for (const [key, val] of [['root_ttl', form.rootTtl], ['int_ttl', form.intTtl]]) {
         const v = String(val || '').trim();
@@ -173,10 +185,10 @@ function pkiRotateBody(intTtl) {
 /* ─── Rendu page PKI initialisée ─── */
 function _renderPkiPage(s) {
     const now = new Date();
-    function badge(iso, label) {
-        const st = expiryBadgeState(iso, now);
+    function badge(iso, seuils) {
+        const st = expiryBadgeState(iso, now, seuils);
         const date = iso && !isNaN(new Date(iso).getTime()) ? fmtDate(new Date(iso).toISOString()) + ' ' : '';
-        return `<span class="badge ${st.cls}">${esc(date)}(${esc(label || st.label)})</span>`;
+        return `<span class="badge ${st.cls}">${esc(date)}(${esc(st.label)})</span>`;
     }
     const knownDate = v => (v && v !== 'inconnu') ? v : null;
 
@@ -222,7 +234,7 @@ function _renderPkiPage(s) {
         <div class="card"><div class="card-label">CA Intermédiaire</div>
             <div class="card-value">${badge(knownDate(s.int_expires))}</div></div>
         <div class="card"><div class="card-label">Liste de révocation (CRL)</div>
-            <div class="card-value">${s.crl_next_update ? badge(s.crl_next_update) : '<span class="badge badge-danger">illisible</span>'}</div>
+            <div class="card-value" data-crl>${s.crl_next_update ? badge(s.crl_next_update, PKI_SEUILS_CRL) : '<span class="badge badge-danger">illisible</span>'}</div>
             <div class="card-sub">Prochaine mise à jour ; renouvelée automatiquement avant échéance.</div></div>
         <div class="card"><div class="card-label">Certificats émis</div>
             <div class="card-value card-value-big">${s.cert_count !== undefined ? esc(String(s.cert_count)) : '—'}</div></div>
@@ -334,7 +346,8 @@ function openPkiReplay() {
 
 async function doPkiSetup() {
     const form = { labMode: _field('pkiLabMode'), acme: _field('pkiAcme'), domains: _field('pkiDomains'),
-                   leafTtl: _field('pkiLeafTtl'), rootTtl: _field('pkiRootTtl'), intTtl: _field('pkiIntTtl') };
+                   leafTtl: _field('pkiLeafTtl'), rootTtl: _field('pkiRootTtl'), intTtl: _field('pkiIntTtl'),
+                   requireLeafTtl: _pki.setupMode === 'replay' };
     const built = pkiSetupBody(form);
     if (built.error) { alert(built.error); return; }
 
@@ -472,7 +485,7 @@ function _pkiShowSignedCsr(result) {
 /* Export pour le test Node ; ignoré dans le navigateur (module y est undefined). */
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
-        _pki, loadPki, expiryBadgeState, ttlFromSeconds, labModeFromEab, pkiSetupBody,
+        _pki, loadPki, expiryBadgeState, PKI_SEUILS_AUTORITE, PKI_SEUILS_CRL, ttlFromSeconds, labModeFromEab, pkiSetupBody,
         pkiReplayReference, pkiReplayChanges, pkiRotateBody, openPkiSetup, openPkiReplay,
         doPkiSetup, openPkiRotate, doPkiRotate, openPkiSignCsr, doPkiSignCsr, pkiRevokeAt,
         pkiCopyUrl, pkiPage, _renderPkiPage, PKI_REPLAY_EXPLANATION,

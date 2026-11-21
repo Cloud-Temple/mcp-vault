@@ -185,7 +185,8 @@ def test_pagination_transmise(query, attendu):
 
 
 @pytest.mark.parametrize("query", [b"limit=0", b"limit=1001", b"limit=-1", b"limit=abc", b"limit=1.5",
-                                   b"offset=-3", b"limit=10&limit=20", b"limit=", b"offset=%D9%A5"])
+                                   b"offset=-3", b"limit=10&limit=20", b"limit=", b"offset=%D9%A5",
+                                   b"limit=" + b"9" * 5000, b"offset=" + b"1" * 10])
 def test_pagination_invalide_400_sans_appel(query):
     with patch.object(pki_ca, "list_issued_certs", AsyncMock()) as lister:
         code, reponse = _appel("/admin/api/pki/certs", query=query)
