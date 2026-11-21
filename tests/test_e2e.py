@@ -1926,61 +1926,42 @@ async def test_15_waf_security():
     status = waf_request("GET", "/admin/static/..%2f..%2f..%2fetc%2fpasswd")
     check_true("LFI encoded %2f bloqué", status == 403, f"status={status}")
 
-    # LFI au niveau des ARGUMENTS MCP (et non de l'URL) — verrouille le fait que
-    # l'activation du parseur JSON sur /mcp (issue #107) ne dégrade pas la
-    # détection LFI dans le corps JSON-RPC.
-    status = waf_request("POST", "/mcp", body=mcp_envelope(
-        "secret_read", {"vault_id": "v", "path": "../../etc/passwd"}))
-    check_true("LFI dans une VALEUR d'argument MCP bloqué", status == 403, f"status={status}")
+    # ── 15b-d. /mcp hors Coraza (#118) : les charges atteignent l'application ──
+    #
+    # Depuis v0.24.0, /mcp (forme canonique) ne passe plus par Coraza : ses
+    # arguments sont des données opaques que le CRS refusait au hasard (#107,
+    # #112, CSR DBaaS 932370). Chaque charge est donc envoyée DEUX fois :
+    #   - sur /mcp, où elle doit ATTEINDRE l'application (corps JSON non vide) ;
+    #   - sur /admin/api/tokens, surface encore inspectée, où elle doit être
+    #     bloquée par le WAF. Sans ce témoin, « /mcp laisse passer » pourrait ne
+    #     signifier que « la charge ne déclenche rien ».
+    # Le contrat complet (routage, variantes de chemin, méthodes, bornes de
+    # taille, HTTP/2) est qualifié par le banc WAF réel `waf/tests/`, en CI.
+    print("\n    ── 15b-d. /mcp hors Coraza, témoin sur /admin/api (#118) ──")
 
-    status = waf_request("POST", "/mcp", body=mcp_envelope(
-        "secret_read", {"../../etc/passwd": "x"}))
-    check_true("LFI dans un NOM d'argument MCP bloqué", status == 403, f"status={status}")
+    charges = {
+        "LFI valeur": mcp_envelope("secret_read", {"vault_id": "v", "path": "../../etc/passwd"}),
+        "LFI nom": mcp_envelope("secret_read", {"../../etc/passwd": "x"}),
+        "SQLi OR 1=1": '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"system_health","arguments":{"test":"1 OR 1=1 --"}},"id":1}',
+        "SQLi UNION": '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"system_health","arguments":{"test":"UNION SELECT * FROM users"}},"id":1}',
+        "XSS script": '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"system_health","arguments":{"test":"<script>alert(1)</script>"}},"id":1}',
+        "XSS img": '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"vault_list","arguments":{"test":"<img src=x onerror=alert(1)>"}},"id":1}',
+        "RCE cat": '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"system_health","arguments":{"cmd":"; cat /etc/passwd"}},"id":1}',
+        "RCE pipe": '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"vault_list","arguments":{"cmd":"|ls -la /etc"}},"id":1}',
+    }
+    for nom, corps in charges.items():
+        st, bd = waf_request("POST", "/mcp", body=corps, headers=MCP_ACCEPT, with_body=True)
+        check_true(f"{nom} sur /mcp : atteint l'application (pas de refus WAF)",
+                   not waf_blocked(st, bd) and st != 0 and st < 500, f"status={st}")
+        st, bd = waf_request("POST", "/admin/api/tokens", body=corps, with_body=True)
+        check_true(f"{nom} sur /admin/api : bloqué par le WAF (témoin)",
+                   waf_blocked(st, bd), f"status={st}")
 
-    status = waf_request("POST", "/mcp", body=mcp_envelope(
-        "secret_read", {"vault_id": "v", "path": "../../etc/passwd"}, CODEX_META))
-    check_true("LFI + métadonnées Codex : pas de bypass", status == 403, f"status={status}")
+    st = waf_request("PUT", "/mcp", body="{}")
+    check_true("PUT /mcp : 405 sans atteindre l'application", st == 405, f"status={st}")
 
-    # ── 15b. Attaques SQLi (SQL Injection) ──
-    print("\n    ── 15b. SQLi (SQL Injection) ──")
-
-    sqli1 = '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"system_health","arguments":{"test":"1 OR 1=1 --"}},"id":1}'
-    status = waf_request("POST", "/mcp", body=sqli1)
-    check_true("SQLi OR 1=1 bloqué", status == 403, f"status={status}")
-
-    sqli2 = '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"system_health","arguments":{"test":"UNION SELECT * FROM users"}},"id":1}'
-    status = waf_request("POST", "/mcp", body=sqli2)
-    check_true("SQLi UNION SELECT bloqué", status == 403, f"status={status}")
-
-    sqli3 = '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"vault_list","arguments":{"test":"1; DROP TABLE secrets;--"}},"id":1}'
-    status = waf_request("POST", "/mcp", body=sqli3)
-    check_true("SQLi DROP TABLE bloqué", status == 403, f"status={status}")
-
-    # ── 15c. Attaques XSS (Cross-Site Scripting) ──
-    print("\n    ── 15c. XSS (Cross-Site Scripting) ──")
-
-    xss1 = '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"system_health","arguments":{"test":"<script>alert(1)</script>"}},"id":1}'
-    status = waf_request("POST", "/mcp", body=xss1)
-    check_true("XSS script alert bloqué", status == 403, f"status={status}")
-
-    xss2 = '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"vault_list","arguments":{"test":"<img src=x onerror=alert(1)>"}},"id":1}'
-    status = waf_request("POST", "/mcp", body=xss2)
-    check_true("XSS img onerror bloqué", status == 403, f"status={status}")
-
-    # ── 15d. Attaques RCE (Remote Code Execution) ──
-    print("\n    ── 15d. RCE (Remote Code Execution) ──")
-
-    rce1 = '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"system_health","arguments":{"cmd":"; cat /etc/passwd"}},"id":1}'
-    status = waf_request("POST", "/mcp", body=rce1)
-    check_true("RCE cat /etc/passwd bloqué", status == 403, f"status={status}")
-
-    rce2 = '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"vault_list","arguments":{"cmd":"$(whoami)"}},"id":1}'
-    status = waf_request("POST", "/mcp", body=rce2)
-    check_true("RCE $(whoami) bloqué", status == 403, f"status={status}")
-
-    rce3 = '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"vault_list","arguments":{"cmd":"|ls -la /etc"}},"id":1}'
-    status = waf_request("POST", "/mcp", body=rce3)
-    check_true("RCE pipe ls bloqué", status == 403, f"status={status}")
+    st = waf_request("POST", "/mcp", body="x" * 65537)
+    check_true("Corps /mcp > 65 536 octets : 413", st == 413, f"status={st}")
 
     # ── 15e. Scanner Detection ──
     print("\n    ── 15e. Scanner Detection ──")
@@ -2022,7 +2003,9 @@ async def test_15_waf_security():
 
     # ── 15h. FP 930120 « OS File Access Attempt » — issue #107 ──
     #
-    # Contexte : sans parseur JSON, Coraza traitait TOUT le corps JSON-RPC comme
+    # Depuis #118, /mcp ne passe plus par Coraza : ces cas restent pertinents
+    # comme NON-RÉGRESSION fonctionnelle de bout en bout.
+    # Contexte historique : sans parseur JSON, Coraza traitait TOUT le corps JSON-RPC comme
     # une variable unique (ARGS_NAMES = corps entier). Toute chaîne de
     # `lfi-os-files.data` présente n'importe où dans le corps — y compris dans
     # une valeur de secret — déclenchait 930120 puis 949110 → HTTP 403 avant le
@@ -2098,259 +2081,20 @@ async def test_15_waf_security():
     })
     check("secret_write type env_file contenant '.env' (FP 930120)", r, "ok")
 
-    # ── 15h-bis. Étroitesse de l'exclusion : ces cas DOIVENT rester bloqués ──
+    # ── 15h-bis à 15h-septies : retirés en v0.24.0 (#118) ──
     #
-    # L'exclusion ne porte que sur (a) les NOMS sous `params._meta` et (b) les
-    # VALEURS sous `params.arguments.data.*` (payload chiffré de secret_write).
-    print("\n    ── 15h-bis. Étroitesse de l'exclusion 930120 ──")
-
-    status = waf_request("POST", "/mcp", body=mcp_envelope(
-        "secret_write", {"vault_id": "v", "path": "app/.env"}))
-    check_true("'.env' dans le champ de contrôle 'path' reste bloqué",
-               status == 403, f"status={status}")
-
-    status = waf_request("POST", "/mcp", body=mcp_envelope(
-        "secret_write", {"vault_id": "v", "path": "ok/x", "tags": "prod,.env"}))
-    check_true("'.env' dans 'tags' (hors payload chiffré) reste bloqué",
-               status == 403, f"status={status}")
-
-    status = waf_request("POST", "/mcp", body=mcp_envelope("secret_write.env", {"vault_id": "v"}))
-    check_true("'.env' dans le nom de l'outil reste bloqué",
-               status == 403, f"status={status}")
-
-    status = waf_request("POST", "/mcp", body=mcp_envelope(
-        "secret_write", {"vault_id": "v", "path": "ok/x"},
-        {"x-codex-turn-metadata": {"cwd": "/srv/app/.env"}}))
-    check_true("'.env' dans une VALEUR sous _meta reste bloqué (exclusion = noms seuls)",
-               status == 403, f"status={status}")
-
-    # Le payload chiffré n'est exclu que de 930120 : une traversal y reste
-    # bloquée par 930100/930110 (path traversal) et 932160.
-    status = waf_request("POST", "/mcp", body=mcp_envelope(
-        "secret_write", {"vault_id": "v", "path": "ok/x", "data": {"notes": "../../etc/passwd"}}))
-    check_true("Traversal dans une valeur du payload chiffré reste bloquée",
-               status == 403, f"status={status}")
-
-    status = waf_request("POST", "/mcp", body=mcp_envelope(
-        "secret_write", {"vault_id": "v", "path": "ok/x", "data": {"../../etc/passwd": "v"}}))
-    check_true("Traversal dans un NOM sous data.* reste bloquée",
-               status == 403, f"status={status}")
-
-    # ── 15h-quater. Anti-évasion des exclusions `json.*` (revue #107) ──
-    #
-    # Les exclusions de cibles sont des directives GLOBALES dont le sélecteur
-    # porte sur un NOM d'argument — donc sur une chaîne choisie par le client.
-    # `ARGS`/`ARGS_NAMES` agrègent aussi les paramètres de query string et de
-    # formulaire : un attaquant nommant son paramètre `json.params.arguments.data.x`
-    # échappait à 930120 sur TOUS les endpoints. Mesuré avant les gardes :
-    # `GET /health?json.params.arguments.data.x=.env` → 200, alors que
-    # `GET /health?legit=.env` → 403. Les gardes 10009/10010 refusent désormais
-    # tout nom d'argument préfixé `json.` hors du corps JSON MCP analysé.
-    print("\n    ── 15h-quater. Anti-évasion des exclusions json.* ──")
-
-    # Témoin : la chaîne est bien détectée quand le nom n'est pas forgé.
-    status_ref = waf_request("GET", "/health?legit=.env")
-    check_true("Témoin : '.env' en query string bloqué (nom non forgé)",
-               status_ref == 403, f"status={status_ref}")
-
-    status = waf_request("GET", "/health?json.params.arguments.data.x=.env")
-    check_true("Nom de paramètre 'json.*' forgé en query string bloqué (garde 10009)",
-               status == 403, f"status={status}")
-
-    status = waf_request("GET", "/mcp?json.params.arguments.data.x=.env")
-    check_true("Nom 'json.*' forgé en query string sur /mcp aussi bloqué",
-               status == 403, f"status={status}")
-
-    status = waf_request("GET", "/health?json.params._meta.x=.env")
-    check_true("Nom 'json.params._meta.*' forgé en query string bloqué",
-               status == 403, f"status={status}")
-
-    status = waf_request("POST", "/admin/api/tokens",
-                         body="json.params.arguments.data.x=.env",
-                         headers={"Content-Type": "application/x-www-form-urlencoded"})
-    check_true("Nom 'json.*' forgé dans un corps formulaire bloqué (garde 10010)",
-               status == 403, f"status={status}")
-
-    # Le parseur de Coraza 3.3.3 est permissif (`gjson.Parse` ne remonte pas
-    # d'erreur de syntaxe) : un corps tronqué est partiellement extrait. Ces deux
-    # assertions verrouillent la propriété qui compte — un corps JSON que Coraza
-    # ne peut pas structurer proprement ne devient pas un angle mort.
-    # Deux issues acceptables, et une seule inacceptable : le passage silencieux.
-    # 403 = détecté par CRS ; 400 = refusé par la règle 10011 parce que le WAF
-    # déclare le corps non analysable. Les deux garantissent que l'application ne
-    # reçoit pas un corps non inspecté.
-    status = waf_request("POST", "/mcp", body='{"jsonrpc":"2.0","params":{"a":"/etc/passwd"',
-                         headers=MCP_ACCEPT)
-    check_true("Corps JSON tronqué contenant une LFI n'atteint pas le handler",
-               status in (400, 403), f"status={status}")
-
-    status = waf_request("POST", "/mcp", body='{"a":' * 200 + '"/etc/passwd"' + '}' * 200,
-                         headers=MCP_ACCEPT)
-    check_true("Corps JSON très imbriqué contenant une LFI n'atteint pas le handler",
-               status in (400, 403), f"status={status}")
-
-    # Multipart : autre voie de peuplement d'ARGS_NAMES, la garde 10010 doit
-    # couvrir aussi les noms de champs de formulaire multipart.
-    boundary = "----waf107boundary"
-    multipart = (
-        f"--{boundary}\r\n"
-        'Content-Disposition: form-data; name="json.params.arguments.data.x"\r\n'
-        "\r\n"
-        ".env\r\n"
-        f"--{boundary}--\r\n"
-    )
-    status = waf_request("POST", "/admin/api/tokens", body=multipart,
-                         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
-    check_true("Nom 'json.*' forgé en champ multipart bloqué (garde 10010)",
-               status == 403, f"status={status}")
-
-    # ── 15h-quinquies. Borne DoS de la surface analysée en JSON (revue #107) ──
-    #
-    # Le parseur JSON de Coraza 3.3.3 récurse sans plafond de profondeur.
-    # `ctl:requestBodyLimit=65536` sur POST /mcp borne le coût : mesuré sur un
-    # conteneur aux limites de production, un corps de 293 Ko passait de 2,0 s
-    # (sans parseur) à 8,1 s (avec parseur) ; avec la borne il est refusé en 2 ms.
-    print("\n    ── 15h-quinquies. Borne DoS du parseur JSON ──")
-
-    t0 = time.monotonic()
-    status = waf_request("POST", "/mcp",
-                         body='{"a":' * 51200 + '"x"' + '}' * 51200,
-                         headers=MCP_ACCEPT)
-    elapsed_ms = (time.monotonic() - t0) * 1000
-    check_true("Corps JSON > 64 Ko sur /mcp refusé par la borne",
-               status in (403, 413), f"status={status}")
-    # Un refus par la borne est immédiat : il n'y a pas d'analyse. Un seuil large
-    # (2 s) évite la fragilité en CI tout en détectant une borne qui aurait sauté
-    # (sans elle, cette requête coûtait plus de 8 s de CPU).
-    check_true("Refus immédiat — la borne évite l'analyse coûteuse",
-               elapsed_ms < 2000, f"{elapsed_ms:.0f} ms")
-
-    # Un corps JSON de taille normale reste évidemment accepté par le WAF.
-    st_small, body_small = waf_request("POST", "/mcp", body=mcp_envelope("secret_write", args_clean),
-                                       headers=MCP_ACCEPT, with_body=True)
-    check_true("Corps MCP de taille normale non affecté par la borne",
-               not waf_blocked(st_small, body_small),
-               f"status={st_small}, bloqué WAF={waf_blocked(st_small, body_small)}")
-
-    # ── 15h-sexies. Profondeur JSON : DoS borné SANS créer d'évasion ──
-    #
-    # Deux propriétés qui doivent tenir ENSEMBLE, et dont la seconde est le piège :
-    #
-    #  1. `SecRequestBodyJsonDepthLimit 32` (coraza ≥ 3.4, d'où la montée du
-    #     plugin en v0.9.2) borne le coût du parseur récursif. Sans elle, un corps
-    #     de 15 Ko `[`×8000 + `0` + `]`×8000 — JSON valide, 2 octets par niveau —
-    #     faisait tomber le WAF en OOM sur un conteneur 512 Mo : mesuré.
-    #     `SecRequestBodyLimit` borne les octets, jamais la profondeur.
-    #  2. La limite seule ÉCHANGE le DoS contre une évasion silencieuse : au-delà
-    #     du seuil, coraza cesse d'alimenter ARGS et le corps n'est plus inspecté.
-    #     Mesuré : LFI, SQLi, XSS et RCE enfouies à 40 niveaux passaient TOUTES en
-    #     200. La règle 10011 refuse donc explicitement (400) tout corps JSON
-    #     signalé non analysable par `REQBODY_ERROR`.
-    print("\n    ── 15h-sexies. Profondeur JSON : DoS borné sans évasion ──")
-
-    def nest_json(depth, payload):
-        body = json.dumps(payload)
-        for _ in range(depth):
-            body = '{"a":' + body + '}'
-        return body
-
-    # Sous le seuil : l'inspection est pleinement active.
-    status = waf_request("POST", "/mcp", body=nest_json(31, "../../etc/passwd"),
-                         headers=MCP_ACCEPT)
-    check_true("LFI enfouie à 31 niveaux (sous le seuil) bloquée par le WAF",
-               status == 403, f"status={status}")
-
-    # Au-delà du seuil : refus explicite, JAMAIS un passage silencieux.
-    for payload, label in (
-        ("../../etc/passwd", "LFI"),
-        ("1 OR 1=1 --", "SQLi"),
-        ("<script>alert(1)</script>", "XSS"),
-        ("; cat /etc/passwd", "RCE"),
-    ):
-        status = waf_request("POST", "/mcp", body=nest_json(40, payload), headers=MCP_ACCEPT)
-        check_true(f"{label} enfouie à 40 niveaux refusée (pas d'évasion par profondeur)",
-                   status in (400, 403), f"status={status}")
-
-    # Vecteur tableau : 2 octets par niveau, donc sous la borne en octets.
-    t0 = time.monotonic()
-    status = waf_request("POST", "/mcp", body='[' * 8000 + '0' + ']' * 8000,
-                         headers=MCP_ACCEPT)
-    elapsed_ms = (time.monotonic() - t0) * 1000
-    check_true("Tableau imbriqué à 8 000 niveaux refusé",
-               status in (400, 403), f"status={status}")
-    # Sans la limite de profondeur, cette requête de 15 Ko ne répondait plus après
-    # 60 s et finissait par tuer le WAF. Le seuil est large pour la CI ; il détecte
-    # une limite qui aurait sauté, pas une microseconde de régression.
-    check_true("Refus immédiat — la limite de profondeur protège le WAF",
-               elapsed_ms < 2000, f"{elapsed_ms:.0f} ms")
-
-    # Le WAF doit être encore debout après le vecteur DoS.
-    status = waf_request("GET", "/health")
-    check_true("WAF vivant après le vecteur DoS par profondeur",
-               status == 200, f"status={status}")
-
-    # L'enveloppe MCP légitime reste très en dessous du seuil.
-    st, bd = waf_request("POST", "/mcp", body=mcp_envelope("secret_write", args_clean, CODEX_META),
-                         headers=MCP_ACCEPT, with_body=True)
-    check_true("Enveloppe MCP réelle (avec _meta Codex) sous le seuil de profondeur",
-               not waf_blocked(st, bd), f"status={st}, bloqué WAF={waf_blocked(st, bd)}")
-
-    # Contrat de compatibilité : `secret_write(data: dict)` accepte une imbrication
-    # arbitraire côté application. La limite WAF en fait une limite PRODUIT, donc
-    # elle doit être testée à sa frontière, pas seulement loin au-delà.
-    def nested_data(depth):
-        payload = "v"
-        for _ in range(depth):
-            payload = {"n": payload}
-        return {"vault_id": "test-waf-unicode", "path": "waf/deep",
-                "secret_type": "custom", "data": {"root": payload}}
-
-    # profondeur totale = params(1) + arguments(2) + data(3) + root(4) + n×depth
-    st, bd = waf_request("POST", "/mcp", body=mcp_envelope("secret_write", nested_data(20)),
-                         headers=MCP_ACCEPT, with_body=True)
-    check_true("Secret dont 'data' est imbriqué à 20 niveaux : non bloqué par le WAF",
-               not waf_blocked(st, bd), f"status={st}, bloqué WAF={waf_blocked(st, bd)}")
-
-    st, bd = waf_request("POST", "/mcp", body=mcp_envelope("secret_write", nested_data(60)),
-                         headers=MCP_ACCEPT, with_body=True)
-    check_true("Secret dont 'data' est imbriqué à 60 niveaux : bloqué par le WAF (limite assumée)",
-               waf_blocked(st, bd), f"status={st}, bloqué WAF={waf_blocked(st, bd)}")
-
-    # ── 15h-septies. Grammaire du Content-Type alignée sur le handler ──
-    #
-    # Le SDK MCP 2.1.1 (`streamable_http.py:489-492`) découpe le Content-Type sur `;` puis
-    # sur `,` et accepte si UN jeton vaut exactement `application/json`. Donc
-    # `text/plain, application/json` atteint le handler. Un ancrage WAF en
-    # `^application/json` le laissait passer SANS le parseur, SANS la borne 64 Ko,
-    # SANS la limite de profondeur et SANS la règle 10011 — contournement mesuré.
-    print("\n    ── 15h-septies. Grammaire Content-Type alignée sur le handler ──")
-
-    deep_array = '[' * 8000 + '0' + ']' * 8000
-    for ct in ("application/json",
-               "application/json; charset=utf-8",
-               "text/plain, application/json",
-               "application/json, text/plain"):
-        status = waf_request("POST", "/mcp", body=deep_array,
-                            headers={**MCP_ACCEPT, "Content-Type": ct})
-        check_true(f"Bornes appliquées avec Content-Type '{ct}'",
-                   status in (400, 403, 413), f"status={status}")
-
-    # Un Content-Type que le WAF ne reconnaît PAS ne doit pas créer d'angle mort :
-    # le corps n'est alors pas structuré, donc inspecté en bloc — comportement
-    # antérieur, bloquant et non permissif.
-    for ct in ("application/jsonp", "application/json-patch+json"):
-        status = waf_request("POST", "/mcp",
-                            body=mcp_envelope("secret_read", {"path": "../../etc/passwd"}),
-                            headers={**MCP_ACCEPT, "Content-Type": ct})
-        check_true(f"LFI avec Content-Type non reconnu '{ct}' reste bloquée",
-                   status == 403, f"status={status}")
+    # Ils qualifiaient l'inspection de /mcp par Coraza (étroitesse des exclusions
+    # 930120, gardes json.*, borne 64 Ko et profondeur du parseur JSON, grammaire
+    # du Content-Type). /mcp ne passant plus par Coraza, ces propriétés n'ont plus
+    # d'objet. Leurs successeurs : `waf/tests/` (banc WAF réel, en CI) pour le
+    # routage, les variantes de chemin, la borne de 65 536 octets et les noms
+    # `json.*` sur les surfaces inspectées ; `tests/test_mcp_body_bounds_118.py`
+    # pour la profondeur JSON refusée par l'application elle-même.
 
     # ── 15h-ter. Surfaces non concernées : comportement inchangé ──
     #
-    # Le parseur JSON n'est activé que sur POST /mcp. Les exclusions de cibles
-    # `json.*` ne sont PAS inertes ailleurs pour autant (cf. 15h-quater) : c'est
-    # la garde 10010 qui l'impose. Ces assertions vérifient que le comportement
-    # préexistant des autres surfaces est bien conservé.
+    # Ces surfaces restent inspectées par Coraza (#118 ne concerne que /mcp).
+    # Ces assertions vérifient que leur comportement préexistant est conservé.
     print("\n    ── 15h-ter. /admin/api, PKI, ACME inchangés ──")
 
     status = waf_request("POST", "/admin/api/tokens",

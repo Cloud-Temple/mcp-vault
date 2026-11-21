@@ -134,3 +134,28 @@ jobs:
       # et sondée par les deux étapes précédentes.
       - name: Exécuter la suite de tests dans l'image
         run: docker run --rm mcp-vault:ci-test
+
+  # Banc du WAF RÉEL (#118). Construit l'image waf/ et la démarre devant un
+  # backend factice qui journalise ce qu'il reçoit, devant l'image de
+  # production mcp-vault (mode dégradé) et en TLS/HTTP/2. Il vérifie que /mcp
+  # canonique ne passe pas par Coraza, que toutes les autres surfaces et les
+  # variantes de chemin restent inspectées, et les bornes de taille. Sans ce
+  # job, une régression de configuration WAF ne se voit qu'en production : c'est
+  # ainsi que des exclusions inopérantes ont vécu plusieurs versions (#42).
+  # Les tests ÉCHOUENT (jamais de skip) si la pile n'est pas démarrée.
+  # `release.yml` appelle tout ce workflow : ce job garde aussi la publication.
+  waf-bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Mêmes versions épinglées que la chaîne de test applicative.
+      - name: Installer pytest (versions épinglées)
+        run: python3 -m pip install --user "pytest==9.1.1" "pluggy==1.6.0" "iniconfig==2.3.0" "packaging==$(sed -n 's/^packaging==\(.*\)$/\1/p' requirements.lock)"
+
+      - name: Exécuter le banc WAF
+        env:
+          BENCH_KEEP_LOGS: "1"
+        run: waf/tests/run_bench.sh -v --tb=short

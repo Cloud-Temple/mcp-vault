@@ -6,7 +6,14 @@
 #   - Coraza WAF avec OWASP CoreRuleSet v4
 #   - Protection contre injections SQL, XSS, LFI, RCE, SSRF
 #   - Headers de sécurité (HSTS, nosniff, X-Frame-Options)
-#   - Exceptions spécifiques pour les endpoints MCP et Admin API
+#   - Exceptions spécifiques pour l'Admin API, la PKI et ACME
+#
+# /mcp ne passe PAS par Coraza (#118, v0.24.0). Ses arguments sont des données
+# opaques — secrets, CSR, certificats, mots de passe aléatoires — sur lesquelles
+# le CRS produisait des refus au hasard (#107, #112, et la règle 932370 sur le
+# base64 d'une CSR). Ce que le WAF apportait sur /mcp est repris ici : borne de
+# 64 Kio, méthodes autorisées, rate limit et en-têtes. La profondeur JSON est
+# refusée par le SDK MCP lui-même (« recursion limit », mesuré en v0.24.0).
 
 {
 	# IMPORTANT : coraza_waf doit être exécuté AVANT les autres handlers
@@ -15,6 +22,21 @@
 
 	# Désactiver l'API admin Caddy (sécurité)
 	admin off
+}
+
+# Options du proxy communes aux deux branches (MCP et surfaces inspectées).
+(mcp_vault_backend_options) {
+	header_up X-Real-IP {remote_host}
+	header_up X-Forwarded-For {remote_host}
+	header_up X-Forwarded-Proto {scheme}
+
+	# Timeouts adaptés aux appels MCP (qui peuvent être longs)
+	transport http {
+		dial_timeout 10s
+		response_header_timeout 120s
+		read_timeout 120s
+		write_timeout 120s
+	}
 }
 
 {$SITE_ADDRESS::8085} {
@@ -41,26 +63,78 @@
 		}
 	}
 
-	# ── WAF Coraza avec OWASP CRS ─────────────────────────────────
-	coraza_waf {
-		directives `
-			Include /etc/coraza/coraza.conf
-		`
+	# ── /mcp : hors Coraza (#118) ─────────────────────────────────
+	# Le contournement porte sur la cible BRUTE de la requête (`orig_uri`, telle
+	# que reçue, avant tout décodage), et seulement sur sa forme canonique :
+	# segments en [A-Za-z0-9._~-], ni `%`, ni `;`, ni `//`, ni segment `.`/`..`,
+	# casse exacte. La cible transmise est donc identique au chemin qu'uvicorn
+	# décodera et que la pile ASGI aiguillera : aucune confusion possible avec
+	# /admin, /pki, /acme ou /health. Toute autre forme (`//mcp`, `/MCP`,
+	# `/%6dcp`, cible absolue, `/mcp;x`…) passe par Coraza comme avant.
+	@mcp expression `{http.request.orig_uri}.matches("^/mcp(?:/[A-Za-z0-9_~-][A-Za-z0-9._~-]*)*/?(?:\\?.*)?$")`
+	handle @mcp {
+		# Borne de 65 536 octets, celle que Coraza imposait à /mcp depuis #107.
+		# Content-Length annoncé au-delà : 413 sans aucun contact avec le
+		# backend. `request_body` seul ne suffit pas : mesuré, il laisse le
+		# proxy transmettre le début du corps avant de refuser.
+		@mcp_too_large header_regexp Content-Length ^0*(?:[1-9][0-9]{5,}|6553[7-9]|655[4-9][0-9]|65[6-9][0-9]{2}|6[6-9][0-9]{3}|[7-9][0-9]{4})$
+		handle @mcp_too_large {
+			respond 413
+		}
+
+		@mcp_methods method GET POST DELETE OPTIONS
+		handle @mcp_methods {
+			# Corps sans Content-Length (chunked) : 413 au client, et le backend
+			# ne reçoit jamais plus de 65 536 octets avant la coupure du flux.
+			request_body {
+				max_size 64KiB
+			}
+			reverse_proxy mcp-vault:8030 {
+				import mcp_vault_backend_options
+			}
+		}
+
+		# PUT, PATCH, HEAD… : refusés ici, sans atteindre le backend.
+		handle {
+			respond 405
+		}
 	}
 
-	# ── Reverse proxy vers MCP Vault ──────────────────────────────
-	reverse_proxy mcp-vault:8030 {
-		header_up X-Real-IP {remote_host}
-		header_up X-Forwarded-For {remote_host}
-		header_up X-Forwarded-Proto {scheme}
-
-		# Timeouts adaptés aux appels MCP (qui peuvent être longs)
-		transport http {
-			dial_timeout 10s
-			response_header_timeout 120s
-			read_timeout 120s
-			write_timeout 120s
+	# ── Toutes les autres surfaces : WAF Coraza avec OWASP CRS ────
+	handle {
+		coraza_waf {
+			directives `
+				Include /etc/coraza/coraza.conf
+			`
 		}
+
+		# ── CORS restrictif (P2-6) ─────────────────────────────────────
+		# Bloque les requêtes cross-origin sauf depuis la même origine.
+		# Hors /mcp seulement : OPTIONS /mcp est transmis au backend (#118).
+		# Placé APRÈS coraza_waf : un préflight reste inspecté comme le reste.
+		# Le SPA admin est servi par le même serveur, donc pas besoin de CORS.
+		@cors_preflight method OPTIONS
+		handle @cors_preflight {
+			header Access-Control-Allow-Methods "GET, POST, PUT, DELETE"
+			header Access-Control-Allow-Headers "Authorization, Content-Type"
+			header Access-Control-Max-Age "3600"
+			# Pas de Access-Control-Allow-Origin → bloque toute origine cross-origin
+			respond 204
+		}
+
+		reverse_proxy mcp-vault:8030 {
+			import mcp_vault_backend_options
+		}
+	}
+
+	# Un refus Coraza porte `X-MCP-Vault-Block: waf`, pour qu'un client ne le
+	# confonde pas avec un refus d'authentification. coraza-caddy v2.5.0 remonte
+	# ce message pour une interruption (mesuré). Les 401/403 du backend sont
+	# relayés par reverse_proxy, sans cet en-tête.
+	handle_errors 403 {
+		@coraza_block expression `{http.error.message} == "interruption triggered"`
+		header @coraza_block X-MCP-Vault-Block waf
+		respond 403
 	}
 
 	# ── Headers de sécurité ────────────────────────────────────────
@@ -76,18 +150,6 @@
 		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;"
 		# Pas de header Server (fingerprinting)
 		-Server
-	}
-
-	# ── CORS restrictif (P2-6) ─────────────────────────────────────
-	# Bloque les requêtes cross-origin sauf depuis la même origine.
-	# Le SPA admin est servi par le même serveur, donc pas besoin de CORS.
-	@cors_preflight method OPTIONS
-	handle @cors_preflight {
-		header Access-Control-Allow-Methods "GET, POST, PUT, DELETE"
-		header Access-Control-Allow-Headers "Authorization, Content-Type"
-		header Access-Control-Max-Age "3600"
-		# Pas de Access-Control-Allow-Origin → bloque toute origine cross-origin
-		respond 204
 	}
 
 	# ── Logs ───────────────────────────────────────────────────────
