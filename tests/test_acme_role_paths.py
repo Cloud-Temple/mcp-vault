@@ -125,16 +125,26 @@ async def test_backend_role_rejection_is_not_masked():
     assert len(calls) == 1 and events[0]["status"] == 403
 
 
-def setup_client(config):
+def setup_client(config, *, existing_issuer=False):
     client = MagicMock()
     client.read.return_value = config
+    issuer = "issuer-uuid" if existing_issuer else ""
+    issuer_reads = {
+        "_sys_pki_int/config/issuers": {"data": {"default": issuer}},
+        "_sys_pki_int/issuer/default": {"data": {"issuer_id": issuer, "key_id": "key-uuid"}},
+    }
+    client.read.side_effect = lambda path: issuer_reads.get(path, client.read.return_value)
+    client.list.return_value = None
     # Doublure réaliste (#206) : la signature d'intermédiaire rend un vrai certificat.
-    client.write.side_effect = pki_write({"data": {"certificate": "", "csr": "test-csr", "imported_issuers": []}})
+    client.write.side_effect = pki_write({"data": {
+        "certificate": "", "csr": "test-csr", "imported_issuers": ["issuer-uuid"],
+    }})
     return client
 
 
 async def run_setup(client):
     with patch("mcp_vault.vault.pki_ca._get_hvac_client", return_value=client), \
+         patch("mcp_vault.vault.pki_ca._refresh_intermediate_crl_if_needed", new_callable=AsyncMock), \
          patch("mcp_vault.s3_sync.upload_to_s3", new_callable=AsyncMock, return_value=True):
         return await setup_pki_ca(lab_mode=False, allowed_domains=["example.test"])
 
@@ -149,7 +159,7 @@ def acme_payload(client):
 async def test_setup_preserves_only_explicit_roles_and_is_idempotent():
     original = {"data": {"enabled": True, "allowed_roles": ["acme-servers", "dbaas-servers", "another-role", "dbaas-servers"]}}
     state = copy.deepcopy(original)
-    client = setup_client(state)
+    client = setup_client(state, existing_issuer=True)
     for _ in range(2):
         client.reset_mock()
         client.read.return_value = state
