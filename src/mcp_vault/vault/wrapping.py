@@ -290,7 +290,11 @@ class WrapRegistry:
         """
         try:
             s3 = self._get_s3_data()
-            data = json.dumps({"wraps": self._wraps}, indent=2, default=str)
+            # #164 : JSON compact. Chaque transition réécrit TOUT le registre en
+            # mode S3 (O(N) par écriture) ; l'indentation n'apportait que des
+            # octets (~22 %). `load()` lit les deux formes : aucune version
+            # antérieure n'est cassée, le retour arrière reste libre.
+            data = json.dumps({"wraps": self._wraps}, separators=(",", ":"), default=str)
             corps = data.encode()
             # #146 : relevé ICI, où la sérialisation est déjà payée. Mesure le coût
             # réel d'une transition, y compris si le PUT échoue ensuite.

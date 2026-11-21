@@ -2,6 +2,62 @@
 
 ## [Unreleased]
 
+## [0.24.0] — 2026-11-21
+
+### WAF : /mcp ne passe plus par Coraza (#118, #112, #114)
+
+- Changement de contrat. Le CRS ne s’applique plus aux appels `/mcp`.
+  Leurs arguments sont des données opaques (secrets, CSR, certificats,
+  mots de passe aléatoires), et le CRS les refusait au hasard : `.env`
+  (#107), données de `secret_write` (#112), et règle 932370 sur le base64
+  d’une CSR envoyée à `pki_sign_csr`. Ce refus surgissait aléatoirement,
+  avec un 403 qui ressemblait à un jeton refusé. Il est reproduit sur la
+  configuration de 0.23.1.
+- Seule la forme canonique est concernée : `/mcp`, `/mcp/…`, lus sur la
+  cible brute de la requête. Les variantes (`//mcp`, `/MCP`, `/%6dcp`,
+  cible absolue, `/mcp;x`…) restent inspectées par Coraza, avec la borne
+  de 65 536 octets calculée sur le chemin normalisé. Caddy transmet
+  `//mcp` au backend sous la forme `/mcp` : une borne sur la cible brute
+  ne suffisait pas (mesuré).
+- `/mcp` accepte `GET`, `POST`, `DELETE` et `OPTIONS`, désormais transmis
+  au backend ; il ne reçoit donc plus le 204 du préflight. Les autres
+  méthodes reçoivent `405` sans atteindre le backend.
+- Borne de 65 536 octets inchangée. Au-delà, un `Content-Length` reçoit
+  `413` sans contact avec le backend. Un corps sans longueur (chunked ou
+  flux HTTP/2) est coupé : le backend n’en reçoit jamais plus de 65 536
+  octets ni de requête complète. Le client reçoit `413`, ou `401` si le
+  backend refuse l’authentification avant de lire le corps.
+- La profondeur JSON n’est plus bornée par Coraza. Le SDK MCP refuse
+  au-delà d’environ 200 niveaux (« Parse error », mesuré). Un appel
+  imbriqué jusqu’à 128 niveaux atteint l’outil. Sans jeton ou avec un
+  jeton invalide (mode `bearer`), le refus intervient avant toute lecture
+  du corps.
+- Les autres surfaces gardent leur inspection : `/health`, `/admin/api`,
+  PKI, ACME, SPA, préflight `OPTIONS` compris.
+- Un refus Coraza en 403 porte désormais l’en-tête `X-MCP-Vault-Block: waf`.
+  Un 401 ou 403 du backend est relayé sans cet en-tête. Les refus de taille
+  (413) ne le portent pas.
+- `coraza.conf` : retrait des règles propres à /mcp (10001, 10003,
+  10007100, 10009, 10010, 10011) et des deux exclusions 930120 sur
+  `json.*`. Un nom de paramètre `json.*` est inspecté comme les autres.
+  La règle 10008 ne fait plus que borner les variantes à 65 536 octets.
+- Nouveau banc du WAF réel `waf/tests/`, exécuté en CI (job `waf-bench`,
+  qui conditionne aussi la release). Il fait tourner le WAF devant un
+  backend factice, devant l’image de production et en HTTP/2. Neuf
+  preuves par mutation (`waf/tests/mutations.py`) montrent qu’il échoue
+  si une propriété disparaît.
+- `.env` : aucune variable ajoutée ni retirée.
+
+### Registre wrap S3 : JSON compact (#164)
+
+- En mode S3, le registre des enveloppes est écrit en JSON compact. La
+  présentation change, pas le contenu. Toutes les versions lisent les deux
+  formes : ni migration, ni obstacle au retour arrière.
+- Le coût de forme demeure en mode S3 : chaque transition réécrit tout le
+  registre. Pour les volumes de mission, il faut le mode
+  `METADATA_BACKEND=postgres` (une ligne par enveloppe ; voir le guide des
+  métadonnées).
+
 ## [0.23.1] — 2026-11-21
 
 - PKI (#214). Rejouer le setup conserve l’émetteur intermédiaire et sa chaîne.

@@ -1,7 +1,8 @@
 # Catalogue des Tests E2E — MCP Vault
 
-> **Version** : v0.23.1 — `mcp==2.2.0`, rejeu du setup PKI et renouvellement automatique de la CRL
+> **Version** : v0.24.0 — `mcp==2.2.0`, /mcp hors Coraza (#118) et banc WAF réel en CI (`waf/tests/`)
 > **Dernière exécution** : 349 assertions e2e sur 15 catégories (+ 18 tests crypto)
+> **v0.24.0** : TEST 15 réécrit pour /mcp hors Coraza (#118) — chaque charge est envoyée sur `/mcp` (doit atteindre l'application) et sur `/admin/api` (témoin, doit être bloquée). Les sections 15h-bis à 15h-septies sont retirées, remplacées par le banc WAF réel `waf/tests/` (164 tests, job CI `waf-bench`, preuves par mutation `waf/tests/mutations.py`) et par `tests/test_mcp_body_bounds_118.py`. Ce TEST 15 réécrit n'a **pas** été exécuté sur la pile complète (S3 de recette requis) ; ses 8 charges témoins ont été vérifiées sur le WAF réel.
 > **Décompte reproductible** : comptage AST des appels `check` / `check_true` / `check_value` / `check_traversed` dans les fonctions `test_*` de `tests/test_e2e.py`, boucles littérales expansées
 > **Durée** : ~5 secondes (e2e) + <1s (crypto)
 > **Environnement** : Docker (OpenBao embedded + S3 Dell ECS + WAF Caddy/Coraza CRS v4)

@@ -8,7 +8,7 @@ Profil PostgreSQL standalone : [installation, quatre parcours et retour contrôl
 
 MCP Vault centralise les secrets, les politiques d’accès et les accès temporaires dont ont besoin des agents IA. Il embarque [OpenBao](https://openbao.org/) pour le chiffrement et le stockage, ajoute une API MCP protégée par authentification et politiques, puis fournit une console d’administration et une CLI.
 
-**Version** : 0.23.1 · **Licence** : [Apache-2.0](LICENSE)
+**Version** : 0.24.0 · **Licence** : [Apache-2.0](LICENSE)
 
 > [!IMPORTANT]
 > MCP Vault est un composant de sécurité à exploiter dans un environnement maîtrisé. Lisez le [modèle de sécurité](#modèle-de-sécurité) et le [rapport d’audit](DESIGN/mcp-vault/SECURITY_AUDIT.md) avant toute mise en production.
@@ -123,6 +123,7 @@ La version actuelle expose **41 outils MCP**. Le [catalogue canonique](src/mcp_v
 - Les politiques limitent les outils, les vaults et les chemins accessibles.
 - Les magasins de policies, de bindings Mission et de wraps refusent les décisions fondées sur un instantané périmé lorsque S3 ne permet plus leur rafraîchissement. Exception documentée : le Token Store peut continuer à authentifier son cache bearer périmé, tandis que `/health` et `/ready` signalent l’instance indisponible.
 - Le WAF filtre l’entrée HTTP, mais ne remplace ni la segmentation réseau ni la gestion des secrets d’infrastructure.
+- Depuis 0.24.0, les appels MCP sur `/mcp` dans sa forme exacte ne passent plus par les règles OWASP du WAF : leurs arguments sont des données opaques (secrets, CSR, certificats) que ces règles refusaient au hasard. Les variantes d’écriture du chemin (`//mcp`, `/MCP`…) restent filtrées. `/mcp` reste borné à 64 Kio et limité en débit ; en mode `bearer`, l’authentification précède toute lecture du corps. Les autres surfaces (console, API d’administration, PKI, santé) restent filtrées. Un refus du WAF en 403 porte l’en-tête `X-MCP-Vault-Block: waf` ; un refus de taille (413) ne le porte pas.
 
 ### Limites à connaître
 
