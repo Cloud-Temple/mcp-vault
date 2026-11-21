@@ -243,31 +243,83 @@
     </div>
 </div>
 
-<!-- ═══════════════ MODAL — PKI Setup ═══════════════ -->
+<!-- ═══════════════ MODAL — PKI Setup (initialisation et rejeu, #217) ═══════════════ -->
 <div id="modalPkiSetup" class="modal-overlay">
-    <div class="modal">
-        <h2>🔐 Initialiser la PKI interne</h2>
+    <div class="modal modal-lg">
+        <h2>🔐 <span id="pkiSetupTitle">Initialiser la PKI interne</span></h2>
+        <div id="pkiSetupReplayNotice" class="help-text" style="white-space:pre-line"></div>
         <div class="form-group">
-            <label for="pkiLabMode">Mode</label>
-            <select id="pkiLabMode">
-                <option value="true">Lab (CA racine self-signed)</option>
-                <option value="false">Prod (CSR pour CA externe)</option>
+            <label for="pkiAcme">Serveur ACME</label>
+            <select id="pkiAcme">
+                <option value="true">Actif — des serveurs (ex. Caddy) obtiennent leurs certificats automatiquement</option>
+                <option value="false">Fermé — la PKI ne fait que signer des CSR et émettre à la main</option>
             </select>
-            <div class="help-text">Lab : CA racine générée localement dans OpenBao. Prod : vous devrez signer le CSR avec votre CA externe.</div>
         </div>
         <div class="form-group">
-            <label for="pkiDomains">Domaines autorisés <span class="field-required">*</span></label>
+            <label for="pkiLabMode">Enrôlement des nouveaux clients ACME <span class="field-required">*</span></label>
+            <select id="pkiLabMode">
+                <option value="">— à choisir —</option>
+                <option value="false">Sur invitation (EAB) — recommandé hors banc de test</option>
+                <option value="true">Libre — tout client qui joint le serveur peut s'enrôler (bancs uniquement)</option>
+            </select>
+            <div class="help-text">Sans effet si ACME est fermé. Aucun choix par défaut : ce réglage ouvre ou ferme l'enrôlement.</div>
+        </div>
+        <div class="form-group">
+            <label for="pkiDomains">Domaines autorisés pour ACME</label>
             <input type="text" id="pkiDomains" value="" placeholder="*.example.com, example.com">
-            <div class="help-text">Domaines pour lesquels ACME peut émettre des certificats (séparés par des virgules). Ex : *.lesur.lan, lesur.lan</div>
+            <div class="help-text">Requis si ACME est actif. Remplacent les domaines actuels du rôle ACME.</div>
         </div>
         <div class="form-group">
-            <label for="pkiLeafTtl">TTL des certificats feuilles</label>
+            <label for="pkiLeafTtl">Durée maximale des certificats ACME</label>
             <input type="text" id="pkiLeafTtl" value="720h" placeholder="720h">
-            <div class="help-text">Durée de vie max des certificats émis (ex: 720h = 30 jours). Renouvellement automatique par Caddy.</div>
+            <div class="help-text">Ex. 720h (30 jours). Sans effet si ACME est fermé.</div>
         </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label for="pkiRootTtl">Plafond de l'autorité racine</label>
+                <input type="text" id="pkiRootTtl" value="" placeholder="vide = inchangé">
+            </div>
+            <div class="form-group">
+                <label for="pkiIntTtl">Plafond de l'autorité intermédiaire</label>
+                <input type="text" id="pkiIntTtl" value="" placeholder="vide = inchangé">
+            </div>
+        </div>
+        <div class="help-text">Plafonds vides : ceux en place sont conservés (à la création : 87600h et 43800h). Les autorités existantes ne sont jamais remplacées.</div>
         <div class="modal-actions">
             <button class="btn btn-ghost" onclick="closeModal('modalPkiSetup')">Annuler</button>
-            <button class="btn btn-primary" onclick="doPkiSetup()">Initialiser</button>
+            <button class="btn btn-primary" onclick="doPkiSetup()">Valider</button>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════ MODAL — PKI Rotation de l'intermédiaire (#217) ═══════════════ -->
+<div id="modalPkiRotate" class="modal-overlay">
+    <div class="modal">
+        <h2>🔄 Rotation de l'autorité intermédiaire</h2>
+        <div class="help-text">Une nouvelle autorité intermédiaire signe les prochains certificats. Les certificats déjà émis restent valides ; la racine ne change pas.</div>
+        <div class="form-group">
+            <label for="pkiRotateIntTtl">Durée de la nouvelle intermédiaire</label>
+            <input type="text" id="pkiRotateIntTtl" value="" placeholder="vide = plafond actuel (ex. 8760h)">
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeModal('modalPkiRotate')">Annuler</button>
+            <button class="btn btn-warn" onclick="doPkiRotate()">Effectuer la rotation</button>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════ MODAL — PKI Signature de CSR (#217) ═══════════════ -->
+<div id="modalPkiSignCsr" class="modal-overlay">
+    <div class="modal modal-lg">
+        <h2>✍️ Signer une CSR</h2>
+        <div class="help-text">La clé privée reste chez vous : seule la demande (CSR) est envoyée. Un seul nom DNS, sous le domaine <code id="pkiSignCsrDomain">—</code>.</div>
+        <div class="form-group">
+            <label for="pkiSignCsrPem">CSR (PEM) <span class="field-required">*</span></label>
+            <textarea id="pkiSignCsrPem" class="mono-textarea" rows="8" placeholder="-----BEGIN CERTIFICATE REQUEST-----"></textarea>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeModal('modalPkiSignCsr')">Annuler</button>
+            <button class="btn btn-primary" onclick="doPkiSignCsr()">Signer</button>
         </div>
     </div>
 </div>

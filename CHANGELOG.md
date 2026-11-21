@@ -2,6 +2,46 @@
 
 ## [Unreleased]
 
+## [0.24.1] — 2026-11-22
+
+### PKI : mêmes capacités dans la console, l’API admin et la CLI (#217)
+
+- Signature de CSR hors MCP.
+  - API admin : `POST /admin/api/pki/sign-csr`, réservée aux admins, avec
+    le corps `{"csr": "<PEM>"}`. Elle applique la même fonction et les
+    mêmes refus que l’outil `pki_sign_csr`.
+  - Audit : sans la CSR, le certificat ni la chaîne. En mode S3, le
+    journal local garde le nom DNS et le serial. Avec PostgreSQL, la
+    route passe par la frontière d’audit habituelle.
+  - CLI : `pki sign-csr FICHIER` (ou `-` pour l’entrée standard), avec
+    `--cert-out` / `--chain-out` qui écrivent les PEM tels quels.
+  - Console : action « Signer une CSR ».
+- Échéance de la CRL. `GET /admin/api/pki/status` expose désormais
+  `crl_next_update`, `csr_domain` et `csr_ttl`. La console affiche
+  l’échéance avec une alerte à son approche, et la CLI la montre dans
+  `pki status` (nouvelle commande) et dans `pki ca-key`.
+- Console : bouton « Rejouer la configuration » sur une PKI existante.
+  - Il fait ce que fait déjà `pki setup` : les autorités et les
+    certificats émis sont conservés, tandis que la configuration ACME,
+    les adresses de publication et la CRL sont réécrites.
+  - Le formulaire est pré-rempli avec l’état lu. Aucun mode
+    d’enrôlement n’est choisi par défaut.
+  - Un écran de confirmation explique l’effet et signale tout
+    changement d’enrôlement ou d’activation d’ACME.
+  - Un réglage modifié à la main en dehors de MCP Vault est remis à sa
+    valeur standard, comme avec la CLI. Le suivi est dans #218.
+- Console : choix ACME actif ou fermé, plafonds de la racine et de
+  l’intermédiaire, durée à la rotation. Tous les rôles sont affichés
+  (plus seulement le rôle ACME), et l’inventaire est paginé.
+  `GET /admin/api/pki/certs` accepte `limit` (de 1 à 1000, 200 par
+  défaut) et `offset`.
+- Sécurité de la console. Plus aucune valeur venant du serveur n’est
+  placée dans un attribut `onclick`. Une URL ou un serial forgé pouvait
+  y créer un attribut d’événement.
+- CI : les contrats de la console (`tests/js`) s’exécutent désormais
+  sous Node. Ils étaient sautés dans l’image de test.
+- `.env` : aucune variable ajoutée ni retirée.
+
 ## [0.24.0] — 2026-11-21
 
 ### WAF : /mcp ne passe plus par Coraza (#118, #112, #114)

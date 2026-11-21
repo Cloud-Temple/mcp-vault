@@ -497,3 +497,29 @@ def test_application_reelle_flux_trop_long_sans_jeton():
     corps. Le client peut donc recevoir 401 au lieu de 413 ; jamais un 2xx."""
     r = envoyer("POST", "/mcp", b"x" * (LIMITE * 3), chunked=True, base=APP)
     assert r.status in (401, 413), r.status
+
+
+# ── 11. Signature de CSR par l'API admin (#217) : traverse le WAF ────────────
+#       /admin/api reste inspecté par Coraza. Une CSR réelle (base64 aléatoire)
+#       ne doit pas y être refusée : mesuré, 0 refus sur 300 CSR EC P-256 le
+#       22/11/2026. Le banc en rejoue 20 à chaque exécution.
+
+
+def _csr_reelle(tmp_path, i):
+    cle, csr = tmp_path / f"k{i}.pem", tmp_path / f"c{i}.pem"
+    subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(cle)],
+                   check=True, capture_output=True)
+    nom = f"pg-{i}.dbaas.example.test"
+    subprocess.run(["openssl", "req", "-new", "-key", str(cle), "-subj", f"/CN={nom}",
+                    "-addext", f"subjectAltName=DNS:{nom}", "-out", str(csr)], check=True, capture_output=True)
+    return csr.read_text()
+
+
+def test_csr_reelles_sur_la_route_admin_de_signature(factice, tmp_path):
+    for i in range(20):
+        corps = json.dumps({"csr": _csr_reelle(tmp_path, i)})
+        r = envoyer("POST", "/admin/api/pki/sign-csr", corps)
+        assert r.status == 200 and not r.bloque_waf, (i, r.status, r.headers)
+    recu = factice()
+    assert len(recu) == 20 and all(e["target"] == "/admin/api/pki/sign-csr" and e["etat"] == "complet"
+                                   for e in recu), recu

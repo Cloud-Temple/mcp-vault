@@ -31,6 +31,7 @@ def route(scope):
         ('GET', '/admin/api/pki/status'): 'pki_ca_status',
         ('POST', '/admin/api/pki/setup'): 'pki_ca_setup',
         ('POST', '/admin/api/pki/issue'): 'pki_issue_cert',
+        ('POST', '/admin/api/pki/sign-csr'): 'pki_sign_csr',
         ('GET', '/admin/api/pki/roles'): 'pki_ca_list_roles',
         ('GET', '/admin/api/pki/certs'): 'pki_list_certs',
         ('POST', '/admin/api/pki/ca/rotate'): 'pki_ca_rotate_intermediate',
