@@ -16,7 +16,9 @@
 - Seule la forme canonique est concernée : `/mcp`, `/mcp/…`, lus sur la
   cible brute de la requête. Les variantes (`//mcp`, `/MCP`, `/%6dcp`,
   cible absolue, `/mcp;x`…) restent inspectées par Coraza, avec la borne
-  de 65 536 octets.
+  de 65 536 octets calculée sur le chemin normalisé. Caddy transmet
+  `//mcp` au backend sous la forme `/mcp` : une borne sur la cible brute
+  ne suffisait pas (mesuré).
 - `/mcp` accepte `GET`, `POST`, `DELETE` et `OPTIONS`, désormais transmis
   au backend ; il ne reçoit donc plus le 204 du préflight. Les autres
   méthodes reçoivent `405` sans atteindre le backend.

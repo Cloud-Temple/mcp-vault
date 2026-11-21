@@ -47,6 +47,9 @@ MUTATIONS = {
         t, "@mcp_methods method GET POST DELETE OPTIONS", "@mcp_methods method GET POST DELETE OPTIONS PUT")),
     "m7_variantes_sans_borne": ("coraza.conf", lambda t: _remplacer(
         t, "     ctl:requestBodyLimit=65536\"", "     nolog\"")),
+    "m9_borne_sur_cible_brute": ("coraza.conf", lambda t: _remplacer(
+        t, 'SecRule REQUEST_FILENAME "@rx ^/mcp(?:[/;]|$)" \\\n    "id:10008,phase:1,pass,nolog,\\\n     t:none,t:urlDecodeUni,t:normalizePath,t:lowercase,',
+        'SecRule REQUEST_URI "@rx ^/mcp(?:[/?]|$)" \\\n    "id:10008,phase:1,pass,nolog,\\\n     t:none,')),
     "m8_preflight_hors_coraza": ("Caddyfile", lambda t: _remplacer(
         _remplacer(t, PREFLIGHT_INTERNE, ""),
         "\t# ── Toutes les autres surfaces",

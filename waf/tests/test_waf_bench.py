@@ -241,12 +241,24 @@ def test_borne_chunked_depassee_jamais_plus_de_la_limite(factice):
     assert all(e["body_len"] <= LIMITE and e["etat"] != "complet" for e in recu), recu
 
 
-def test_variante_inspectee_garde_la_borne_de_64_kio(factice):
-    """`/mcp/./x` n'est pas canonique : il traverse Coraza, qui doit lui
-    appliquer la borne de 65 536 octets de l'ancienne règle 10008."""
-    r = envoyer("POST", "/mcp/./x", b"x" * (LIMITE + 1))
-    assert r.status == 413, r.status
+@pytest.mark.parametrize("chemin", ["/mcp/./x", "//mcp", "///mcp/x", "/MCP", "/Mcp/x",
+                                    "/%6dcp", "/%2Fmcp", "/x/../mcp", "/mcp;x"])
+def test_variante_inspectee_garde_la_borne_de_64_kio(factice, chemin):
+    """Une variante non canonique traverse Coraza, qui doit lui appliquer la
+    borne de 65 536 octets (règle 10008). Mesuré : Caddy transmet `//mcp` au
+    backend sous la forme `/mcp` — sans cette borne, un corps de plusieurs Mo
+    atteignait MCP par cette porte."""
+    r = envoyer("POST", chemin, b"x" * (LIMITE + 1))
+    assert r.status == 413, (chemin, r.status)
     assert factice() == []
+
+
+def test_variante_sous_la_borne_reste_admise(factice):
+    """Témoin : la borne ne refuse pas tout. Un petit corps bénin sur `//mcp`
+    traverse Coraza et atteint le backend (normalisé en `/mcp`)."""
+    r = envoyer("POST", "//mcp", b'{"jsonrpc": "2.0"}')
+    assert r.status == 200, r.status
+    assert [e["target"] for e in factice()] == ["/mcp"]
 
 
 def test_preflight_hors_mcp_reste_inspecte(factice):

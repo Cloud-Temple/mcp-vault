@@ -2808,7 +2808,7 @@ reste bloquée (403), car un corps non structuré est inspecté en bloc.
 | 10005      | `/pki/ca/{root,chain,crl}.pem` | 920440, 920540, 932120 | Distribution CA/CRL publique (extension `.pem`) |
 | 10006      | `/acme/*`                   | 920420, 920540, 932120 | Content-Type `application/jose+json` (RFC 8555) |
 | 10007      | `/v1/_sys_pki_int/acme/*`   | 920420, 920540, 932120 | Paths ACME générés par OpenBao              |
-| 10008      | `^/mcp(?:[/?]|$)` (variantes non canoniques qui passent par Coraza) | *(aucune)* | Borne le corps à 65 536 octets ; plus de parseur JSON depuis v0.24.0 |
+| 10008      | chemin **normalisé** (décodé, `//` fusionnés, `.`/`..` résolus, minuscules) `^/mcp(?:[/;]|$)` : variantes non canoniques qui passent par Coraza | *(aucune)* | Borne le corps à 65 536 octets ; plus de parseur JSON depuis v0.24.0. Normalisé car Caddy transmet `//mcp` au backend sous la forme `/mcp` (mesuré) |
 | ~~10007100, 10009, 10010, 10011~~ | — | — | Retirées en v0.24.0 (#118) avec le parseur JSON |
 
 Les deux exclusions de cible 930120 sur `json.*` ont été retirées en v0.24.0
