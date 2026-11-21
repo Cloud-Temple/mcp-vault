@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.23.1] — 2026-11-21
+
+- PKI (#214). Rejouer le setup conserve l’émetteur intermédiaire et sa chaîne.
+  Pour changer d’émetteur, utiliser la rotation explicite.
+- PKI. OpenBao renouvelle la CRL intermédiaire avant expiration, même sans
+  révocation. La CRL est valide 7 jours et son renouvellement est déclenché
+  3 jours avant l’échéance. Rejouer le setup sur une PKI existante pour
+  appliquer ces réglages. `pki_ca_public_key` expose `crl_next_update`.
+- PKI. Une révocation régénère immédiatement la CRL via l’API OpenBao.
+
 ## [0.23.0] — 2026-11-19
 
 - PKI (#210) — `pki_ca_setup(lab_mode=False, acme=False)` permet de signer des
