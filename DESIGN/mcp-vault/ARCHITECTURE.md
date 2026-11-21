@@ -1,6 +1,6 @@
 # Architecture — MCP Vault
 
-> **Version** : 0.23.1 | **Date** : 2026-11-21 | **Auteur** : Cloud Temple
+> **Version** : 0.24.0 | **Date** : 2026-11-21 | **Auteur** : Cloud Temple
 > **Projet** : mcp-vault | **Licence** : Apache 2.0  
 > **Statut** : ✅ Implémenté — Production-ready (PKI interne v0.5.x + C18 v0.6.x)
 
@@ -2464,6 +2464,33 @@ besoin. Remplacé par `Settings.mission_pep_active`, une appartenance explicite
 
 ### 11.6 WAF Coraza — Architecture et Fine-tuning
 
+> **Depuis v0.24.0 (#118) : `/mcp` ne passe plus par Coraza.** Les arguments
+> MCP sont des données opaques (secrets, CSR, certificats, mots de passe
+> aléatoires) sur lesquelles le CRS produisait des refus au hasard : `.env`
+> (#107), payload de `secret_write` (#112), règle 932370 sur le base64 d'une
+> CSR (`pki_sign_csr`, DBaaS, 21/11/2026). Corriger règle par règle ne
+> fermait pas la classe.
+>
+> | Surface | Traitement |
+> | --- | --- |
+> | `/mcp`, `/mcp/…` sous forme **canonique** (cible brute `orig_uri` : segments `[A-Za-z0-9._~-]`, ni `%`, `;`, `//`, segment `.`/`..`, casse exacte) | Pas de Coraza. `GET`/`POST`/`DELETE`/`OPTIONS` transmis ; autres méthodes : `405` sans backend. `Content-Length` > 65 536 : `413` sans contact backend ; corps sans longueur (chunked, flux HTTP/2) : le backend ne reçoit jamais plus de 65 536 octets ni une requête complète. |
+> | Variantes non canoniques de `/mcp` (`//mcp`, `/MCP`, `/%6dcp`, cible absolue, `/mcp;x`…) | Coraza + CRS, avec la borne de 65 536 octets (règle 10008 réduite) |
+> | Toutes les autres surfaces (`/health`, `/admin/api`, PKI, ACME, SPA) | Inchangé : Coraza + CRS en mode BLOCKING, préflight `OPTIONS` compris |
+>
+> Ce qui protège `/mcp` sans le CRS : authentification Bearer avant toute
+> lecture du corps (mode `bearer` ; l'exception `bearer-anonymous` #116 reste
+> documentée), policies et isolation par propriétaire, rate limit Caddy, borne
+> de taille, et le SDK MCP qui refuse un JSON imbriqué au-delà d'environ 200
+> niveaux en « Parse error » (mesuré en v0.24.0, `tests/test_mcp_body_bounds_118.py`).
+> Un refus Coraza porte l'en-tête `X-MCP-Vault-Block: waf` ; un 401/403 du
+> backend est relayé sans lui.
+>
+> Les sous-sections 11.6.4 (faux positif 3), 11.6.4-bis à -quater décrivent le
+> traitement de `/mcp` par Coraza entre v0.9.2 et v0.23.1 : elles sont
+> **historiques**. Les règles 10001, 10003, 10007100, 10009, 10010, 10011 et
+> les deux exclusions `json.*` de 930120 ont été retirées. Le contrat actuel est
+> qualifié par le banc WAF réel `waf/tests/` (job CI `waf-bench`).
+
 Le WAF (Web Application Firewall) est la **première couche de sécurité** du
 MCP Vault. Il intercepte toutes les requêtes HTTP avant qu'elles n'atteignent
 l'application, bloquant les attaques L7 connues (injections, XSS, LFI, RCE...).
@@ -2568,8 +2595,9 @@ Requête entrante
 signaux suspects pour dépasser le seuil. Cela **réduit les faux positifs**
 tout en maintenant une détection efficace.
 
-Le mode de MCP Vault est **BLOCKING** (`SecRuleEngine On`) sur **tous les
-endpoints** : `/health`, `/mcp` et `/admin/api`.
+Le mode de MCP Vault est **BLOCKING** (`SecRuleEngine On`) sur toutes les
+surfaces qui passent par Coraza : `/health`, `/admin/api`, PKI, ACME. `/mcp`
+canonique n'y passe plus depuis v0.24.0 (#118).
 
 #### 11.6.4 Exclusions ciblées (fine-tuning)
 
@@ -2773,23 +2801,19 @@ reste bloquée (403), car un corps non structuré est inspecté en bloc.
 
 | ID interne | Endpoint                    | Règle CRS        | Motif du faux positif                          |
 | ---------- | --------------------------- | ---------------- | ---------------------------------------------- |
-| 10001      | `/mcp`                      | 920540           | Unicode français dans les payloads JSON        |
+| ~~10001~~  | `/mcp`                      | 920540           | Retirée en v0.24.0 (#118)                      |
 | 10002      | `/admin/api`                | 920540           | Unicode français dans les payloads JSON        |
-| 10003      | `/mcp`                      | 932120           | `test-path` dans les noms de policies          |
+| ~~10003~~  | `/mcp`                      | 932120           | Retirée en v0.24.0 (#118)                      |
 | 10004      | `/admin/api`                | 932120           | `test-path` dans les noms de policies          |
 | 10005      | `/pki/ca/{root,chain,crl}.pem` | 920440, 920540, 932120 | Distribution CA/CRL publique (extension `.pem`) |
 | 10006      | `/acme/*`                   | 920420, 920540, 932120 | Content-Type `application/jose+json` (RFC 8555) |
 | 10007      | `/v1/_sys_pki_int/acme/*`   | 920420, 920540, 932120 | Paths ACME générés par OpenBao              |
-| 10007100   | *(toutes)*                  | *(aucune)*       | Initialise `tx.mcp_json_body=0` — sans quoi la garde 10010 est inopérante |
-| 10008      | `POST /mcp` (JSON)          | *(aucune)*       | Active le parseur JSON — prérequis du scoping fin |
-| 10009      | *(toutes)*                  | *(deny 403)*     | Refuse un nom de paramètre `json.*` forgé en query string |
-| 10010      | *(toutes)*                  | *(deny 403)*     | Refuse un nom `json.*` hors corps JSON MCP analysé |
-| 10011      | `POST /mcp` (JSON)          | *(deny 400)*     | Refuse un corps JSON non analysable (`REQBODY_ERROR`) — évite l'évasion par profondeur |
+| 10008      | `^/mcp(?:[/?]|$)` (variantes non canoniques qui passent par Coraza) | *(aucune)* | Borne le corps à 65 536 octets ; plus de parseur JSON depuis v0.24.0 |
+| ~~10007100, 10009, 10010, 10011~~ | — | — | Retirées en v0.24.0 (#118) avec le parseur JSON |
 
-| Exclusion de cible (après Include)                          | Règle CRS | Portée                                   |
-| ----------------------------------------------------------- | --------- | ---------------------------------------- |
-| `!ARGS_NAMES:/^json\.params\._meta\./`                      | 930120    | **Noms** sous l'enveloppe MCP `_meta`    |
-| `!ARGS:/^json\.params\.arguments\.data\./`                  | 930120    | **Valeurs** du payload opaque `secret_write` |
+Les deux exclusions de cible 930120 sur `json.*` ont été retirées en v0.24.0
+(#118) avec leurs gardes : sans parseur JSON, aucun argument `json.*` n'existe
+légitimement, et un nom `json.*` forgé est inspecté comme n'importe quel autre.
 
 #### 11.6.5 Headers de sécurité
 
@@ -2876,6 +2900,13 @@ procédure de diagnostic :
 > et tout autre endpoint non spécifiquement exclu.
 
 #### 11.6.9 Tests e2e WAF dédiés (TEST 15)
+
+> **Depuis v0.24.0** : le banc qui fait foi est `waf/tests/` (WAF réel devant
+> un backend factice, devant l'application réelle et en HTTP/2), exécuté en CI
+> par le job `waf-bench` et preuves par mutation dans `waf/tests/mutations.py`.
+> Le TEST 15 e2e envoie chaque charge sur `/mcp` (doit atteindre l'application)
+> ET sur `/admin/api` (doit être bloquée). Le tableau ci-dessous décrit l'état
+> antérieur à v0.24.0 pour les lignes `POST /mcp`.
 
 Les tests e2e incluent un groupe dédié (`--test waf_security`) qui valide
 que le WAF bloque bien les attaques simulées :

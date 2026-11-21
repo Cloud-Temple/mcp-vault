@@ -37,6 +37,20 @@ Les JWT de délégation restent une option explicitement configurée avec issuer
 audience et clés vérifiables ; aucun header d'identité fourni par le caller ne
 remplace l'authentification.
 
+## Volumétrie du registre wrap : S3 contre PostgreSQL (#164)
+
+En mode `METADATA_BACKEND=s3`, le registre des enveloppes est **un seul
+objet** réécrit en entier à chaque transition d'état : le coût d'une écriture
+croît avec le nombre d'entrées (O(N) par écriture, O(N²) cumulé). Depuis
+v0.24.0 il est écrit en JSON compact (−22 % mesuré dans #164, sans changement de
+format logique ni de compatibilité), ce qui réduit le coût sans en changer la
+forme. Une entrée n'est jamais purgée : c'est la garde d'usage unique.
+
+En mode `METADATA_BACKEND=postgres`, chaque enveloppe est **une ligne** de
+`vault_metadata.wrap_registry` : une transition n'écrit que sa ligne. C'est le
+mode retenu pour les volumes de mission (une mission produit typiquement une
+douzaine d'enveloppes) ; le profil Hub/Mission l'exige déjà.
+
 ## Installation depuis des volumes vides
 
 1. Installer MCP Vault/OpenBao et son backup existant suivant le README. Restaurer,
