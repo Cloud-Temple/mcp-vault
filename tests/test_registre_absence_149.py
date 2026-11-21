@@ -416,11 +416,14 @@ class TestVolumetrieDuRegistre:
             "None = aucune écriture depuis le démarrage ; ce n'est pas « vide »"
         )
 
-        registre._get_s3_data = MagicMock(return_value=MagicMock())
+        s3 = MagicMock()
+        registre._get_s3_data = MagicMock(return_value=s3)
         assert registre._save() is True
 
+        # Le poids est celui des octets RÉELLEMENT envoyés, pas d'une
+        # sérialisation recalculée ici (qui suivrait n'importe quel format).
         poids = registre.volumetrie()["last_write_bytes"]
-        attendu = len(json.dumps({"wraps": registre._wraps}, indent=2, default=str).encode())
+        attendu = len(s3.put_object.call_args.kwargs["Body"])
         assert poids == attendu, f"{poids} != {attendu}"
 
     def test_la_sonde_ne_SERIALISE_JAMAIS_le_registre(self):
