@@ -826,3 +826,74 @@ async def test_reprise_apres_fermeture_et_echec_de_suppression_du_role(pki):
     await _check_acme_http(pki, enabled=False)
     assert (await _setup())["acme_enabled"] is False
     assert client.read(f"{_INT_MOUNT}/roles/acme-servers") is None
+
+
+# ── 9. Parité console / API admin / CLI (#217) ──────────────────────────────
+
+async def test_statut_expose_l_echeance_reelle_de_la_crl_et_la_signature_csr(pki):
+    from mcp_vault.vault.pki_ca import get_ca_root_pem, get_pki_status
+
+    await _setup(acme=False)
+    status = await get_pki_status()
+    assert status["status"] == "ok", status
+    root = await get_ca_root_pem()
+    assert status["crl_next_update"] is not None
+    assert status["crl_next_update"] == root["crl_next_update"]
+    expiry = datetime.fromisoformat(status["crl_next_update"])
+    assert timedelta(hours=167) < expiry - datetime.now(timezone.utc) <= timedelta(hours=168)
+    assert (status["csr_domain"], status["csr_ttl"]) == (_DOMAIN, "2160h")
+
+    # Témoin : signature désactivée sur l'instance → plus de domaine annoncé.
+    pki.settings.pki_csr_domain = ""
+    status = await get_pki_status()
+    assert (status["csr_domain"], status["csr_ttl"]) == (None, None)
+
+
+async def test_route_admin_de_signature_sur_openbao_reel(pki, tmp_path):
+    """La route `/admin/api/pki/sign-csr` signe pour de vrai, et la chaîne rendue
+    se vérifie avec la seule racine ; une CSR non conforme est refusée en 400
+    sans émission."""
+    import json as _json
+    from unittest.mock import patch as _patch
+    from mcp_vault.admin import api
+
+    await _setup(root_ttl="219000h", int_ttl="8760h")
+    client = pki.bao.client
+
+    def appeler(csr_pem):
+        events = []
+
+        async def receive():
+            return {"type": "http.request", "body": _json.dumps({"csr": csr_pem}).encode(),
+                    "more_body": False}
+
+        async def send(event):
+            events.append(event)
+
+        scope = {"type": "http", "method": "POST", "path": "/admin/api/pki/sign-csr",
+                 "query_string": b"", "headers": [(b"authorization", b"Bearer t")]}
+        return scope, receive, send, events
+
+    async def signer(csr_pem):
+        scope, receive, send, events = appeler(csr_pem)
+        with _patch.object(api, "_get_token_info", return_value={
+                "client_name": "admin", "permissions": ["admin"], "allowed_resources": []}):
+            await api.handle_admin_api(scope, receive, send, None)
+        start = next(e for e in events if e["type"] == "http.response.start")
+        body = next(e for e in events if e["type"] == "http.response.body")
+        return start["status"], _json.loads(body["body"])
+
+    name = _name()
+    csr_pem, _key = _csr(name, cn=name)
+    before = _cert_count(client)
+    code, result = await signer(csr_pem)
+    assert code == 200 and result["status"] == "ok", result
+    assert result["dns_name"] == name
+    assert _cert_count(client) == before + 1
+    assert _openssl_verify(tmp_path, await _root_pem(), result["certificate"], result["ca_chain"])
+
+    second = _name()
+    double, _ = _csr(name, second, cn=name)
+    code, refus = await signer(double)
+    assert code == 400 and refus["error_type"] == "csr_rejected", refus
+    assert _cert_count(client) == before + 1

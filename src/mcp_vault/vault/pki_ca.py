@@ -762,6 +762,20 @@ async def get_pki_status() -> dict:
         acme_enabled = acme_data["enabled"]
         eab_policy = acme_data.get("eab_policy", "unknown") if acme_enabled else None
 
+        # #217 : même lecture que `get_ca_root_pem` — la console et la CLI
+        # surveillent l'échéance de la CRL sans passer par MCP. `None` = CRL
+        # illisible, jamais une date inventée.
+        crl_next_update = None
+        try:
+            crl_next_update = (await _read_intermediate_crl()).next_update_utc.isoformat()
+        except (httpx.HTTPError, ValueError) as e:
+            logger.warning("Lecture de la CRL intermédiaire impossible : %s", type(e).__name__)
+
+        # Réglages de la signature de CSR (#206), non secrets : domaine vide =
+        # fonction désactivée sur cette instance.
+        settings = get_settings()
+        csr_domain = (settings.pki_csr_domain or "").strip() or None
+
         base = _base_url()
         return {
             "status": "ok",
@@ -769,6 +783,9 @@ async def get_pki_status() -> dict:
             "root_expires": root_expires,
             "root_fingerprint_sha256": root_fp,
             "int_expires": int_expires,
+            "crl_next_update": crl_next_update,
+            "csr_domain": csr_domain,
+            "csr_ttl": settings.pki_csr_ttl.strip() if csr_domain else None,
             "cert_count": cert_count,
             "acme_enabled": acme_enabled,
             "eab_policy": eab_policy,

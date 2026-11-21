@@ -499,7 +499,16 @@ async def _handle_admin_routes(scope, receive, send, mcp, token_info):
     if path == "/admin/api/pki/certs" and method == "GET":
         if not is_admin:
             return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
-        return await _api_pki_list_certs(send)
+        return await _api_pki_list_certs(send, scope)
+
+    # Signature de CSR (#217) : parité avec l'outil MCP `pki_sign_csr`. Surface
+    # d'administration : admin seulement, comme l'émission de certificat. Le
+    # chemin non-admin par policy reste propre à MCP.
+    if path == "/admin/api/pki/sign-csr" and method == "POST":
+        if not is_admin:
+            return await _json_response(send, 403, {"status": "error", "message": "Permission admin requise"})
+        body = await _read_body(receive)
+        return await _api_pki_sign_csr(send, body)
 
     if path.startswith("/admin/api/pki/certs/") and method == "POST" and path.endswith("/revoke"):
         if not is_admin:
@@ -1773,11 +1782,70 @@ async def _api_pki_issue(send, body):
     await _json_response(send, code, result)
 
 
-async def _api_pki_list_certs(send):
-    """GET /admin/api/pki/certs — Inventaire des certificats émis."""
+_CERTS_PAGE_MAX = 1000
+
+
+async def _api_pki_list_certs(send, scope=None):
+    """GET /admin/api/pki/certs?limit=&offset= — Inventaire paginé des certificats émis.
+
+    Défaut inchangé (200, 0). `limit` 1..1000, `offset` ≥ 0, entiers décimaux ;
+    toute autre valeur est refusée en 400 plutôt que remplacée par un défaut.
+    """
+    from urllib.parse import parse_qs
     from ..vault.pki_ca import list_issued_certs
-    result = await list_issued_certs(limit=200)
+    query = parse_qs((scope or {}).get("query_string", b"").decode("latin-1"), keep_blank_values=True)
+    values = {}
+    for name, default, low, high in (("limit", 200, 1, _CERTS_PAGE_MAX), ("offset", 0, 0, None)):
+        raw = query.get(name)
+        if raw is None:
+            values[name] = default
+            continue
+        if len(raw) != 1 or not raw[0].isascii() or not raw[0].isdigit():
+            return await _json_response(send, 400, {
+                "status": "error", "error_type": "invalid_input",
+                "message": f"`{name}` doit être un entier décimal unique.",
+            })
+        value = int(raw[0])
+        if value < low or (high is not None and value > high):
+            borne = f"{low}..{high}" if high is not None else f"≥ {low}"
+            return await _json_response(send, 400, {
+                "status": "error", "error_type": "invalid_input",
+                "message": f"`{name}` hors bornes ({borne}).",
+            })
+        values[name] = value
+    result = await list_issued_certs(limit=values["limit"], offset=values["offset"])
     await _json_response(send, 200, result)
+
+
+_SIGN_CSR_REFUS = {"csr_rejected", "feature_disabled", "invalid_input"}
+
+
+async def _api_pki_sign_csr(send, body):
+    """POST /admin/api/pki/sign-csr — Signer une CSR (admin), parité MCP `pki_sign_csr`.
+
+    Corps : {"csr": "<PEM CERTIFICATE REQUEST>"}. Toutes les validations (un seul
+    SAN DNS sous PKI_CSR_DOMAIN, clé, durée…) restent dans `sign_csr`. Audit S3 :
+    nom DNS et serial, jamais la CSR, le certificat ni la chaîne.
+    """
+    from ..vault.pki_ca import sign_csr
+    try:
+        data = json.loads(body) if body else None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        data = None
+    csr = data.get("csr") if isinstance(data, dict) else None
+    if not isinstance(csr, str) or not csr.strip():
+        return await _json_response(send, 400, {
+            "status": "error", "error_type": "invalid_input",
+            "message": 'Corps JSON attendu : {"csr": "<PEM>"}.',
+        })
+    result = await sign_csr(csr)
+    ok = result.get("status") == "ok"
+    log_audit("pki_sign_csr", "ok" if ok else "error",
+              detail=f"dns={str(result.get('dns_name', ''))[:64]} "
+                     f"serial={str(result.get('serial_number', ''))[:64]} "
+                     f"error_type={'' if ok else result.get('error_type', '')}")
+    code = 200 if ok else (400 if result.get("error_type") in _SIGN_CSR_REFUS else 500)
+    await _json_response(send, code, result)
 
 
 async def _api_pki_revoke_cert(send, serial):

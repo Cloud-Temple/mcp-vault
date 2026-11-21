@@ -995,6 +995,74 @@ def pki_rotate_cmd(ctx, keep_old, overlap, int_ttl, output_json):
     asyncio.run(_run())
 
 
+@pki_group.command("sign-csr")
+@click.argument("csr_file", type=click.File("r"))
+@click.option("--cert-out", type=click.Path(dir_okay=False, writable=True), default=None,
+              help="Écrire le certificat PEM dans ce fichier (tel quel).")
+@click.option("--chain-out", type=click.Path(dir_okay=False, writable=True), default=None,
+              help="Écrire la chaîne intermédiaire PEM dans ce fichier (tel quel).")
+@click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
+@click.pass_context
+def pki_sign_csr_cmd(ctx, csr_file, cert_out, chain_out, output_json):
+    """Signer une CSR (PEM) sous le rôle restreint de l'instance.
+
+    \b
+    CSR_FILE : fichier PEM, ou « - » pour l'entrée standard.
+    La clé privée reste chez vous : seule la CSR est envoyée.
+    Un seul nom DNS, sous le domaine configuré sur l'instance (PKI_CSR_DOMAIN).
+    Rendu : certificat + chaîne intermédiaire (sans la racine).
+    Même autorisation que l'outil MCP pki_sign_csr.
+    """
+    csr = csr_file.read()
+
+    async def _run():
+        client = MCPClient(ctx.obj["url"], ctx.obj["token"])
+        result = await client.call_tool("pki_sign_csr", {"csr": csr})
+        if result.get("status") == "ok":
+            # Écriture binaire exacte : l'affichage Rich peut replier des lignes.
+            for chemin, cle in ((cert_out, "certificate"), (chain_out, "ca_chain")):
+                if chemin:
+                    with open(chemin, "w", encoding="ascii", newline="") as f:
+                        f.write(result.get(cle) or "")
+        if output_json:
+            show_json(result)
+        else:
+            show_pki_result(result)
+        if result.get("status") != "ok":
+            raise SystemExit(1)
+    asyncio.run(_run())
+
+
+@pki_group.command("status")
+@click.option("--json", "-j", "output_json", is_flag=True, help="Sortie JSON brute")
+@click.pass_context
+def pki_status_cmd(ctx, output_json):
+    """État de la PKI : autorités, CRL, ACME, enrôlement, signature de CSR.
+
+    \b
+    Passe par l'API d'administration (comme whoami) : il n'existe pas d'outil
+    MCP de statut PKI.
+    """
+    async def _run():
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=10) as http:
+                resp = await http.get(
+                    f"{ctx.obj['url']}/admin/api/pki/status",
+                    headers={"Authorization": f"Bearer {ctx.obj['token']}"},
+                )
+                result = resp.json()
+        except Exception as e:
+            result = {"status": "error", "message": str(e)}
+        if output_json:
+            show_json(result)
+        else:
+            show_pki_result(result)
+        if result.get("status") not in ("ok", "not_initialized"):
+            raise SystemExit(1)
+    asyncio.run(_run())
+
+
 # =============================================================================
 # Policies (groupe admin)
 # =============================================================================

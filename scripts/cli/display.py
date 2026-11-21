@@ -693,6 +693,47 @@ def show_pki_result(result: dict):
             console.print(result.get("ca_chain"))
         return
 
+    # Signature de CSR : certificat + chaîne, jamais de clé privée
+    if "certificate" in result and "dns_name" in result:
+        show_success(f"CSR signée — {result.get('dns_name', '?')}")
+        table = Table(show_header=False)
+        table.add_column("Champ", style="cyan bold", min_width=18)
+        table.add_column("Valeur")
+        table.add_row("Serial", str(result.get("serial_number", "?")))
+        table.add_row("Expire", str(result.get("not_after", "?")))
+        table.add_row("SHA-256 racine", str(result.get("root_fingerprint_sha256", "?")))
+        console.print(table)
+        console.print("\n[bold]Certificat :[/bold]")
+        console.print(result.get("certificate", ""), soft_wrap=True)
+        if result.get("ca_chain"):
+            console.print("\n[bold]Chaîne intermédiaire (sans la racine) :[/bold]")
+            console.print(result.get("ca_chain"), soft_wrap=True)
+        return
+
+    # Statut PKI (API admin)
+    if result.get("status") == "not_initialized":
+        show_warning("PKI non initialisée")
+        return
+    if result.get("initialized") is True and "acme_enabled" in result:
+        show_success("PKI initialisée")
+        table = Table(show_header=False)
+        table.add_column("Champ", style="cyan bold", min_width=25)
+        table.add_column("Valeur")
+        table.add_row("Expiration racine", str(result.get("root_expires", "?")))
+        table.add_row("SHA-256 racine", str(result.get("root_fingerprint_sha256") or "?"))
+        table.add_row("Expiration intermédiaire", str(result.get("int_expires", "?")))
+        table.add_row("CRL : prochaine mise à jour", str(result.get("crl_next_update") or "illisible"))
+        table.add_row("Certificats émis", str(result.get("cert_count", "?")))
+        table.add_row("ACME", "actif" if result.get("acme_enabled") else "fermé")
+        if result.get("acme_enabled"):
+            table.add_row("Enrôlement ACME (EAB)", str(result.get("eab_policy", "?")))
+        table.add_row("Signature de CSR",
+                      f"{result['csr_domain']} ({result.get('csr_ttl', '?')})"
+                      if result.get("csr_domain") else "désactivée")
+        table.add_row("CRL URL", str(result.get("crl_url", "?")))
+        console.print(table)
+        return
+
     # Setup : retourne root_mount + acme_directory
     if "root_mount" in result and "acme_directory" in result:
         lab = result.get("lab_mode", True)
@@ -722,6 +763,8 @@ def show_pki_result(result: dict):
         show_success(f"CA Racine — expire {result.get('expires', '?')}")
         console.print(f"  [cyan]SHA-256[/cyan] : {result.get('sha256_fingerprint', '?')}")
         console.print(f"  [cyan]URL[/cyan]    : {result.get('url', '?')}")
+        if "crl_next_update" in result:
+            console.print(f"  [cyan]CRL[/cyan]    : prochaine mise à jour {result.get('crl_next_update') or 'illisible'}")
         if result.get("usage"):
             console.print(f"  [dim]💡 {result['usage']}[/dim]")
         pem = result["pem"]
