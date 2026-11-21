@@ -134,8 +134,9 @@ CHEMINS_MCP = ["/mcp", "/mcp/", "/mcp/sub", "/mcp?x=1", "/mcp/sub?x=1"]
 #      parseur JSON de /mcp (le `\n` du PEM devenait un vrai saut de ligne) ;
 #      ce parseur n'existe plus nulle part, donc aucune surface inspectée ne
 #      peut servir de témoin. Son RED est établi sur la configuration de main
-#      (rapport de PR), et le cas reste utile ci-dessous : la CSR réelle, dans
-#      sa forme exacte, doit atteindre le backend intacte.
+#      (rapport de PR), et le cas reste utile ci-dessous : un PEM de la forme
+#      d'une CSR (synthétique, pas une CSR cryptographiquement valide) doit
+#      atteindre le backend intact.
 
 TEMOINS = sorted(set(CHARGES) - {"csr_932370"})
 
@@ -242,7 +243,8 @@ def test_borne_chunked_depassee_jamais_plus_de_la_limite(factice):
 
 
 @pytest.mark.parametrize("chemin", ["/mcp/./x", "//mcp", "///mcp/x", "/MCP", "/Mcp/x",
-                                    "/%6dcp", "/%2Fmcp", "/x/../mcp", "/mcp;x"])
+                                    "/%6dcp", "/%2Fmcp", "/x/../mcp", "/mcp;x",
+                                    "http://localhost/mcp"])
 def test_variante_inspectee_garde_la_borne_de_64_kio(factice, chemin):
     """Une variante non canonique traverse Coraza, qui doit lui appliquer la
     borne de 65 536 octets (règle 10008). Mesuré : Caddy transmet `//mcp` au
@@ -439,28 +441,41 @@ def test_application_reelle_borne_de_taille():
     assert r.status == 413
 
 
+ACCES_200 = "POST /mcp → 200"
+
+
 def _journal_app():
-    return subprocess.run(["docker", "logs", APP_CONTENEUR], capture_output=True,
-                          text=True, timeout=30).stderr
+    """Journal de l'application. Une lecture qui échoue fait ÉCHOUER le test :
+    un journal vide rendrait toute comparaison « avant / après » vraie."""
+    fini = subprocess.run(["docker", "logs", APP_CONTENEUR], capture_output=True,
+                          text=True, timeout=30)
+    assert fini.returncode == 0, f"docker logs a échoué : {fini.stderr[-500:]}"
+    return fini.stdout + fini.stderr
 
 
 def test_application_reelle_flux_trop_long_jamais_traite():
     """Appel MCP AUTHENTIFIÉ et valide, dont `data` pousse le corps au-delà de
-    65 536 octets, transmis en flux (sans Content-Length). L'application ne
-    doit jamais le traiter : aucune réponse 2xx, et aucune ligne d'accès 200
-    pour /mcp dans son journal entre les deux témoins."""
+    65 536 octets, transmis en flux (sans Content-Length). Il n'est jamais
+    traité avec succès : refus 400/413 (jamais 2xx ni 5xx), et aucune ligne
+    d'accès 200 pour /mcp dans le journal de l'application, alors que les
+    deux témoins `tools/list` qui l'encadrent y apparaissent bien — sans quoi
+    l'absence de ligne ne prouverait rien. La frontière d'appel de l'outil
+    elle-même est observée par tests/test_mcp_body_bounds_118.py."""
     entetes = {"Authorization": f"Bearer {APP_JETON}",
                "Accept": "application/json, text/event-stream"}
     liste = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    depart = _journal_app().count(ACCES_200)
     assert envoyer("POST", "/mcp", liste, entetes, base=APP).status == 200, "témoin : jeton refusé"
-    avant = _journal_app().count("POST /mcp → 200")
+    avant = _journal_app().count(ACCES_200)
+    assert avant == depart + 1, "le témoin n'est pas observable dans le journal"
     gros = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
         "name": "secret_write", "arguments": {"vault_id": "banc-118", "path": "p",
                                               "data": {"notes": "x" * (LIMITE * 2)}}}})
     r = envoyer("POST", "/mcp", gros, entetes, chunked=True, base=APP)
-    assert r.status >= 400, (r.status, r.body[:200])
-    assert _journal_app().count("POST /mcp → 200") == avant, "appel tronqué traité"
+    assert r.status in (400, 413), (r.status, r.body[:200])
+    assert _journal_app().count(ACCES_200) == avant, "appel tronqué traité avec succès"
     assert envoyer("POST", "/mcp", liste, entetes, base=APP).status == 200, "témoin final"
+    assert _journal_app().count(ACCES_200) == avant + 1, "témoin final non observé"
 
 
 def test_application_reelle_flux_trop_long_sans_jeton():

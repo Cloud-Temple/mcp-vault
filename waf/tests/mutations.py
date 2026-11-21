@@ -58,24 +58,47 @@ MUTATIONS = {
 }
 
 
+def _banc(caddy_txt, coraza_txt, suffixe):
+    """Exécute le banc et rend (code, nb_échecs, nb_succès, nb_erreurs, résumé)."""
+    import re
+    with tempfile.TemporaryDirectory() as d:
+        caddy, coraza = os.path.join(d, "Caddyfile"), os.path.join(d, "coraza.conf")
+        open(caddy, "w").write(caddy_txt)
+        open(coraza, "w").write(coraza_txt)
+        env = dict(os.environ, WAF_CADDYFILE=caddy, WAF_CORAZA_CONF=coraza,
+                   BENCH_SUFFIX=suffixe)
+        fini = subprocess.run([os.path.join(ICI, "run_bench.sh"), "-q", "--no-header"],
+                              env=env, capture_output=True, text=True)
+    resume = (fini.stdout.strip().splitlines() or ["?"])[-1]
+
+    def nombre(mot):
+        m = re.search(rf"(\d+) {mot}", resume)
+        return int(m.group(1)) if m else 0
+    return fini.returncode, nombre("failed"), nombre("passed"), nombre("error"), resume
+
+
 def main(choix):
-    resultats = {}
+    # Référence : la configuration livrée, montée comme les mutations, doit
+    # être verte. Sinon un échec de mutation ne prouverait rien.
+    code, echecs, succes, erreurs, resume = _banc(CADDY, CORAZA, "mut-ref")
+    if code or echecs or erreurs or not succes:
+        sys.exit(f"référence non verte, mutations non interprétables : {resume}")
+    print(f"REF   configuration livrée                 {resume}", flush=True)
+    rate = []
     for nom in choix or sorted(MUTATIONS):
         fichier, muter = MUTATIONS[nom]
-        with tempfile.TemporaryDirectory() as d:
-            caddy, coraza = os.path.join(d, "Caddyfile"), os.path.join(d, "coraza.conf")
-            open(caddy, "w").write(muter(CADDY) if fichier == "Caddyfile" else CADDY)
-            open(coraza, "w").write(muter(CORAZA) if fichier == "coraza.conf" else CORAZA)
-            env = dict(os.environ, WAF_CADDYFILE=caddy, WAF_CORAZA_CONF=coraza,
-                       BENCH_SUFFIX=f"mut-{nom[:2]}")
-            fini = subprocess.run([os.path.join(ICI, "run_bench.sh"), "-q", "--no-header", "-p", "no:randomly"],
-                                  env=env, capture_output=True, text=True)
-            resume = (fini.stdout.strip().splitlines() or ["?"])[-1]
-            resultats[nom] = (fini.returncode != 0, resume)
-            print(f"{'MORD ' if fini.returncode else 'VERT!'} {nom:36} {resume}", flush=True)
-    rate = [n for n, (mord, _) in resultats.items() if not mord]
+        code, echecs, succes, erreurs, resume = _banc(
+            muter(CADDY) if fichier == "Caddyfile" else CADDY,
+            muter(CORAZA) if fichier == "coraza.conf" else CORAZA, f"mut-{nom[:2]}")
+        # Seul un échec d'ASSERTION exécutée compte. Une panne Docker, une
+        # configuration refusée ou une erreur de collecte ne prouve rien.
+        mord = code != 0 and echecs >= 1 and erreurs == 0 and succes >= 1
+        etat = "MORD " if mord else ("INFRA" if code and not echecs else "VERT!")
+        print(f"{etat} {nom:36} {resume}", flush=True)
+        if not mord:
+            rate.append(nom)
     if rate:
-        sys.exit(f"mutations NON détectées : {rate}")
+        sys.exit(f"mutations NON détectées ou non interprétables : {rate}")
 
 
 if __name__ == "__main__":

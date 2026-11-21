@@ -127,7 +127,7 @@
 		}
 	}
 
-	# Un refus Coraza porte `X-MCP-Vault-Block: waf`, pour qu'un client ne le
+	# Un refus Coraza en 403 porte `X-MCP-Vault-Block: waf`, pour qu'un client ne le
 	# confonde pas avec un refus d'authentification. coraza-caddy v2.5.0 remonte
 	# ce message pour une interruption (mesuré). Les 401/403 du backend sont
 	# relayés par reverse_proxy, sans cet en-tête.

@@ -42,6 +42,15 @@ def _appel_secret_write(profondeur):
             '"arguments":{"vault_id":"sonde-118","path":"p","data":' + data + "}}}")
 
 
+def _profondeur(data):
+    """Profondeur de la chaîne {"k": {"k": … "v"}} reçue par la primitive."""
+    n = 0
+    while isinstance(data, dict):
+        data = data.get("k")
+        n += 1
+    return n
+
+
 def _classer(reponse):
     try:
         corps = reponse.json()
@@ -54,7 +63,9 @@ def _classer(reponse):
         else:
             return "illisible"
     if "result" in corps:
-        return "traite"
+        # Un `result` peut porter une erreur d'outil (outil inconnu, arguments
+        # refusés, exception) : ce n'est PAS un appel traité.
+        return "erreur_outil" if corps["result"].get("isError") else "resultat"
     code = corps.get("error", {}).get("code")
     if code == -32700:
         return "parse_error"
@@ -72,15 +83,28 @@ def main():
     with patch.object(server, "_install_vault_lifespan", lambda app: None):
         app = server.create_app()
 
-    with TestClient(app, base_url="http://localhost") as client:
+    # Frontière d'appel observée : `secret_write` importe `write_secret` à
+    # chaque appel ; on y enregistre ce que la primitive reçoit RÉELLEMENT.
+    # Un appel n'est « atteint » que si la primitive a reçu `data` à la
+    # profondeur envoyée — pas parce qu'un `result` existe.
+    recu = []
+
+    async def enregistreur(vault_id, path, data, *args, **kwargs):
+        recu.append(_profondeur(data))
+        return {"status": "ok", "vault_id": vault_id, "path": path}
+
+    with TestClient(app, base_url="http://localhost") as client, \
+            patch("mcp_vault.vault.secrets.write_secret", enregistreur):
         for profondeur in (8, 32, 64, 128, 200, 256, 1000, 10000):
             corps = _appel_secret_write(profondeur).encode()
             if len(corps) > LIMITE:
                 continue
+            recu.clear()
             debut = time.perf_counter()
             r = client.post("/mcp", content=corps, headers=entetes)
             sortie["corpus"].append({"profondeur": profondeur, "octets": len(corps),
                                      "statut": r.status_code, "classe": _classer(r),
+                                     "primitive": list(recu),
                                      "ms": round((time.perf_counter() - debut) * 1000, 1)})
         for nom, n in (("tableau", 32767), ("objet", 10922)):
             corps = ("[" * n + "0" + "]" * n if nom == "tableau"

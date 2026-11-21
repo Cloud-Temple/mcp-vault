@@ -5,8 +5,9 @@ Coraza bornait la PROFONDEUR des corps JSON de /mcp (`SecRequestBodyJsonDepthLim
 ailleurs. Ces tests établissent, sur l'application RÉELLE (`create_app()` et
 tous ses middlewares), que :
 
-1. un appel `secret_write` VALIDE dont `data` est imbriqué raisonnablement
-   atteint l'outil (la nouvelle posture ne casse pas un usage légitime) ;
+1. un appel `secret_write` VALIDE dont `data` est imbriqué jusqu'à 128 niveaux
+   atteint la primitive `write_secret`, qui reçoit `data` à la profondeur
+   envoyée, et rend un résultat sans erreur d'outil ;
 2. au-delà, le SDK MCP refuse en « Parse error » (-32700), vite, sans 5xx ;
    et le refus est monotone : une profondeur supérieure n'est jamais acceptée ;
 3. deux racines extrêmes de 64 Kio (tableau, objet) sont refusées ;
@@ -65,18 +66,21 @@ def test_aucune_reponse_lente_ni_5xx(mesure):
         assert cas["ms"] < BUDGET_MS, cas
 
 
-def test_imbrication_raisonnable_atteint_l_outil(mesure):
+def test_imbrication_raisonnable_atteint_la_primitive(mesure):
     par_profondeur = {c["profondeur"]: c for c in mesure["corpus"]}
-    for profondeur in (8, 32, 64):
+    for profondeur in (8, 32, 64, 128):
         cas = par_profondeur[profondeur]
-        assert (cas["statut"], cas["classe"]) == (200, "traite"), cas
+        assert (cas["statut"], cas["classe"]) == (200, "resultat"), cas
+        assert cas["primitive"] == [profondeur], cas
 
 
 def test_imbrication_excessive_refusee_et_refus_monotone(mesure):
-    classes = [c["classe"] for c in sorted(mesure["corpus"], key=lambda c: c["profondeur"])]
-    assert set(classes) <= {"traite", "parse_error"}, classes
+    corpus = sorted(mesure["corpus"], key=lambda c: c["profondeur"])
+    classes = [c["classe"] for c in corpus]
+    assert set(classes) <= {"resultat", "parse_error"}, classes
     premier_refus = classes.index("parse_error")  # lève si rien n'est refusé
     assert all(c == "parse_error" for c in classes[premier_refus:]), classes
+    assert all(c["primitive"] == [] for c in corpus[premier_refus:]), corpus
     plus_profond = max(mesure["corpus"], key=lambda c: c["profondeur"])
     assert plus_profond["profondeur"] >= 10000 and plus_profond["statut"] == 400
 
@@ -89,7 +93,7 @@ def test_racines_extremes_refusees(mesure):
 
 
 def test_service_vivant_apres_le_corpus(mesure):
-    assert mesure["apres"] == {"statut": 200, "classe": "traite"}
+    assert mesure["apres"] == {"statut": 200, "classe": "resultat"}
 
 
 @pytest.mark.parametrize("cas", ["sans_jeton", "jeton_invalide"])

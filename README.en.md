@@ -123,6 +123,7 @@ The current version exposes **41 MCP tools**. The [canonical catalog](src/mcp_va
 - Policies restrict accessible tools, vaults, and paths.
 - Policy, Mission binding, and wrap stores reject decisions based on stale snapshots when S3 can no longer refresh them. Documented exception: the Token Store may keep authenticating its stale bearer cache, while `/health` and `/ready` report the instance as unavailable.
 - The WAF filters HTTP input but does not replace network segmentation or infrastructure secret management.
+- Since 0.24.0, MCP calls (`/mcp`) no longer go through the WAF's OWASP rules: their arguments are opaque data (secrets, CSRs, certificates) that these rules rejected at random. `/mcp` stays capped at 64 KiB and rate limited, authentication happens before any body is read, and every other surface (console, admin API, PKI, health) is still filtered. A WAF block carries the `X-MCP-Vault-Block: waf` header.
 
 ### Important limitations
 

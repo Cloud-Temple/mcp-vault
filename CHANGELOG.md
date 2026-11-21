@@ -34,15 +34,16 @@
   du corps.
 - Les autres surfaces gardent leur inspection : `/health`, `/admin/api`,
   PKI, ACME, SPA, préflight `OPTIONS` compris.
-- Un refus Coraza porte désormais l’en-tête `X-MCP-Vault-Block: waf`. Un
-  401 ou 403 du backend est relayé sans cet en-tête.
+- Un refus Coraza en 403 porte désormais l’en-tête `X-MCP-Vault-Block: waf`.
+  Un 401 ou 403 du backend est relayé sans cet en-tête. Les refus de taille
+  (413) ne le portent pas.
 - `coraza.conf` : retrait des règles propres à /mcp (10001, 10003,
   10007100, 10009, 10010, 10011) et des deux exclusions 930120 sur
   `json.*`. Un nom de paramètre `json.*` est inspecté comme les autres.
   La règle 10008 ne fait plus que borner les variantes à 65 536 octets.
 - Nouveau banc du WAF réel `waf/tests/`, exécuté en CI (job `waf-bench`,
   qui conditionne aussi la release). Il fait tourner le WAF devant un
-  backend factice, devant l’image de production et en HTTP/2. Huit
+  backend factice, devant l’image de production et en HTTP/2. Neuf
   preuves par mutation (`waf/tests/mutations.py`) montrent qu’il échoue
   si une propriété disparaît.
 - `.env` : aucune variable ajoutée ni retirée.

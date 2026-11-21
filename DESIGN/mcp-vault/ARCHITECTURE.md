@@ -2482,8 +2482,8 @@ besoin. Remplacé par `Settings.mission_pep_active`, une appartenance explicite
 > documentée), policies et isolation par propriétaire, rate limit Caddy, borne
 > de taille, et le SDK MCP qui refuse un JSON imbriqué au-delà d'environ 200
 > niveaux en « Parse error » (mesuré en v0.24.0, `tests/test_mcp_body_bounds_118.py`).
-> Un refus Coraza porte l'en-tête `X-MCP-Vault-Block: waf` ; un 401/403 du
-> backend est relayé sans lui.
+> Un refus Coraza en 403 porte l'en-tête `X-MCP-Vault-Block: waf` ; un 401/403
+> du backend est relayé sans lui ; un refus de taille (413) ne le porte pas.
 >
 > Les sous-sections 11.6.4 (faux positif 3), 11.6.4-bis à -quater décrivent le
 > traitement de `/mcp` par Coraza entre v0.9.2 et v0.23.1 : elles sont

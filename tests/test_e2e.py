@@ -1951,8 +1951,11 @@ async def test_15_waf_security():
     }
     for nom, corps in charges.items():
         st, bd = waf_request("POST", "/mcp", body=corps, headers=MCP_ACCEPT, with_body=True)
+        # Empreinte applicative exigée : l'application répond toujours en JSON
+        # sur /mcp, alors qu'un refus Caddy (405, 413) ou Coraza a un corps vide.
         check_true(f"{nom} sur /mcp : atteint l'application (pas de refus WAF)",
-                   not waf_blocked(st, bd) and st != 0 and st < 500, f"status={st}")
+                   st != 0 and st < 500 and bd.strip().startswith(("{", "event:", "data:")),
+                   f"status={st}")
         st, bd = waf_request("POST", "/admin/api/tokens", body=corps, with_body=True)
         check_true(f"{nom} sur /admin/api : bloqué par le WAF (témoin)",
                    waf_blocked(st, bd), f"status={st}")
