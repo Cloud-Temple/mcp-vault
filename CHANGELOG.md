@@ -7,13 +7,14 @@
 - L’image de production embarque OpenBao 2.6.6 sur Linux amd64 et arm64. Le
   build vérifie le SHA-256 de chaque archive officielle avant extraction.
   La base Python 3.12.16 (Debian trixie) et les paquets système sont actualisés.
-  Les versions de certifi, opentelemetry-api et cryptography sont mises à jour.
+  Les versions de pip (26.3), certifi, opentelemetry-api et cryptography sont mises à jour.
 - Les nouveaux montages d’authentification traitent les alias d’entités et de
   groupes comme sensibles à la casse par défaut. Vérifier la correspondance
   avec le fournisseur d’identité. Le réglage OpenBao est `case_sensitive_alias`.
 - **Risque résiduel élevé** ([GHSA-mgcc-cww5-fp2q](https://github.com/go-jose/go-jose/security/advisories/GHSA-mgcc-cww5-fp2q)).
-  OpenBao embarque go-jose/v4 4.1.4. Le traitement de clés JWK RSA non fiables
-  peut provoquer un déni de service. La correction commence en 4.1.6.
+  OpenBao embarque go-jose/v4 4.1.4 et go-jose/v3 3.0.5. Le traitement de clés
+  JWK RSA non fiables peut provoquer un déni de service. La correction commence
+  en 4.1.6 sur la branche v4. Le scan n’indique aucun correctif sur la branche v3.
   OpenBao 2.7.3 déclare également la version 4.1.4. Réexaminer dès qu’un
   binaire officiel compatible intègre la correction, puis rescanner l’image.
 

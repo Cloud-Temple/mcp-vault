@@ -72,6 +72,7 @@ mdurl==0.1.2
 Pygments==2.21.0
 
 # --- Common dependencies ---
+pip==26.3
 anyio==4.14.2
 annotated-types==0.8.0
 attrs==26.1.0
