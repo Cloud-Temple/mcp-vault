@@ -1,13 +1,13 @@
 # Documentation Technique — MCP Vault
 
-> **Version** : 0.24.1 | **Date** : 2026-11-22 | **Auteur** : Cloud Temple
+> **Version** : 0.25.0 | **Date** : 2026-11-23 | **Auteur** : Cloud Temple
 > **Licence** : Apache 2.0 | **Statut** : ✅ Production-ready (audit V2.1 complété + PKI interne v0.5.1)
 
 ---
 
 ## 1. Vue d'ensemble
 
-MCP Vault est un serveur MCP (Model Context Protocol) qui fournit une gestion sécurisée des secrets pour les agents IA. Il embarque **OpenBao 2.5.1** (fork open-source de HashiCorp Vault, Linux Foundation) comme moteur de chiffrement et de stockage de secrets.
+MCP Vault est un serveur MCP (Model Context Protocol) qui fournit une gestion sécurisée des secrets pour les agents IA. Il embarque **OpenBao 2.6.6** (fork open-source de HashiCorp Vault, Linux Foundation) comme moteur de chiffrement et de stockage de secrets.
 
 ### Principes fondamentaux
 
@@ -885,7 +885,7 @@ d'audit avec status `"denied"`.
 ### 4.1 Dockerfile (multi-stage)
 
 ```
-Stage 1: alpine:3.20 → télécharge OpenBao 2.5.1 (ARM64/x86_64 auto-détecté)
+Stage 1: alpine:3.23 → télécharge OpenBao 2.6.6 (linux/amd64 ou linux/arm64), vérifie le SHA-256 de l’archive
 Stage 2: python:3.12-slim → installe deps + copie source + OpenBao binary
 ```
 
@@ -1245,7 +1245,7 @@ Voir `ARCHITECTURE.md §11.3` pour les diagrammes d'architecture et les étapes 
 
 **Runtime** :
 - Python 3.12+
-- OpenBao 2.5.1 (binaire embarqué)
+- OpenBao 2.6.6 (binaire embarqué)
 - Docker + Docker Compose
 - S3 Dell ECS Cloud Temple
 

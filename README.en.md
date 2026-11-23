@@ -8,7 +8,11 @@ Standalone PostgreSQL: [installation, four deployment paths and safe return](doc
 
 MCP Vault centralizes the secrets, access policies, and temporary credentials required by AI agents. It embeds [OpenBao](https://openbao.org/) for encryption and storage, adds an authenticated and policy-controlled MCP API, and provides an administration console and CLI.
 
-**Version**: 0.24.1 · **License**: [Apache-2.0](LICENSE)
+**Version**: 0.25.0 · **License**: [Apache-2.0](LICENSE)
+
+The image includes OpenBao 2.6.6 on Linux amd64 and arm64. Entity and group
+aliases are case-sensitive by default on newly created authentication mounts.
+Check the spelling against your identity provider before enabling a new mount.
 
 > [!IMPORTANT]
 > MCP Vault is a security component intended for controlled environments. Read the [security model](#security-model) and [security audit](DESIGN/mcp-vault/SECURITY_AUDIT.md) before using it in production.

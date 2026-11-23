@@ -7,29 +7,31 @@
 
 # --- Stage 1 : Download OpenBao binary ---
 # SÉCURITÉ V2-12 : images pinnées par digest (pas par tag mutable)
-FROM alpine:3.20@sha256:a4f4213abb84c497377b8544c81b3564f313746700372ec4fe84653e4fb03805 AS openbao-download
-ARG OPENBAO_VERSION=2.5.1
+FROM --platform=$BUILDPLATFORM alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2 AS openbao-download
 ARG TARGETARCH
-RUN apk add --no-cache wget && \
-    ARCH=$(case ${TARGETARCH} in arm64) echo "arm64" ;; *) echo "x86_64" ;; esac) && \
-    URL="https://github.com/openbao/openbao/releases/download/v${OPENBAO_VERSION}/bao_${OPENBAO_VERSION}_Linux_${ARCH}.tar.gz" && \
-    echo "Downloading OpenBao ${OPENBAO_VERSION} for ${ARCH} from ${URL}" && \
-    wget -q "${URL}" -O /tmp/openbao.tar.gz && \
-    mkdir -p /tmp/openbao && \
-    tar xzf /tmp/openbao.tar.gz -C /tmp/openbao && \
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      amd64) checksum=9df0ae1f5e15c8b5ad0a61be930c7d0e5d3e507ce9cbd912c161463f5130e644 ;; \
+      arm64) checksum=5eda3fd7cff9d7e4e1cc21525b9919ecc59ffd69f66f7c391deca4f106734525 ;; \
+      *) echo "Architecture OpenBao non prise en charge : $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    wget -q "https://github.com/openbao/openbao/releases/download/v2.6.6/openbao_2.6.6_linux_${TARGETARCH}.tar.gz" -O /tmp/bao.tar.gz; \
+    echo "$checksum  /tmp/bao.tar.gz" | sha256sum -c -; \
+    mkdir -p /tmp/openbao; \
+    tar -xzf /tmp/bao.tar.gz -C /tmp/openbao bao; \
     chmod +x /tmp/openbao/bao
 
 # --- Stage 2 : Python application (production) ---
 # SÉCURITÉ V2-12 : image pinnée par digest
-FROM python:3.12-slim@sha256:3d5ed973e45820f5ba5e46bd065bd88b3a504ff0724d85980dcd05eab361fcf4 AS production
+FROM python:3.12.16-slim-trixie@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS production
 
 # Metadata
 LABEL maintainer="Cloud Temple" \
       description="MCP Vault — Secure secrets management for AI agents" \
-      version="0.24.1"
+      version="0.25.0"
 
 # System deps for OpenBao
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get -o APT::Update::Error-Mode=any update && apt-get -y --no-install-recommends upgrade && apt-get install -y --no-install-recommends \
     libcap2-bin \
     curl \
     && rm -rf /var/lib/apt/lists/*
@@ -107,9 +109,9 @@ ENTRYPOINT ["python", "/app/scripts/standalone_pg.py"]
 # Stage 3 : Image de test (P2-8 — tests hors image prod)
 # Usage : docker compose run --rm test
 # ============================================================================
-FROM python:3.12-slim@sha256:3d5ed973e45820f5ba5e46bd065bd88b3a504ff0724d85980dcd05eab361fcf4 AS test
+FROM python:3.12.16-slim-trixie@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS test
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get -o APT::Update::Error-Mode=any update && apt-get -y --no-install-recommends upgrade && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 COPY --from=openbao-download /tmp/openbao/bao /usr/local/bin/bao
 RUN mkdir -p /openbao/file /openbao/config /openbao/logs && chmod -R 700 /openbao
 
