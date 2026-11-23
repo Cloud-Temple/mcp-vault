@@ -8,7 +8,12 @@ Profil PostgreSQL standalone : [installation, quatre parcours et retour contrôl
 
 MCP Vault centralise les secrets, les politiques d’accès et les accès temporaires dont ont besoin des agents IA. Il embarque [OpenBao](https://openbao.org/) pour le chiffrement et le stockage, ajoute une API MCP protégée par authentification et politiques, puis fournit une console d’administration et une CLI.
 
-**Version** : 0.24.1 · **Licence** : [Apache-2.0](LICENSE)
+**Version** : 0.25.0 · **Licence** : [Apache-2.0](LICENSE)
+
+L’image embarque OpenBao 2.6.6 sur Linux amd64 et arm64. Pour tout nouveau
+montage d’authentification, les alias d’entités et de groupes sont sensibles à
+la casse par défaut. Vérifiez leur correspondance avec le fournisseur d’identité
+avant sa mise en service.
 
 > [!IMPORTANT]
 > MCP Vault est un composant de sécurité à exploiter dans un environnement maîtrisé. Lisez le [modèle de sécurité](#modèle-de-sécurité) et le [rapport d’audit](DESIGN/mcp-vault/SECURITY_AUDIT.md) avant toute mise en production.
